@@ -3,6 +3,9 @@ module cli;
 
 import core.sync.mutex : Mutex;
 import effects.bounded_input : BoundedInput, InputLimits;
+import effects.jsonl_stream : JsonlFailure, JsonlLimits;
+import effects.stdio_stream : processStandardJsonl;
+import domain.document : DocumentId, SourceLocator;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
@@ -22,6 +25,7 @@ import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
 import std.string : join;
+import std.utf : validate;
 import std.uuid : randomUUID;
 
 private string normalizedAbsolute(string path) {
@@ -333,8 +337,18 @@ int runApp(string[] args) {
     bool validateOnly;
     bool dryRun;
     bool explain;
+    string jsonlFields, datasetNamespace, sourceKey;
+    size_t maxJsonlLineBytes, maxJsonlOutputBytes;
     const filtersExplicit = args.canFindOption("--filters");
     const descriptorsExplicit = args.canFindOption("--max-open-inputs");
+    const fieldsExplicit = args.canFindOption("--jsonl-fields");
+    const namespaceExplicit = args.canFindOption("--dataset-namespace");
+    const sourceExplicit = args.canFindOption("--source-key");
+    const lineCapExplicit = args.canFindOption("--max-jsonl-line-bytes");
+    const outputCapExplicit = args.canFindOption("--max-jsonl-output-bytes");
+    const fileSchedulingExplicit = args.canFindOption("--threads") ||
+        args.canFindOption("--max-queued-docs") ||
+        args.canFindOption("--max-input-bytes") || descriptorsExplicit;
 
     auto helpInfo = getopt(args,
         config.caseSensitive,
@@ -349,10 +363,64 @@ int runApp(string[] args) {
         "list-filters", "Print registered filter names and exit", &listFilters,
         "validate", "Validate invocation, filter chain and roots without processing", &validateOnly,
         "dry-run", "Run filters without creating or writing output", &dryRun,
-        "explain", "Print one decision record per input file", &explain);
+        "explain", "Print one decision record per input file", &explain,
+        "jsonl-fields", "Comma-separated selected JSONL text fields", &jsonlFields,
+        "dataset-namespace", "Stable JSONL dataset namespace", &datasetNamespace,
+        "source-key", "Stable JSONL source key", &sourceKey,
+        "max-jsonl-line-bytes", "Maximum input JSONL record bytes", &maxJsonlLineBytes,
+        "max-jsonl-output-bytes", "Maximum output JSONL record bytes including LF", &maxJsonlOutputBytes);
     if (helpInfo.helpWanted) {
         defaultGetoptPrinter("scrubbed", helpInfo.options);
         return 0;
+    }
+    const jsonlOptions = fieldsExplicit || namespaceExplicit || sourceExplicit ||
+        lineCapExplicit || outputCapExplicit;
+    const jsonlRoute = jsonlOptions || inputPath == "-" || outputPath == "-";
+    if (jsonlRoute) {
+        if (inputPath != "-" || outputPath != "-" ||
+            !fieldsExplicit || !namespaceExplicit || !sourceExplicit ||
+            !lineCapExplicit || !outputCapExplicit)
+            throw new Exception("JSONL requires --input -, --output -, selected fields, identity, and both byte caps");
+        if (listFilters || explain)
+            throw new Exception("--list-filters and --explain are unavailable in JSONL mode");
+        if (fileSchedulingExplicit)
+            throw new Exception("file scheduling limits are unavailable in JSONL mode");
+        if (!maxJsonlLineBytes || !maxJsonlOutputBytes)
+            throw new Exception("JSONL byte caps must be positive");
+        auto fields = jsonlFields.split(",");
+        if (!fields.length || !datasetNamespace.length || !sourceKey.length)
+            throw new Exception("JSONL fields, namespace and source key must be nonempty");
+        foreach (i, field; fields) {
+            if (!field.length) throw new Exception("JSONL field names must be nonempty");
+            validate(field);
+            if (fields[0 .. i].canFind(field))
+                throw new Exception("duplicate JSONL field: " ~ field);
+        }
+        SourceLocator(datasetNamespace, sourceKey, "1");
+        if (configPath.length && filtersExplicit)
+            throw new Exception("--config and --filters are mutually exclusive");
+        auto chain = configPath.length
+            ? Pipeline.buildConfigured(loadFilterConfig(configPath))
+            : Pipeline.build(filterList.split(","));
+        if (validateOnly) {
+            stderr.writeln("valid JSONL invocation; no stdin read.");
+            return 0;
+        }
+        try {
+            const completed = processStandardJsonl(datasetNamespace, sourceKey,
+                fields, (string field, string text, DocumentId id) => chain.run(text),
+                JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun);
+            stderr.writeln("JSONL done. ", completed, " records processed", dryRun ? "; dry-run, no stdout." : ".");
+            return 0;
+        } catch (JsonlFailure error) {
+            stderr.writefln("JSONL %s at physical line %s, DocumentId %s: %s; %s prior records %s; current record %s",
+                error.kind, error.line, error.documentId.text, error.msg,
+                error.completedRecords, dryRun ? "processed, no stdout" :
+                    "fully flushed", dryRun ? "produced no stdout" :
+                    (error.partialOutputPossible ? "may be partially written" :
+                    "was not written"));
+            return 1;
+        }
     }
     if (listFilters) {
         writeln("registered filters: ", availableFilters.join(", "));

@@ -146,6 +146,30 @@ void main(string[] args) {
     require(writerError.line == 1 && writerError.completedRecords == 0 &&
         writerError.partialOutputPossible && writerFault.writes == 1 &&
         writerFault.output.length == 3, "writer partial-output uncertainty");
+    // Reader faults are processing failures at the next physical line, not
+    // invocation failures; the previously written prefix remains complete.
+    size_t readCalls;
+    string readOutput;
+    try processJsonl((ubyte[] dst) {
+        if (++readCalls == 1) {
+            enum firstRecord = "{\"text\":\"a\"}\n";
+            dst[0 .. firstRecord.length] = cast(const(ubyte)[]) firstRecord;
+            return firstRecord.length;
+        }
+        throw new Exception("injected read fault");
+        return size_t.init;
+    }, (const(ubyte)[] bytes) { readOutput ~= cast(string) bytes; },
+        "batch", "stable-source", ["text"],
+        (string field, string text, DocumentId id) => text,
+        JsonlLimits(1024, 2048));
+    catch (JsonlFailure error) {
+        require(error.kind == JsonlFailureKind.reader && error.line == 2 &&
+            error.completedRecords == 1 && !error.partialOutputPossible &&
+            error.documentId.text == DocumentId.from(SourceLocator(
+                "batch", "stable-source", "2")).text &&
+            readOutput == "{\"text\":\"a\"}\n", "reader fault prefix/identity");
+    }
+    require(readCalls == 2, "reader fault was not exercised");
     // With a one-byte reader, no additional read callback runs during writing.
     auto serial = Fixture("{\"text\":\"a\"}\n{\"text\":\"b\"}\n");
     size_t position;

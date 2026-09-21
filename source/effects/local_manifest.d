@@ -386,13 +386,17 @@ final class LocalManifest {
 
     /// Hashes observed destination independently. A previously committed row
     /// is invalidated on deletion, path hazard, or mismatched bytes.
-    Inspection inspect(SinkKey key) {
+    Inspection inspect(SinkKey key, string intendedDestination = "") {
         auto prior = lookup(key);
         if (prior.isNull) return Inspection.absent;
         auto row = prior.get;
         if (row.state != SinkState.committed) return Inspection.retryRequired;
         try {
             safeDestination(row.destination);
+            if (intendedDestination.length &&
+                row.destination != resolvedName(intendedDestination))
+                throw new OutputPolicyViolation(
+                    "local manifest: committed destination differs from selected output");
             if (exists(row.destination) && row.hasOutput &&
                 hashFile(row.destination) == row.outputSha256)
                 return Inspection.verifiedCommitted;

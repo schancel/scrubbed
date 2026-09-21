@@ -348,6 +348,34 @@ int main(string[] args) {
         state(aliasDb) == "committed" && readText(aliasOutput) == "one\n",
         "stored manifest alias is fatal without overwriting DB or output");
     writeln("ok: stored manifest alias policy fatal");
+    auto routeFolder = buildPath(root, "stored-destination-route");
+    mkdir(routeFolder);
+    auto routeInput = buildPath(routeFolder, "input.txt");
+    auto routeOutput = buildPath(routeFolder, "output.txt");
+    auto alternateOutput = buildPath(routeFolder, "alternate.txt");
+    auto routeDb = buildPath(routeFolder, "state.db");
+    write(routeInput, "one\r\n");
+    auto routeCommand = [args[1], "run", "--input", routeInput,
+        "--output", routeOutput, "--manifest", routeDb,
+        "--filters", "normalize-line-endings", "--explain"];
+    result = execute(routeCommand);
+    need(result.status == 0 && state(routeDb) == "committed" &&
+        readText(routeOutput) == "one\n", "stored route setup committed");
+    auto routeId = firstDocumentId(routeDb);
+    write(alternateOutput, "one\n");
+    changeDestination(routeDb, alternateOutput);
+    remove(routeOutput);
+    result = execute(routeCommand);
+    need(result.status == 2 && result.output.canFind("FATAL") &&
+        result.output.canFind("status=failure") &&
+        result.output.canFind("committed destination differs from selected output") &&
+        result.output.canFind("document_id=\"" ~ routeId ~ "\"") &&
+        result.output.canFind("sink_key=\"local-primary:v1\"") &&
+        result.output.split("EXPLAIN\tinput=").length == 2 &&
+        state(routeDb) == "committed" && !exists(routeOutput) &&
+        readText(alternateOutput) == "one\n",
+        "same-byte alternate stored route cannot falsely skip intended output");
+    writeln("ok: stored destination route mismatch fatal");
     foreach (kind; ["changed", "unchanged"]) {
         auto positiveFolder = buildPath(root, "positive-" ~ kind);
         mkdir(positiveFolder);

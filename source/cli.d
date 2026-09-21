@@ -532,7 +532,7 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
     bool replacing;
     if (!dryRun) {
         try {
-            auto inspected = manifest.inspect(key);
+            auto inspected = manifest.inspect(key, destination);
             if (inspected == Inspection.verifiedCommitted)
                 return manifestOutcome("skipped", "", key);
             auto previous = manifest.lookup(key);

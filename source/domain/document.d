@@ -4,6 +4,7 @@ import std.array : Appender, appender;
 import std.digest.sha : sha256Of;
 import std.digest : LetterCase, toHexString;
 import std.exception : enforce;
+import std.conv : to;
 import std.mmfile : MmFile;
 import std.string : indexOf;
 import std.uni : normalize;
@@ -34,7 +35,7 @@ struct OutputName {
     string text() const { return value; }
 }
 
-/// Versioned SHA-256 key for a logical source record.
+/// Versioned SHA-256 key for a logical source record or a derived child.
 struct DocumentId {
     private string value;
 
@@ -51,14 +52,46 @@ struct DocumentId {
         appendField(bytes, source.recordKey);
         return DocumentId("doc:v1:" ~ toHexString!(LetterCase.lower)(sha256Of(bytes.data)).idup);
     }
+
+    private static DocumentId childOf(DocumentId parent, string stageKey, size_t ordinal) {
+        enforce(parent.text.length != 0, "parent document ID is not initialized");
+        // Separate from source IDs: domain tag, then length-prefixed parent ID,
+        // NFC stage key, and decimal ordinal. No caller-owned locator can
+        // produce the visibly distinct child:v1: kind.
+        auto bytes = appender!(ubyte[]);
+        bytes.put(cast(const(ubyte)[]) "scrubbed:child-document-id:v1\0");
+        appendField(bytes, parent.text);
+        appendField(bytes, canonicalField(stageKey));
+        appendField(bytes, ordinal.to!string);
+        return DocumentId("child:v1:" ~
+            toHexString!(LetterCase.lower)(sha256Of(bytes.data)).idup);
+    }
 }
 
 /// Identity and presentation are separate values; revision/hash are not identity.
 struct Document {
     SourceLocator source;
     OutputName outputName;
+    private DocumentId childId;
 
-    DocumentId id() const { return DocumentId.from(source); }
+    this(SourceLocator source, OutputName outputName) {
+        this.source = source;
+        this.outputName = outputName;
+    }
+
+    /// A child retains source provenance but has an ID outside the source-ID
+    /// namespace. A nested child derives from its immediate parent's ID.
+    static Document derivedChild(Document parent, string stageKey,
+        size_t ordinal, OutputName outputName) {
+        enforce(outputName.text.length != 0, "child output name is not initialized");
+        auto child = Document(parent.source, outputName);
+        child.childId = DocumentId.childOf(parent.id, stageKey, ordinal);
+        return child;
+    }
+
+    DocumentId id() const {
+        return childId.text.length != 0 ? childId : DocumentId.from(source);
+    }
 }
 
 private string canonicalField(string input) {
@@ -186,6 +219,48 @@ unittest {
     assertThrown(SourceLocator("archive", cast(string) [cast(char) 0xff], "record"));
     assertThrown(OutputName(""));
     assertThrown(DocumentId.from(SourceLocator.init));
+}
+
+unittest {
+    import std.exception : assertThrown;
+
+    auto parent = Document(SourceLocator("archive", "bundle", "record"),
+        OutputName("original"));
+    auto child = Document.derivedChild(parent, "split:stage|1", 0, OutputName("part"));
+    assert(child.id.text ==
+        "child:v1:17f0922cd16212a59c775405caa7b62699118778b3de07c67870a4f4af5d5413");
+    assert(child.id == Document.derivedChild(parent, "split:stage|1", 0,
+        OutputName("another name")).id);
+    assert(child.id != Document.derivedChild(parent, "split:stage|1", 1,
+        OutputName("part")).id);
+    assert(child.id != Document.derivedChild(parent, "split:stage", 10,
+        OutputName("part")).id);
+    assert(child.id != Document.derivedChild(parent, "split:stage|10", 0,
+        OutputName("part")).id);
+    auto renamed = child;
+    renamed.outputName = OutputName("renamed");
+    assert(renamed.id == child.id);
+    assert(child.source == parent.source);
+
+    // The old textual child tuple is a valid caller-owned source key. Its
+    // source ID must never collide with the derived child ID.
+    auto oldTuple = "stage-child:v1:" ~ parent.id.text ~ ":split:stage|1:0";
+    auto adversarial = Document(SourceLocator("archive", "bundle", oldTuple),
+        OutputName("original source"));
+    assert(adversarial.id.text[0 .. "doc:v1:".length] == "doc:v1:");
+    assert(adversarial.id != child.id);
+
+    auto nested = Document.derivedChild(child, "next", 2, OutputName("nested"));
+    assert(nested.id != Document.derivedChild(parent, "next", 2,
+        OutputName("nested")).id);
+    assert(nested.id == Document.derivedChild(renamed, "next", 2,
+        OutputName("renamed nested")).id);
+    assert(Document.derivedChild(parent, "caf\u00e9", 3, OutputName("part")).id ==
+        Document.derivedChild(parent, "cafe\u0301", 3, OutputName("part")).id);
+    assertThrown(Document.derivedChild(parent, "", 0, OutputName("part")));
+    assertThrown(Document.derivedChild(parent, "bad\0key", 0, OutputName("part")));
+    assertThrown(Document.derivedChild(Document.init, "stage", 0, OutputName("part")));
+    assertThrown(Document.derivedChild(parent, "stage", 0, OutputName.init));
 }
 
 unittest {

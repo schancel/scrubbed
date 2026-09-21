@@ -109,6 +109,13 @@ struct StageResult {
 alias StageTransform = StageDecision delegate(StageDocument input);
 alias CancellationCheck = bool delegate();
 
+private DocumentId checkedDocument(Document document) {
+    auto id = document.id;
+    // Document.id validates only the locator; a default OutputName is invalid.
+    enforce(document.outputName.text.length != 0, "document output name is not initialized");
+    return id;
+}
+
 /// A cancellation check occurs before each input and after committing its
 /// complete decision. If cancellation is noticed afterward, its events stay
 /// visible and the next input is not visited. No sink rollback is implied.
@@ -127,7 +134,7 @@ StageResult runStage(R)(R inputs, StageDeclaration stage,
         }
         auto input = pending.front;
         // Validate identity and content before calling user stage code.
-        auto inputId = input.document.id;
+        auto inputId = checkedDocument(input.document);
         enforce(input.content !is null, "stage input content is required");
         input.content.size;
         auto decision = transform(input);
@@ -135,7 +142,7 @@ StageResult runStage(R)(R inputs, StageDeclaration stage,
         case DecisionKind.map:
             enforce(decision.documents.length == 1, "map requires one document");
             auto mapped = decision.documents[0];
-            enforce(mapped.content !is null && mapped.document.id == inputId,
+            enforce(mapped.content !is null && checkedDocument(mapped.document) == inputId,
                 "map must preserve document identity and provide content");
             mapped.content.size;
             result.events ~= StageEvent(EventKind.emitted, mapped);
@@ -157,7 +164,7 @@ StageResult runStage(R)(R inputs, StageDeclaration stage,
                     input.document.source.sourceKey,
                     "stage-child:v1:" ~ inputId.text ~ ":" ~ stage.key ~ ":" ~ ordinal.to!string);
                 child.document = Document(locator, child.document.outputName);
-                child.document.id; // Validate output name and derived identity.
+                checkedDocument(child.document);
                 result.events ~= StageEvent(EventKind.emitted, child, null,
                     inputId, ordinal, true);
             }
@@ -201,6 +208,24 @@ unittest {
     assert(mapped.processed == 3 && mapped.events.length == 3 && !mapped.cancelled);
     foreach (i, event; mapped.events)
         assert(event.kind == EventKind.emitted && event.payload.document.id == inputs[i].document.id);
+    bool visitedInvalidInput;
+    auto invalidInput = inputs[0];
+    invalidInput.document.outputName = OutputName.init;
+    assertThrown(runStage([invalidInput], stage, (StageDocument input) {
+        visitedInvalidInput = true;
+        return StageDecision.map(input);
+    }));
+    assert(!visitedInvalidInput);
+    assertThrown(runStage(inputs[0 .. 1], stage, (StageDocument input) {
+        auto invalidMap = input;
+        invalidMap.document.outputName = OutputName.init;
+        return StageDecision.map(invalidMap);
+    }));
+    assertThrown(runStage(inputs[0 .. 1], stage, (StageDocument input) {
+        auto invalidChild = input;
+        invalidChild.document.outputName = OutputName.init;
+        return StageDecision.split([invalidChild]);
+    }));
 
     auto decisions = runStage(inputs, stage, (StageDocument input) {
         if (input.document.id == inputs[0].document.id) return StageDecision.reject("bad");

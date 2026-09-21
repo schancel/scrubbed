@@ -121,7 +121,8 @@ limits cap queued documents, reserved input bytes, and concurrent file-work
 callbacks; oversized files fail, and detected size changes are skipped. The
 callback limit is not a count of every OS handle, and this is not a stable
 input snapshot. Each file is still mapped as one region, output-producing
-stages may materialize whole-file strings, and there is no durable resume.
+stages may materialize whole-file strings. Opt-in local file/tree restart uses
+`--manifest PATH`; unflagged runs and JSONL streams have no durable resume.
 The [bounded-input contract](docs/bounded-input.md) and `TODO.md` describe
 the remaining scale-readiness gates. Scrubbed is not yet a proven
 terabyte-scale engine.
@@ -130,10 +131,13 @@ Standalone POSIX effects now demonstrate [bounded mapped windows](docs/windowed-
 and [atomic streaming of content pieces](docs/atomic-piece-output.md), including
 a verified 1.075 GB output without an output-sized D allocation. Neither
 effect is wired into the CLI or proves that context-heavy filters can stream.
-A [statically linked local SQLite manifest API](docs/local-manifest.md) now
+A [statically linked local SQLite manifest](docs/local-manifest.md) now
 records versioned per-sink state, verifies destination bytes before a skip,
-and passes bounded replay and process-kill tests. It is not wired to the CLI,
-so current file/tree runs still have no durable resume. The earlier
+and passes bounded replay and process-kill tests. Opt-in file/tree CLI
+`--manifest PATH` serializes local work, records input/config/executable
+identity, and requires explicit `--manifest-retry` for unresolved output;
+unflagged and JSONL runs remain unchanged. This does not guarantee power-loss
+durability, concurrent input snapshots, or bounded output materialization. The earlier
 [SQLite experiment](docs/sqlite-manifest-evaluation.md) remains as prerequisite
 evidence. SQLite stores the local run ledger, not the corpus or a distributed
 coordinator.

@@ -239,8 +239,11 @@ is useful, but it is not sufficient on its own.
       skip, two independent sinks, bounded 10,100-row replay, foreign-DB
       refusal and process-kill windows (`docs/local-manifest.md`). Its pinned
       prerequisite experiment remains in `docs/sqlite-manifest-evaluation.md`.
-      The API is not yet wired to CLI file/tree runs; no end-user resume or
-      power-loss guarantee follows from the standalone tests.
+      Opt-in file/tree `--manifest PATH` now uses the ledger for verified skips
+      and explicit `--manifest-retry` on unresolved output, with real-binary
+      crash/restart tests. JSONL and unflagged runs have no resume. This is a
+      serial local path, not power-loss durability, a concurrent input snapshot,
+      or bounded output materialization.
 - [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
       adapter and explicit paired-dash `run`/`repair` mode preserve untouched
       JSON values semantically, derive stable caller-key/line IDs, cap records,

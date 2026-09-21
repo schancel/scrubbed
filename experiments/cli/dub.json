@@ -1,0 +1,16 @@
+{
+  "name": "scrubbed-cli-spike",
+  "description": "Isolated argparse evaluation; never processes files",
+  "license": "MIT",
+  "targetType": "executable",
+  "targetName": "scrubbed-cli-spike",
+  "dflags": ["-g"],
+  "dependencies": {
+    "argparse": "==2.0.2"
+  },
+  "buildTypes": {
+    "release": {
+      "buildOptions": ["releaseMode", "optimize", "inline"]
+    }
+  }
+}

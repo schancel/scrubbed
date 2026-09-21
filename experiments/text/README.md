@@ -22,3 +22,15 @@ then prints the five raw mojibake wall and CPU (user plus system) samples per
 run, with binary hashes. It performs no benchmark
 run itself. Compile with `ldc2 -O -release experiments/text/compare_cli.d
 -of=/tmp/scrubbed-compare-cli`, then pass the base and candidate report paths.
+The comparator uses release-active checks, including exactly five successful
+samples per report. To verify rejection rather than trust those checks,
+`bad_cli_report.d` changes one field in an otherwise valid D-harness report:
+
+```sh
+ldc2 -O -release experiments/text/bad_cli_report.d -of=/tmp/scrubbed-bad-cli-report
+/tmp/scrubbed-bad-cli-report base.json bad.json harness
+/tmp/scrubbed-compare-cli base.json bad.json # must exit nonzero
+```
+
+Modes `harness`, `input`, `expected`, `case`, `exact`, `count`, `status`, and
+`output` exercise the corresponding release-mode rejection checks.

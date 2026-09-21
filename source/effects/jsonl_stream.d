@@ -11,7 +11,7 @@ alias ReadBytes = size_t delegate(ubyte[] destination);
 alias WriteBytes = void delegate(const(ubyte)[] bytes);
 alias TextTransform = string delegate(string field, string text, DocumentId id);
 
-enum JsonlFailureKind { inputLimit, malformedJson, invalidText, outputLimit, writer }
+enum JsonlFailureKind { inputLimit, malformedJson, invalidText, outputLimit, reader, writer }
 
 final class JsonlFailure : Exception {
     JsonlFailureKind kind;
@@ -52,7 +52,15 @@ size_t processJsonl(ReadBytes read, WriteBytes write, string datasetNamespace,
     ubyte[] line;
     ubyte[4096] chunk;
     for (;;) {
-        auto n = read(chunk[]);
+        size_t n;
+        try n = read(chunk[]);
+        catch (Exception error) {
+            auto ordinal = lineNumber + 1;
+            throw new JsonlFailure(JsonlFailureKind.reader, ordinal,
+                DocumentId.from(SourceLocator(datasetNamespace, sourceKey,
+                    ordinal.to!string)), completed, false,
+                "JSONL reader failed: " ~ error.msg);
+        }
         if (n > chunk.length) throw new Exception("JSONL reader exceeded its buffer");
         foreach (c; chunk[0 .. n]) {
             if (c == '\n') {

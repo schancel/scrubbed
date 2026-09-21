@@ -413,10 +413,12 @@ int runApp(string[] args) {
             stderr.writeln("JSONL done. ", completed, " records processed", dryRun ? "; dry-run, no stdout." : ".");
             return 0;
         } catch (JsonlFailure error) {
-            stderr.writefln("JSONL %s at physical line %s, DocumentId %s: %s; %s prior records fully flushed; current record %s",
+            stderr.writefln("JSONL %s at physical line %s, DocumentId %s: %s; %s prior records %s; current record %s",
                 error.kind, error.line, error.documentId.text, error.msg,
-                error.completedRecords, error.partialOutputPossible ?
-                    "may be partially written" : "was not written");
+                error.completedRecords, dryRun ? "processed, no stdout" :
+                    "fully flushed", dryRun ? "produced no stdout" :
+                    (error.partialOutputPossible ? "may be partially written" :
+                    "was not written"));
             return 1;
         }
     }

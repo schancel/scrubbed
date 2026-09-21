@@ -12,7 +12,7 @@ import std.json : parseJSON;
 import std.path : buildPath;
 import std.process : Redirect, execute, kill, pipeProcess, wait;
 import std.stdio : File, writeln;
-import std.string : splitLines;
+import std.string : splitLines, toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string reason) {
@@ -41,6 +41,21 @@ private Result invoke(string[] args, string input = "") {
 }
 
 void main(string[] args) {
+    if (args.length == 3 && args[1] == "--closed-stdin") {
+        version (Posix) {
+            import core.sys.posix.unistd : close, execv;
+            string[] command = [args[2], "run", "--input", "-", "--output", "-",
+                "--jsonl-fields", "text", "--dataset-namespace", "batch",
+                "--source-key", "stable-source", "--max-jsonl-line-bytes", "1024",
+                "--max-jsonl-output-bytes", "2048"];
+            const(char)*[] cArgs;
+            foreach (part; command) cArgs ~= part.toStringz;
+            cArgs ~= null;
+            close(0);
+            execv(command[0].toStringz, cArgs.ptr);
+            throw new Exception("failed to exec closed-stdin binary");
+        } else throw new Exception("closed stdin proof requires POSIX");
+    }
     require(args.length == 2, "pass the release binary path");
     auto base = [args[1], "run", "--input", "-", "--output", "-",
         "--jsonl-fields", "text,title", "--dataset-namespace", "batch",
@@ -97,6 +112,21 @@ void main(string[] args) {
         prefix.diagnostics.canFind("physical line 2, DocumentId doc:v1:") &&
         prefix.diagnostics == invoke(base, "{\"text\":\"ok\"}\n{bad}\n").diagnostics,
         "completed prefix not reported");
+    auto dryFailure = invoke(base ~ ["--dry-run"],
+        "{\"text\":\"ok\"}\n{bad}\n");
+    require(dryFailure.code == 1 && dryFailure.output.length == 0 &&
+        dryFailure.diagnostics.canFind("1 prior records processed, no stdout") &&
+        !dryFailure.diagnostics.canFind("fully flushed"),
+        "dry-run failure falsely claimed stdout flush");
+    version (Posix) {
+        auto readFault = invoke([args[0], "--closed-stdin", args[1]]);
+        require(readFault.code == 1 && readFault.output.length == 0 &&
+            readFault.diagnostics.canFind("JSONL reader at physical line 1, DocumentId doc:v1:") &&
+            readFault.diagnostics.canFind("0 prior records fully flushed") &&
+            readFault.diagnostics.canFind("current record was not written"),
+            "closed stdin was not classified as record-aware processing failure: " ~
+            readFault.diagnostics);
+    }
     auto outputCapped = invoke(base ~ ["--max-jsonl-output-bytes", "10"],
         "{\"text\":\"a\"}\n");
     require(outputCapped.code == 1 && outputCapped.output.length == 0 &&

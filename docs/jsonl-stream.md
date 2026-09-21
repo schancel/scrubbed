@@ -15,7 +15,9 @@ and `--explain` are unavailable in this mode. `--validate` checks options,
 identity, config, and filters without reading stdin or writing stdout.
 `--dry-run` processes records and reports the bounded count to stderr but
 writes no stdout. Normal stdout contains only JSONL records; status and
-errors are on stderr. Help and argument errors exit before streaming starts.
+errors are on stderr. In dry-run failures the diagnostic counts prior records
+processed and explicitly says no stdout was written. Help and argument errors
+exit before streaming starts.
 
 A record's ID is derived from the caller namespace, source key, and 1-based
 physical line ordinal; it does not depend on the transport path. Retry with
@@ -24,7 +26,9 @@ parsed JSON values are preserved; object key order, escape spelling,
 whitespace, and formatting are not byte-preserved. Malformed JSON and invalid
 selected text have distinct error categories. Processing stops on the first
 failed record (exit 1), reporting its line, DocumentId, and number of fully
-flushed prior records. A broken stdout writer may have emitted part of the
+flushed prior records. A stdin read fault is also a record-aware processing
+failure at the next physical line, not an invocation error. A broken stdout
+writer may have emitted part of the
 current record; the current record is never reported as completed. There is
 no atomic rollback or quarantine. Invalid invocation/config exits 2.
 
@@ -81,7 +85,9 @@ bytes beyond the current record's LF when writing starts. It performs no
 further read callback or record processing while the writer blocks; there is
 no unbounded record queue. Earlier completed records stay written on failure.
 A writer fault reports `partialOutputPossible = true` for the current
-record, because stdout and general streams have no atomic rollback.
+record, because stdout and general streams have no atomic rollback. A reader
+callback exception reports the next physical line and completed prior record
+count, with no current-record output.
 
 Run the release-active harness with:
 

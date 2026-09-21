@@ -168,7 +168,11 @@ time budget. The check is a refusal threshold, not a deadline or guarantee
 against other users consuming disk. The version-4 report records the measured
 preflight inputs and per-sample observed fixture/output filesystem lengths.
 Version 3 small-only reports remain distinct; a version-4 report missing any
-layout or preflight fails validation. No >RAM run is attempted by this mode.
+layout or preflight fails validation. The v4 validator recomputes the scratch
+reservation from the known total input footprint and checks the independent
+2 GiB RAM floor and input-less-than-RAM rule; a report cannot validate by
+forging RAM, free scratch and reservation to mutually consistent tiny values.
+No >RAM run is attempted by this mode.
 
 The external `/usr/bin/time` supplies process user/system CPU and peak RSS.
 We investigated an FD count sampler, but the current timing wrapper owns the
@@ -182,13 +186,13 @@ synthetic scaling samples do not establish OS-cold, TB readiness, or a general
 speed advantage over other tools.
 
 The checked-in `pipeline-resource-sample.json` was collected on an Apple M4
-with 17,179,869,184 physical RAM bytes and 17,798,807,552 free scratch bytes
+with 17,179,869,184 physical RAM bytes and 17,557,745,664 free scratch bytes
 at preflight. The raw report retains three samples per case, including the
 small baseline, manifest skips, all per-file output hashes/statuses, and the
 restart probe. For the 16 MiB/128 MiB first-write layouts, the raw wall ranges
-were 1.09–1.29 s / 4.75–9.33 s across three samples per layout; user+system
-CPU ranges were 0.61–0.66 s / 4.51–5.03 s, respectively. Peak RSS ranges
-across these layouts were 8.36–97.25 MiB / 75.94–668.33 MiB; the disparity
+were 0.58–0.66 s / 3.27–4.05 s across three samples per layout; user+system
+CPU ranges were 0.55–0.62 s / 3.21–3.95 s, respectively. Peak RSS ranges
+across these layouts were 8.34–97.20 MiB / 75.91–668.39 MiB; the disparity
 between many-small and few-large is a useful reason to keep both layouts,
 not a general memory scaling law. The 128 MiB layouts each had 123,031,040
 bytes of exact-gated output. Wall variance reflects this host and run, and

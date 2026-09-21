@@ -119,27 +119,37 @@ private long freeScratchBytes(string root) {
     return kib * 1024;
 }
 
+private enum plannedLargeInputBytes = 2L * (16_776_960L + 134_215_680L);
+private enum minimumLargeRamBytes = 2L * 1024 * 1024 * 1024;
+private enum minimumLargeTimeSeconds = 900L;
+private enum scratchHeadroomBytes = 512L * 1024 * 1024;
+
+private long requiredLargeScratchBytes(long plannedInputBytes) {
+    require(plannedInputBytes > 0 &&
+        plannedInputBytes <= (long.max - scratchHeadroomBytes) / 4,
+        "invalid or overflowing planned input footprint");
+    return 4L * plannedInputBytes + scratchHeadroomBytes;
+}
+
 private JSONValue largePreflight(long ramBytes, long freeBytes,
                                  long timeBudgetSeconds) {
     // Four corpora total: two layouts at each size. Allow copies, alternate
     // outputs, manifest state, restart input/output, and filesystem headroom.
-    enum plannedInputBytes = 2L * (16_776_960L + 134_215_680L);
-    enum reservedScratchBytes = 4L * plannedInputBytes + 512L * 1024 * 1024;
-    enum minimumRamBytes = 2L * 1024 * 1024 * 1024;
-    enum minimumTimeSeconds = 900L;
-    require(plannedInputBytes < ramBytes,
+    auto reservedScratchBytes = requiredLargeScratchBytes(plannedLargeInputBytes);
+    require(plannedLargeInputBytes < ramBytes,
         "large corpus exceeds RAM; >RAM needs a separate capacity contract");
-    require(ramBytes >= minimumRamBytes, "insufficient RAM for large verification");
+    require(ramBytes >= minimumLargeRamBytes,
+        "insufficient RAM for large verification");
     require(freeBytes >= reservedScratchBytes,
         "insufficient scratch headroom before large corpus creation");
-    require(timeBudgetSeconds >= minimumTimeSeconds,
+    require(timeBudgetSeconds >= minimumLargeTimeSeconds,
         "large run requires at least 900 seconds of available time");
     JSONValue result = JSONValue([
         "scratch_free_bytes_before_fixture": JSONValue(freeBytes),
         "scratch_reservation_bytes": JSONValue(reservedScratchBytes),
-        "planned_input_bytes": JSONValue(plannedInputBytes),
+        "planned_input_bytes": JSONValue(plannedLargeInputBytes),
         "time_budget_seconds_declared": JSONValue(timeBudgetSeconds),
-        "minimum_time_seconds": JSONValue(minimumTimeSeconds),
+        "minimum_time_seconds": JSONValue(minimumLargeTimeSeconds),
         "capacity_policy": JSONValue("checked before large fixture creation; not a >RAM or deadline guarantee")]);
     return result;
 }
@@ -517,12 +527,16 @@ private void validate(JSONValue report) {
             "v4 must contain all six layouts and manifest variants");
         auto preflight = report["large_preflight"];
         require(preflight["planned_input_bytes"].integer ==
-                    2L * (16_776_960L + 134_215_680L) &&
+                    plannedLargeInputBytes &&
+            preflight["scratch_reservation_bytes"].integer ==
+                requiredLargeScratchBytes(preflight["planned_input_bytes"].integer) &&
+            report["ram_bytes"].integer >= minimumLargeRamBytes &&
+            report["ram_bytes"].integer > preflight["planned_input_bytes"].integer &&
             preflight["scratch_free_bytes_before_fixture"].integer >=
                 preflight["scratch_reservation_bytes"].integer &&
             preflight["time_budget_seconds_declared"].integer >=
                 preflight["minimum_time_seconds"].integer &&
-            preflight["minimum_time_seconds"].integer == 900,
+            preflight["minimum_time_seconds"].integer == minimumLargeTimeSeconds,
             "v4 capacity preflight absent or unsafe");
         foreach (index, item; report["cases"].array) {
             auto layout = index / 2;
@@ -578,6 +592,7 @@ private void selfTest() {
     validate(report);
     auto v4 = parseJSON(report.toString);
     v4["schema"] = "scrubbed-pipeline-v4";
+    v4["ram_bytes"] = minimumLargeRamBytes;
     v4["corpus_mode"] = "small-and-large";
     v4["large_preflight"] = largePreflight(4L * 1024 * 1024 * 1024,
         4L * 1024 * 1024 * 1024, 900);
@@ -608,6 +623,19 @@ private void selfTest() {
     v4Failed = false;
     try { validate(invalidV4); } catch (Exception) { v4Failed = true; }
     require(v4Failed, "v4 false capacity claim negative did not fail");
+    invalidV4 = parseJSON(v4.toString);
+    invalidV4["ram_bytes"] = 1;
+    invalidV4["large_preflight"]["scratch_free_bytes_before_fixture"] = 1;
+    invalidV4["large_preflight"]["scratch_reservation_bytes"] = 1;
+    v4Failed = false;
+    try { validate(invalidV4); } catch (Exception) { v4Failed = true; }
+    require(v4Failed, "v4 paired capacity forgery negative did not fail");
+    invalidV4 = parseJSON(v4.toString);
+    invalidV4["large_preflight"]["scratch_reservation_bytes"] = long.max;
+    invalidV4["large_preflight"]["scratch_free_bytes_before_fixture"] = long.max;
+    v4Failed = false;
+    try { validate(invalidV4); } catch (Exception) { v4Failed = true; }
+    require(v4Failed, "v4 overflow-sized reservation negative did not fail");
     foreach (key; ["binary_sha256", "harness_sha256", "source_sha",
                    "harness_compiler_available_version"]) {
         auto bad = report;
@@ -719,6 +747,21 @@ private void selfTest() {
         4L * 1024 * 1024 * 1024, 899); }
     catch (Exception) { failed = true; }
     require(failed, "unsafe time preflight negative did not fail");
+    require(largePreflight(minimumLargeRamBytes,
+        requiredLargeScratchBytes(plannedLargeInputBytes),
+        minimumLargeTimeSeconds)["scratch_reservation_bytes"].integer ==
+            requiredLargeScratchBytes(plannedLargeInputBytes),
+        "exact large capacity boundary did not pass");
+    failed = false;
+    try { largePreflight(minimumLargeRamBytes - 1,
+        requiredLargeScratchBytes(plannedLargeInputBytes),
+        minimumLargeTimeSeconds); }
+    catch (Exception) { failed = true; }
+    require(failed, "sub-threshold RAM negative did not fail");
+    failed = false;
+    try { requiredLargeScratchBytes(long.max); }
+    catch (Exception) { failed = true; }
+    require(failed, "overflowing scratch calculation negative did not fail");
     auto root = buildPath(tempDir, "scrubbed-pipeline-test-" ~ randomUUID.toString);
     mkdirRecurse(root);
     scope(exit) rmdirRecurse(root);

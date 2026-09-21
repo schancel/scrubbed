@@ -6,12 +6,18 @@ then runs the shipping CLI on both. Each run starts a new process, admits the
 input tree, applies `normalize-line-endings,strip-control`, and writes a fresh
 output tree. The manifest variant times a first run followed by two verified
 skips, each with independent rehashing of the outputs. All three samples and
-per-file input/output SHA-256 values are retained in JSON. Incorrect bytes,
+per-file input/output SHA-256 values are retained in JSON. After the skip
+samples, it separately times an explicit changed-input retry, a changed
+filter-selection retry, and a new output route; all reported per-file
+statuses and exact output trees are gated. A 64 MiB single-file restart probe
+observes a durable `planned` row through the local `sqlite3` CLI, kills only
+the recorded child PID, then times replay/reconciliation and a verified skip.
+The replay is checked against exact input/output hashes. Incorrect bytes,
 missing files, extra files, failed commands, missing timing metrics, partial
 samples, and a manifest warm run without a reported skip abort the run. The
 quality gate precedes publication of every timing result.
 
-From the repository root on macOS or Linux:
+From the repository root on macOS or Linux with `sqlite3` CLI available:
 
 ```sh
 dub test --compiler=ldc2
@@ -25,7 +31,8 @@ ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
 
 The self-test runs in release mode. It rejects missing required metadata,
 partial or zero samples, a false quality claim, a temporary path in the
-report, incorrect output bytes, and an extra output file. The checked-in
+report, incorrect output bytes, an extra output file, an unproven restart,
+and a false post-restart skip. The checked-in
 `cli_baseline.d --self-test` separately rejects prefix-collision ftfy and
 wcwidth versions. `experiments/content/bench.d` now checks equality with a
 runtime throw, even when assertions are disabled by `-release`.
@@ -60,6 +67,14 @@ calculated from the generated corpus; they are not independently observed I/O
 counter values. GC and peak open FDs are not instrumented. `time` reports
 process peak RSS only. BSD `time -l -p` gives bytes; GNU `time -v` gives KiB
 converted to bytes. Both round short timings to hundredths of a second.
+The per-sample `input_tree_bytes_observed` and
+`output_tree_bytes_observed` are post-run filesystem lengths; they are not
+the syscall bytes read/written, especially for a verified skip. The benchmark
+does not instrument actual I/O byte counters. Peak open FDs are unavailable:
+neither supported `time` variant exposes them, and a short-lived subprocess
+`lsof` poll would only be a sampling lower bound. GC internals are likewise
+not observable from the external shipping process. These metrics are
+explicitly unsupported, not reported as zero.
 The report explicitly labels the source-to-supplied-binary mapping
 `UNVERIFIED`: the executable's SHA-256 is measured, but merely reading Git
 HEAD does not prove which source commit produced an externally supplied
@@ -79,9 +94,10 @@ is made from these runs.
 The current generated corpus is small and repetitive: each layout contains
 32,768 records, around 0.8 MiB of input. It is an integration and
 methodology baseline, not a representative document corpus. The benchmark
-does not time changed-input/config/binary/output manifest paths or
-kill-and-restart recovery; the paired release gate above checks their
-correctness. Open-FD or GC sampling and a safely completed greater-than-RAM
+times changed input/filter selection/output route and post-kill replay, but
+does not time changed executable bytes. The paired release gate above checks
+all of those correctness paths. Peak open-FD/GC and actual read/write byte
+counters and a safely completed greater-than-RAM
 case remain unsupported. On the observed Apple M4 host, `sysctl -n hw.memsize`
 reported 17,179,869,184 bytes (16 GiB) RAM and `df -k .` reported
 24,899,788 KiB (23.75 GiB) free. A >RAM normalization case needs more than

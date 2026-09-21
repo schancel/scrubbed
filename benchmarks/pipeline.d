@@ -1,6 +1,8 @@
 // Local full-process benchmark. Build with ldc2 -O3 -release.
 module pipeline;
 
+import core.sys.posix.signal : kill, SIGKILL;
+import core.thread : Thread;
 import std.algorithm.searching : canFind, startsWith;
 import std.algorithm.sorting : sort;
 import std.array : replicate;
@@ -8,11 +10,12 @@ import std.ascii : isHexDigit;
 import std.conv : to;
 import std.digest : toHexString;
 import std.digest.sha : sha256Of;
-import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
+import std.datetime : dur;
+import std.file : SpanMode, dirEntries, exists, getSize, mkdirRecurse, read, readText,
     remove, rmdirRecurse, tempDir, write;
 import std.json : JSONValue;
 import std.path : buildPath, relativePath;
-import std.process : execute;
+import std.process : execute, spawnProcess, wait;
 import std.stdio : File, stderr, writeln;
 import std.string : split, splitLines, strip;
 import std.uuid : randomUUID;
@@ -54,16 +57,30 @@ private double elapsed(string value) {
     return result;
 }
 
+private bool allSkipped(string output, size_t expected) {
+    return output.split("EXPLAIN\tinput=").length - 1 == expected &&
+        output.split("status=skipped").length - 1 == expected;
+}
+
 private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0) {
     auto result = execute((mac ? ["/usr/bin/time", "-l", "-p"] :
         ["/usr/bin/time", "-v"]) ~ command);
     require(result.status == 0, "timed command failed: " ~ result.output);
+    size_t decisionCount = result.output.split("EXPLAIN\tinput=").length - 1;
+    size_t skipCount = result.output.split("status=skipped").length - 1;
+    size_t retryCount = result.output.split("status=retry").length - 1;
+    size_t changedCount = result.output.split("status=changed").length - 1;
+    size_t unchangedCount = result.output.split("status=unchanged").length - 1;
     if (expectedSkips) {
-        require(result.output.split("EXPLAIN\tinput=").length - 1 == expectedSkips &&
-            result.output.split("status=skipped").length - 1 == expectedSkips,
+        require(allSkipped(result.output, expectedSkips),
             "manifest warm run did not report every verified skip");
     }
     JSONValue sample = JSONValue(["status": JSONValue(result.status)]);
+    sample["decisions"] = cast(long) decisionCount;
+    sample["skipped"] = cast(long) skipCount;
+    sample["retry"] = cast(long) retryCount;
+    sample["changed"] = cast(long) changedCount;
+    sample["unchanged"] = cast(long) unchangedCount;
     foreach (line; result.output.splitLines) {
         auto s = line.strip;
         if (mac) {
@@ -139,6 +156,14 @@ private JSONValue caseRun(string name, string[] command, string input,
         auto sample = timed(command, mac, manifest && run > 0 ? files : 0);
         identities = verifyTree(input, output, files, records);
         sample["exact_output"] = true;
+        long observedInputBytes, observedOutputBytes;
+        foreach (i; 0 .. files) {
+            auto filename = "doc-" ~ i.to!string ~ ".txt";
+            observedInputBytes += getSize(buildPath(input, filename));
+            observedOutputBytes += getSize(buildPath(output, filename));
+        }
+        sample["input_tree_bytes_observed"] = observedInputBytes;
+        sample["output_tree_bytes_observed"] = observedOutputBytes;
         sample["input_fixture_bytes"] = cast(long)(files * records *
             "alpha\r\nbeta\rgamma\x01delta\n".length);
         sample["expected_output_bytes"] = cast(long)(files * records *
@@ -159,6 +184,121 @@ private JSONValue caseRun(string name, string[] command, string input,
         "<scrubbed-binary> --input <fixture-input> --output <fixture-output> --filters normalize-line-endings,strip-control --threads 1 --manifest <manifest-db> --explain" :
         "<scrubbed-binary> --input <fixture-input> --output <fixture-output> --filters normalize-line-endings,strip-control --threads 1";
     return result;
+}
+
+private JSONValue manifestTransitions(string[] command, string input,
+                                      string output, size_t files,
+                                      size_t records, bool mac) {
+    JSONValue[] steps;
+    auto firstFile = buildPath(input, "doc-0.txt");
+    auto bytes = cast(ubyte[]) read(firstFile);
+    bool altered;
+    foreach (ref byteValue; bytes) {
+        if (byteValue == 1) { byteValue = 2; altered = true; break; }
+    }
+    require(altered, "fixture lacks control byte for mutation");
+    write(firstFile, bytes);
+    auto changedInput = timed(command ~ ["--manifest-retry"], mac);
+    require(changedInput["decisions"].integer == files &&
+        changedInput["retry"].integer == 1 &&
+        changedInput["skipped"].integer == files - 1,
+        "changed input did not retry exactly one file");
+    verifyTree(input, output, files, records);
+    changedInput["phase"] = "changed-input-explicit-retry";
+    steps ~= changedInput;
+
+    auto changedConfig = command.dup;
+    changedConfig[6] = "strip-control,normalize-line-endings";
+    auto configSample = timed(changedConfig ~ ["--manifest-retry"], mac);
+    require(configSample["decisions"].integer == files &&
+        configSample["retry"].integer == files,
+        "changed config did not retry every file");
+    verifyTree(input, output, files, records);
+    configSample["phase"] = "changed-filter-selection-explicit-retry";
+    steps ~= configSample;
+
+    auto newRoute = changedConfig.dup;
+    auto alternate = output ~ "-alternate";
+    newRoute[4] = alternate;
+    auto routeSample = timed(newRoute, mac);
+    require(routeSample["decisions"].integer == files &&
+        routeSample["changed"].integer == files,
+        "changed output route did not publish every file");
+    verifyTree(input, alternate, files, records);
+    routeSample["phase"] = "changed-output-route-first";
+    steps ~= routeSample;
+    return JSONValue(steps);
+}
+
+private JSONValue restartProbe(string binary, string root, bool mac) {
+    auto input = buildPath(root, "restart-input.txt");
+    auto output = buildPath(root, "restart-output.txt");
+    auto db = buildPath(root, "restart.sqlite");
+    {
+        auto file = File(input, "wb");
+        auto chunk = "x".replicate(1024 * 1024);
+        foreach (_; 0 .. 64) file.rawWrite(chunk);
+    }
+    auto command = [binary, "run", "--input", input, "--output", output,
+        "--manifest", db, "--filters", "normalize-line-endings",
+        "--max-input-bytes", "134217728", "--threads", "1", "--explain"];
+    auto child = spawnProcess(command);
+    bool planned;
+    foreach (_; 0 .. 250) {
+        if (exists(db)) {
+            auto query = execute(["sqlite3", "-readonly", db,
+                "SELECT count(*) FROM sink_state WHERE state='planned';"]);
+            if (query.status == 0 && query.output.strip == "1") {
+                planned = true; break;
+            }
+        }
+        Thread.sleep(dur!"msecs"(4));
+    }
+    if (!planned) {
+        wait(child);
+        throw new Exception("restart probe never observed a durable planned row");
+    }
+    require(kill(child.processID, SIGKILL) == 0, "kill exact planned process");
+    require(wait(child) == -SIGKILL, "planned process did not die by SIGKILL");
+    auto query = checked(["sqlite3", "-readonly", db,
+        "SELECT count(*) FROM sink_state WHERE state='planned';"]);
+    require(query == "1", "killed process lost durable planned row");
+    bool hadOutput = exists(output);
+    auto replay = timed(hadOutput ? command ~ ["--manifest-retry"] : command,
+        mac);
+    require(replay["decisions"].integer == 1 &&
+        (replay["changed"].integer == 1 || replay["unchanged"].integer == 1 ||
+         replay["retry"].integer == 1),
+        "restart replay was not a publish/retry: " ~ replay.toString);
+    require(exists(output) && getSize(output) == 64UL * 1024 * 1024 &&
+        hashFile(output) == hashFile(input), "restart output bytes differ");
+    auto skip = timed(command, mac, 1);
+    require(hashFile(output) == hashFile(input), "restart skip changed output");
+    JSONValue result = JSONValue(["planned_seen": JSONValue(planned),
+        "killed_after_planned": JSONValue(true),
+        "output_existed_at_kill": JSONValue(hadOutput),
+        "input_sha256": JSONValue(hashFile(input)),
+        "output_sha256": JSONValue(hashFile(output)),
+        "input_bytes": JSONValue(cast(long) getSize(input))]);
+    result["replay"] = replay;
+    result["verified_skip"] = skip;
+    return result;
+}
+
+private void validateRestart(JSONValue probe) {
+    require(probe["planned_seen"].boolean &&
+        probe["killed_after_planned"].boolean,
+        "restart report lacks proven planned kill");
+    require(probe["replay"]["status"].integer == 0 &&
+        probe["replay"]["decisions"].integer == 1 &&
+        probe["verified_skip"]["status"].integer == 0 &&
+        probe["verified_skip"]["skipped"].integer == 1 &&
+        probe["verified_skip"]["decisions"].integer == 1,
+        "restart report false skip or incomplete replay");
+    require(probe["input_sha256"].str == probe["output_sha256"].str &&
+        digestField(probe["input_sha256"].str, 64) &&
+        probe["input_bytes"].integer > 0,
+        "restart report incorrect output identity");
 }
 
 private void validate(JSONValue report) {
@@ -262,6 +402,34 @@ private void selfTest() {
     failed = false;
     try { verifyTree(input, output, 1, 1); } catch (Exception) { failed = true; }
     require(failed, "extra output negative did not fail");
+    string skipRows;
+    foreach (_; 0 .. 31) skipRows ~= "EXPLAIN\tinput=a\tstatus=skipped\n";
+    skipRows ~= "EXPLAIN\tinput=b\tstatus=changed\n";
+    require(!allSkipped(skipRows, 32), "31/32 false-skip negative did not fail");
+    skipRows = "";
+    foreach (_; 0 .. 32) skipRows ~= "EXPLAIN\tinput=a\tstatus=skipped\n";
+    require(allSkipped(skipRows, 32), "32/32 skip positive did not pass");
+    JSONValue replaySample = JSONValue(["status": JSONValue(0),
+        "decisions": JSONValue(1)]);
+    JSONValue skipSample = JSONValue(["status": JSONValue(0),
+        "decisions": JSONValue(1), "skipped": JSONValue(1)]);
+    JSONValue probe = JSONValue(["planned_seen": JSONValue(true),
+        "killed_after_planned": JSONValue(true),
+        "replay": replaySample, "verified_skip": skipSample,
+        "input_sha256": JSONValue("0".replicate(64)),
+        "output_sha256": JSONValue("0".replicate(64)),
+        "input_bytes": JSONValue(1)]);
+    validateRestart(probe);
+    bad = probe;
+    bad["verified_skip"]["skipped"] = 0;
+    failed = false;
+    try { validateRestart(bad); } catch (Exception) { failed = true; }
+    require(failed, "restart false-skip negative did not fail");
+    bad = probe;
+    bad["planned_seen"] = false;
+    failed = false;
+    try { validateRestart(bad); } catch (Exception) { failed = true; }
+    require(failed, "unproven restart negative did not fail");
     writeln("pipeline release self-test passed");
 }
 
@@ -317,6 +485,8 @@ private void compareDos2unix(string scrubbed, string dos2unix,
     report["source_tar_binary_mapping"] = "UNVERIFIED; observed manual build";
     report["dos2unix_version"] = toolVersion;
     report["dos2unix_license"] = "FreeBSD (official COPYING.txt)";
+    report["dos2unix_build_command"] = "make ENABLE_NLS= dos2unix (cc, default -O2)";
+    report["scrubbed_build_command"] = "dub build --build=release --compiler=ldc2";
     report["input_sha256"] = hashFile(input);
     report["output_sha256"] = samples[0]["output_sha256"];
     report["input_bytes"] = cast(long)(65536 * "alpha\r\nbeta\r\n".length);
@@ -356,6 +526,7 @@ int main(string[] args) {
         mkdirRecurse(root);
         scope(exit) rmdirRecurse(root);
         JSONValue[] cases;
+        JSONValue[] transitions;
         foreach (index, name; ["many-small", "few-large"]) {
             size_t files = [32, 2][index];
             size_t records = [1024, 16384][index];
@@ -370,6 +541,9 @@ int main(string[] args) {
             command ~= ["--manifest", manifest, "--explain"];
             cases ~= caseRun(name ~ "/manifest", command, input, output,
                 files, records, os == "Darwin", true);
+            transitions ~= JSONValue(["name": JSONValue(name),
+                "steps": manifestTransitions(command, input, output, files,
+                    records, os == "Darwin")]);
         }
         JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v1")]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
@@ -381,12 +555,19 @@ int main(string[] args) {
         report["cpu"] = os == "Darwin" ?
             checked(["sysctl", "-n", "machdep.cpu.brand_string"]) :
             "see /proc/cpuinfo; not captured";
+        report["ram_bytes"] = os == "Darwin" ?
+            checked(["sysctl", "-n", "hw.memsize"]).to!long : -1;
         report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
         report["build_flags"] = "dub build --build=release --compiler=ldc2; ldc2 -O3 -release benchmarks/pipeline.d";
         report["cases"] = JSONValue(cases);
+        report["manifest_transitions"] = JSONValue(transitions);
+        report["restart_probe"] = restartProbe(args[1], root, os == "Darwin");
+        validateRestart(report["restart_probe"]);
         report["unsupported"] = arr(["OS cold cache not controlled",
-            "peak open FDs and GC not instrumented", "greater-than-RAM preflight/run not performed",
-            "process-kill restart injection not included"]);
+            "peak open FDs and GC not instrumented",
+            "actual syscall read/write bytes not observable",
+            "greater-than-RAM unsafe on measured 16 GiB RAM and 23.75 GiB scratch",
+            "changed-executable timing not included; paired correctness gate covers identity"]);
         validate(report);
         if (args.length == 3) write(args[2], report.toString ~ "\n");
         else writeln(report.toString);

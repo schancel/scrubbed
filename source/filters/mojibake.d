@@ -4,6 +4,7 @@
 module filters.mojibake;
 
 import pipeline : ConfiguredFilter, FilterOptions, registerFilterFactory;
+import std.array : appender;
 import std.conv : ConvException, to;
 import std.range.primitives : empty, front, isForwardRange, isInputRange, popFront, save;
 import std.string : split;
@@ -261,8 +262,105 @@ private bool scoreCandidate(string text, LegacyEncoding encoding, out long score
     }
 }
 
+/// Return the end byte offset of one exact UTF-8 sequence represented by
+/// legacy codepoints. An invalid or incomplete sequence is not a candidate.
+private size_t legacySequenceEnd(string text, size_t start, LegacyEncoding encoding) {
+    auto rest = text[start .. $];
+    ubyte lead;
+    if (!legacyByte(rest.front, encoding, lead)) return start;
+    const width = lead >= 0xC2 && lead <= 0xDF ? 2 :
+        lead >= 0xE0 && lead <= 0xEF ? 3 :
+        lead >= 0xF0 && lead <= 0xF4 ? 4 : 0;
+    if (width == 0) return start;
+    rest.popFront();
+    foreach (_; 1 .. width) {
+        if (rest.empty) return start;
+        ubyte next;
+        if (!legacyByte(rest.front, encoding, next) || next < 0x80 || next > 0xBF)
+            return start;
+        rest.popFront();
+    }
+    const end = text.length - rest.length;
+    long ignored;
+    return scoreCandidate(text[start .. end], encoding, ignored) ? end : start;
+}
+
+/// Scan only exact legacy-encoded UTF-8 sequences. Unmatched slices are
+/// appended directly from the original buffer, never decoded or re-encoded.
+private string repairLocal(string text, MojibakeOptions options, size_t remainingPasses) {
+    auto output = appender!string();
+    size_t copiedUntil;
+    size_t at;
+    while (at < text.length) {
+        size_t bestEnd;
+        LegacyEncoding bestEncoding;
+        long bestGain;
+        foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
+            if ((encoding == LegacyEncoding.latin1 && !options.useLatin1) ||
+                (encoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+            auto end = legacySequenceEnd(text, at, encoding);
+            if (end == at) continue;
+            // Standalone C2 pairs are ambiguous; permit one only when joined
+            // to a preceding higher-byte sequence in the same local island.
+            ubyte lead;
+            legacyByte(text[at .. $].front, encoding, lead);
+            if (lead == 0xC2) continue;
+            // Score the minimal complete sequence first. A positive score
+            // here must not carry an adjacent ambiguous C2 sequence along.
+            const atom = text[at .. end];
+            long decodedScore;
+            if (!scoreCandidate(atom, encoding, decodedScore)) continue;
+            const atomicGain = decodedScore - plausibilityScore(atom);
+            if (atomicGain > bestGain) {
+                bestGain = atomicGain;
+                bestEnd = end;
+                bestEncoding = encoding;
+            }
+            // Only exact second-pass improvement can justify grouping
+            // adjacent sequences for double-mangled text. Capping
+            // this at four sequences keeps long lookalike runs linear-time.
+            if (remainingPasses < 2) continue;
+            foreach (_; 1 .. 4) {
+                const next = end < text.length ? legacySequenceEnd(text, end, encoding) : end;
+                if (next == end) break;
+                end = next;
+                const span = text[at .. end];
+                if (!scoreCandidate(span, encoding, decodedScore)) continue;
+                const intermediate = decodedCandidate(span, encoding).to!string;
+                foreach (nextEncoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
+                    if ((nextEncoding == LegacyEncoding.latin1 && !options.useLatin1) ||
+                        (nextEncoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                    long nextScore;
+                    if (scoreCandidate(intermediate, nextEncoding, nextScore)) {
+                        const improvement = nextScore - plausibilityScore(span);
+                        if (improvement > 0 && nextScore > decodedScore &&
+                            improvement >= bestGain) {
+                            bestGain = improvement;
+                            bestEnd = end;
+                            bestEncoding = encoding;
+                        }
+                    }
+                }
+            }
+        }
+        if (bestGain > 0) {
+            output.put(text[copiedUntil .. at]);
+            output.put(decodedCandidate(text[at .. bestEnd], bestEncoding).to!string);
+            copiedUntil = bestEnd;
+            at = bestEnd;
+        } else {
+            auto rest = text[at .. $];
+            rest.popFront();
+            at = text.length - rest.length;
+        }
+    }
+    if (copiedUntil == 0) return text;
+    output.put(text[copiedUntil .. $]);
+    return output.data;
+}
+
 private string repairMojibake(string text, MojibakeOptions options) {
-    foreach (_; 0 .. options.maxPasses) {
+    foreach (pass; 0 .. options.maxPasses) {
         LegacyEncoding winner;
         bool haveWinner;
         long bestScore = plausibilityScore(text);
@@ -280,7 +378,17 @@ private string repairMojibake(string text, MojibakeOptions options) {
                 bestScore = candidateScore;
             }
         }
-        if (!haveWinner) break;
+        if (!haveWinner) {
+            // Preserve the old whole-string decision for its original
+            // repertoire. Local repair is for an unmappable surrounding
+            // codepoint that prevented that decision from being made.
+            if ((options.useLatin1 && canEncodeLegacy(text, LegacyEncoding.latin1)) ||
+                (options.useCp1252 && canEncodeLegacy(text, LegacyEncoding.cp1252))) break;
+            const local = repairLocal(text, options, options.maxPasses - pass);
+            if (local == text) break;
+            text = local;
+            continue;
+        }
 
         // Candidate scoring above is lazy and does not allocate candidate
         // output buffers. Materialize only the winner for the next pass.
@@ -340,4 +448,25 @@ unittest {
         "日本語 Ελληνικά русский العربية",
     ];
     foreach (text; clean) assert(fixMojibake(text) == text, text);
+}
+
+unittest {
+    // A damaged island must not make adjacent unmappable Unicode an obstacle.
+    assert(fixMojibake("🙂日本語 Ελληνικά العربية schÃ¶n 🐈") ==
+        "🙂日本語 Ελληνικά العربية schön 🐈");
+    assert(fixMojibake("🐈schÃ¶n🐈 donâ€™t 東京") ==
+        "🐈schön🐈 don’t 東京");
+    assert(fixMojibake("東京 schÃ¶n Αθήνα donâ€™t العربية") ==
+        "東京 schön Αθήνα don’t العربية");
+    assert(fixMojibake("🙂 ÃƒÂ¶ 🙂") == "🙂 ö 🙂");
+    assert(fixMojibake("日本語 Ã¶ �🐈") == "日本語 ö �🐈");
+    assert(fixMojibake("🐈 Ã©Â© 🐈") == "🐈 éÂ© 🐈");
+
+    // Plausible legacy-looking text and an incomplete UTF-8 sequence abstain.
+    foreach (text; ["🙂 café Â© Ω", "東京 Ãx🙂", "🙂 Ã 🐈", "العربية § ½ Ελληνικά"])
+        assert(fixMojibake(text) == text, text);
+
+    MojibakeOptions onePass;
+    onePass.maxPasses = 1;
+    assert(repairMojibake("🙂 ÃƒÂ¶ 🐈", onePass) != "🙂 ö 🐈");
 }

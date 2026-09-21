@@ -41,13 +41,15 @@ private double elapsed(string value) {
     return result;
 }
 
-private JSONValue timed(string[] command, bool mac, bool expectSkip = false) {
+private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0) {
     auto result = execute((mac ? ["/usr/bin/time", "-l", "-p"] :
         ["/usr/bin/time", "-v"]) ~ command);
     require(result.status == 0, "timed command failed: " ~ result.output);
-    if (expectSkip)
-        require(result.output.canFind("skipped"),
-            "manifest warm run did not report a verified skip");
+    if (expectedSkips) {
+        require(result.output.split("EXPLAIN\tinput=").length - 1 == expectedSkips &&
+            result.output.split("status=skipped").length - 1 == expectedSkips,
+            "manifest warm run did not report every verified skip");
+    }
     JSONValue sample = JSONValue(["status": JSONValue(result.status)]);
     foreach (line; result.output.splitLines) {
         auto s = line.strip;
@@ -121,7 +123,7 @@ private JSONValue caseRun(string name, string[] command, string input,
         if (!manifest || run == 0) {
             if (exists(output)) rmdirRecurse(output);
         }
-        auto sample = timed(command, mac, manifest && run > 0);
+        auto sample = timed(command, mac, manifest && run > 0 ? files : 0);
         identities = verifyTree(input, output, files, records);
         sample["exact_output"] = true;
         sample["input_fixture_bytes"] = cast(long)(files * records *
@@ -138,7 +140,7 @@ private JSONValue caseRun(string name, string[] command, string input,
     JSONValue result = JSONValue(["name": JSONValue(name),
         "files": identities, "samples": JSONValue(samples)]);
     result["filter_config"] = "normalize-line-endings,strip-control";
-    result["filter_config_sha256"] = toHexString(
+    result["filter_selection_sha256"] = toHexString(
         sha256Of(cast(ubyte[])"normalize-line-endings,strip-control".dup)).to!string;
     result["command_template"] = manifest ?
         "<scrubbed-binary> --input <fixture-input> --output <fixture-output> --filters normalize-line-endings,strip-control --threads 1 --manifest <manifest-db> --explain" :
@@ -152,6 +154,14 @@ private void validate(JSONValue report) {
                    "cpu", "compiler", "build_flags"])
         require(key in report.object && report[key].str.length,
             "missing report metadata " ~ key);
+    foreach (key; ["os", "cpu", "compiler"]) {
+        auto value = report[key].str;
+        require(!value.canFind('/') && !value.canFind('\\') &&
+            !value.canFind('\n') && !value.canFind('\r') &&
+            !value.canFind('\t'), "hostile report metadata " ~ key);
+    }
+    require(report["source_binary_mapping"].str == "UNVERIFIED",
+        "unverified source/binary relation must not be claimed verified");
     require(report["cases"].array.length > 0, "zero cases");
     foreach (item; report["cases"].array) {
         require(item["samples"].array.length == 3, "zero/partial samples");
@@ -169,7 +179,8 @@ private void selfTest() {
         "source_sha": JSONValue("x"), "binary_sha256": JSONValue("x"),
         "harness_sha256": JSONValue("x"), "os": JSONValue("x"),
         "cpu": JSONValue("x"), "compiler": JSONValue("x"),
-        "build_flags": JSONValue("x")]);
+        "build_flags": JSONValue("x"),
+        "source_binary_mapping": JSONValue("UNVERIFIED")]);
     JSONValue sample = JSONValue(["exact_output": JSONValue(true),
         "status": JSONValue(0)]);
     report["cases"] = JSONValue([JSONValue(["samples":
@@ -197,6 +208,16 @@ private void selfTest() {
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "path privacy negative did not fail");
     bad = report;
+    bad["cpu"] = "/Users/alice/private";
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "hostile absolute path negative did not fail");
+    bad = report;
+    bad["source_binary_mapping"] = "VERIFIED";
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "stale binary provenance negative did not fail");
+    bad = report;
     bad["cases"][0]["samples"][0]["exact_output"] = false;
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
@@ -223,10 +244,88 @@ private void selfTest() {
     writeln("pipeline release self-test passed");
 }
 
+private void compareDos2unix(string scrubbed, string dos2unix,
+                             string reportPath) {
+    auto os = checked(["uname", "-s"]);
+    require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
+    auto toolVersion = checked([dos2unix, "--version"]).splitLines[0];
+    require(toolVersion.startsWith("dos2unix 7.5.7"),
+        "expected official dos2unix 7.5.7, got " ~ toolVersion);
+    auto root = buildPath(tempDir, "scrubbed-dos2unix-" ~ randomUUID.toString);
+    mkdirRecurse(root);
+    scope(exit) rmdirRecurse(root);
+    auto input = buildPath(root, "input.txt");
+    auto output = buildPath(root, "output.txt");
+    auto file = File(input, "wb");
+    foreach (_; 0 .. 65536) file.rawWrite("alpha\r\nbeta\r\n");
+    file.close();
+    auto expected = "alpha\nbeta\n";
+    JSONValue[] samples;
+    foreach (index; 0 .. 4) {
+        bool useScrubbed = index % 2 == 0;
+        if (exists(output)) remove(output);
+        auto command = useScrubbed ?
+            [scrubbed, "--input", input, "--output", output,
+             "--filters", "normalize-line-endings", "--threads", "1"] :
+            [dos2unix, "-n", input, output];
+        auto sample = timed(command, os == "Darwin");
+        require(exists(output), "comparator produced no output");
+        auto outputBytes = readText(output);
+        require(outputBytes.length == 65536 * expected.length,
+            "comparator output length mismatch");
+        foreach (i; 0 .. 65536)
+            require(outputBytes[i * expected.length .. (i + 1) * expected.length] ==
+                expected, "comparator exact output mismatch");
+        sample["tool"] = useScrubbed ? "scrubbed" : "dos2unix";
+        sample["output_sha256"] = hashFile(output);
+        sample["exact_output"] = true;
+        samples ~= sample;
+    }
+    require(samples.length == 4 && samples[0]["tool"].str == "scrubbed" &&
+        samples[1]["tool"].str == "dos2unix" &&
+        samples[2]["tool"].str == "scrubbed" &&
+        samples[3]["tool"].str == "dos2unix", "A/B/A/B order");
+    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-comparator-v1")]);
+    report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
+    report["source_binary_mapping"] = "UNVERIFIED";
+    report["harness_sha256"] = hashFile("benchmarks/pipeline.d");
+    report["scrubbed_binary_sha256"] = hashFile(scrubbed);
+    report["dos2unix_binary_sha256"] = hashFile(dos2unix);
+    report["dos2unix_source_tar_sha256"] =
+        "669ee27120ae71589f638fe3a167d6ea54f8633f5ab1b282551bd7a7c9510dfa";
+    report["source_tar_binary_mapping"] = "UNVERIFIED; observed manual build";
+    report["dos2unix_version"] = toolVersion;
+    report["dos2unix_license"] = "FreeBSD (official COPYING.txt)";
+    report["input_sha256"] = hashFile(input);
+    report["output_sha256"] = samples[0]["output_sha256"];
+    report["input_bytes"] = cast(long)(65536 * "alpha\r\nbeta\r\n".length);
+    report["output_bytes"] = cast(long)(65536 * expected.length);
+    report["os"] = os ~ " " ~ checked(["uname", "-r"]) ~ " " ~
+        checked(["uname", "-m"]);
+    report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
+    report["scrubbed_command_template"] =
+        "<scrubbed-binary> --input <fixture> --output <output> --filters normalize-line-endings --threads 1";
+    report["dos2unix_command_template"] =
+        "<dos2unix-binary> -n <fixture> <output>";
+    report["boundary"] = "single file to fresh file; full process; CRLF-only text; exact bytes";
+    report["samples"] = JSONValue(samples);
+    auto published = report.toString;
+    require(!published.canFind(root) && !published.canFind(scrubbed) &&
+        !published.canFind(dos2unix) && !published.canFind(checked(["uname", "-n"])),
+        "private comparator report path/host");
+    if (reportPath.length) write(reportPath, published ~ "\n");
+    else writeln(published);
+}
+
 int main(string[] args) {
     try {
         if (args.length == 2 && args[1] == "--self-test") {
             selfTest(); return 0;
+        }
+        if ((args.length == 4 || args.length == 5) &&
+            args[1] == "--compare-dos2unix") {
+            compareDos2unix(args[2], args[3], args.length == 5 ? args[4] : "");
+            return 0;
         }
         require(args.length == 2 || args.length == 3,
             "usage: pipeline SCRUBBED_BINARY [REPORT_JSON]");
@@ -254,6 +353,7 @@ int main(string[] args) {
         JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v1")]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["binary_sha256"] = hashFile(args[1]);
+        report["source_binary_mapping"] = "UNVERIFIED";
         report["harness_sha256"] = hashFile("benchmarks/pipeline.d");
         report["os"] = os ~ " " ~ checked(["uname", "-r"]) ~ " " ~
             checked(["uname", "-m"]);

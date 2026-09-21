@@ -1,6 +1,95 @@
 # Benchmarks
 
-All benchmark and corpus-analysis utilities are written in D.
+All project benchmark and corpus-analysis utilities are written in D. The
+baseline also measures the external ftfy CLI on its task-equivalent fixture.
+
+## Pre-refactor full-CLI baseline (A00)
+
+`cli_baseline.d` measures whole processes, including input/output and startup,
+on generated UTF-8 text and a 32-file nested tree. It refuses to emit a result
+if any output differs byte-for-byte from the independently specified expected
+output. Every case has five repetitions, raw wall/user/system CPU seconds and
+peak resident bytes. The JSON emitted on stdout also records input/output
+SHA-256, publication-safe command templates, binary and harness hashes, source
+commit, host-neutral OS fields, CPU model, compiler, observed Python package
+versions, flags, and unsupported capabilities. No fixture bytes from other
+projects are redistributed.
+
+From a clean checkout on macOS or Linux, with `ldc2`, `dub`, `uv`, and BSD/GNU
+`/usr/bin/time` available:
+
+```sh
+bench_env=$(mktemp -d /tmp/scrubbed-a00-XXXXXX)
+uv venv "$bench_env/venv"
+uv pip install --python "$bench_env/venv/bin/python" ftfy==6.3.1 wcwidth==0.8.4
+dub build --build=release --compiler=ldc2
+ldc2 -O -release benchmarks/cli_baseline.d -of="$bench_env/cli_baseline"
+"$bench_env/cli_baseline" --self-test
+"$bench_env/cli_baseline" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" > "$bench_env/result.json"
+```
+
+In JSON, substitute `<scrubbed-binary>`, `<ftfy-cli>`, and `<fixture-root>`
+with the run's local paths to replay a command; no checkout, user, hostname,
+or temporary-directory path is published. The `result.json` path is local run
+output, not a committed fixture. The runner creates and removes its own
+generated inputs under the system temporary
+directory. `uv` installs only pinned public packages in the isolated venv.
+The D self-test rejects prefix-collision versions such as `ftfy==6.3.10` and
+`wcwidth==0.8.40`, duplicate rows, and missing Linux CPU-model fields. The
+run parses exact `uv pip freeze` name/version pairs and reports the observed
+versions, not assumed pins. On macOS `cpu_model` comes from
+`machdep.cpu.brand_string` and `hardware_model` from `hw.model`; on Linux the
+CPU model comes from `model name`, `Hardware`, or `Processor` in
+`/proc/cpuinfo`. An unavailable/unreadable source is reported explicitly,
+never replaced with the architecture.
+The binary build uses the repository's release Dub configuration; the harness
+uses the shown LDC flags. Run on an otherwise idle machine and retain all raw
+samples; compare only cases with the same input hash and a passing exact-output
+gate. BSD `/usr/bin/time -l -p` reports RSS bytes, while GNU `time -v` reports
+KiB, converted to bytes in JSON. Both report process peak, not summed memory
+across a fleet. Their clocks round to centiseconds; do not interpret apparent
+ties for fast cases as precise equality.
+
+The measured comparator configurations were discovered through their installed
+CLIs. [ftfy 6.3.1](https://github.com/rspeer/python-ftfy) runs on the same
+UTF-8 mojibake file with `--preserve-entities -n none`, which avoids unrelated
+HTML-entity and Unicode-normalization behavior on this fixture. Its
+`wcwidth==0.8.4` dependency is pinned. No custom non-D transformation script
+is included as a comparator. These are task-specific process measurements,
+not a ranking of whole tools.
+
+One Apple M4 / macOS 25.6.0 / LDC 1.43.0 sample at source
+`9dea1f6272660ebaccbb8965b0fe4cfe3fe7286b` passed every exact-output
+gate. Ranges below are the five raw repetitions, not confidence intervals:
+
+| Case | Wall (s) | CPU user+system (s) | Peak RSS (MiB) |
+|---|---:|---:|---:|
+| 4,096-line mojibake, scrubbed | 2.95–3.16 | 2.93–3.14 | 2.92–2.94 |
+| Same mojibake, ftfy 6.3.1 | 0.16–0.16 | 0.14–0.16 | 23.78–23.91 |
+| 262,144-record normalization, scrubbed | 0.13–0.13 | 0.12–0.12 | 53.98–54.00 |
+| 32-file normalization tree, scrubbed | 0.04–0.04 | 0.03–0.03 | 6.83–6.84 |
+
+The repeated synthetic lines favor neither a realistic document mix nor broad
+output-quality coverage; the existing pinned ftfy correctness corpus below is
+the separate quality gate. In particular, no single-machine speed claim or
+cross-task raw-speed comparison follows from this table. The tree exercises
+file discovery, nested output creation, and per-file writes, but ftfy's CLI
+does not provide an equivalent recursive tree mode. The present binary has no
+HTML extraction filter, so trafilatura is not a quality-matched comparator;
+the future full-pipeline comparison belongs to #59. The tree gate also rejects
+unexpected output files or directories, not only missing/incorrect files.
+No independently sourced executable comparator has been verified for the
+combined current line-ending and control-stripping task:
+[dos2unix](https://manpages.debian.org/wheezy/dos2unix/dos2unix.1.en.html)
+handles newline conversion but not the same control-stripping operation. We
+found no separately
+verified, executable comparator with the same current quote/entity semantics,
+or a second credible mojibake repair CLI beyond ftfy. Specifically,
+[mojiblame](https://pypi.org/project/mojiblame/) exposes a Git-aware,
+in-place `fix` command rather than a quality-matched file-to-file transform;
+[scrubkit](https://pypi.org/project/scrubkit/) has no installed CLI. Those
+cases are reported as unsupported rather than assigned misleading speed
+numbers.
 
 ## Lazy mojibake candidates
 

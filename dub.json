@@ -6,6 +6,8 @@
 	"targetType": "executable",
 	"sourcePaths": ["source"],
 	"dependencies": {"argparse": "==2.0.2"},
+	"preBuildCommands": ["cc -O2 -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION -c third_party/sqlite/sqlite3.c -o third_party/sqlite/sqlite3.o"],
+	"sourceFiles": ["third_party/sqlite/sqlite3.o"],
 	"dflags": ["-g"],
 	"buildTypes": {
 		"release": {

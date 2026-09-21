@@ -2,7 +2,7 @@
 
 Status key: [x] done and verified, [~] partially done, [ ] not started.
 
-Planning status (2026-09-20): [67 accepted GitHub issues](https://github.com/schancel/scrubd/issues)
+Planning status (2026-09-20): [67 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
 cover the broader corpus-curation roadmap with 136 native dependency edges.
 Acceptance is not an implementation claim; worker readiness is tracked per
 issue. This file remains the status record for implemented work.

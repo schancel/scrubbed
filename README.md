@@ -99,7 +99,7 @@ files, not yet a proven terabyte-scale engine.
 Phases 0-2 are usable within the documented scope; JSON configuration from
 Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
 The broader corpus-curation plan is tracked in
-[GitHub issues](https://github.com/schancel/scrubd/issues); accepted tickets do
+[GitHub issues](https://github.com/schancel/scrubbed/issues); accepted tickets do
 not imply the features are implemented or worker-ready.
 
 Reproducible D correctness and allocation microbenchmarks, including the

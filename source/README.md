@@ -51,6 +51,17 @@ points, and validated descriptive resources. Its pass-mode metadata describes
 single-pass or resumable stage behavior; it does not implement checkpoints or
 scheduling. These stages are not wired to the current string pipeline or CLI.
 
+[`stages/registry.d`](stages/registry.d) adds typed stage declarations, option
+schemas, factory registration, and relative ordering metadata. A concrete
+stage registers itself in its own module constructor; consumers import that
+module to make it available. [`stages/config.d`](stages/config.d) strictly
+parses the nested `{"version":2,"stages":[{"name":"...","options":{...}}]}`
+API format and resolves typed transforms before document execution. Its
+[`stages/fixture.d`](stages/fixture.d) registration exists only in unittest
+builds. V2 is not accepted by the CLI; the existing v1 `--config` path remains
+unchanged. Registration and parsing do not reserve resources or establish
+production backpressure; F04's high-edit content path still needs measurement.
+
 [`effects/runner.d`](effects/runner.d) defines typed `Source`, `Parser`, and
 `Sink` ports and the one-document-at-a-time `runEffects` composition root.
 The source transfers each record's view owner to the runner, which closes it

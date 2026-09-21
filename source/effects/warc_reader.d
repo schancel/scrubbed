@@ -57,6 +57,7 @@ final class WarcReader {
     private size_t separatorAt;
     private size_t completed;
     private bool stopped;
+    private bool inCallback;
     private string key;
     private WarcVisit visit;
 
@@ -74,6 +75,7 @@ final class WarcReader {
     size_t completedRecords() const { return completed; }
 
     void feed(const(ubyte)[] bytes) {
+        if (inCallback) throw new WarcError("reentrant reader call");
         if (stopped) throw new WarcError("reader stopped");
         try {
             size_t at;
@@ -109,6 +111,7 @@ final class WarcReader {
     }
 
     void finish() {
+        if (inCallback) throw new WarcError("reentrant reader call");
         if (stopped) throw new WarcError("reader stopped");
         if (phase != Phase.header || header.length != 0 || completed == 0) {
             stopped = true;
@@ -125,6 +128,8 @@ final class WarcReader {
         header = null;
         separatorAt = 0;
         phase = Phase.header;
+        inCallback = true;
+        scope(exit) inCallback = false;
         if (!visit(record)) fail("callback cancelled");
         ++completed;
     }
@@ -146,11 +151,13 @@ final class WarcReader {
             if (colon <= 0) fail("invalid header field");
             auto name = line[0 .. colon];
             foreach (c; name)
-                if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                    (c >= '0' && c <= '9') || c == '-')) fail("invalid field name");
+                if (c < 33 || c > 126 ||
+                    ("()<>@,;:/[]?={} " ~ "\x22\x5c").indexOf(c) >= 0)
+                    fail("invalid field name");
             auto raw = line[colon + 1 .. $];
-            if (raw.indexOf('\r') >= 0 || raw.indexOf('\n') >= 0)
-                fail("invalid field line ending");
+            foreach (c; raw)
+                if ((c < 32 && c != '\t') || c == 127)
+                    fail("control character in header value");
             auto value = trimSpace(raw);
             if (value.indexOf("=?") >= 0) fail("encoded-word fields unsupported");
             try validate(value);

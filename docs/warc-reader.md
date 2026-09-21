@@ -5,6 +5,9 @@ then requires one `finish` call. It emits one fully validated, owned `WarcRecord
 per callback. The callback returns `false` to cancel. Exceptions propagate;
 after cancellation, exception, or `finish`, the reader cannot be reused.
 Earlier completed callbacks are not rolled back on a later failure.
+Callbacks cannot call `feed` or `finish` on the same reader; such reentrant
+calls fail without changing parser state. A callback may catch that rejection
+and return normally, or let it propagate and stop the reader.
 
 ```d
 auto reader = new WarcReader("dataset/archive-source-key", (WarcRecord record) {
@@ -33,6 +36,8 @@ Target-URI, metadata permits it, and other supported record types require it.
 Unknown header fields are retained. The reader rejects folded, RFC 2047
 encoded-word, and segmented fields. Its URI check is a conservative syntax
 screen, not full RFC 3986 validation; date values are retained, not normalized.
+Extension field names use the IIPC ASCII `token` grammar, and header values
+reject control characters other than horizontal tab used as linear whitespace.
 It does not support WARC/1.0, compression, recovery/resynchronization, HTTP
 payload extraction, or full WARC conformance.
 

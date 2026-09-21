@@ -91,6 +91,16 @@ void main() {
         "metadata with URI");
     need(decode(record("zero", "response", []), 1).length == 1,
         "zero-length block");
+    WarcRecord tokenField;
+    auto tokenReader = new WarcReader("key", (WarcRecord r) {
+        tokenField = r; return true;
+    });
+    tokenReader.feed(record("token", "response", [],
+        "X_Trace: caf\xc3\xa9\tvalue\r\n"));
+    tokenReader.finish();
+    need(tokenField.fields[4].name == "X_Trace" &&
+        tokenField.fields[4].value == " caf\xc3\xa9\tvalue",
+        "IIPC token extension and UTF-8/HT value");
     auto mixedCase = record("case", "response", [], "X-Mixed: value\r\n");
     auto changed = cast(string) mixedCase;
     import std.string : replace;
@@ -146,6 +156,15 @@ void main() {
     rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
         p.feed(record("bad", "response", [], " X: fold\r\n")); }, "folded field");
     rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
+        p.feed(record("bad", "response", [], "X-Test: a\0b\r\n"));
+        }, "NUL header value");
+    rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
+        p.feed(record("bad", "response", [], "X-Test: a\x7fb\r\n"));
+        }, "DEL header value");
+    rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
+        p.feed(record("bad", "response", [], "X@Trace: value\r\n"));
+        }, "separator in field name");
+    rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
         p.feed(record("bad", "response", [], "X-Test: =?utf-8?B?QQ==?=\r\n"));
         }, "encoded word");
     rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
@@ -160,6 +179,26 @@ void main() {
     rejects({ late.feed(record("bad", "response", [cast(ubyte) 1])[0 .. $ - 2]);
         late.finish(); }, "late truncation");
     need(earlier == 1 && late.completedRecords == 1, "late failure emitted failed record");
+    WarcReader reentrant;
+    size_t[] ordinals;
+    size_t deniedCalls;
+    bool attemptedReentry;
+    reentrant = new WarcReader("k", (WarcRecord r) {
+        ordinals ~= r.ordinal;
+        if (!attemptedReentry) {
+            attemptedReentry = true;
+            rejects({ reentrant.feed(record("nested", "response", [])); },
+                "reentrant feed");
+            rejects({ reentrant.finish(); }, "reentrant finish");
+            deniedCalls += 2;
+        }
+        return true;
+    });
+    reentrant.feed(record("first", "response", []) ~
+        record("second", "response", []));
+    reentrant.finish();
+    need(ordinals == [1, 2] && deniedCalls == 2 &&
+        reentrant.completedRecords == 2, "reentrant calls changed emission state");
     auto cancelled = new WarcReader("k", (WarcRecord r) { return false; });
     rejects({ cancelled.feed(record("cancel", "response", [])); }, "callback cancellation");
     rejects({ cancelled.feed(record("again", "response", [])); }, "cancelled reader reuse");

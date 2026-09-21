@@ -5,9 +5,10 @@ import std.algorithm.searching : canFind, endsWith, startsWith;
 import std.array : replicate;
 import std.conv : to;
 import std.digest.sha : sha256Of;
-import std.file : exists, mkdirRecurse, read, readText, remove, rmdirRecurse, tempDir, write;
+import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
+    remove, rmdirRecurse, tempDir, write;
 import std.json : JSONValue;
-import std.path : buildPath, dirName;
+import std.path : buildPath, dirName, dirSeparator, relativePath;
 import std.process : execute;
 import std.string : split, splitLines, strip;
 import std.uuid : randomUUID;
@@ -30,6 +31,21 @@ private JSONValue strings(string[] values) {
     JSONValue[] result;
     foreach (value; values) result ~= JSONValue(value);
     return JSONValue(result);
+}
+
+// Commands in a shareable report must be reproducible without publishing the
+// current machine's checkout, account, or temporary-directory names.
+private JSONValue publicCommand(string[] command, string binary, string ftfy,
+                                string fixtureRoot) {
+    string[] safe;
+    foreach (arg; command) {
+        if (arg == binary) safe ~= "<scrubbed-binary>";
+        else if (arg == ftfy) safe ~= "<ftfy-cli>";
+        else if (arg.startsWith(fixtureRoot ~ dirSeparator))
+            safe ~= "<fixture-root>/" ~ relativePath(arg, fixtureRoot);
+        else safe ~= arg;
+    }
+    return strings(safe);
 }
 
 private double metric(string report, string prefix) {
@@ -131,6 +147,18 @@ private JSONValue runTree(string binary, string root, bool darwin) {
     foreach (_; 0 .. 5) {
         if (exists(outputRoot)) rmdirRecurse(outputRoot);
         auto sample = timed(command, darwin);
+        bool[string] expectedNames;
+        foreach (fixture; fixtureFiles) expectedNames[fixture["path"].str] = true;
+        size_t seen;
+        foreach (entry; dirEntries(outputRoot, SpanMode.depth, false)) {
+            auto relative = relativePath(entry.name, outputRoot);
+            if (entry.isDir && relative == "nested") continue;
+            if (!entry.isFile || relative !in expectedNames)
+                throw new Exception("unexpected tree output entry " ~ relative);
+            seen++;
+        }
+        if (seen != fixtureFiles.length)
+            throw new Exception("tree output set differs from expected fixture set");
         foreach (ref fixture; fixtureFiles) {
             auto path = buildPath(outputRoot, fixture["path"].str);
             if (!exists(path)) throw new Exception("missing tree output " ~ path);
@@ -191,9 +219,8 @@ int main(string[] args) {
             normalization, "--output", outputPath, "--filters",
             "normalize-line-endings,strip-control", "--threads", "1"],
             normalization, outputPath, normalized, darwin, 5);
-        // Perl is a separate executable implementation of the two regex-level
-        // normalization operations. This fixture intentionally contains ASCII
-        // controls only; its result is not a Unicode-domain equivalence claim.
+        // Ad-hoc Perl reference, not an independently sourced comparator.
+        // The fixture contains ASCII controls only; it proves no Unicode parity.
         const perlProgram = `local $/; open my $in, '<:raw', $ARGV[0] or die $!;
             my $s = <$in>; $s =~ s/\r\n?/\n/g;
             $s =~ s/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g;
@@ -201,12 +228,22 @@ int main(string[] args) {
         cases ~= runCase("normalization/perl", ["/usr/bin/perl", "-e",
             perlProgram, normalization, outputPath], normalization, outputPath,
             normalized, darwin, 5);
+        cases[$-1]["reference_origin"] = "benchmark-authored ad-hoc Perl program";
         cases ~= runTree(args[1], root, darwin);
+
+        foreach (ref result; cases) {
+            string[] command;
+            foreach (arg; result["command"].array) command ~= arg.str;
+            result["command"] = publicCommand(command, args[1], args[2], root);
+        }
 
         JSONValue report = JSONValue(["schema": JSONValue("scrubbed-cli-baseline-v1")]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["fixture_policy"] = "generated deterministic UTF-8; exact byte equality required";
-        report["os"] = checked(["uname", "-a"]);
+        report["os"] = JSONValue([
+            "name": JSONValue(os),
+            "release": JSONValue(checked(["uname", "-r"])),
+            "architecture": JSONValue(checked(["uname", "-m"]))]);
         report["hardware"] = darwin ? checked(["sysctl", "-n", "hw.model"]) :
             checked(["uname", "-m"]);
         report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
@@ -223,22 +260,28 @@ int main(string[] args) {
             "ldc2 -O -release benchmarks/cli_baseline.d -of=<path>";
         auto python = buildPath(dirName(args[2]), "python");
         report["python_version"] = checked([python, "--version"]);
-        report["python_packages"] = checked(["uv", "pip", "list", "--python", python]);
-        if (!report["python_packages"].str.canFind("ftfy    6.3.1") ||
-            !report["python_packages"].str.canFind("wcwidth 0.8.4"))
+        auto packages = checked(["uv", "pip", "list", "--python", python]);
+        if (!packages.canFind("ftfy    6.3.1") ||
+            !packages.canFind("wcwidth 0.8.4"))
             throw new Exception("expected ftfy==6.3.1 and wcwidth==0.8.4");
+        report["python_packages"] = strings(["ftfy==6.3.1", "wcwidth==0.8.4"]);
         report["perl_version"] = checked(["/usr/bin/perl", "-v"]);
         report["perl_capability"] =
             "ASCII CRLF/CR and C0/DEL controls only on generated fixture; not Unicode C1 parity";
         report["unsupported"] = strings([
             "ftfy CLI has no recursive tree input/output mode; no process-equivalent tree baseline",
             "trafilatura HTML extraction: scrubbed html2md is unimplemented; #59 owns future pipeline comparison",
+            "no independently sourced executable matches current normalize-line-endings plus strip-control semantics; Perl case is an ad-hoc reference only",
             "no independently verified quality-matched executable for current quote/entity semantics",
             "no independently verified additional mojibake repair executable beyond ftfy"]);
         report["time_variant"] = darwin ? "BSD time -l -p; RSS bytes" :
             "GNU time -v; RSS KiB converted to bytes";
         report["cases"] = JSONValue(cases);
-        writeln(report.toString);
+        auto published = report.toString;
+        if (published.canFind(root) || published.canFind(args[1]) ||
+            published.canFind(args[2]) || published.canFind(checked(["uname", "-n"])))
+            throw new Exception("result contains a private run path or hostname");
+        writeln(published);
         return 0;
     } catch (Exception error) {
         stderr.writeln("baseline: ", error.msg);

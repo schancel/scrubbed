@@ -1,6 +1,8 @@
 # Benchmarks
 
-All benchmark and corpus-analysis utilities are written in D.
+All project benchmark and corpus-analysis utilities are written in D. The
+baseline additionally measures external executables, including one explicitly
+ad-hoc Perl reference program.
 
 ## Pre-refactor full-CLI baseline (A00)
 
@@ -9,8 +11,9 @@ on generated UTF-8 text and a 32-file nested tree. It refuses to emit a result
 if any output differs byte-for-byte from the independently specified expected
 output. Every case has five repetitions, raw wall/user/system CPU seconds and
 peak resident bytes. The JSON emitted on stdout also records input/output
-SHA-256, exact commands, binary and harness hashes, source commit, OS, compiler,
-Python package versions, flags, and unsupported capabilities. No fixture bytes
+SHA-256, publication-safe command templates, binary and harness hashes, source
+commit, host-neutral OS fields, compiler, Python package versions, flags, and
+unsupported capabilities. No fixture bytes
 from other projects are redistributed.
 
 From a clean checkout on macOS or Linux, with `ldc2`, `dub`, `uv`, and BSD/GNU
@@ -25,8 +28,11 @@ ldc2 -O -release benchmarks/cli_baseline.d -of="$bench_env/cli_baseline"
 "$bench_env/cli_baseline" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" > "$bench_env/result.json"
 ```
 
-The `result.json` path is local run output, not a committed fixture. The
-runner creates and removes its own generated inputs under the system temporary
+In JSON, substitute `<scrubbed-binary>`, `<ftfy-cli>`, and `<fixture-root>`
+with the run's local paths to replay a command; no checkout, user, hostname,
+or temporary-directory path is published. The `result.json` path is local run
+output, not a committed fixture. The runner creates and removes its own
+generated inputs under the system temporary
 directory. `uv` installs only pinned public packages in the isolated venv.
 The binary build uses the repository's release Dub configuration; the harness
 uses the shown LDC flags. Run on an otherwise idle machine and retain all raw
@@ -40,12 +46,13 @@ The measured comparator configurations were discovered through their installed
 CLIs. [ftfy 6.3.1](https://github.com/rspeer/python-ftfy) runs on the same
 UTF-8 mojibake file with `--preserve-entities -n none`, which avoids unrelated
 HTML-entity and Unicode-normalization behavior on this fixture. Its
-`wcwidth==0.8.4` dependency is pinned. The independent system Perl executable
-applies CRLF/CR and ASCII-control transformations on the normalization file;
-the exact one-liner appears in JSON. It is quality-matched on the generated
-ASCII-control fixture, not a claim of Unicode C1-control parity or of identical
+`wcwidth==0.8.4` dependency is pinned. The system Perl executable runs a
+benchmark-authored, ad-hoc script for CRLF/CR and ASCII-control transforms;
+the exact script appears in JSON. This is a custom reference baseline, **not**
+an independently sourced alternative. It passes exact output on the generated
+ASCII-control fixture but proves neither Unicode C1-control parity nor matching
 security/filesystem semantics. Perl's installed version and executable path
-are recorded. These are task-specific process comparisons, not a ranking of
+are recorded. These are task-specific process measurements, not a ranking of
 whole tools.
 
 One Apple M4 / macOS 25.6.0 / LDC 1.43.0 sample at source
@@ -67,7 +74,13 @@ cross-task raw-speed comparison follows from this table. The tree exercises
 file discovery, nested output creation, and per-file writes, but ftfy's CLI
 does not provide an equivalent recursive tree mode. The present binary has no
 HTML extraction filter, so trafilatura is not a quality-matched comparator;
-the future full-pipeline comparison belongs to #59. We found no separately
+the future full-pipeline comparison belongs to #59. The tree gate also rejects
+unexpected output files or directories, not only missing/incorrect files.
+No independently sourced executable comparator has been verified for the
+combined current line-ending and control-stripping task:
+[dos2unix](https://manpages.debian.org/wheezy/dos2unix/dos2unix.1.en.html)
+handles newline conversion but not the same control-stripping operation, while
+the Perl case above implements our own recipe. We found no separately
 verified, executable comparator with the same current quote/entity semantics,
 or a second credible mojibake repair CLI beyond ftfy. Specifically,
 [mojiblame](https://pypi.org/project/mojiblame/) exposes a Git-aware,

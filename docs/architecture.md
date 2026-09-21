@@ -12,6 +12,7 @@ app (process exit)
        -> filters/* (imported so their module constructors register)
 filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
+domain.document (standalone typed identity/view facade; no current CLI caller)
 ```
 
 Keep orchestration and filesystem effects in `cli`, chain composition in
@@ -35,6 +36,27 @@ the input tree.
 parallel-tree, invalid-input, and symlink cases. `dub build --build=release`
 builds the executable; both commands are defined by the current `dub.json`.
 
-Document/content/input/output/job boundaries discussed in the roadmap are
+The new `domain.document` module defines `SourceLocator`, `DocumentId`,
+`OutputName`, `Document`, and an owner-checked borrowed view. It has no import
+from `cli`, `pipeline`, or `filters`; none of those modules imports it yet.
+`DocumentId` is a durable logical-record key, not a path, output name, worker
+assignment, source revision, or content hash. Its `doc:v1:` text consists of
+lowercase SHA-256 hex of `scrubbed:document-id:v1\0`, followed by three
+UTF-8 fields (dataset namespace, source key, record key), each prefixed with
+a four-byte unsigned big-endian byte length. Fields must be nonempty valid
+UTF-8 without NUL and are NFC-normalized. Case and path-like spelling remain
+significant: no case-folding, slash cleanup, absolute-path resolution, or
+provider-specific source interpretation occurs here. This leaves annotation
+joins and shard reassignment stable without defining S3/WARC identity policy.
+`OutputName` is separate and does not enter the key. `DocumentViewOwner.mapFile`
+opens and exclusively owns a mapping until `close`; its checked `at`/iteration
+access borrows bytes without an eager whole-file copy or an escaping slice.
+The in-memory constructor borrows a GC-owned array instead, which the caller
+must not manually free or reallocate while open. `copy` explicitly retains
+only the selected range; all view access is rejected after owner close. The
+current CLI retains its own mapping-lifetime logic and is not wired to this
+facade.
+
+Content pieces, job/stage scheduling, and provider transport boundaries remain
 proposals, not modules or APIs in this checkout. Do not depend on them when
 extending a current filter.

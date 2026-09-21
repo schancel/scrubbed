@@ -1,5 +1,15 @@
 # Third-party notices
 
+## SQLite
+
+The standalone local manifest API statically links SQLite 3.53.4's unmodified
+`sqlite3.c` amalgamation. SQLite core code is public domain; no copyright
+license is imposed on these source files. Upstream public-domain statement:
+https://www.sqlite.org/copyright.html. The pinned release archive and SHA3-256,
+per-file hashes, and static build flags are recorded in
+[`third_party/sqlite/README.md`](third_party/sqlite/README.md). No system
+`libsqlite3` is linked for this API.
+
 ## argparse
 
 The shipping `scrubbed` executable uses `argparse` version 2.0.2 by Andrey

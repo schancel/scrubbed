@@ -91,6 +91,11 @@ context-heavy filters streaming.
 JSONL selected-field and stream adapters with semantic-value preservation of
 untouched fields. They are not wired to the command adapter or current CLI.
 
+[`effects/local_manifest.d`](effects/local_manifest.d) is a standalone,
+versioned local SQLite sink ledger with independent per-sink states and bounded
+replay. It verifies observed output bytes before a committed skip. It is not
+wired to the CLI; see [local manifest API and crash limits](../docs/local-manifest.md).
+
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.

@@ -173,7 +173,8 @@ void main() {
     auto ropeHeap = GC.stats().usedSize - ropeHeapBefore;
     auto left = list.output();
     auto right = rope.output();
-    assert(left == right && left.length == length);
+    if (left != right || left.length != length)
+        throw new Exception("content candidates differ in release mode");
     writeln("input_bytes=", input.length, " edits=", edits.length,
         " output_bytes=", length, " exact_equal=true");
     writeln("list_ms=", listTime, " list_gc_delta_bytes=", listHeap,

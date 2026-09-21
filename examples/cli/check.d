@@ -2,12 +2,14 @@
 module cli_check;
 
 import std.algorithm.searching : canFind;
+import std.array : replicate;
 import std.conv : to;
 import std.file : SpanMode, dirEntries, exists, mkdir, readText, rmdirRecurse,
     symlink, tempDir, write;
-import std.path : buildPath;
+import std.json : parseJSON;
+import std.path : baseName, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
-import std.string : splitLines, startsWith;
+import std.string : split, splitLines, startsWith;
 import std.uuid : randomUUID;
 
 private void check(bool condition, string label) {
@@ -131,28 +133,45 @@ int main(string[] args) {
     auto options = execute([exe, "--fish", "--", "repair", "--th"]);
     check(options.status == 0 && options.output == "--threads\n", "option candidate golden");
 
-    // The symlink is created after the regular files so traversal reaches it
-    // after admission. Every file must produce exactly one EXPLAIN record,
-    // including any admitted work canceled by the late traversal failure.
+    // Real release-path cancellation regression: processing these files takes
+    // long enough that the later symlink catches admitted work still queued.
     auto tree = buildPath(root, "tree");
     mkdir(tree);
-    foreach (n; 0 .. 64) write(buildPath(tree, n.to!string ~ ".txt"), "line\r\n");
-    symlink(input, buildPath(tree, "late-link"));
-    size_t expectedRecords = 1; // the symlink itself
-    foreach (entry; dirEntries(tree, SpanMode.shallow)) {
+    auto slowText = replicate("line\r\n", 500_000);
+    foreach (n; 0 .. 16) write(buildPath(tree, n.to!string ~ ".txt"), slowText);
+    auto child = buildPath(tree, "zchild");
+    mkdir(child);
+    symlink(input, buildPath(child, "late-link"));
+    string[] visited;
+    foreach (entry; dirEntries(tree, SpanMode.depth, false)) {
+        if (entry.isFile || entry.isSymlink) visited ~= entry.name;
         if (entry.isSymlink) break;
-        if (entry.isFile) ++expectedRecords;
     }
-    check(expectedRecords > 1, "symlink followed at least one regular file");
+    check(visited.length > 4 && visited[$ - 1] == buildPath(child, "late-link"),
+        "symlink followed at least four regular files");
     auto treeOutput = buildPath(root, "tree-output");
-    auto traversal = separately([exe, "run", "--input", tree, "--output", treeOutput,
-        "--dry-run", "--explain", "--threads", "1", "--max-queued-docs", "1"]);
-    size_t records;
-    foreach (line; traversal.output.splitLines())
-        if (line.startsWith("EXPLAIN\t")) ++records;
-    check(traversal.status == 2 && records == expectedRecords && !exists(treeOutput),
-        "late-symlink release EXPLAIN record count (exit " ~
-        traversal.status.to!string ~ ", records " ~ records.to!string ~
-        ", expected " ~ expectedRecords.to!string ~ ")");
+    foreach (attempt; 0 .. 5) {
+        auto traversal = separately([exe, "run", "--input", tree, "--output", treeOutput,
+            "--dry-run", "--explain", "--threads", "4", "--max-queued-docs", "4",
+            "--max-open-inputs", "1"]);
+        size_t[string] records;
+        size_t canceled;
+        foreach (line; traversal.output.splitLines()) {
+            if (!line.startsWith("EXPLAIN\t")) continue;
+            auto fields = line.split("\t");
+            check(fields.length >= 4 && fields[1].startsWith("input="),
+                "whole EXPLAIN record");
+            auto path = parseJSON(fields[1]["input=".length .. $]).str;
+            ++records[baseName(path)];
+            if (line.canFind("reason=\"canceled after traversal error\"")) ++canceled;
+        }
+        check(traversal.status == 2 && records.length == visited.length &&
+            canceled > 0 && !exists(treeOutput),
+            "late-symlink release cancellation (attempt " ~ attempt.to!string ~
+            ", records " ~ records.length.to!string ~ ", expected " ~
+            visited.length.to!string ~ ", canceled " ~ canceled.to!string ~ ")");
+        foreach (path; visited)
+            check(records.get(baseName(path), 0) == 1, "exactly one record for " ~ path);
+    }
     return 0;
 }

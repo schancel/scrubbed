@@ -37,9 +37,9 @@ completion through `bashcompinit`; no native Zsh candidate generator is
 claimed.
 
 Exit 0 means help, list, validation or processing success; exit 1 means one
-or more input files failed; exit 2 means an invalid invocation or preflight
-failure. Existing path, resource-limit and config/filter exclusivity checks
-remain in the processing boundary.
+or more input files failed; exit 2 means an invocation, config, preflight or
+traversal error (including a late symlink). Existing path, resource-limit and
+config/filter exclusivity checks remain in the processing boundary.
 
 To reproduce the release-active checks after building in release mode:
 

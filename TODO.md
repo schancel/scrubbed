@@ -254,6 +254,13 @@ is useful, but it is not sufficient on its own.
       not support Common Crawl WARC 1.0 as tested here, and does not add zstd
       to the shipping build. A future reader must prove arbitrary feed-chunk
       invariance, real archive compatibility and error-path resource cleanup.
+- [~] Package a clean-machine core. A D-only evidence harness verifies a
+      macOS arm64 text-core bundle with closed file/notice inventory,
+      checksums, clean-`PATH` help/text output, and negative controls
+      (`docs/package-core-evaluation.md`). Linux was blocked by an old
+      compiler in one emulated container; Windows and HTML packaging remain
+      untested. This is not a public release, fully static binary, or proof of
+      bit-for-bit reproducible builds.
 - [ ] Stress interruption, disk-full, invalid UTF-8, permission failures,
       changing inputs, and process restart. Never report success for skipped or
       partially written data; emit a machine-readable failure manifest.

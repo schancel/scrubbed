@@ -184,3 +184,7 @@ tests authored WARC 1.1 records in independent gzip members and proposed
 zstd-WARC frames with bounded D/native decoding. It is not a production reader,
 does not establish Common Crawl WARC 1.0 compatibility, and does not add zstd
 to the shipping build.
+A [macOS arm64 text-core packaging probe](docs/package-core-evaluation.md)
+checks an isolated binary, license/notice inventory, and clean-`PATH` execution.
+It is not a release or proof of Linux/Windows support, HTML packaging, a fully
+static binary, or bit-for-bit reproducible builds.

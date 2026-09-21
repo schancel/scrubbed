@@ -2,13 +2,14 @@
 module experiments.failure_policy.check;
 
 import effects.sqlite_ffi;
-import std.algorithm.searching : canFind;
+import std.algorithm.searching : canFind, startsWith;
+import std.array : split;
 import std.conv : to;
 import std.file : exists, isSymlink, mkdir, readText, rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.process : execute;
 import std.stdio : writeln;
-import std.string : toStringz;
+import std.string : splitLines, toStringz;
 import std.uuid : randomUUID;
 
 private void need(bool okay, string label) {
@@ -121,6 +122,32 @@ int main(string[] args) {
         state(policyDb) == "uncertain" && isSymlink(policyOutput) &&
         readText(policyInput) == "original", "post-preflight policy swap fatal");
     writeln("ok: post-preflight policy swap fatal");
+    auto cancelFolder = buildPath(root, "fatal-admission");
+    mkdir(cancelFolder);
+    auto cancelInput = buildPath(cancelFolder, "input");
+    auto cancelOutput = buildPath(cancelFolder, "output");
+    auto cancelDb = buildPath(cancelFolder, "state.db");
+    mkdir(cancelInput);
+    write(buildPath(cancelInput, "a.txt"), "a");
+    write(buildPath(cancelInput, "b.txt"), "b");
+    write(cancelDb ~ ".fault-policy-swap", "");
+    result = execute([args[1], "run", "--input", cancelInput,
+        "--output", cancelOutput, "--manifest", cancelDb,
+        "--filters", "normalize-line-endings", "--explain"]);
+    size_t aDecisions, bDecisions;
+    foreach (line; result.output.splitLines()) {
+        if (!line.startsWith("EXPLAIN\tinput=")) continue;
+        if (line.canFind("a.txt")) ++aDecisions;
+        if (line.canFind("b.txt")) ++bDecisions;
+    }
+    need(result.status == 2 &&
+        result.output.split("EXPLAIN\tinput=").length == 3 &&
+        aDecisions == 1 && bDecisions == 1 &&
+        result.output.canFind("status=uncertain") &&
+        result.output.canFind("canceled after traversal error") &&
+        countState(cancelDb, "uncertain") == 1,
+        "fatal admission explains each discovered file once");
+    writeln("ok: fatal admission EXPLAIN reconciliation");
     auto fatalFolder = buildPath(root, "fatal");
     mkdir(fatalFolder);
     auto fatalInput = buildPath(fatalFolder, "input.txt");

@@ -824,30 +824,39 @@ int runApp(string[] args) {
                     throw new Exception(reason);
                 }
                 if (!entry.isFile) continue;
+                bool admissionCanceled;
                 try {
-                    auto bytes = getSize(entry.name);
                     if (explain) pending.add(entry.name);
+                    auto bytes = getSize(entry.name);
                     if (!scheduler.submit(entry.name, bytes)) {
-                        if (explain) pending.remove(entry.name);
+                        admissionCanceled = true;
                         throw new Exception("input admission canceled: " ~ entry.name);
                     }
                 }
                 catch (Exception error) {
-                    if (explain) pending.remove(entry.name);
+                    if (explain && !admissionCanceled) {
+                        pending.remove(entry.name);
+                        explainOne(entry.name, destinationFor(entry.name, inputPath,
+                            outputPath, inputIsDir), chainLabel, "failure", error.msg);
+                    }
                     throw error;
                 }
             }
         } else {
+            bool admissionCanceled;
             try {
-                auto bytes = getSize(inputPath);
                 if (explain) pending.add(inputPath);
+                auto bytes = getSize(inputPath);
                 if (!scheduler.submit(inputPath, bytes)) {
-                    if (explain) pending.remove(inputPath);
+                    admissionCanceled = true;
                     throw new Exception("input admission canceled: " ~ inputPath);
                 }
             }
             catch (Exception error) {
-                if (explain) pending.remove(inputPath);
+                if (explain && !admissionCanceled) {
+                    pending.remove(inputPath);
+                    explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
+                }
                 throw error;
             }
         }

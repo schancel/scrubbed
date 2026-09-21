@@ -35,9 +35,12 @@ output cap before serialization. Serialization appends each JSON value only
 while bytes remain under the output cap; no complete oversized output record
 is built. A transform that internally allocates excessive memory is a
 caller concern; the adapter cannot bound memory inside an opaque callback.
-The `File` binding flushes each record before reading the next. No records
-are queued while a writer blocks. Earlier completed records stay written on
-failure. A writer fault reports `partialOutputPossible = true` for the current
+The `File` binding flushes each record before processing the next. The reader
+fetches chunks of at most 4096 bytes, so it may already have read up to 4095
+bytes beyond the current record's LF when writing starts. It performs no
+further read callback or record processing while the writer blocks; there is
+no unbounded record queue. Earlier completed records stay written on failure.
+A writer fault reports `partialOutputPossible = true` for the current
 record, because stdout and general streams have no atomic rollback.
 
 Run the release-active harness with:

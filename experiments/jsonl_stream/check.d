@@ -139,14 +139,14 @@ void main(string[] args) {
     require(escapeExpansion.output.length == 0, "escaped output cap emitted");
 
     // A writer is called synchronously once per record. On failure, the next
-    // record is neither transformed nor read from the underlying stream.
+    // record is not processed; bytes for it may already be in the read chunk.
     auto writerFault = Fixture("{\"text\":\"a\"}\n{\"text\":\"b\"}\n");
     writerFault.failWrite = true;
     auto writerError = expectFailure(writerFault, JsonlFailureKind.writer);
     require(writerError.line == 1 && writerError.completedRecords == 0 &&
         writerError.partialOutputPossible && writerFault.writes == 1 &&
         writerFault.output.length == 3, "writer partial-output uncertainty");
-    // A one-byte reader proves no read-ahead or queued records while writing.
+    // With a one-byte reader, no additional read callback runs during writing.
     auto serial = Fixture("{\"text\":\"a\"}\n{\"text\":\"b\"}\n");
     size_t position;
     size_t reads;
@@ -154,7 +154,7 @@ void main(string[] args) {
     processJsonl((ubyte[] dst) { ++reads; if (position == serial.input.length) return 0;
         dst[0] = cast(ubyte) serial.input[position++]; return 1; },
         (const(ubyte)[] bytes) { ++writes;
-            require(reads == (writes == 1 ? 13 : 26), "reader advanced past blocked write");
+            require(reads == (writes == 1 ? 13 : 26), "reader advanced during write");
         }, "batch", "stable-source", ["text"],
         (string field, string text, DocumentId id) => text, JsonlLimits(64, 64));
     require(writes == 2, "synchronous writer order");
@@ -184,7 +184,18 @@ void main(string[] args) {
     resume.notify();
     worker.join();
     require(workerFailure is null && readsWhileBlocked == 13 &&
-        blockedWrites == 2, "blocked writer allowed reader to advance");
+        blockedWrites == 2, "blocked writer allowed another read callback");
+
+    // A full-chunk reader can fetch later-line bytes before the first write.
+    // Writer failure must stop further reads and never process those bytes.
+    string chunkedInput;
+    foreach (_; 0 .. 400) chunkedInput ~= "{\"text\":\"a\"}\n";
+    auto readAhead = Fixture(chunkedInput);
+    readAhead.failWrite = true;
+    auto aheadError = expectFailure(readAhead, JsonlFailureKind.writer);
+    require(aheadError.completedRecords == 0 && readAhead.reads == 1 &&
+        readAhead.cursor == 4096 && readAhead.writes == 1,
+        "writer fault exceeded bounded read-ahead or processed later record");
 
     // Generate records at the reader boundary instead of constructing a file.
     // Force collection periodically: retained adapter state must not grow with

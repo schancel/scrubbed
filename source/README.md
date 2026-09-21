@@ -36,6 +36,13 @@ by the CLI or pipeline. Its canonical key format and lifetime rule are in the
 [architecture map](../docs/architecture.md); transport-specific source keys
 and content/job stages are not implemented here.
 
+[`content/pieces.d`](content/pieces.d) provides ordered borrowed/owned byte
+pieces for future text and output stages. It depends on `domain.document`'s
+checked view, not CLI mapping internals. Edits use byte offsets; `replace`
+can insert, delete, or replace without copying untouched source bytes. `stream`
+emits bounded, temporary chunks to a sink. The CLI and filters are not yet
+wired to this facade.
+
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.

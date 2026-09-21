@@ -13,6 +13,7 @@ app (process exit)
 filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
 domain.document (standalone typed identity/view facade; no current CLI caller)
+content.pieces -> domain.document (checked borrowed content; no current CLI caller)
 ```
 
 Keep orchestration and filesystem effects in `cli`, chain composition in
@@ -57,6 +58,20 @@ only the selected range; all view access is rejected after owner close. The
 current CLI retains its own mapping-lifetime logic and is not wired to this
 facade.
 
-Content pieces, job/stage scheduling, and provider transport boundaries remain
-proposals, not modules or APIs in this checkout. Do not depend on them when
-extending a current filter.
+`content.pieces` is the standalone ordered byte-content facade. A
+`ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one
+independently retained owned replacement; a default piece is invalid. `Content`
+keeps ordered descriptors with byte offsets, supports range replacement and
+deletion without flattening source bytes, and streams into a caller sink using
+a bounded temporary buffer (default 8 KiB). Borrowed access, including length
+and streaming after owner closure, fails; owned pieces remain valid. Sinks
+must consume each chunk before returning because the buffer is reused. This
+module points only toward `domain.document`; neither CLI nor filters use it
+yet. Job/stage scheduling and provider transport boundaries remain proposals.
+
+The [D-only content experiment](../experiments/content/README.md) compares an
+ordered piece list against a randomized-priority rope on an identical edit
+trace. It is representation evidence, not a production rope framework or a
+corpus-scale throughput claim. The ordered list is retained in production for
+its smaller implementation and adequate editing cost until a measured caller
+requires a tree.

@@ -70,13 +70,20 @@ struct DocumentId {
 
 /// Identity and presentation are separate values; revision/hash are not identity.
 struct Document {
-    SourceLocator source;
+    private SourceLocator sourceValue;
     OutputName outputName;
     private DocumentId childId;
 
     this(SourceLocator source, OutputName outputName) {
-        this.source = source;
+        DocumentId.from(source); // Reject invalid provenance at construction.
+        this.sourceValue = source;
         this.outputName = outputName;
+    }
+
+    /// Return a value, never a writable alias to identity provenance.
+    @property SourceLocator source() const {
+        return SourceLocator(sourceValue.datasetNamespace, sourceValue.sourceKey,
+            sourceValue.recordKey);
     }
 
     /// A child retains source provenance but has an ID outside the source-ID
@@ -84,13 +91,15 @@ struct Document {
     static Document derivedChild(Document parent, string stageKey,
         size_t ordinal, OutputName outputName) {
         enforce(outputName.text.length != 0, "child output name is not initialized");
-        auto child = Document(parent.source, outputName);
-        child.childId = DocumentId.childOf(parent.id, stageKey, ordinal);
+        auto parentId = parent.id; // Also validates a derived parent's provenance.
+        auto child = Document(parent.sourceValue, outputName);
+        child.childId = DocumentId.childOf(parentId, stageKey, ordinal);
         return child;
     }
 
     DocumentId id() const {
-        return childId.text.length != 0 ? childId : DocumentId.from(source);
+        auto sourceId = DocumentId.from(sourceValue);
+        return childId.text.length != 0 ? childId : sourceId;
     }
 }
 
@@ -224,6 +233,11 @@ unittest {
 unittest {
     import std.exception : assertThrown;
 
+    static assert(!__traits(compiles, {
+        auto document = Document(SourceLocator("a", "b", "c"), OutputName("name"));
+        document.source = SourceLocator("other", "source", "record");
+    }));
+
     auto parent = Document(SourceLocator("archive", "bundle", "record"),
         OutputName("original"));
     auto child = Document.derivedChild(parent, "split:stage|1", 0, OutputName("part"));
@@ -241,6 +255,9 @@ unittest {
     renamed.outputName = OutputName("renamed");
     assert(renamed.id == child.id);
     assert(child.source == parent.source);
+    auto provenanceCopy = child.source;
+    provenanceCopy = SourceLocator("other", "source", "record");
+    assert(child.source == parent.source && child.source != provenanceCopy);
 
     // The old textual child tuple is a valid caller-owned source key. Its
     // source ID must never collide with the derived child ID.
@@ -261,6 +278,12 @@ unittest {
     assertThrown(Document.derivedChild(parent, "bad\0key", 0, OutputName("part")));
     assertThrown(Document.derivedChild(Document.init, "stage", 0, OutputName("part")));
     assertThrown(Document.derivedChild(parent, "stage", 0, OutputName.init));
+    assertThrown(Document(SourceLocator.init, OutputName("part")));
+    auto corrupted = child;
+    corrupted.sourceValue = SourceLocator.init; // Same-module fault injection.
+    assertThrown(corrupted.id);
+    assertThrown(corrupted.source);
+    assertThrown(Document.derivedChild(corrupted, "next", 0, OutputName("part")));
 }
 
 unittest {

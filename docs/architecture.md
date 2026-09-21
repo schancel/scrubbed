@@ -15,6 +15,7 @@ filters.entities -> filters.mojibake (CP1252 character mapping)
 domain.document (standalone typed identity/view facade; no current CLI caller)
 content.pieces -> domain.document (checked borrowed content; no current CLI caller)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
+effects.runner -> stages.contract, content.pieces, domain.document (standalone effect composition)
 ```
 
 Keep orchestration and filesystem effects in `cli`, chain composition in
@@ -50,9 +51,10 @@ UTF-8 without NUL and are NFC-normalized. Case and path-like spelling remain
 significant: no case-folding, slash cleanup, absolute-path resolution, or
 provider-specific source interpretation occurs here. This leaves annotation
 joins and shard reassignment stable without defining S3/WARC identity policy.
-`OutputName` is separate and does not enter the key. `DocumentViewOwner.mapFile`
-opens and exclusively owns a mapping until `close`; its checked `at`/iteration
-access borrows bytes without an eager whole-file copy or an escaping slice.
+`OutputName` is separate and does not enter the key.
+`effects.mapped_file.openMappedFile` opens a mapping and transfers its opaque
+lifetime lease to `DocumentViewOwner` until `close`; checked `at`/iteration
+borrows bytes without an eager whole-file copy or an escaping slice.
 The in-memory constructor borrows a GC-owned array instead, which the caller
 must not manually free or reallocate while open. `copy` explicitly retains
 only the selected range; all view access is rejected after owner close. The
@@ -104,3 +106,31 @@ trace. It is representation evidence, not a production rope framework or a
 corpus-scale throughput claim. The ordered list remains a private, reversible
 representation pending review of the measured wired caller above; its
 high-edit scaling is not assumed adequate for production throughput.
+
+`effects.runner` is an unwired composition root. A `Source` yields one typed
+record and view owner, a `Parser` produces checked `Content`, and a `Sink`
+synchronously consumes each ordered stage event. `runEffects` calls the F04
+decision contract for one document at a time, then delivers all its events
+before fetching another record. A record's view owner stays open through sink
+calls and closes afterward; retained borrowed content rejects access after
+closure. `Content.stream` chunks must be consumed before callback return.
+Cancellation is checked before source fetch, before parse/stage evaluation,
+and before the next fetch after complete delivery. A sink exception reports
+wholly delivered decisions and the failing event ordinal with partial-write
+uncertainty; it promises no rollback, checkpoint, or successful completion.
+
+Only in-memory/faulting adapters exercise the runner path. The separate mapped
+file opener is not a runner `Source` or CLI switch; no S3/parser-library adapter
+is added. F04 materializes events per
+document and ordered-list content has poor high-edit scaling; production
+callers must measure representation and backpressure before using this seam
+for corpus throughput. The checker rejects direct imports from
+domain/content/stages into effects or known concrete file, mmap, socket,
+network, stdio, and process modules; effects may import concrete I/O. This is
+a direct-import check, not proof of transitive I/O independence. Its additional
+D unittests and generated good/bad fixtures run with:
+
+```sh
+ldc2 -unittest -main -d-version=moduleCheckRunner -of=/tmp/scrubbed-module-edge-tests scripts/check_modules.d
+/tmp/scrubbed-module-edge-tests
+```

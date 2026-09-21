@@ -9,7 +9,7 @@ import std.stdio : stderr, writeln;
 import std.string : replace, split, splitLines, strip;
 
 private bool projectModule(string name) {
-    foreach (prefix; ["app", "cli", "pipeline", "filters", "domain", "content"])
+    foreach (prefix; ["app", "cli", "pipeline", "filters", "domain", "content", "stages", "effects"])
         if (name == prefix || name.startsWith(prefix ~ "."))
             return true;
     return false;
@@ -25,6 +25,13 @@ private string modulePath(string root, string path) {
 }
 
 private string importRule(string owner, string dependency) {
+    if (inLayer(owner, "domain") || inLayer(owner, "content") || inLayer(owner, "stages")) {
+        if (inLayer(dependency, "effects") ||
+            inLayer(dependency, "std.file") || inLayer(dependency, "std.mmfile") ||
+            inLayer(dependency, "std.socket") || inLayer(dependency, "std.net") ||
+            inLayer(dependency, "std.stdio") || inLayer(dependency, "std.process"))
+            return "domain/content/stages must not import effects or concrete I/O";
+    }
     if (!projectModule(dependency)) return null;
     if (owner == "app" && dependency != "cli")
         return "app may import only cli among project modules";
@@ -38,7 +45,16 @@ private string importRule(string owner, string dependency) {
     if (owner == "content" || owner.startsWith("content.")) {
         if (inLayer(dependency, "app") || inLayer(dependency, "cli"))
             return "content may import domain, but not app or cli";
+        if (!inLayer(dependency, "domain") && !inLayer(dependency, "content"))
+            return "content may import only domain and content project modules";
     }
+    if (inLayer(owner, "stages") && !inLayer(dependency, "stages") &&
+        !inLayer(dependency, "domain") && !inLayer(dependency, "content"))
+        return "stages may import only stages, domain and content project modules";
+    if (inLayer(owner, "effects") && !inLayer(dependency, "effects") &&
+        !inLayer(dependency, "stages") && !inLayer(dependency, "domain") &&
+        !inLayer(dependency, "content"))
+        return "effects may import only effects, stages, domain and content project modules";
     if (owner == "filters" || owner.startsWith("filters.")) {
         if (inLayer(dependency, "app") || inLayer(dependency, "cli"))
             return "filters must not import app or cli";
@@ -49,6 +65,44 @@ private string importRule(string owner, string dependency) {
         }
     }
     return null;
+}
+
+unittest {
+    import std.file : mkdirRecurse, rmdirRecurse, tempDir, write;
+    import std.uuid : randomUUID;
+
+    assert(importRule("effects.runner", "stages.contract").length == 0);
+    assert(importRule("effects.runner", "domain.document").length == 0);
+    assert(importRule("effects.runner", "content.pieces").length == 0);
+    assert(importRule("domain.document", "effects.runner").length != 0);
+    assert(importRule("content.pieces", "effects.runner").length != 0);
+    assert(importRule("stages.contract", "effects.runner").length != 0);
+    foreach (owner; ["domain.document", "content.pieces", "stages.contract"])
+        foreach (dependency; ["effects.runner", "std.file", "std.mmfile",
+            "std.socket", "std.net", "std.stdio", "std.process"])
+            assert(importRule(owner, dependency).length != 0);
+    assert(importRule("effects.runner", "cli").length != 0);
+
+    auto fixtureRoot = buildPath(tempDir(), "scrubbed-effects-check-" ~ randomUUID().toString());
+    scope(exit) rmdirRecurse(fixtureRoot);
+    auto good = buildPath(fixtureRoot, "good", "effects");
+    mkdirRecurse(good);
+    write(buildPath(good, "runner.d"),
+        "/// Fixture effect.\nmodule effects.runner;\n" ~
+        "import stages.contract, domain.document, content.pieces;\n");
+    assert(checkTree(buildPath(fixtureRoot, "good")).length == 0);
+    foreach (layer; ["domain", "content", "stages"])
+        foreach (dependency; ["effects.runner", "std.file", "std.mmfile",
+            "std.socket", "std.net", "std.stdio", "std.process"]) {
+            auto root = buildPath(fixtureRoot, "bad_" ~ layer ~ "_" ~ dependency);
+            auto bad = buildPath(root, layer);
+            mkdirRecurse(bad);
+            write(buildPath(bad, "fixture.d"),
+                "/// Forbidden boundary fixture.\nmodule " ~ layer ~
+                ".fixture;\nimport " ~ dependency ~ ";\n");
+            auto failures = checkTree(root);
+            assert(failures.length == 1 && failures[0].canFind(dependency));
+        }
 }
 
 private bool hasModuleDoc(string root, string path, string source, string name) {

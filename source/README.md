@@ -51,6 +51,16 @@ points, and validated descriptive resources. Its pass-mode metadata describes
 single-pass or resumable stage behavior; it does not implement checkpoints or
 scheduling. These stages are not wired to the current string pipeline or CLI.
 
+[`effects/runner.d`](effects/runner.d) defines typed `Source`, `Parser`, and
+`Sink` ports and the one-document-at-a-time `runEffects` composition root.
+The source transfers each record's view owner to the runner, which closes it
+after the stage decision is synchronously delivered; borrowed content cannot
+be retained by the sink without an explicit copy. Faults surface phase,
+completed-decision count, and possible partial sink-write uncertainty.
+Cancellation never fetches the next lazy input after it is observed. Memory
+and faulting D test adapters use this same path. It is not wired to CLI, and
+does not establish production backpressure or corpus-throughput readiness.
+
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.

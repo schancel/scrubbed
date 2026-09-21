@@ -255,10 +255,12 @@ is useful, but it is not sufficient on its own.
 - [~] Evaluate compressed WARC/WET input. A D-only evidence probe covers
       authored WARC 1.1 records in independent gzip members and proposed
       zstd-WARC frames with explicit byte/ratio caps and negative fixtures
-      (`docs/warc-reader-evaluation.md`). It is not a production reader, does
-      not support Common Crawl WARC 1.0 as tested here, and does not add zstd
-      to the shipping build. A future reader must prove arbitrary feed-chunk
-      invariance, real archive compatibility and error-path resource cleanup.
+      (`docs/warc-reader-evaluation.md`). A separate bounded production
+      uncompressed WARC/1.1 reader now proves arbitrary feed-chunk invariance,
+      record ownership/identity, and WET-style UTF-8 conversion on authored
+      fixtures (`docs/warc-reader.md`). Production gzip/zstd adapters, real
+      archive/file/CLI integration, Common Crawl WARC 1.0 compatibility, and
+      full format conformance remain open; zstd is not in the shipping build.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

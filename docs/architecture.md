@@ -14,6 +14,7 @@ filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
 domain.document (standalone typed identity/view facade; no current CLI caller)
 content.pieces -> domain.document (checked borrowed content; no current CLI caller)
+stages.contract -> content.pieces, domain.document (standalone stage contract)
 ```
 
 Keep orchestration and filesystem effects in `cli`, chain composition in
@@ -66,12 +67,40 @@ deletion without flattening source bytes, and streams into a caller sink using
 a bounded temporary buffer (default 8 KiB). Borrowed access, including length
 and streaming after owner closure, fails; owned pieces remain valid. Sinks
 must consume each chunk before returning because the buffer is reused. This
-module points only toward `domain.document`; neither CLI nor filters use it
-yet. Job/stage scheduling and provider transport boundaries remain proposals.
+`Content.pieces()` also exposes a lazy Phobos InputRange over a snapshot of
+descriptors: it does not flatten bytes, preserves empty pieces, and checks a
+borrowed owner's lifetime when `front` or `popFront` touches that descriptor.
+Edits after obtaining the range do not alter that descriptor snapshot.
+The content module points only toward `domain.document`; neither CLI nor
+filters use it yet.
+
+`stages.contract` accepts a document range and makes one complete decision per
+visited document: map (same identity), reject with reason, quarantine with
+reason, or split into one or more children. The result carries ordered events;
+split children occupy their parent's position and have a deterministic,
+domain-separated `child:v1:` ID derived from the immediate parent ID, stage
+key and zero-based ordinal, plus explicit parent ID/ordinal provenance.
+Output names do not
+define child identity, but inputs and emitted documents must have a valid
+initialized output name. A cancellation callback is checked before a lazy
+range's `front` and after its complete decision is recorded; cancellation
+never removes an
+already recorded event. The result's processed count is the next input index
+for a caller that owns its own replay cursor. `singlePass` and `resumable` are
+declarations only: resumable allows replay from that boundary, but neither
+mode creates a checkpoint, reserves resources, or rolls back an external sink.
+Resource needs (CPU slots, memory bytes, exclusive names) are validated and
+descriptive. This module has no CLI or filter import, and no scheduler, join,
+global dedup or persistence implementation.
+
+The [wired D stage experiment](../experiments/stages/README.md) measures the
+actual ordered-list `Content.replace` path through `runStage`; it does not
+substitute the isolated rope prototype. Job scheduling and provider transport
+boundaries remain proposals.
 
 The [D-only content experiment](../experiments/content/README.md) compares an
 ordered piece list against a randomized-priority rope on an identical edit
 trace. It is representation evidence, not a production rope framework or a
-corpus-scale throughput claim. The ordered list is retained in production for
-its smaller implementation and adequate editing cost until a measured caller
-requires a tree.
+corpus-scale throughput claim. The ordered list remains a private, reversible
+representation pending review of the measured wired caller above; its
+high-edit scaling is not assumed adequate for production throughput.

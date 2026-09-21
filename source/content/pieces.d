@@ -68,6 +68,28 @@ final class Content {
         sequence = pieces.dup;
     }
 
+    /// A snapshot of descriptors, not of bytes. Replacing Content later does
+    /// not change this range; borrowed pieces still check their live owner.
+    struct PieceRange {
+        private ContentPiece[] descriptors;
+        private size_t cursor;
+
+        @property bool empty() { return cursor == descriptors.length; }
+        @property ContentPiece front() {
+            enforce(!empty, "content piece range is empty");
+            auto piece = descriptors[cursor];
+            piece.size;
+            return piece;
+        }
+        void popFront() {
+            front; // Check a borrowed descriptor even if it is empty.
+            ++cursor;
+        }
+        PieceRange save() { return this; }
+    }
+
+    PieceRange pieces() { return PieceRange(sequence); }
+
     size_t size() const {
         size_t total;
         foreach (piece; sequence) {
@@ -165,6 +187,42 @@ final class Content {
         }
         if (filled) sink(buffer[0 .. filled]);
     }
+}
+
+unittest {
+    import domain.document : DocumentViewOwner;
+    import std.exception : assertThrown;
+    import std.algorithm.iteration : map;
+    import std.array : array;
+    import std.range.primitives : isInputRange;
+    static assert(isInputRange!(Content.PieceRange));
+
+    auto owner = new DocumentViewOwner([cast(ubyte) 'a']);
+    auto content = new Content([
+        ContentPiece.own(null),
+        ContentPiece.borrow(owner.view(0, 0)),
+        ContentPiece.borrow(owner.view(0, 1))
+    ]);
+    auto range = content.pieces();
+    assert(content.pieces().map!(piece => piece.size).array ==
+        [cast(size_t) 0, 0, 1]);
+    auto saved = range.save;
+    assert(range.front.size == 0);
+    range.popFront();
+    assert(range.front.size == 0);
+    range.popFront();
+    assert(range.front.at(0) == 'a');
+    range.popFront();
+    assert(range.empty);
+    assert(saved.front.size == 0);
+    content.replace(0, 1, [ContentPiece.own(cast(const(ubyte)[]) "x")]);
+    owner.close();
+    saved.popFront();
+    assertThrown(saved.front.size);
+    assertThrown(saved.popFront());
+    auto current = content.pieces();
+    current.popFront();
+    assertThrown(current.front.size); // surviving empty borrow
 }
 
 unittest {

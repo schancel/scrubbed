@@ -2,7 +2,7 @@
 
 Status key: [x] done and verified, [~] partially done, [ ] not started.
 
-Planning status (2026-09-20): [67 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
+Planning status (2026-09-21): [67 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
 cover the broader corpus-curation roadmap with 136 native dependency edges.
 Acceptance is not an implementation claim; worker readiness is tracked per
 issue. This file remains the status record for implemented work.
@@ -127,9 +127,9 @@ issue. This file remains the status record for implemented work.
 - [x] Add CLI `--validate`, `--dry-run`, and per-file `--explain` inspection
       without output mutation in validate/dry-run modes. Explain reports
       changed/unchanged/failure with bounded pending-path tracking even when
-      a late traversal error cancels admitted files. This is not a diff view,
-      full-tree transaction, or durable manifest; add a checked-in end-to-end
-      stdout-record regression beyond the current formatter/scheduler tests.
+      a late traversal error cancels admitted files. Checked-in release-binary
+      end-to-end stdout-record regression covers that path. This is not a diff
+      view, full-tree transaction, or durable manifest.
 - [x] Integrate pinned D `argparse` 2.0.2 for generated root/subcommand help
       and command/option-name completion. `run` and `repair` preserve the
       implemented filter pipeline and old no-verb flags; `extract` fails
@@ -230,16 +230,28 @@ is useful, but it is not sufficient on its own.
       (`docs/s3-capability-evaluation.md`). No production client, AWS SigV4,
       real-service compatibility, or secret-bearing credential path exists yet.
 - [~] Add a durable run manifest with input identity/checksum, selected filter
-      config, per-sink state and safe resume/retry. A D-only evidence harness
-      evaluates pinned static SQLite, indexed v1 state and four process-exit
-      sink/DB crash windows (`docs/sqlite-manifest-evaluation.md`). No
-      production format, reconciliation policy, dependency or CLI resume has
-      been adopted; atomic output alone does not make a multi-day run resumable.
-- [~] Add bounded JSONL selected-field and stdin/stdout adapters. Effects-only
-      D modules preserve untouched JSON values semantically, derive stable
-      caller-key/line IDs, cap records, and test malformed JSON separately
-      from invalid document text (`docs/jsonl-stream.md`). No CLI stream mode
-      is wired yet; raw formatting/field order is not preserved.
+      config, per-sink state and safe resume/retry. A statically linked local
+      SQLite v1 API is implemented and tested with destination rehash before
+      skip, two independent sinks, bounded 10,100-row replay, foreign-DB
+      refusal and process-kill windows (`docs/local-manifest.md`). Its pinned
+      prerequisite experiment remains in `docs/sqlite-manifest-evaluation.md`.
+      The API is not yet wired to CLI file/tree runs; no end-user resume or
+      power-loss guarantee follows from the standalone tests.
+- [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
+      adapter and explicit paired-dash `run`/`repair` mode preserve untouched
+      JSON values semantically, derive stable caller-key/line IDs, cap records,
+      and distinguish malformed JSON, invalid selected text and reader/writer
+      failures in release-active live-pipe tests (`docs/jsonl-stream.md`). Raw
+      formatting/key order is not preserved. No graceful signal cancellation,
+      checkpoint or resumability is promised; F12/#17 is scoped to failure
+      and cancellation policy for later work.
+- [~] Evaluate compressed WARC/WET input. A D-only evidence probe covers
+      authored WARC 1.1 records in independent gzip members and proposed
+      zstd-WARC frames with explicit byte/ratio caps and negative fixtures
+      (`docs/warc-reader-evaluation.md`). It is not a production reader, does
+      not support Common Crawl WARC 1.0 as tested here, and does not add zstd
+      to the shipping build. A future reader must prove arbitrary feed-chunk
+      invariance, real archive compatibility and error-path resource cleanup.
 - [ ] Stress interruption, disk-full, invalid UTF-8, permission failures,
       changing inputs, and process restart. Never report success for skipped or
       partially written data; emit a machine-readable failure manifest.

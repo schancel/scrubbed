@@ -36,8 +36,9 @@ for its CP1252 mapping helper.
 [`domain/document.d`](domain/document.d) is a standalone future-facing domain
 facade for logical `SourceLocator`/`DocumentId` identity, distinct `OutputName`,
 and owner-checked zero-copy byte views with explicit selected-range copying.
-It is tested in place but not yet used
-by the CLI or pipeline. Its canonical key format and lifetime rule are in the
+It is tested in place and supplies stable line-ordinal IDs to JSONL CLI mode;
+the file/tree CLI and document-stage pipeline do not use it yet. Its
+canonical key format and lifetime rule are in the
 [architecture map](../docs/architecture.md); transport-specific source keys
 and content/job stages are not implemented here.
 
@@ -89,7 +90,11 @@ context-heavy filters streaming.
 [`effects/jsonl_stream.d`](effects/jsonl_stream.d) and
 [`effects/stdio_stream.d`](effects/stdio_stream.d) provide standalone bounded
 JSONL selected-field and stream adapters with semantic-value preservation of
-untouched fields. They are not wired to the command adapter or current CLI.
+untouched fields. The command adapter now routes explicit paired `--input -`
+and `--output -` `run`/`repair` mode through them, with caller-provided stable
+namespace/source keys and line-ordinal `DocumentId`s. The file/tree CLI still
+does not use `DocumentId`; there is no JSONL checkpoint or graceful signal
+cancellation.
 
 [`effects/local_manifest.d`](effects/local_manifest.d) is a standalone,
 versioned local SQLite sink ledger with independent per-sink states and bounded

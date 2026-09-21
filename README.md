@@ -64,6 +64,7 @@ dub build --build=release
 ./scrubbed --input path/to/docs --output path/to/clean --threads 4 --max-queued-docs 64 --max-input-bytes 268435456 --max-open-inputs 4
 ./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json --dry-run --explain
 ./scrubbed repair --input path/to/docs --output path/to/clean --dry-run --explain
+./scrubbed run --input - --output - --jsonl-fields text,title --dataset-namespace corpus-v1 --source-key shard-0001 --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 < input.jsonl > clean.jsonl
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -88,6 +89,14 @@ already-admitted files; those receive failure records, and the command exits 2.
 `run` and `repair` also route to the implemented filter pipeline, with generated
 help and command/option-name completion; `extract` is shown as unavailable and
 exits 2 without writing output. See the [command guide](docs/cli-commands.md).
+The explicit paired `--input - --output -` JSONL mode transforms selected
+top-level text fields through the same filter chain. It requires a stable
+dataset namespace, source key, and input/output record byte caps. Untouched
+values are preserved semantically, not byte-for-byte or in original key order;
+stdout contains records only. `--validate` does not read stdin and `--dry-run`
+emits no stdout. It has no graceful cancellation, checkpoint, or restart
+guarantee; OS termination can leave a partial current record. See the
+[JSONL stream guide](docs/jsonl-stream.md).
 
 Outputs are written beside their destination and atomically renamed into
 place, so a clean zero-copy result is safe even when input and output are the
@@ -121,10 +130,13 @@ Standalone POSIX effects now demonstrate [bounded mapped windows](docs/windowed-
 and [atomic streaming of content pieces](docs/atomic-piece-output.md), including
 a verified 1.075 GB output without an output-sized D allocation. Neither
 effect is wired into the CLI or proves that context-heavy filters can stream.
-A [bounded JSONL/stdin-stdout adapter](docs/jsonl-stream.md) is also tested as
-an effects-layer API, but is not an end-user CLI mode. A separate
-[SQLite manifest experiment](docs/sqlite-manifest-evaluation.md) tests local
-crash/restart states; no production resume store or format has been adopted.
+A [statically linked local SQLite manifest API](docs/local-manifest.md) now
+records versioned per-sink state, verifies destination bytes before a skip,
+and passes bounded replay and process-kill tests. It is not wired to the CLI,
+so current file/tree runs still have no durable resume. The earlier
+[SQLite experiment](docs/sqlite-manifest-evaluation.md) remains as prerequisite
+evidence. SQLite stores the local run ledger, not the corpus or a distributed
+coordinator.
 
 ## Status
 
@@ -165,3 +177,8 @@ real pages, other platforms, and license redistribution gates remain open.
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.
+An [evidence-only WARC/WET compression probe](docs/warc-reader-evaluation.md)
+tests authored WARC 1.1 records in independent gzip members and proposed
+zstd-WARC frames with bounded D/native decoding. It is not a production reader,
+does not establish Common Crawl WARC 1.0 compatibility, and does not add zstd
+to the shipping build.

@@ -19,6 +19,8 @@ dub build --build=release --compiler=ldc2
 ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
 /tmp/scrubbed-pipeline --self-test
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" > /tmp/scrubbed-pipeline-result.json
+# To preserve a publication-safe raw sample in the repository instead:
+/tmp/scrubbed-pipeline "$(pwd)/scrubbed" benchmarks/pipeline-sample.json
 ```
 
 The self-test runs in release mode. It rejects missing required metadata,

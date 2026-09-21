@@ -228,7 +228,8 @@ int main(string[] args) {
         if (args.length == 2 && args[1] == "--self-test") {
             selfTest(); return 0;
         }
-        require(args.length == 2, "usage: pipeline SCRUBBED_BINARY");
+        require(args.length == 2 || args.length == 3,
+            "usage: pipeline SCRUBBED_BINARY [REPORT_JSON]");
         auto os = checked(["uname", "-s"]);
         require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
         auto root = buildPath(tempDir, "scrubbed-pipeline-" ~ randomUUID.toString);
@@ -266,7 +267,8 @@ int main(string[] args) {
             "peak open FDs and GC not instrumented", "greater-than-RAM preflight/run not performed",
             "process-kill restart injection not included"]);
         validate(report);
-        writeln(report.toString);
+        if (args.length == 3) write(args[2], report.toString ~ "\n");
+        else writeln(report.toString);
         return 0;
     } catch (Exception error) {
         stderr.writeln("pipeline: ", error.msg);

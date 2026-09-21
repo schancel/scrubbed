@@ -91,7 +91,10 @@ final class Content {
     }
 
     /// Replace [start, start + length) with zero or more ordered pieces.
-    /// A zero-length range inserts; an empty replacement deletes.
+    /// A zero-length range inserts; an empty replacement deletes. Empty
+    /// descriptors at the start boundary stay before inserted pieces; those
+    /// at the end boundary stay after them. Only empties strictly inside a
+    /// removed range are removed.
     void replace(size_t start, size_t length, ContentPiece[] inserted = null) {
         auto total = size;
         enforce(start <= total && length <= total - start, "content edit outside range");
@@ -106,8 +109,21 @@ final class Content {
         ContentPiece[] next;
         size_t cursor;
         bool didInsert;
+        auto end = start + length;
         foreach (piece; sequence) {
             auto n = piece.size;
+            if (n == 0) {
+                if (cursor <= start) {
+                    next ~= piece;
+                } else if (cursor >= end) {
+                    if (!didInsert) {
+                        next ~= inserted;
+                        didInsert = true;
+                    }
+                    next ~= piece;
+                }
+                continue;
+            }
             if (!didInsert && start <= cursor) {
                 next ~= inserted;
                 didInsert = true;
@@ -118,7 +134,6 @@ final class Content {
                 if (keep) next ~= piece.subpiece(0, keep);
             }
             // Keep the portion at or after the removed interval.
-            auto end = start + length;
             if (cursor + n > end) {
                 auto skip = end > cursor ? end - cursor : 0;
                 if (!didInsert) {
@@ -208,6 +223,36 @@ unittest {
     assertThrown(content.replace(input.length + 1, 0));
     assertThrown(new Content([ContentPiece.init]));
     owner.close();
+}
+
+unittest {
+    import domain.document : DocumentViewOwner;
+    import std.exception : assertThrown;
+
+    auto owner = new DocumentViewOwner([cast(ubyte) 'x']);
+    auto emptyBorrowed = ContentPiece.borrow(owner.view(0, 0));
+    auto content = new Content([
+        ContentPiece.own(cast(const(ubyte)[]) "a"),
+        emptyBorrowed,
+        ContentPiece.own(cast(const(ubyte)[]) "b"),
+        ContentPiece.own(null),
+        ContentPiece.own(cast(const(ubyte)[]) "c"),
+        ContentPiece.own(null)
+    ]);
+    content.replace(2, 1, [ContentPiece.own(cast(const(ubyte)[]) "C")]);
+    size_t[] offsets;
+    bool[] borrowed;
+    foreach (offset, piece; content) {
+        offsets ~= offset;
+        borrowed ~= piece.isBorrowed;
+    }
+    assert(offsets == [cast(size_t) 0, 1, 1, 2, 2, 3]);
+    assert(borrowed == [false, true, false, false, false, false]);
+    ubyte[] output;
+    content.stream((const(ubyte)[] chunk) { output ~= chunk; });
+    assert(output == cast(const(ubyte)[]) "abC");
+    owner.close();
+    assertThrown(content.size); // disjoint edit must not discard a borrow
 }
 
 unittest {

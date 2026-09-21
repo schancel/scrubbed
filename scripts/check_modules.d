@@ -26,12 +26,10 @@ private string modulePath(string root, string path) {
 
 private string importRule(string owner, string dependency) {
     if (inLayer(owner, "domain") || inLayer(owner, "content") || inLayer(owner, "stages")) {
-        // domain.document's existing unittest imports std.file for a temp
-        // mapping fixture; source changes there are outside this ticket.
         if (inLayer(dependency, "effects") ||
-            (inLayer(dependency, "std.file") && owner != "domain.document") ||
-            (inLayer(dependency, "std.mmfile") && owner != "domain.document") ||
-            inLayer(dependency, "std.socket") || inLayer(dependency, "std.net"))
+            inLayer(dependency, "std.file") || inLayer(dependency, "std.mmfile") ||
+            inLayer(dependency, "std.socket") || inLayer(dependency, "std.net") ||
+            inLayer(dependency, "std.stdio") || inLayer(dependency, "std.process"))
             return "domain/content/stages must not import effects or concrete I/O";
     }
     if (!projectModule(dependency)) return null;
@@ -79,9 +77,10 @@ unittest {
     assert(importRule("domain.document", "effects.runner").length != 0);
     assert(importRule("content.pieces", "effects.runner").length != 0);
     assert(importRule("stages.contract", "effects.runner").length != 0);
-    assert(importRule("content.pieces", "std.file").length != 0);
-    assert(importRule("stages.contract", "std.mmfile").length != 0);
-    assert(importRule("domain.document", "std.socket").length != 0);
+    foreach (owner; ["domain.document", "content.pieces", "stages.contract"])
+        foreach (dependency; ["effects.runner", "std.file", "std.mmfile",
+            "std.socket", "std.net", "std.stdio", "std.process"])
+            assert(importRule(owner, dependency).length != 0);
     assert(importRule("effects.runner", "cli").length != 0);
 
     auto fixtureRoot = buildPath(tempDir(), "scrubbed-effects-check-" ~ randomUUID().toString());
@@ -92,15 +91,18 @@ unittest {
         "/// Fixture effect.\nmodule effects.runner;\n" ~
         "import stages.contract, domain.document, content.pieces;\n");
     assert(checkTree(buildPath(fixtureRoot, "good")).length == 0);
-    foreach (layer; ["domain", "content", "stages"]) {
-        auto bad = buildPath(fixtureRoot, "bad_" ~ layer, layer);
-        mkdirRecurse(bad);
-        write(buildPath(bad, "fixture.d"),
-            "/// Forbidden boundary fixture.\nmodule " ~ layer ~
-            ".fixture;\nimport effects.runner;\n");
-        auto failures = checkTree(buildPath(fixtureRoot, "bad_" ~ layer));
-        assert(failures.length == 1 && failures[0].canFind("effects.runner"));
-    }
+    foreach (layer; ["domain", "content", "stages"])
+        foreach (dependency; ["effects.runner", "std.file", "std.mmfile",
+            "std.socket", "std.net", "std.stdio", "std.process"]) {
+            auto root = buildPath(fixtureRoot, "bad_" ~ layer ~ "_" ~ dependency);
+            auto bad = buildPath(root, layer);
+            mkdirRecurse(bad);
+            write(buildPath(bad, "fixture.d"),
+                "/// Forbidden boundary fixture.\nmodule " ~ layer ~
+                ".fixture;\nimport " ~ dependency ~ ";\n");
+            auto failures = checkTree(root);
+            assert(failures.length == 1 && failures[0].canFind(dependency));
+        }
 }
 
 private bool hasModuleDoc(string root, string path, string source, string name) {

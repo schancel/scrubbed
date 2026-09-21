@@ -153,6 +153,8 @@ unittest {
             assert(fault.phase == phase && fault.completed == 0);
             assert(fault.partialWritePossible == (phase == EffectPhase.sink));
         }
+        if (phase != EffectPhase.source)
+            assertThrown(badSource.records[0].owner.view(0, 0));
     }
     auto splitSource = new MemorySource;
     splitSource.records = [SourceRecord(records[3].document,
@@ -167,11 +169,38 @@ unittest {
             fault.eventOrdinal == 1 && fault.partialWritePossible);
         assert(splitSink.events.length == 1);
     }
+    assertThrown(splitSource.records[0].owner.view(0, 0));
+
+    auto laterSource = new MemorySource;
+    laterSource.records = [
+        SourceRecord(records[0].document, new DocumentViewOwner([cast(ubyte) 'a'])),
+        SourceRecord(records[1].document, new DocumentViewOwner([cast(ubyte) 'b']))
+    ];
+    auto laterSink = new MemorySink;
+    laterSink.failAt = 1;
+    try {
+        runEffects(laterSource, new MemoryParser, laterSink, stage, &decide);
+        assert(0, "later sink fault reported as success");
+    } catch (EffectFailure fault) {
+        assert(fault.phase == EffectPhase.sink && fault.completed == 1 &&
+            fault.documentId == records[1].document.id && fault.eventOrdinal == 0 &&
+            fault.partialWritePossible && laterSink.events.length == 1);
+    }
+    assertThrown(laterSource.records[0].owner.view(0, 0));
+    assertThrown(laterSource.records[1].owner.view(0, 0));
     auto cancelledSource = new MemorySource;
     cancelledSource.records = records;
     auto cancelled = runEffects(cancelledSource, new MemoryParser, new MemorySink,
         stage, &decide, () => true);
     assert(cancelled.cancelled && cancelled.completed == 0 && cancelledSource.cursor == 0);
+
+    auto fetchedSource = new MemorySource;
+    fetchedSource.records = [SourceRecord(records[0].document,
+        new DocumentViewOwner([cast(ubyte) 'a']))];
+    auto fetched = runEffects(fetchedSource, new MemoryParser, new MemorySink,
+        stage, &decide, () => fetchedSource.cursor == 1);
+    assert(fetched.cancelled && fetched.completed == 0 && fetchedSource.cursor == 1);
+    assertThrown(fetchedSource.records[0].owner.view(0, 0));
 
     auto afterCommitSource = new MemorySource;
     afterCommitSource.records = [
@@ -185,6 +214,8 @@ unittest {
         () => afterCommitSink.events.length == 1);
     assert(afterCommit.cancelled && afterCommit.completed == 1 &&
         afterCommitSource.cursor == 1);
+    assertThrown(afterCommitSource.records[0].owner.view(0, 0));
+    assert(afterCommitSource.records[1].owner.view(0, 0).size == 0);
 
     auto stageSource = new MemorySource;
     stageSource.records = [SourceRecord(records[0].document,
@@ -200,6 +231,7 @@ unittest {
         assert(fault.phase == EffectPhase.stage && fault.completed == 0 &&
             !fault.partialWritePossible);
     }
+    assertThrown(stageSource.records[0].owner.view(0, 0));
 }
 
 struct RunResult {

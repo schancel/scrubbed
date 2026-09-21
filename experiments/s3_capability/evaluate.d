@@ -14,7 +14,7 @@ import core.time : msecs;
 enum AuthSource { explicit, environment, profile, missing }
 enum Addressing { path, virtualHost }
 enum Capability { getObject, listObjectsV2, unsupported }
-enum FakeResponse { ok, forbidden, notFound, serverError, malformed }
+enum FakeResponse { ok, forbidden, notFound, serverError, malformed, missingSeparator }
 enum Failure { none, missingCredentials, incompleteCredentials, unsupportedCapability,
                badAuth, tlsUntrusted, endpointFailure }
 
@@ -95,6 +95,7 @@ void fakeEndpoint(Socket listener, string expectedPath, string expectedHost,
     case FakeResponse.notFound: status = "HTTP/1.1 404 Not Found"; break;
     case FakeResponse.serverError: status = "HTTP/1.1 500 Internal Server Error"; break;
     case FakeResponse.malformed: status = "HTTP/1.1 200bogus"; break;
+    case FakeResponse.missingSeparator: status = "HTTP/1.1 200"; break;
     }
     auto response = status ~ "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     peer.send(response);
@@ -133,8 +134,7 @@ Failure probeLocal(Endpoint endpoint, AuthSelection auth, FakeResponse result)
     auto endOfStatus = response.indexOf("\r\n");
     if (endOfStatus < 0) return Failure.endpointFailure;
     auto status = response[0 .. endOfStatus];
-    if (!status.startsWith("HTTP/1.1 ") || status.length < 12 ||
-        (status.length > 12 && status[12] != ' '))
+    if (!status.startsWith("HTTP/1.1 ") || status.length < 13 || status[12] != ' ')
         return Failure.endpointFailure;
     foreach (digit; status[9 .. 12])
         if (digit < '0' || digit > '9') return Failure.endpointFailure;
@@ -181,6 +181,8 @@ void main()
           "local 500 mapping");
     check(probeLocal(endpoint, auth, FakeResponse.malformed) == Failure.endpointFailure,
           "malformed status rejected");
+    check(probeLocal(endpoint, auth, FakeResponse.missingSeparator) == Failure.endpointFailure,
+          "status missing second separator rejected");
     // Real TLS stack, loopback-only certificate. No -k/--insecure option is used.
     auto dir = buildPath(tempDir(), "s3-capability-" ~ randomUUID().toString());
     mkdir(dir);

@@ -1,0 +1,6 @@
+{
+    "name": "content-candidates",
+    "targetType": "executable",
+    "sourceFiles": ["bench.d"],
+    "buildTypes": { "release": { "buildOptions": ["releaseMode", "optimize", "inline"] } }
+}

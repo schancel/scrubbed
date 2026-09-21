@@ -1,5 +1,9 @@
 # Inspect a pipeline without writing output
 
+These flags also work under the generated `run`/`clean` and `repair`/`fix`
+commands. See [cli-commands.md](cli-commands.md) for command syntax, help and
+shell completion.
+
 The existing no-verb CLI accepts three additive flags:
 
 - `--validate` checks the invocation, registered filters and their options, and

@@ -1,5 +1,19 @@
 # Third-party notices
 
+## argparse
+
+The shipping `scrubbed` executable uses `argparse` version 2.0.2 by Andrey
+Zherikov (Copyright © 2021, Andrey Zherikov). It is licensed under the Boost
+Software License 1.0 (BSL-1.0). The complete license is in
+[`third_party/argparse-LICENSE.txt`](third_party/argparse-LICENSE.txt).
+
+Source: https://github.com/andrey-zherikov/argparse/tree/v2.0.2
+Pinned upstream commit: `10b7bce1cc813e9930ed85bcc6d54a89c0cb65f9`.
+DUB dependency: `argparse ==2.0.2` in `dub.json` and `dub.selections.json`.
+The installed DUB package's complete `source/` tree matches the upstream tag
+byte-for-byte (`diff -qr`), and the copied license matches upstream (`cmp`).
+DUB adds a version field to its cached manifest.
+
 ## WHATWG HTML named character references
 
 `source/filters/entities_data.d` is a generated D representation of the

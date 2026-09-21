@@ -5,6 +5,7 @@
 	"license": "MIT",
 	"targetType": "executable",
 	"sourcePaths": ["source"],
+	"dependencies": {"argparse": "==2.0.2"},
 	"dflags": ["-g"],
 	"buildTypes": {
 		"release": {

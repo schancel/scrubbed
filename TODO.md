@@ -20,6 +20,13 @@ issue. This file remains the status record for implemented work.
       replacement, trusted failure counts/exit status, and rejection of
       nested output trees and symlink traversal within selected trees
 - [x] End-to-end smoke test (see git log / commit for the exact repro)
+- [x] Human-written architecture/source/filter guides for current ownership
+      and extension seams (`docs/architecture.md`, `source/README.md`,
+      `source/filters/README.md`).
+- [~] Typed `DocumentId`, source locator, output name, and owner-checked
+      mmap/byte views exist in `source/domain/document.d`, with golden ID and
+      close/alias tests. The CLI and future content/job pipelines do not yet
+      use this module; callers must explicitly close view owners.
 - [ ] Upstream software-factory follow-up: replace `.claude/skills` directory
       symlinks with an installer-owned portable representation. The canonical
       installer layout works on POSIX and symlink-enabled Git checkouts, but
@@ -64,11 +71,13 @@ issue. This file remains the status record for implemented work.
       example, intentional punctuation or emoji surrounding a damaged span).
 
 ## Phase 2 — more normalization filters
-- [~] HTML entity decoding (`&amp;` etc.) as its own filter, separate
+- [x] HTML entity decoding (`&amp;` etc.) as its own filter, separate
       from `html2md` — useful standalone for non-HTML text that still has
-      stray entities. `decode-html-entities` handles numeric references with
-      HTML's CP1252 compatibility mapping and 15 common named references; the
-      complete WHATWG named-reference table is not yet included.
+      stray entities. `decode-html-entities` handles numeric references and
+      all 2,231 pinned WHATWG named references, with explicit text and
+      attribute-value modes. The registered filter uses text mode; this is
+      not a full HTML tokenizer. The generated table has a D-only
+      regeneration/check script under `scripts/`.
 - [x] Curly-quote / smart-punctuation normalization (ftfy's
       `uncurl_quotes`-equivalent), implemented as a lazy range. It can run
       before mojibake repair when intentional curly quotes would otherwise
@@ -108,8 +117,9 @@ issue. This file remains the status record for implemented work.
 ## Phase 5 — correctness + performance validation
 - [x] Correctness: benchmark the mojibake fixer against ftfy's own public
       test cases (respecting its license for any vendored fixtures). The
-      checked-in D harness reports 39/39 in-scope positives and 48/48
-      encoding-negative cases; see `benchmarks/ftfy_corpus.d`.
+      checked-in D harness pins input hashes and emits JSON results: 39/39
+      in-scope positives, 48/48 encoding-negative cases, and 64 unsupported
+      positives; see `benchmarks/ftfy_corpus.d`.
 - [ ] Throughput: benchmark against Python ftfy/trafilatura on both a
       controlled document tree and a corpus larger than RAM. Report wall
       time, CPU time, peak RSS, bytes/sec, files/sec, allocation volume, and

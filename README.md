@@ -30,6 +30,8 @@ output path, parallel processing across files via `std.parallelism`'s
 zero-copy reads via `std.mmfile.MmFile`, deterministic per-file mapping cleanup,
 atomic output replacement, mojibake repair, entity decoding, smart-quote
 normalization, and two basic normalization filters.
+The entity decoder now includes all 2,231 WHATWG named references and explicit
+text/attribute-value modes; it is still not an HTML tokenizer.
 
 ## Why D
 
@@ -98,6 +100,9 @@ files, not yet a proven terabyte-scale engine.
 
 Phases 0-2 are usable within the documented scope; JSON configuration from
 Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
+The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
+describe the current module boundaries. A typed document-identity and borrowed
+view module exists, but it is not yet wired into the CLI or pipeline.
 The broader corpus-curation plan is tracked in
 [GitHub issues](https://github.com/schancel/scrubbed/issues); accepted tickets do
 not imply the features are implemented or worker-ready.

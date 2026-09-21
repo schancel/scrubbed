@@ -42,6 +42,11 @@ issue. This file remains the status record for implemented work.
       quarantine, split, cancellation and resource declarations, with tagged
       derived-child IDs. They are tested but not wired into the CLI or a
       bounded-memory scheduler; a stage result currently batches its events.
+- [~] Typed source/parser/sink ports and a per-document effects runner now
+      exercise the same ordered path with in-memory and faulting D adapters.
+      The file-mapping opener lives in the effects layer, not domain. The
+      runner is tested but not wired into the CLI; corpus backpressure and
+      throughput remain unproven.
 - [~] A strict byte-to-Unicode facade in `source/text/decoding.d` decodes
       UTF-8 and BOM/declared UTF-16 LE/BE, with typed quarantine for malformed,
       conflicting, unsupported, or binary-looking input. It is tested but not

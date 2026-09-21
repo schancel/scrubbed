@@ -109,8 +109,10 @@ Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
 The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
 describe the current module boundaries. A typed document-identity and borrowed
 view module, ordered borrowed/owned content-piece module with a lazy range,
-and standalone document stage contracts exist, but they are not yet wired
-into the CLI or a bounded-memory scheduler. High-edit list scaling is not
+standalone document stage contracts, and typed source/parser/sink ports with
+a per-document runner exist, but they are not yet wired into the CLI or a
+bounded-memory scheduler. The file-mapping opener now lives in the effects
+layer; the CLI's own mmap path is unchanged. High-edit list scaling is not
 ready for a throughput path. A D module-boundary check is under `scripts/`.
 The document model distinguishes original source IDs from derived-child IDs;
 split stages now use the latter, without changing original source IDs.

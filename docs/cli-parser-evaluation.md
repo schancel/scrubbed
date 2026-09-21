@@ -1,6 +1,35 @@
 # CLI parser spike (issue #3)
 
-Recommendation: **adopt `argparse` 2.0.2 for the future command tree, with a small compatibility adapter at integration time**. The isolated spike demonstrates generated command help, aliases, required/typed arguments, and command/option-name completion. It does not demonstrate argument-value completion or production processing. U02 owns integration; nothing here changes the shipping CLI.
+Recommendation from the #3 spike: **adopt `argparse` 2.0.2 with a small compatibility adapter**. U02 now uses the pinned dependency in production; this document preserves the original parser-only evidence below. The shipping behavior and setup are in [cli-commands.md](cli-commands.md). Argument-value completion is still unsupported.
+
+## U02 integrated measurement (2026-09-21)
+
+At base `d624eff67ef11143359b802535e53a9f0c233700`, both the archived
+baseline and integrated candidate were built on the same Darwin arm64 host
+with LDC 1.43.0, DUB 1.42.0 and `--build=release`. The existing D-only
+`experiments/cli/bench.d` measured 100 `--help` subprocess invocations after
+5 warmups per executable. The release-active D golden runner
+`examples/cli/check.d` checked exact root help, error, list and unavailable
+extract output, plus processing, inspection, completion and late-symlink
+records.
+
+| Release executable | Median `--help` invocation | File bytes |
+| --- | ---: | ---: |
+| Base | 5,845 µs | 1,821,640 |
+| Integrated candidate | 7,476 µs | 2,658,840 |
+
+Observed candidate-minus-base: +1,631 µs and +837,200 bytes. This is an
+end-to-end, same-host comparison of two different applications, not a causal
+estimate of parser cost or a speed claim. Host load and unrelated code changes
+between build inputs may affect timings. `--help` startup is per invocation,
+not per processed document.
+
+The production manifest and selection file both pin `argparse` 2.0.2. Its
+upstream tag resolves to commit `10b7bce1cc813e9930ed85bcc6d54a89c0cb65f9`.
+The DUB cache's complete `source/` tree matches that tag byte-for-byte, and
+the installed/copied license matches upstream. The upstream manifest identifies
+Andrey Zherikov and BSL-1.0; redistribution details are in
+[THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
 ## Reproduce
 

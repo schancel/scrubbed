@@ -95,15 +95,88 @@ The first four exact observations share full hashes across parsers (printed by
 the executable). Negative quality control was rejected on both runs. The
 charset row's visible replacement glyph is not evidence of byte equality.
 
+## Second evidence slice: charset, custom elements, ownership
+
+The follow-up `evaluate.d` mode uses the **same** pinned upstream commits and
+libraries. Build it with the LDC command above (change the output path if
+desired), then run `evaluate lexbor evidence` and `evaluate gumbo evidence`.
+The three new malformed snippets are authored for this experiment; no external
+page text is copied, so no third-party fixture redistribution permission is
+asserted. Their input strings and exact goldens are in D, and the optimized
+executable throws on a bad golden or on a deliberately bad quality control;
+this does not depend on D `assert` surviving release compilation.
+
+The [HTML Standard input-byte-stream rules](https://html.spec.whatwg.org/multipage/parsing.html#the-input-byte-stream)
+require encoding sniffing and byte-to-character decoding *before* tokenization;
+`meta charset` can influence that decoding. The
+[Encoding Standard](https://encoding.spec.whatwg.org/#names-and-labels) maps
+the `iso-8859-1` label to `windows-1252`. At the tested API boundary,
+[Gumbo's pinned header](https://github.com/google/gumbo-parser/blob/v0.10.1/src/gumbo.h)
+requires UTF-8 input, and [Lexbor's encoding example](https://lexbor.com/modules/encoding/)
+shows conversion to UTF-8 before `lxb_html_document_parse`. The raw `E9`
+byte was intentionally **not decoded** by this harness. Thus the original
+charset discrepancy is an invalid-input/API-boundary test, not evidence that
+the parsers disagree about HTML encoding sniffing. The prior report's phrase
+"visible replacement glyph" hid the crucial byte distinction: Lexbor's
+selected text retained single byte `E9`, while Gumbo emitted UTF-8 replacement
+`EF BF BD`. When the D fixture supplies the corresponding UTF-8 bytes `C3 A9`,
+both produce `{café}` with SHA-256
+`6cd3b8589e7357640a2bc60a6fc3cf7c43918d847168b626d1ed50abb529a6c3`.
+Both raw-byte outcomes are exact *observational* goldens, not standards-conformance
+passes. An actual byte-sniff/decode pipeline remains untested here.
+
+The new observation mode copies qualified element names and decoded attributes
+into D-owned strings before either native tree is freed. Gumbo uses its pinned
+`gumbo_tag_from_original_text` API when a normalized custom-tag name is empty;
+the original tag slice remains live until `gumbo_destroy_output`. This fallback
+does not establish names for parser-inserted unknown elements with no original
+slice. The selected observations below match and are exact goldens for both
+parsers (SHA-256 of the full observation):
+
+| Authored malformed case | Observation SHA-256 | What it pins |
+| --- | --- | --- |
+| `<x-note data-id='a&amp;b' disabled>Hi</x-note>` | `01707e60c4730639347df25b13742a091c87e2387e0643283d671cd547834a83` | custom tag, entity-decoded attribute, empty-valued boolean attribute |
+| misnested `<a><b>…</a>…</b>` | `dfbf8a268328d12e3e4bc69f80f8e7ddf9a324f756cc5c9fcde36a7690d55e75` | formatting-element reconstruction and `href` |
+| omitted `</li>` list | `7ef210348064d303fdabaaf9ac2d39c9ba15e32cc987de7bcf3520ef5ead2972` | implied ends and `class` |
+
+The mode then runs eight D threads, each constructing, observing, and
+destroying 100 independent native trees from one read-only input. Both
+candidate runs matched SHA-256
+`5a448ed3366b5994b7dafd3669f26ce3d34fcbfb08fe27da5c81b6fce22d8d33`;
+this is a bounded reentrancy/ownership probe, not a thread-safety guarantee
+for shared trees or a race-detector result. Namespaces, source spans, duplicate
+attributes, parser-inserted custom names, actual page corpus, other platforms,
+and lifecycle failure injection remain unsupported.
+
+On Darwin arm64 with Apple clang 21.0.0 and LDC 1.43.0, I also built the
+**same revisions** with native ASan+UBSan instrumentation. Lexbor's separate
+CMake build used `RelWithDebInfo` and
+`-DCMAKE_C_FLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer'`,
+then `--target lexbor_static`. Gumbo used the exact C source list above with
+`cc -O1 -g -fPIC -fsanitize=address,undefined -fno-omit-frame-pointer -dynamiclib`.
+The D executable was optimized/release with assertions enabled and linked to
+these instrumented libraries and Apple's
+`libclang_rt.asan_osx_dynamic.dylib` and
+`libclang_rt.ubsan_osx_dynamic.dylib` from
+`/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin`, with that
+directory passed as linker `-rpath`. Both `evidence` runs exited 0 with the
+same observation hashes and no sanitizer diagnostic. This probes the native
+parse/observe/destroy path, not D-runtime memory safety, full fuzz coverage,
+ThreadSanitizer, or a release binary. No native instrumented artifact was
+committed. The Gumbo build emitted its existing pointer-to-enum cast warnings;
+LDC emitted an optional LLVM clang search-path warning.
+
 ## Recommendation and next decision
 
 Lexbor is the better **candidate to investigate next**, not a production
 selection: it is current upstream and its D FFI path completed this small
 HTML5-like corpus. Gumbo remains a useful independent output oracle, but its
 archive status and explicit input/tree lifetime coupling raise maintenance and
-integration costs. Neither candidate has passed real-page corpus tests,
-sanitizers, thread/concurrency tests, attribute/namespace parity, encoding
-conversion, platform coverage, or license/NOTICE redistribution review. The
+integration costs. The second slice provides only bounded native sanitizer,
+independent-tree concurrency, and selected attribute evidence. Neither
+candidate has passed representative real-page corpus, namespace/source-span
+parity, actual encoding conversion, other-platform coverage, or license/NOTICE
+redistribution review. The
 next reviewed continuation under #24 should resolve those gaps and obtain
 @schancel's adoption decision before any parser enters `source/`, the package
 lock, or a release artifact. Rollback of this landing deletes only this report

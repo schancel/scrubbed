@@ -1,0 +1,6 @@
+{
+  "filters": [
+    "normalize-line-endings",
+    "strip-control"
+  ]
+}

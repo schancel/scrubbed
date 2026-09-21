@@ -11,10 +11,10 @@ import std.algorithm.searching : startsWith;
 import std.array : split;
 import std.conv : to;
 import std.file : FileException, SpanMode, dirEntries, exists, getAttributes,
-    getSize, isDir, isSymlink, mkdir, mkdirRecurse, remove, rename, readText,
+    getSize, isDir, isFile, isSymlink, mkdir, mkdirRecurse, remove, rename, readText,
     setAttributes, write;
 import std.getopt : config, defaultGetoptPrinter, getopt;
-import std.json : JSONType, parseJSON;
+import std.json : JSONType, JSONValue, parseJSON;
 import std.mmfile : MmFile;
 import std.parallelism : totalCPUs;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
@@ -109,6 +109,39 @@ private void ensurePlainDirectory(string root, string path) {
     }
 }
 
+/// Check the output route without creating it. Traversal still checks every
+/// component again at write time, since another process may change the tree.
+private void preflightOutput(string outputPath, bool inputIsDir) {
+    auto directory = inputIsDir ? outputPath : dirName(outputPath);
+    auto current = normalizedAbsolute(directory);
+    while (!exists(current)) {
+        auto parent = dirName(current);
+        if (parent == current) break;
+        current = parent;
+    }
+    if (isSymlink(current) || !isDir(current))
+        throw new Exception("output ancestor is not a plain directory: " ~ current);
+    if (inputIsDir && exists(outputPath) && !isDir(outputPath))
+        throw new Exception("output directory is not a directory: " ~ outputPath);
+    if (!inputIsDir && exists(outputPath) && isDir(outputPath))
+        throw new Exception("output file is a directory: " ~ outputPath);
+}
+
+private void preflightDestination(string destination, string outputRoot) {
+    auto current = dirName(normalizedAbsolute(destination));
+    auto root = normalizedAbsolute(outputRoot);
+    if (!pathIsWithin(current, root))
+        throw new Exception("output escaped its selected root: " ~ destination);
+    while (pathIsWithin(current, root)) {
+        if (exists(current) && (isSymlink(current) || !isDir(current)))
+            throw new Exception("output path component is not a plain directory: " ~ current);
+        if (current == root) break;
+        current = dirName(current);
+    }
+    if (exists(destination) && (isSymlink(destination) || isDir(destination)))
+        throw new Exception("output destination is not a plain file: " ~ destination);
+}
+
 /// Write beside the destination and rename into place. This makes same-file
 /// input/output safe even when `content` is still a view into an MmFile, and
 /// prevents readers from observing a partially-written destination.
@@ -176,14 +209,21 @@ private FilterSpec[] loadFilterConfig(string path) {
     return specs;
 }
 
-void processOne(string file, string inputRoot, string outputRoot,
-                bool inputIsDir, const ref Pipeline chain, ulong reservedBytes) {
+private string destinationFor(string file, string inputRoot, string outputRoot,
+                              bool inputIsDir) {
+    return inputIsDir ? buildPath(outputRoot, relativePath(file, inputRoot)) : outputRoot;
+}
+
+/// Returns whether the filter chain changed the document. In dry-run mode the
+/// same mapping and filter path executes, but no output path is created.
+bool processOne(string file, string inputRoot, string outputRoot,
+                bool inputIsDir, const ref Pipeline chain, ulong reservedBytes,
+                bool dryRun = false) {
     if (isSymlink(file))
         throw new Exception("refusing symlink input: " ~ file);
 
-    string outPath = inputIsDir
-        ? buildPath(outputRoot, relativePath(file, inputRoot))
-        : outputRoot;
+    string outPath = destinationFor(file, inputRoot, outputRoot, inputIsDir);
+    preflightDestination(outPath, inputIsDir ? outputRoot : dirName(outputRoot));
 
     if (reservedBytes == 0) {
         // MmFile cannot map an empty file. Check size on an opened handle so
@@ -193,11 +233,14 @@ void processOne(string file, string inputRoot, string outputRoot,
             if (input.size != 0)
                 throw new Exception("input changed size after admission: " ~ file);
         }
-        atomicWrite(outPath, inputIsDir ? outputRoot : dirName(outputRoot), chain.run(""));
-        return;
+        auto cleanedEmpty = chain.run("");
+        if (!dryRun)
+            atomicWrite(outPath, inputIsDir ? outputRoot : dirName(outputRoot), cleanedEmpty);
+        return cleanedEmpty.length != 0;
     }
 
     string cleaned;
+    bool changed;
     {
         if (getSize(file) != reservedBytes)
             throw new Exception("input changed size after admission: " ~ file);
@@ -211,6 +254,7 @@ void processOne(string file, string inputRoot, string outputRoot,
             throw new Exception("input changed size after admission: " ~ file);
         auto text = cast(string)(cast(ubyte[]) mm[]);
         cleaned = chain.run(text);
+        changed = cleaned != text;
         if (cleaned.length) {
             const textStart = cast(size_t) text.ptr;
             const textEnd = textStart + text.length;
@@ -219,7 +263,24 @@ void processOne(string file, string inputRoot, string outputRoot,
                 cleaned = cleaned.idup;
         }
     }
-    atomicWrite(outPath, inputIsDir ? outputRoot : dirName(outputRoot), cleaned);
+    if (!dryRun)
+        atomicWrite(outPath, inputIsDir ? outputRoot : dirName(outputRoot), cleaned);
+    return changed;
+}
+
+private string explanationRecord(string file, string destination, string chain,
+                                 string decision, string reason = "") {
+    auto record = "EXPLAIN\tinput=" ~ JSONValue(file).toString ~
+        "\toutput=" ~ JSONValue(destination).toString ~
+        "\tchain=" ~ JSONValue(chain).toString ~
+        "\tstatus=" ~ decision;
+    if (reason.length) record ~= "\treason=" ~ JSONValue(reason).toString;
+    return record;
+}
+
+private void explainOne(string file, string destination, string chain,
+                        string decision, string reason = "") {
+    writeln(explanationRecord(file, destination, chain, decision, reason));
 }
 
 private bool canFindOption(const string[] args, string option) {
@@ -238,6 +299,9 @@ int runApp(string[] args) {
     ulong maxInputBytes = 256UL * 1024 * 1024;
     size_t maxOpenInputs;
     bool listFilters;
+    bool validateOnly;
+    bool dryRun;
+    bool explain;
     const filtersExplicit = args.canFindOption("--filters");
     const descriptorsExplicit = args.canFindOption("--max-open-inputs");
 
@@ -251,7 +315,10 @@ int runApp(string[] args) {
         "max-queued-docs", "Maximum queued input documents (default: 64)", &maxQueuedDocuments,
         "max-input-bytes", "Maximum reserved input bytes (default: 268435456)", &maxInputBytes,
         "max-open-inputs", "Maximum worker-held input descriptors (default: threads)", &maxOpenInputs,
-        "list-filters", "Print registered filter names and exit", &listFilters);
+        "list-filters", "Print registered filter names and exit", &listFilters,
+        "validate", "Validate invocation, filter chain and roots without processing", &validateOnly,
+        "dry-run", "Run filters without creating or writing output", &dryRun,
+        "explain", "Print one decision record per input file", &explain);
     if (helpInfo.helpWanted) {
         defaultGetoptPrinter("scrubbed", helpInfo.options);
         return 0;
@@ -288,30 +355,54 @@ int runApp(string[] args) {
     writeln("filter chain: ", chain.names.join(" -> "));
 
     const inputIsDir = isDir(inputPath);
+    if (!inputIsDir && !isFile(inputPath))
+        throw new Exception("input root is not a regular file or directory: " ~ inputPath);
     if (inputIsDir) {
         if (pathIsWithin(outputPath, inputPath))
             throw new Exception("output directory must not be inside the input tree");
     }
-    ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
-        inputIsDir ? outputPath : dirName(outputPath));
+    preflightOutput(outputPath, inputIsDir);
+    if (validateOnly) {
+        writeln("valid. No files processed.");
+        return 0;
+    }
+    if (!dryRun)
+        ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
+            inputIsDir ? outputPath : dirName(outputPath));
+    const chainLabel = chain.names.join(" -> ");
     auto scheduler = new BoundedInput(
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs), nThreads,
         (string file, ulong bytes) {
-            processOne(file, inputPath, outputPath, inputIsDir, chain, bytes);
+            const changed = processOne(file, inputPath, outputPath, inputIsDir,
+                chain, bytes, dryRun);
+            if (explain)
+                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
+                    chainLabel, changed ? "changed" : "unchanged");
         },
         (string file, Throwable error) {
             stderr.writefln("SKIP %s: %s", file, error.msg);
+            if (explain)
+                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
+                    chainLabel, "failure", error.msg);
         });
     size_t rejected;
     try {
         if (inputIsDir) {
             foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
-                if (entry.isSymlink)
-                    throw new Exception("refusing symlink in input tree: " ~ entry.name);
+                if (entry.isSymlink) {
+                    auto reason = "refusing symlink in input tree: " ~ entry.name;
+                    if (explain)
+                        explainOne(entry.name, destinationFor(entry.name, inputPath,
+                            outputPath, inputIsDir), chainLabel, "failure", reason);
+                    throw new Exception(reason);
+                }
                 if (!entry.isFile) continue;
                 try scheduler.submit(entry.name, getSize(entry.name));
                 catch (Exception error) {
                     stderr.writefln("SKIP %s: %s", entry.name, error.msg);
+                    if (explain)
+                        explainOne(entry.name, destinationFor(entry.name, inputPath,
+                            outputPath, inputIsDir), chainLabel, "failure", error.msg);
                     ++rejected;
                 }
             }
@@ -319,6 +410,8 @@ int runApp(string[] args) {
             try scheduler.submit(inputPath, getSize(inputPath));
             catch (Exception error) {
                 stderr.writefln("SKIP %s: %s", inputPath, error.msg);
+                if (explain)
+                    explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
                 ++rejected;
             }
         }
@@ -459,4 +552,78 @@ unittest {
         assertThrown(runApp(["scrubbed", "--input", inputDir,
             "--output", buildPath(root, "tree-output"), "--threads", "1"]));
     }
+}
+
+private void requireCli(bool condition, string message) {
+    if (!condition) throw new Exception("CLI inspection test: " ~ message);
+}
+
+unittest {
+    import std.file : rmdirRecurse, tempDir;
+
+    auto root = buildPath(tempDir, "scrubbed-inspection-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdir(root);
+    auto input = buildPath(root, "input.txt");
+    write(input, "line\r\n");
+    auto output = buildPath(root, "new", "output.txt");
+    auto badConfig = buildPath(root, "bad.json");
+    write(badConfig, `{ "filters": [{ "name": "strip-control", ` ~
+        `"options": { "not-an-option": true } }] }`);
+    try {
+        runApp(["scrubbed", "--input", input, "--output", output,
+            "--config", badConfig, "--threads", "1"]);
+        throw new Exception("invalid config was accepted");
+    } catch (Exception error) {
+        requireCli(error.msg != "invalid config was accepted", "invalid config rejected");
+    }
+    requireCli(!exists(dirName(output)), "invalid config created output parent");
+
+    requireCli(runApp(["scrubbed", "--input", input, "--output", output,
+        "--validate", "--threads", "1"]) == 0, "validate exit");
+    requireCli(!exists(dirName(output)), "validate created output parent");
+    requireCli(runApp(["scrubbed", "--input", input, "--output", output,
+        "--dry-run", "--explain", "--threads", "1"]) == 0, "dry-run exit");
+    requireCli(!exists(dirName(output)), "dry-run created output parent");
+    requireCli(readText(input) == "line\r\n", "dry-run changed source");
+    requireCli(runApp(["scrubbed", "--input", input, "--output", input,
+        "--dry-run", "--threads", "1"]) == 0, "same-file dry-run exit");
+    requireCli(readText(input) == "line\r\n", "same-file dry-run changed source");
+
+    auto inputTree = buildPath(root, "tree");
+    mkdir(inputTree);
+    write(buildPath(inputTree, "changed.txt"), "line\r\n");
+    write(buildPath(inputTree, "unchanged.txt"), "clean");
+    write(buildPath(inputTree, "bad.bin"), [cast(ubyte) 0xFF]);
+    auto treeOutput = buildPath(root, "tree-output");
+    requireCli(runApp(["scrubbed", "--input", inputTree, "--output", treeOutput,
+        "--dry-run", "--explain", "--threads", "4", "--max-queued-docs", "1",
+        "--max-open-inputs", "1"]) == 1, "multi-thread failure exit");
+    requireCli(!exists(treeOutput), "multi-thread dry-run created output tree");
+    version (Posix) {
+        import std.file : symlink;
+        auto unsafeOutput = buildPath(root, "unsafe-output");
+        mkdir(unsafeOutput);
+        auto linkedFile = buildPath(unsafeOutput, "changed.txt");
+        symlink(input, linkedFile);
+        requireCli(runApp(["scrubbed", "--input", inputTree,
+            "--output", unsafeOutput, "--dry-run", "--threads", "1"]) == 1,
+            "dry-run must reject unsafe destination");
+        requireCli(readText(input) == "line\r\n", "unsafe dry-run followed output link");
+    }
+    requireCli(explanationRecord("in\n", "out", "strip-control", "changed") ==
+        "EXPLAIN\tinput=\"in\\n\"\toutput=\"out\"\tchain=\"strip-control\"\tstatus=changed",
+        "changed record format");
+    requireCli(explanationRecord("in", "out", "strip-control", "unchanged") ==
+        "EXPLAIN\tinput=\"in\"\toutput=\"out\"\tchain=\"strip-control\"\tstatus=unchanged",
+        "unchanged record format");
+    requireCli(explanationRecord("in", "out", "strip-control", "failure", "bad\tdata") ==
+        "EXPLAIN\tinput=\"in\"\toutput=\"out\"\tchain=\"strip-control\"\tstatus=failure\treason=\"bad\\tdata\"",
+        "failure record format");
+
+    auto plainOutput = buildPath(root, "plain.txt");
+    requireCli(runApp(["scrubbed", "--input", input, "--output", plainOutput,
+        "--filters", "normalize-line-endings", "--threads", "1"]) == 0,
+        "legacy invocation exit");
+    requireCli(readText(plainOutput) == "line\n", "legacy invocation output");
 }

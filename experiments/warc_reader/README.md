@@ -24,6 +24,8 @@ make -C "$tmpdir/zstd-1.5.7/lib" -j4 libzstd.a
 ldc2 -O2 -release -of="$tmpdir/check" experiments/warc_reader/check.d \
   "$tmpdir/zstd-1.5.7/lib/libzstd.a" -L-lz
 "$tmpdir/check"
+# Optional negative control: must exit nonzero even under -release.
+"$tmpdir/check" --negative-control && exit 1 || true
 ```
 
 The tarball is upstream release v1.5.7, SHA-256 above. The library is

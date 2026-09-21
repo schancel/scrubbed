@@ -88,6 +88,7 @@ class Parser {
             auto header = text[0 .. headerEnd];
             require(header.startsWith("WARC/1.1\r\n"), "version or CRLF");
             string id, uri, date, kind, lenText;
+            bool idSeen, uriSeen, dateSeen, kindSeen, lenSeen;
             auto lines = header[0 .. $ - 4].split("\r\n");
             foreach (line; lines[1 .. $]) {
                 auto part = line;
@@ -96,13 +97,13 @@ class Parser {
                 require(colon > 0, "header field");
                 auto name = part[0 .. colon].toLower;
                 auto value = part[cast(size_t) colon + 1 .. $].strip;
-                if (name == "warc-record-id") { require(id.length == 0, "duplicate id"); id = value; }
-                else if (name == "warc-target-uri") { require(uri.length == 0, "duplicate uri"); uri = value; }
-                else if (name == "warc-date") { require(date.length == 0, "duplicate date"); date = value; }
-                else if (name == "warc-type") { require(kind.length == 0, "duplicate type"); kind = value; }
-                else if (name == "content-length") { require(lenText.length == 0, "duplicate length"); lenText = value; }
+                if (name == "warc-record-id") { require(!idSeen, "duplicate id"); idSeen = true; id = value; }
+                else if (name == "warc-target-uri") { require(!uriSeen, "duplicate uri"); uriSeen = true; uri = value; }
+                else if (name == "warc-date") { require(!dateSeen, "duplicate date"); dateSeen = true; date = value; }
+                else if (name == "warc-type") { require(!kindSeen, "duplicate type"); kindSeen = true; kind = value; }
+                else if (name == "content-length") { require(!lenSeen, "duplicate length"); lenSeen = true; lenText = value; }
             }
-            require(id.length >= 4 && id[0] == '<' && id[$ - 1] == '>' && date.length && kind.length,
+            require(idSeen && dateSeen && kindSeen && id.length >= 4 && id[0] == '<' && id[$ - 1] == '>' && date.length && kind.length,
                 "required fields");
             auto idUri = id[1 .. $ - 1];
             auto schemeEnd = idUri.indexOf(':');
@@ -112,9 +113,10 @@ class Parser {
                 bool allowed = alpha || (i > 0 && ((ch >= '0' && ch <= '9') || ch == '+' || ch == '-' || ch == '.'));
                 require(allowed, "record-id URI scheme");
             }
-            if (kind == "warcinfo") require(uri.length == 0, "warcinfo target URI forbidden");
-            else if (kind != "metadata") require(uri.length > 0, "target URI required");
-            require(lenText.length > 0, "missing length");
+            if (kind == "warcinfo") require(!uriSeen, "warcinfo target URI forbidden");
+            else if (kind == "metadata") require(!uriSeen || uri.length > 0, "empty metadata target URI");
+            else require(uriSeen && uri.length > 0, "target URI required");
+            require(lenSeen && lenText.length > 0, "missing length");
             size_t bodyLength;
             foreach (digit; lenText) {
                 require(digit >= '0' && digit <= '9', "invalid length");
@@ -134,7 +136,7 @@ class Parser {
     void finish() { require(pending.length == 0, "truncated record"); }
 }
 
-import std.string : endsWith, split, strip, toLower;
+import std.string : endsWith, replace, split, strip, toLower;
 
 ubyte[] warc(string id, string uri, string kind, const(ubyte)[] block,
              string lenOverride = "") {
@@ -143,7 +145,8 @@ ubyte[] warc(string id, string uri, string kind, const(ubyte)[] block,
         "\r\nWARC-Record-ID: <" ~ idUri ~ ">\r\n" ~
         (uri.length ? "WARC-Target-URI: " ~ uri ~ "\r\n" : "") ~
         "WARC-Date: 2026-09-21T00:00:00Z\r\n" ~
-        "Content-Type: " ~ (kind == "conversion" ? "text/plain" : "application/http") ~
+        "Content-Type: " ~ ((kind == "warcinfo" || kind == "metadata") ?
+            "application/warc-fields" : (kind == "conversion" ? "text/plain" : "application/http")) ~
         "\r\nContent-Length: " ~ (lenOverride.length ? lenOverride : to!string(block.length)) ~ "\r\n\r\n";
     return (cast(ubyte[]) header.dup ~ block ~ cast(ubyte[]) "\r\n\r\n").dup;
 }
@@ -269,7 +272,12 @@ long maxRss() {
     else return usage.ru_maxrss; // Linux reports KiB.
 }
 
-void main() {
+void main(string[] args) {
+    if (args.length == 2 && args[1] == "--negative-control") {
+        auto bad = new Parser("negative-control");
+        decodeGzip(cast(const(ubyte)[]) [0x00, 0x00], bad);
+        return;
+    }
     writeln("runtime zlib=", fromStringz(zlibVersion()));
     auto fdBefore = fdCount();
     auto rssBefore = maxRss();
@@ -325,7 +333,8 @@ void main() {
         plain.records[1].headerHash == "E6CB6BE0F41709D716C8D871E8AFF0A60D310FEAACF69784FE1DB617E02F97DF" &&
         plain.records[1].blockHash == "1F359813ACDD5E1A8BB0EF7AA6EBF46E477889FD0387BFD5050A1B0FF6A01D61",
         "pinned fixture hashes");
-    auto warcinfo = warc("https://archive.example/id/info", "", "warcinfo", cast(const(ubyte)[]) "");
+    auto warcinfo = warc("https://archive.example/id/info", "", "warcinfo",
+        cast(const(ubyte)[]) "software: scrubd-evidence\r\n");
     auto info = new Parser("archive-key"); info.feed(warcinfo); info.finish();
     require(info.records.length == 1 && info.records[0].id == "<https://archive.example/id/info>" &&
         info.records[0].uri.length == 0 && info.records[0].kind == "warcinfo",
@@ -335,9 +344,26 @@ void main() {
     require(infoGzip.records == info.records && infoZstd.records == info.records,
         "warcinfo compressed equivalence");
     auto meta = new Parser("archive-key");
-    meta.feed(warc("https://archive.example/id/meta", "", "metadata", cast(const(ubyte)[]) "tag"));
+    meta.feed(warc("https://archive.example/id/meta", "", "metadata",
+        cast(const(ubyte)[]) "via: https://example.org/\r\n"));
     meta.finish();
     require(meta.records.length == 1 && meta.records[0].uri.length == 0, "metadata optional target URI");
+    auto emptyTarget = (cast(string) warcinfo).replace("WARC-Date:", "WARC-Target-URI: \r\nWARC-Date:");
+    rejects({ auto p = new Parser("k"); p.feed(cast(const(ubyte)[]) emptyTarget); },
+        "warcinfo explicit empty target URI");
+    auto emptyMetaTarget = (cast(string) warc("https://archive.example/id/meta", "", "metadata",
+        cast(const(ubyte)[]) "via: https://example.org/\r\n")).replace("WARC-Date:",
+            "WARC-Target-URI: \r\nWARC-Date:");
+    rejects({ auto p = new Parser("k"); p.feed(cast(const(ubyte)[]) emptyMetaTarget); },
+        "metadata explicit empty target URI");
+    auto duplicateEmptyId = (cast(string) warcinfo).replace("WARC-Record-ID:",
+        "WARC-Record-ID: \r\nWARC-Record-ID:");
+    rejects({ auto p = new Parser("k"); p.feed(cast(const(ubyte)[]) duplicateEmptyId); },
+        "duplicate record ID after empty first field");
+    auto duplicateEmptyLength = (cast(string) warcinfo).replace("Content-Length:",
+        "Content-Length: \r\nContent-Length:");
+    rejects({ auto p = new Parser("k"); p.feed(cast(const(ubyte)[]) duplicateEmptyLength); },
+        "duplicate content length after empty first field");
     rejects({ auto p = new Parser("k"); p.feed(warc("x", "u", "response", cast(const(ubyte)[]) "x", "x")); }, "invalid length");
     rejects({ auto p = new Parser("k"); p.feed(warc("x", "u", "response", cast(const(ubyte)[]) "x", "999999999999999999999999")); }, "overflow length");
     rejects({ auto p = new Parser("k"); p.feed(warc("x", "u", "response", cast(const(ubyte)[]) "x", "65537")); }, "body cap");
@@ -383,5 +409,5 @@ void main() {
         " max_rss_after=", maxRss(), " gc_used_before=", gcBefore,
         " gc_used_after_collect=", GC.stats.usedSize,
         " fd_before=", fdBefore, " fd_after=", fdAfter);
-    writeln("PASS: 2 records, gzip members, zstd frames, 15 release-active negatives");
+    writeln("PASS: 2 main records, warcinfo/metadata fixtures, gzip members, zstd frames, 19 release-active negatives");
 }

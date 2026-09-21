@@ -37,6 +37,18 @@ through plain, gzip, and zstd decode, plus `metadata` with optional absent
 Target-URI. The parser checks a record-ID URI scheme's basic character shape;
 it does **not** fully validate RFC 3986 URIs. Exact main-fixture hashes observed:
 
+| Authored fixture | Content-Type | Target-URI | Content-Length |
+| --- | --- | --- | --- |
+| response | `application/http` | required, nonempty | computed HTTP block bytes |
+| conversion (WET-style) | `text/plain` | required, nonempty | computed UTF-8 text bytes |
+| warcinfo | `application/warc-fields` | absent; even an empty field is rejected | computed `software:` field bytes |
+| metadata | `application/warc-fields` | absent in positive; empty field rejected | computed `via:` field bytes |
+
+All fixture lengths are decimal byte counts computed from the authored block,
+not character counts. Presence is tracked independently of value, so an
+empty first field cannot disguise a duplicate mandatory field. These are
+format-consistent positive fixtures, not a claim of full WARC validation.
+
 | Record ID suffix | Header SHA-256 | Body SHA-256 |
 | --- | --- | --- |
 | `...0001` | `1AF48705DC634605AD10FBEE02711C2635FA429B3E7271E74D6AB5FD7B8E3420` | `39AD3DAD2662D694C233E7BA171EDCB439020FBEBAFB8D8127C11EDFE7A411E4` |
@@ -57,6 +69,8 @@ best-effort skip; no resynchronization is promised. The parser can retain
 earlier or current records when a late gzip/zstd checksum fails; release-active
 negative cases prove this partial state. A caller **must discard the parser
 and all its records on any decode error**. There is no atomic rollback claim.
+The release-built `--negative-control` invocation deliberately feeds corrupt
+gzip without catching the rejection and exits nonzero.
 
 Bounds precede potentially large decompression output: at most 1 MiB
 compressed input in memory; fixed 127-byte inflate output; at most 128 KiB

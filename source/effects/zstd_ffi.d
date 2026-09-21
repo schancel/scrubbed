@@ -1,3 +1,4 @@
+/// ABI declarations for the pinned zstd 1.5.7 decompressor archive.
 module effects.zstd_ffi;
 
 // ABI declarations for pinned zstd 1.5.7, third_party/zstd/zstd.h.

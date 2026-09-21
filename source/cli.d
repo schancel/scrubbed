@@ -288,18 +288,20 @@ bool processOne(string file, string inputRoot, string outputRoot,
 }
 
 private string explanationRecord(string file, string destination, string chain,
-                                 string decision, string reason = "") {
+                                 string decision, string reason = "",
+                                 string detail = "") {
     auto record = "EXPLAIN\tinput=" ~ JSONValue(file).toString ~
         "\toutput=" ~ JSONValue(destination).toString ~
         "\tchain=" ~ JSONValue(chain).toString ~
         "\tstatus=" ~ decision;
     if (reason.length) record ~= "\treason=" ~ JSONValue(reason).toString;
+    if (detail.length) record ~= "\tdetail=" ~ JSONValue(detail).toString;
     return record;
 }
 
 private void explainOne(string file, string destination, string chain,
-                        string decision, string reason = "") {
-    writeln(explanationRecord(file, destination, chain, decision, reason));
+                        string decision, string reason = "", string detail = "") {
+    writeln(explanationRecord(file, destination, chain, decision, reason, detail));
 }
 
 /// Only admitted or admission-blocked paths live here. The scheduler bounds
@@ -431,7 +433,20 @@ version (ManifestCliHarness) {
     }
 }
 
-private string processManifestOne(LocalManifest manifest, string databasePath,
+private struct ManifestOutcome {
+    string status;
+    string detail;
+}
+
+private class ManifestDecisionFailure : Exception {
+    string status;
+    this(string status, string message) {
+        super(message);
+        this.status = status;
+    }
+}
+
+private ManifestOutcome processManifestOne(LocalManifest manifest, string databasePath,
         string file, string inputRoot,
         string outputRoot, bool inputIsDir, const ref Pipeline chain,
         ulong reservedBytes, ubyte[32] configHash, bool retry, bool dryRun) {
@@ -451,16 +466,22 @@ private string processManifestOne(LocalManifest manifest, string databasePath,
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
     SinkKey key = SinkKey(id, firstHash, configHash, "local-primary:v1");
+    bool replacing;
     if (!dryRun) {
         auto inspected = manifest.inspect(key);
-        if (inspected == Inspection.verifiedCommitted) return "skipped";
+        if (inspected == Inspection.verifiedCommitted)
+            return ManifestOutcome("skipped", "");
         auto previous = manifest.lookup(key);
         bool destinationExists = exists(destination);
         bool unresolved = !previous.isNull && previous.get.state != SinkState.planned;
         if (!retry && (destinationExists || unresolved))
-            throw new Exception("manifest output requires explicit --manifest-retry after inspection: " ~ destination);
+            throw new ManifestDecisionFailure(
+                !previous.isNull && previous.get.state == SinkState.uncertain
+                    ? "uncertain" : "retry-required",
+                "manifest output requires explicit --manifest-retry after inspection: " ~ destination);
         auto row = manifest.plan(key, destination);
-        if (retry && (destinationExists || row.state != SinkState.planned))
+        replacing = retry && (destinationExists || row.state != SinkState.planned);
+        if (replacing)
             manifest.retry(key);
         version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
     }
@@ -472,7 +493,8 @@ private string processManifestOne(LocalManifest manifest, string databasePath,
                 cast(const(ubyte)[])mm[]) != firstHash)
             throw new Exception("mapped input changed before publish: " ~ file);
         const changed = cleaned != text;
-        if (dryRun) return changed ? "dry-run-changed" : "dry-run-unchanged";
+        if (dryRun) return ManifestOutcome(changed ? "dry-run-changed" :
+            "dry-run-unchanged", "");
         version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
         // The F08 sink owns its buffer and fsync-before-rename publication.
         ensurePlainDirectory(inputIsDir ? outputRoot : dirName(outputRoot),
@@ -488,7 +510,9 @@ private string processManifestOne(LocalManifest manifest, string databasePath,
         manifest.commitPublished(key, destination,
             outputDigest(cast(const(ubyte)[])cleaned));
         version (ManifestCliHarness) manifestKillAt(databasePath, "after-commit");
-        return changed ? "changed" : "unchanged";
+        return ManifestOutcome(replacing ? "retry" :
+            (changed ? "changed" : "unchanged"),
+            replacing ? (changed ? "changed" : "unchanged") : "");
     } catch (Throwable failure) {
         if (!dryRun) {
             try {
@@ -679,23 +703,26 @@ int runApp(string[] args) {
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs),
         manifestPath.length ? 1 : nThreads,
         (string file, ulong bytes) {
-            string decision;
+            ManifestOutcome decision;
             if (manifestPath.length)
                 decision = processManifestOne(manifest, manifestPath, file, inputPath, outputPath,
                     inputIsDir, chain, bytes, configHash, manifestRetry, dryRun);
             else
-                decision = processOne(file, inputPath, outputPath, inputIsDir,
+                decision.status = processOne(file, inputPath, outputPath, inputIsDir,
                     chain, bytes, dryRun) ? "changed" : "unchanged";
             if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, decision);
+                    chainLabel, decision.status, "", decision.detail);
             if (explain) pending.remove(file);
         },
         (string file, Throwable error) {
             stderr.writefln("SKIP %s: %s", file, error.msg);
-            if (explain)
+            if (explain) {
+                auto manifestDecision = cast(ManifestDecisionFailure)error;
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, "failure", error.msg);
+                    chainLabel, manifestDecision is null ? "failure" :
+                        manifestDecision.status, error.msg);
+            }
             if (explain) pending.remove(file);
         });
     size_t rejected;

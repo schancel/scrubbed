@@ -30,7 +30,11 @@ default. A planned row with no destination can resume. After inspecting a
 destination, `--manifest-retry` explicitly authorizes replacement; it is not
 part of output identity. `--validate` checks paths/config without creating a
 DB, and `--dry-run` runs filters but creates neither DB nor output. `--explain`
-reports one status per input, including skip/failure. Manifest DB, `-wal`, and
+reports one status per input: `skipped` for verified committed output,
+`uncertain` for invalidated committed output, `retry-required` for other
+unresolved/pre-existing destinations, and `retry` with a separate
+changed/unchanged detail after authorized replacement. Refused inputs retain
+a nonzero incomplete exit. Manifest DB, `-wal`, and
 `-shm` must lie outside the selected input and output trees; aliases and
 hardlinks are rejected. The first CLI slice serializes manifest work even when
 `--threads` is larger, while preserving bounded input admission. It makes no

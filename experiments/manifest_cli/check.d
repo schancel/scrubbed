@@ -6,6 +6,7 @@ import core.thread : Thread;
 import effects.local_manifest : LocalManifest, SinkState;
 import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
+import std.array : split;
 import std.conv : to;
 import std.datetime : dur;
 import std.file : copy, exists, getAttributes, getSize, mkdir, readText, remove,
@@ -31,6 +32,17 @@ private void expect(string label, string[] args, int status, string fragment) {
     auto result = run(args);
     need(result.status == status && result.output.canFind(fragment),
         label ~ ": exit " ~ result.status.to!string ~ ", output " ~ result.output);
+    writeln("ok: ", label);
+}
+
+private void expectOneDecision(string label, string[] args, int exitStatus,
+        string decision, string detail = "") {
+    auto result = run(args);
+    need(result.status == exitStatus &&
+        result.output.canFind("status=" ~ decision) &&
+        (!detail.length || result.output.canFind("detail=\"" ~ detail ~ "\"")) &&
+        result.output.split("EXPLAIN\tinput=").length == 2,
+        label ~ ": expected one " ~ decision ~ " record, got " ~ result.output);
     writeln("ok: ", label);
 }
 
@@ -112,9 +124,10 @@ private void deterministicCrashWindows(string hookExecutable, string root) {
             (phase == "after-commit" ? 0 : 1), phase ~ " durable state");
         ledger.close();
         if (phase == "after-publish") {
-            expect(phase ~ " default refuses", command, 1, "--manifest-retry");
-            expect(phase ~ " explicit reconcile", command ~ ["--manifest-retry"],
-                0, "status=changed");
+            expectOneDecision(phase ~ " default refuses", command, 1,
+                "retry-required");
+            expectOneDecision(phase ~ " explicit reconcile",
+                command ~ ["--manifest-retry"], 0, "retry", "changed");
         } else if (phase == "after-commit") {
             expect(phase ~ " verified skip", command, 0, "status=skipped");
         } else {
@@ -145,19 +158,50 @@ int main(string[] args) {
     expect("dry run leaves DB absent", command ~ ["--dry-run"], 0,
         "dry-run-changed");
     need(!exists(db) && !exists(output), "dry run mutated state");
+    auto preexistingInput = buildPath(root, "preexisting-input.txt");
+    auto preexistingOutput = buildPath(root, "preexisting-output.txt");
+    auto preexistingDb = buildPath(root, "preexisting.db");
+    write(preexistingInput, "preexisting\r\n");
+    write(preexistingOutput, "user-owned output");
+    auto preexistingCommand = [executable, "run", "--input", preexistingInput,
+        "--output", preexistingOutput, "--manifest", preexistingDb,
+        "--filters", "normalize-line-endings", "--explain"];
+    expectOneDecision("unrecorded destination refuses by default",
+        preexistingCommand, 1, "retry-required");
+    need(readText(preexistingOutput) == "user-owned output",
+        "unrecorded destination was replaced without authorization");
+    auto preexistingLedger = new LocalManifest(preexistingDb);
+    need(preexistingLedger.replay(SinkState.planned, 2).rows.length == 0,
+        "unrecorded destination was planned before rejection");
+    preexistingLedger.close();
+    expectOneDecision("unrecorded destination explicit reconcile",
+        preexistingCommand ~ ["--manifest-retry"], 0, "retry", "changed");
+    need(readText(preexistingOutput) == "preexisting\n",
+        "explicit reconcile did not publish expected output");
+    expect("retry control excluded from output identity", preexistingCommand,
+        0, "status=skipped");
+    auto unchangedInput = buildPath(root, "unchanged-input.txt");
+    auto unchangedOutput = buildPath(root, "unchanged-output.txt");
+    write(unchangedInput, "already clean");
+    write(unchangedOutput, "unrecorded bytes");
+    expectOneDecision("retry preserves unchanged detail", [executable,
+        "run", "--input", unchangedInput, "--output", unchangedOutput,
+        "--manifest", buildPath(root, "unchanged.db"), "--filters",
+        "normalize-line-endings", "--explain", "--manifest-retry"],
+        0, "retry", "unchanged");
     expect("first publish", command, 0, "status=changed");
     need(readText(output) == "one\n", "first output bytes");
     expect("exact committed skip", command, 0, "status=skipped");
     write(output, "tampered");
-    expect("tampered output refuses", command, 1, "--manifest-retry");
+    expectOneDecision("tampered output refuses", command, 1, "uncertain");
     need(readText(output) == "tampered", "tamper overwritten without retry");
-    expect("explicit reconcile", command ~ ["--manifest-retry"], 0,
-        "status=changed");
+    expectOneDecision("explicit reconcile", command ~ ["--manifest-retry"],
+        0, "retry", "changed");
     need(readText(output) == "one\n", "reconcile output");
     write(input, "two\r\n");
     expect("changed input refuses existing output", command, 1, "--manifest-retry");
-    expect("changed input explicit retry", command ~ ["--manifest-retry"], 0,
-        "status=changed");
+    expectOneDecision("changed input explicit retry", command ~ ["--manifest-retry"],
+        0, "retry", "changed");
     need(readText(output) == "two\n", "changed input output");
     write(input, "abc\r\n");
     expect("same-size mutation refuses", command, 1, "--manifest-retry");
@@ -172,8 +216,8 @@ int main(string[] args) {
     auto configured = [executable, "run", "--input", input, "--output", output,
         "--manifest", db, "--config", config, "--explain"];
     expect("config bytes change identity", configured, 1, "--manifest-retry");
-    expect("new config explicit retry", configured ~ ["--manifest-retry"], 0,
-        "status=changed");
+    expectOneDecision("new config explicit retry", configured ~ ["--manifest-retry"],
+        0, "retry", "changed");
     write(config, `{"filters": ["normalize-line-endings"]}`);
     expect("same filter with changed config bytes", configured, 1,
         "--manifest-retry");
@@ -217,7 +261,7 @@ int main(string[] args) {
     need(mixed.status == 1 && mixed.output.canFind("status=skipped") &&
         mixed.output.canFind("--manifest-retry"), "one changed record blocked independently");
     expect("tree explicit retry", treeCommand ~ ["--manifest-retry"], 0,
-        "status=changed");
+        "status=retry");
     need(readText(buildPath(treeOut, "a.txt")) == "tree\n" &&
         readText(buildPath(treeOut, "b.txt")) == "alter\n",
         "independent tree output bytes");

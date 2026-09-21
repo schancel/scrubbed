@@ -15,8 +15,11 @@ Previously committed rows remain intact. A completed run exits 0; a run with
 acknowledged per-document failures or unresolved retry decisions exits 1.
 
 `--explain` shows one decision per file. For acknowledged failures it includes
-the exact document ID and sink key in `detail`; the summary counts include
-each processed file once. The failure row itself remains the restart authority.
+the exact document ID, sink key, and count of prior terminal acknowledged
+manifest decisions in `detail`; the summary counts include each processed file
+once. The failure row itself remains the restart authority. Pre-plan open/read
+faults cannot be assigned an exact manifest key and therefore remain fatal;
+the injected read/decode probes exercise post-plan routing only.
 
 The release-active fault harness is `experiments/failure_policy/check.d`.
 Build a release binary with `DFLAGS=-d-version=FailurePolicyHarness dub build

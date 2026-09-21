@@ -7,7 +7,7 @@ import effects.jsonl_stream : JsonlFailure, JsonlLimits;
 import effects.stdio_stream : processStandardJsonl;
 import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
     configDigest, inputDigest, outputDigest;
-import effects.atomic_piece_sink : writeAtomicPieces;
+import effects.atomic_piece_sink : OutputPolicyViolation, writeAtomicPieces;
 import effects.failure_policy : recordDocumentFailure;
 import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
@@ -545,6 +545,12 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
             throw new Exception("mapped input length changed");
         phase = FailurePhase.sink;
         sinkTouched = true;
+        version (FailurePolicyHarness) {
+            if (exists(databasePath ~ ".fault-policy-swap")) {
+                import std.file : symlink;
+                symlink(file, destination);
+            }
+        }
         version (FailurePolicyHarness) failureAt(databasePath, "sink", file);
         writeAtomicPieces(destination, content.pieces());
         version (ManifestCliHarness) manifestKillAt(databasePath, "after-publish");
@@ -559,10 +565,14 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
         if (dryRun) throw failure;
         if (phase == FailurePhase.policy || phase == FailurePhase.scheduler)
             throw failure;
+        if (cast(OutputPolicyViolation)failure !is null)
+            phase = FailurePhase.policy;
         if (phase == FailurePhase.filter && cast(UTFException)failure !is null)
             phase = FailurePhase.decode;
+        const fatal = phase == FailurePhase.policy || phase == FailurePhase.manifest;
         auto record = FailureRecord(id, key.sink, phase,
-            FailureClass.document, sinkTouched, completedPrefix, failure.msg, failure);
+            fatal ? FailureClass.fatal : FailureClass.document,
+            sinkTouched, completedPrefix, failure.msg, failure);
         // A manifest write or acknowledgment failure is fatal; it must never
         // be mistaken for a quarantined document.
         try {
@@ -571,9 +581,10 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
                     (in FailureRecord logged) { failureAt(databasePath, "log-ack", file); });
             } else recordDocumentFailure(manifest, key, record);
         } catch (Exception acknowledgmentFailure) {
+            record.classification = FailureClass.fatal;
             throw new FatalDocumentFailure(record, acknowledgmentFailure);
         }
-        if (phase == FailurePhase.manifest)
+        if (fatal)
             throw new FatalDocumentFailure(record, failure);
         throw new DocumentFailure(record);
     }
@@ -783,16 +794,21 @@ int runApp(string[] args) {
             if (explain) {
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, documentFailure is null ?
-                        (manifestDecision is null ? "failure" : manifestDecision.status) :
+                        (fatalDocumentFailure !is null ?
+                            (fatalDocumentFailure.record.sinkTouched ? "uncertain" : "failed") :
+                            (manifestDecision is null ? "failure" : manifestDecision.status)) :
                         (documentFailure.record.sinkTouched ? "uncertain" : "failed"),
                     error.msg, documentFailure !is null ?
                         ("id=" ~ documentFailure.record.documentId.text ~
-                        " sink=" ~ documentFailure.record.sinkKey) :
+                        " sink=" ~ documentFailure.record.sinkKey ~
+                        " completed-prefix=" ~ documentFailure.record.completedPrefix.to!string) :
                         (fatalDocumentFailure !is null ?
                             ("id=" ~ fatalDocumentFailure.record.documentId.text ~
-                            " sink=" ~ fatalDocumentFailure.record.sinkKey) : ""));
+                            " sink=" ~ fatalDocumentFailure.record.sinkKey ~
+                            " completed-prefix=" ~ fatalDocumentFailure.record.completedPrefix.to!string) : ""));
             }
             if (explain) pending.remove(file);
+            if (documentFailure !is null) ++manifestCompletedPrefix;
         }, (Throwable error) {
             return cast(DocumentFailure)error is null &&
                 cast(ManifestDecisionFailure)error is null;

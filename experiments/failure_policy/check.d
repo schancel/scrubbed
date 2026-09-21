@@ -4,7 +4,7 @@ module experiments.failure_policy.check;
 import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
 import std.conv : to;
-import std.file : exists, mkdir, readText, rmdirRecurse, tempDir, write;
+import std.file : exists, isSymlink, mkdir, readText, rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.process : execute;
 import std.stdio : writeln;
@@ -90,6 +90,37 @@ int main(string[] args) {
         readText(buildPath(output, "good.txt")) == "good\n" &&
         !exists(buildPath(output, "bad.txt")), "second-document continuation");
     writeln("ok: second-document continuation");
+    auto twoFolder = buildPath(root, "two-failures");
+    mkdir(twoFolder);
+    auto twoInput = buildPath(twoFolder, "input");
+    auto twoOutput = buildPath(twoFolder, "output");
+    auto twoDb = buildPath(twoFolder, "state.db");
+    mkdir(twoInput);
+    write(buildPath(twoInput, "a.txt"), "a");
+    write(buildPath(twoInput, "b.txt"), "b");
+    write(twoDb ~ ".fault-filter", "");
+    result = execute([args[1], "run", "--input", twoInput, "--output", twoOutput,
+        "--manifest", twoDb, "--filters", "normalize-line-endings", "--explain"]);
+    need(result.status == 1 && result.output.canFind("0 succeeded, 2 failed") &&
+        result.output.canFind("completed-prefix=0") &&
+        result.output.canFind("completed-prefix=1") &&
+        countState(twoDb, "failed") == 2, "two acknowledged failure prefixes");
+    writeln("ok: two acknowledged failure prefixes");
+    auto policyFolder = buildPath(root, "policy-swap");
+    mkdir(policyFolder);
+    auto policyInput = buildPath(policyFolder, "input.txt");
+    auto policyOutput = buildPath(policyFolder, "output.txt");
+    auto policyDb = buildPath(policyFolder, "state.db");
+    write(policyInput, "original");
+    write(policyDb ~ ".fault-policy-swap", "");
+    result = execute([args[1], "run", "--input", policyInput,
+        "--output", policyOutput, "--manifest", policyDb,
+        "--filters", "normalize-line-endings", "--explain"]);
+    need(result.status == 2 && result.output.canFind("FATAL") &&
+        result.output.canFind("status=uncertain") &&
+        state(policyDb) == "uncertain" && isSymlink(policyOutput) &&
+        readText(policyInput) == "original", "post-preflight policy swap fatal");
+    writeln("ok: post-preflight policy swap fatal");
     auto fatalFolder = buildPath(root, "fatal");
     mkdir(fatalFolder);
     auto fatalInput = buildPath(fatalFolder, "input.txt");

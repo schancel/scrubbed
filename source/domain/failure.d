@@ -12,6 +12,7 @@ struct FailureRecord {
     FailurePhase phase;
     FailureClass classification;
     bool sinkTouched;
+    /// Prior terminal, durably acknowledged manifest decisions, including failures.
     size_t completedPrefix;
     string reason;
     Exception cause;

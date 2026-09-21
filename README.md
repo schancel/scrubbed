@@ -113,6 +113,11 @@ The [bounded-input contract](docs/bounded-input.md) and `TODO.md` describe
 the remaining scale-readiness gates. Scrubbed is not yet a proven
 terabyte-scale engine.
 
+Standalone POSIX effects now demonstrate [bounded mapped windows](docs/windowed-input.md)
+and [atomic streaming of content pieces](docs/atomic-piece-output.md), including
+a verified 1.075 GB output without an output-sized D allocation. Neither
+effect is wired into the CLI or proves that context-heavy filters can stream.
+
 ## Status
 
 Phases 0-2 are usable within the documented scope; JSON configuration from

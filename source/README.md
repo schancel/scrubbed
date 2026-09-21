@@ -75,6 +75,14 @@ Cancellation never fetches the next lazy input after it is observed. Memory
 and faulting D test adapters use this same path. It is not wired to CLI, and
 does not establish production backpressure or corpus-throughput readiness.
 
+[`effects/windowed_input.d`](effects/windowed_input.d) is a separate POSIX
+single-active-lease mmap reader with checked borrows, bounded owning carry,
+and mapped-byte counters. [`effects/atomic_piece_sink.d`](effects/atomic_piece_sink.d)
+streams `Content.pieces()` through a bounded buffer to one atomic local
+destination. Both have D evidence harnesses, but neither is wired to CLI or
+to the future document-stage runner; their resource bounds do not make
+context-heavy filters streaming.
+
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.

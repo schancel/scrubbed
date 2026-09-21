@@ -203,10 +203,12 @@ is useful, but it is not sufficient on its own.
       ceilings, including cancellation, worker faults, oversize files and
       detected size changes. The callback limit is not a count of every OS
       handle; whole-file output allocations and input mutation races remain.
-- [ ] Add windowed mmap or buffered chunks for very large individual files.
-      Preserve UTF-8 codepoint boundaries and filter state across windows
-      (including CRLF pairs, HTML entities, and mojibake candidate spans), with
-      adversarial boundary fixtures.
+- [~] Add windowed mmap or buffered chunks for very large individual files.
+      A standalone POSIX effect bounds one active mapping, checks borrowed
+      lifetimes, and copies bounded handoff state; a D harness tests UTF-8,
+      CRLF, entity and mojibake candidate split offsets plus a sparse file
+      (`docs/windowed-input.md`). The CLI and actual filter algorithms still
+      need stateful streaming integration and adversarial huge-file proof.
 - [ ] Define which filters are truly streaming and which require document
       context. Fuse compatible range stages so the registry boundary does not
       force a whole-file allocation after every stage; give contextual stages
@@ -215,6 +217,11 @@ is useful, but it is not sufficient on its own.
       topology (local SSD, network filesystem, object-store staging). Verify
       actual OS descriptor and mapping counts stay bounded under low OS limits;
       the current local callback and input-byte tokens are narrower evidence.
+- [~] Stream ordered content pieces to atomic local output. A standalone
+      POSIX one-destination sink uses a bounded buffer and same-directory
+      rename, with injected-fault rollback and 1.075/2.149 GB D evidence
+      (`docs/atomic-piece-output.md`). It is not CLI-wired; parent-directory
+      crash durability, concurrent writers, and S3 commits remain open.
 - [~] Evaluate a direct S3 client/auth/capability boundary. A D-only local
       probe now tests fake credential precedence, fail-closed options, loopback
       endpoint/TLS behavior, and publication-safe error labels

@@ -14,7 +14,7 @@ import std.digest.sha : sha256Of;
 import std.datetime : dur;
 import std.file : SpanMode, copy, dirEntries, exists, getSize, mkdirRecurse,
     read, readText, remove, rename, rmdirRecurse, tempDir, write;
-import std.json : JSONValue;
+import std.json : JSONValue, parseJSON;
 import std.path : buildPath, relativePath;
 import std.process : execute, spawnProcess, wait;
 import std.stdio : File, stderr, writeln;
@@ -106,6 +106,41 @@ private long linuxRamBytes(string meminfo) {
         matches++;
     }
     require(matches == 1, "Linux /proc/meminfo must have one MemTotal");
+    return result;
+}
+
+private long freeScratchBytes(string root) {
+    auto lines = checked(["df", "-Pk", root]).splitLines;
+    require(lines.length == 2, "unexpected df -Pk output");
+    auto fields = lines[1].split();
+    require(fields.length >= 6, "df -Pk lacks available blocks");
+    auto kib = fields[$ - 3].to!long;
+    require(kib > 0 && kib <= long.max / 1024, "invalid free scratch blocks");
+    return kib * 1024;
+}
+
+private JSONValue largePreflight(long ramBytes, long freeBytes,
+                                 long timeBudgetSeconds) {
+    // Four corpora total: two layouts at each size. Allow copies, alternate
+    // outputs, manifest state, restart input/output, and filesystem headroom.
+    enum plannedInputBytes = 2L * (16_776_960L + 134_215_680L);
+    enum reservedScratchBytes = 4L * plannedInputBytes + 512L * 1024 * 1024;
+    enum minimumRamBytes = 2L * 1024 * 1024 * 1024;
+    enum minimumTimeSeconds = 900L;
+    require(plannedInputBytes < ramBytes,
+        "large corpus exceeds RAM; >RAM needs a separate capacity contract");
+    require(ramBytes >= minimumRamBytes, "insufficient RAM for large verification");
+    require(freeBytes >= reservedScratchBytes,
+        "insufficient scratch headroom before large corpus creation");
+    require(timeBudgetSeconds >= minimumTimeSeconds,
+        "large run requires at least 900 seconds of available time");
+    JSONValue result = JSONValue([
+        "scratch_free_bytes_before_fixture": JSONValue(freeBytes),
+        "scratch_reservation_bytes": JSONValue(reservedScratchBytes),
+        "planned_input_bytes": JSONValue(plannedInputBytes),
+        "time_budget_seconds_declared": JSONValue(timeBudgetSeconds),
+        "minimum_time_seconds": JSONValue(minimumTimeSeconds),
+        "capacity_policy": JSONValue("checked before large fixture creation; not a >RAM or deadline guarantee")]);
     return result;
 }
 
@@ -241,16 +276,18 @@ private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0,
 }
 
 private string expectedBytes(size_t records) {
-    string result;
-    foreach (_; 0 .. records) result ~= "alpha\nbeta\ngammadelta\n";
-    return result;
+    return "alpha\nbeta\ngammadelta\n".replicate(records);
 }
 
 private void fixture(string root, size_t files, size_t records) {
     mkdirRecurse(root);
+    enum chunkRecords = 1024;
+    auto chunk = "alpha\r\nbeta\rgamma\x01delta\n".replicate(chunkRecords);
     foreach (i; 0 .. files) {
         auto file = File(buildPath(root, "doc-" ~ i.to!string ~ ".txt"), "wb");
-        foreach (_; 0 .. records) file.rawWrite("alpha\r\nbeta\rgamma\x01delta\n");
+        foreach (_; 0 .. records / chunkRecords) file.rawWrite(chunk);
+        foreach (_; 0 .. records % chunkRecords)
+            file.rawWrite("alpha\r\nbeta\rgamma\x01delta\n");
     }
 }
 
@@ -446,7 +483,8 @@ private void validateRestart(JSONValue probe) {
 }
 
 private void validate(JSONValue report) {
-    require(report["schema"].str == "scrubbed-pipeline-v3", "report schema");
+    bool large = report["schema"].str == "scrubbed-pipeline-v4";
+    require(large || report["schema"].str == "scrubbed-pipeline-v3", "report schema");
     foreach (key; ["source_sha", "binary_sha256", "harness_sha256", "os",
                    "cpu"])
         require(key in report.object && report[key].str.length,
@@ -473,6 +511,36 @@ private void validate(JSONValue report) {
     require(report["unsupported"].toString == unsupportedCases().toString,
         "unsupported status must be host-neutral and complete");
     require(report["cases"].array.length > 0, "zero cases");
+    if (large) {
+        require(report["corpus_mode"].str == "small-and-large" &&
+            report["cases"].array.length == 12,
+            "v4 must contain all six layouts and manifest variants");
+        auto preflight = report["large_preflight"];
+        require(preflight["planned_input_bytes"].integer ==
+                    2L * (16_776_960L + 134_215_680L) &&
+            preflight["scratch_free_bytes_before_fixture"].integer >=
+                preflight["scratch_reservation_bytes"].integer &&
+            preflight["time_budget_seconds_declared"].integer >=
+                preflight["minimum_time_seconds"].integer &&
+            preflight["minimum_time_seconds"].integer == 900,
+            "v4 capacity preflight absent or unsafe");
+        foreach (index, item; report["cases"].array) {
+            auto layout = index / 2;
+            auto expectedName = ["many-small", "few-large", "many-small-16m",
+                "few-large-16m", "many-small-128m", "few-large-128m"][layout];
+            if (index % 2) expectedName ~= "/manifest";
+            auto inputBytes = layout < 2 ? 786_432L :
+                layout < 4 ? 16_776_960L : 134_215_680L;
+            require(item["name"].str == expectedName,
+                "v4 case order or layout changed");
+            foreach (sample; item["samples"].array)
+                require(sample["input_fixture_bytes"].integer == inputBytes &&
+                    sample["input_tree_bytes_observed"].integer == inputBytes &&
+                    sample["output_tree_bytes_observed"].integer ==
+                        sample["expected_output_bytes"].integer,
+                    "v4 corpus size or output footprint mismatch");
+        }
+    }
     foreach (item; report["cases"].array) {
         require(item["samples"].array.length == 3, "zero/partial samples");
         foreach (sample; item["samples"].array)
@@ -508,6 +576,38 @@ private void selfTest() {
     report["cases"] = JSONValue([JSONValue(["samples":
         JSONValue([sample, sample, sample])])]);
     validate(report);
+    auto v4 = parseJSON(report.toString);
+    v4["schema"] = "scrubbed-pipeline-v4";
+    v4["corpus_mode"] = "small-and-large";
+    v4["large_preflight"] = largePreflight(4L * 1024 * 1024 * 1024,
+        4L * 1024 * 1024 * 1024, 900);
+    JSONValue[] v4Cases;
+    foreach (index; 0 .. 12) {
+        auto name = ["many-small", "few-large", "many-small-16m",
+            "few-large-16m", "many-small-128m", "few-large-128m"][index / 2];
+        if (index % 2) name ~= "/manifest";
+        long inputBytes = index < 4 ? 786_432 :
+            index < 8 ? 16_776_960 : 134_215_680;
+        auto v4Sample = parseJSON(sample.toString);
+        v4Sample["input_fixture_bytes"] = inputBytes;
+        v4Sample["input_tree_bytes_observed"] = inputBytes;
+        v4Sample["expected_output_bytes"] = inputBytes;
+        v4Sample["output_tree_bytes_observed"] = inputBytes;
+        v4Cases ~= JSONValue(["name": JSONValue(name),
+            "samples": JSONValue([v4Sample, v4Sample, v4Sample])]);
+    }
+    v4["cases"] = JSONValue(v4Cases);
+    validate(v4);
+    auto invalidV4 = parseJSON(v4.toString);
+    invalidV4["cases"][4]["samples"][0]["input_tree_bytes_observed"] = 1;
+    bool v4Failed;
+    try { validate(invalidV4); } catch (Exception) { v4Failed = true; }
+    require(v4Failed, "v4 wrong fixture footprint negative did not fail");
+    invalidV4 = parseJSON(v4.toString);
+    invalidV4["large_preflight"]["scratch_free_bytes_before_fixture"] = 1;
+    v4Failed = false;
+    try { validate(invalidV4); } catch (Exception) { v4Failed = true; }
+    require(v4Failed, "v4 false capacity claim negative did not fail");
     foreach (key; ["binary_sha256", "harness_sha256", "source_sha",
                    "harness_compiler_available_version"]) {
         auto bad = report;
@@ -609,6 +709,16 @@ private void selfTest() {
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "false quality claim did not fail");
+    failed = false;
+    try { largePreflight(4L * 1024 * 1024 * 1024,
+        1L * 1024 * 1024 * 1024, 900); }
+    catch (Exception) { failed = true; }
+    require(failed, "unsafe disk preflight negative did not fail");
+    failed = false;
+    try { largePreflight(4L * 1024 * 1024 * 1024,
+        4L * 1024 * 1024 * 1024, 899); }
+    catch (Exception) { failed = true; }
+    require(failed, "unsafe time preflight negative did not fail");
     auto root = buildPath(tempDir, "scrubbed-pipeline-test-" ~ randomUUID.toString);
     mkdirRecurse(root);
     scope(exit) rmdirRecurse(root);
@@ -803,18 +913,33 @@ int main(string[] args) {
             compareDos2unix(args[2], args[3], args.length == 5 ? args[4] : "");
             return 0;
         }
-        require(args.length == 2 || args.length == 3,
-            "usage: pipeline SCRUBBED_BINARY [REPORT_JSON]");
+        bool large = args.length == 5 && args[3] == "--large";
+        require(args.length == 2 || args.length == 3 || large,
+            "usage: pipeline SCRUBBED_BINARY [REPORT_JSON [--large TIME_BUDGET_SECONDS]]");
+        long timeBudgetSeconds;
+        if (large) timeBudgetSeconds = args[4].to!long;
         auto os = checked(["uname", "-s"]);
         require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
         auto root = privateScratch("scrubbed-pipeline-");
         scope(exit) rmdirRecurse(root);
+        auto ramBytes = os == "Darwin" ?
+            checked(["sysctl", "-n", "hw.memsize"]).to!long :
+            linuxRamBytes(readText("/proc/meminfo"));
+        auto freeBytes = freeScratchBytes(root);
+        JSONValue preflight;
+        if (large) preflight = largePreflight(ramBytes, freeBytes,
+            timeBudgetSeconds);
         auto binaryCopy = snapshotExecutable(args[1], root, "scrubbed-snapshot");
         JSONValue[] cases;
         JSONValue[] transitions;
-        foreach (index, name; ["many-small", "few-large"]) {
-            size_t files = [32, 2][index];
-            size_t records = [1024, 16384][index];
+        foreach (index, name; large ?
+                ["many-small", "few-large", "many-small-16m", "few-large-16m",
+                 "many-small-128m", "few-large-128m"] :
+                ["many-small", "few-large"]) {
+            size_t files = index % 2 == 0 ? 32 : 2;
+            size_t records = index < 2 ? (index == 0 ? 1024 : 16384) :
+                index < 4 ? (index == 2 ? 21845 : 349520) :
+                (index == 4 ? 174760 : 2796160);
             auto input = buildPath(root, name ~ "-input");
             auto output = buildPath(root, name ~ "-output");
             fixture(input, files, records);
@@ -830,7 +955,12 @@ int main(string[] args) {
                 "steps": manifestTransitions(command, input, output, files,
                     records, os == "Darwin")]);
         }
-        JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v3")]);
+        JSONValue report = JSONValue(["schema": JSONValue(large ?
+            "scrubbed-pipeline-v4" : "scrubbed-pipeline-v3")]);
+        if (large) {
+            report["corpus_mode"] = "small-and-large";
+            report["large_preflight"] = preflight;
+        }
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["binary_sha256"] = binaryCopy.sha256;
         report["binary_identity_policy"] = identityPolicy();
@@ -841,9 +971,7 @@ int main(string[] args) {
         report["cpu"] = os == "Darwin" ?
             checked(["sysctl", "-n", "machdep.cpu.brand_string"]) :
             linuxCpuModel(readText("/proc/cpuinfo"));
-        report["ram_bytes"] = os == "Darwin" ?
-            checked(["sysctl", "-n", "hw.memsize"]).to!long :
-            linuxRamBytes(readText("/proc/meminfo"));
+        report["ram_bytes"] = ramBytes;
         report["ram_source"] = os == "Darwin" ?
             "sysctl hw.memsize" : "/proc/meminfo MemTotal";
         report["harness_compiler_available_version"] =
@@ -859,7 +987,7 @@ int main(string[] args) {
         verifySnapshot(binaryCopy);
         report["unsupported"] = unsupportedCases();
         validate(report);
-        if (args.length == 3) write(args[2], report.toString ~ "\n");
+        if (args.length == 3 || large) write(args[2], report.toString ~ "\n");
         else writeln(report.toString);
         return 0;
     } catch (Exception error) {

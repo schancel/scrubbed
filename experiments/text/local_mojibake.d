@@ -2,6 +2,7 @@
 import core.memory : GC;
 import filters.mojibake : cp1252RoundTrip, fixMojibake, latin1RoundTrip,
     plausibilityScore;
+import std.exception : enforce;
 import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.stdio : writeln;
 
@@ -31,7 +32,11 @@ private struct Sample {
     string newExpected;
 }
 
-void main() {
+void main(string[] args) {
+    enforce(args.length == 1 || (args.length == 2 &&
+        (args[1] == "--probe-wrong-old-expected" ||
+         args[1] == "--probe-wrong-new-expected")),
+        "usage: local_mojibake [--probe-wrong-old-expected|--probe-wrong-new-expected]");
     immutable samples = [
         Sample("clean", "🙂 日本語 Ελληνικά العربية café 🐈",
             "🙂 日本語 Ελληνικά العربية café 🐈", "🙂 日本語 Ελληνικά العربية café 🐈"),
@@ -41,8 +46,14 @@ void main() {
         Sample("ambiguous", "🐈 café Â© Ω", "🐈 café Â© Ω", "🐈 café Â© Ω"),
     ];
     foreach (sample; samples) {
-        assert(oldRepair(sample.input) == sample.oldExpected, sample.name ~ " old");
-        assert(fixMojibake(sample.input) == sample.newExpected, sample.name ~ " new");
+        const wrongOld = args.length == 2 && args[1] == "--probe-wrong-old-expected" &&
+            sample.name == "mixed";
+        const wrongNew = args.length == 2 && args[1] == "--probe-wrong-new-expected" &&
+            sample.name == "mixed";
+        enforce(oldRepair(sample.input) == (wrongOld ? "intentionally wrong" : sample.oldExpected),
+            sample.name ~ " old output mismatch");
+        enforce(fixMojibake(sample.input) == (wrongNew ? "intentionally wrong" : sample.newExpected),
+            sample.name ~ " new output mismatch");
         foreach (version_; 0 .. 2) {
             enum iterations = 100;
             GC.collect();

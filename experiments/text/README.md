@@ -15,6 +15,11 @@ in `GC.stats().usedSize` after a collection before the loop. That heap delta
 is retained GC memory, not a count of all allocations or a throughput claim.
 Run-to-run timing and GC collection can vary. The trace does not replace the
 F01 or T03 quality gates.
+Both expected-output checks remain active under `-release`. Run
+`/tmp/scrubbed-local-mojibake --probe-wrong-old-expected` and
+`/tmp/scrubbed-local-mojibake --probe-wrong-new-expected` to deliberately
+substitute a wrong expected output; each must exit nonzero before timing the
+mixed sample.
 
 `compare_cli.d` reads JSON reports from the unchanged A00 D CLI harness,
 requires identical fixture/harness hashes and byte-exact successful outputs,

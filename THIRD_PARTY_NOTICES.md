@@ -1,5 +1,26 @@
 # Third-party notices
 
+## Zstandard decompressor
+
+The pinned Zstandard v1.5.7 decompression-only source is statically compiled
+for macOS arm64. The source is dual-offered under BSD-style or GPLv2 terms;
+this project explicitly selects the BSD-style alternative and does **not**
+select GPLv2. The complete upstream [`LICENSE`](third_party/zstd/LICENSE),
+source-file copyright notices, exact release tarball SHA-256, per-file hash
+manifest, omitted modules, and no-network build are documented in
+[`third_party/zstd/README.md`](third_party/zstd/README.md). The included xxHash
+implementation is credited to Yann Collet / Meta in its source files and
+shares that license alternative. No separately licensed transitive library
+is included in the linked decompression graph. This prerequisite does not yet
+ship a compressed-WARC adapter.
+
+The approved successor may use macOS system zlib dynamically, with no claim of
+a standalone-static package. On the supported build host (macOS 26.6.2 arm64),
+the SDK `zlib.h` advertises zlib 1.2.12 and `/usr/bin/gzip` links
+`/usr/lib/libz.1.dylib` with current version 1.2.12 (`otool -L`). The successor
+must establish its own runtime version and exact final-binary linkage before
+making a gzip-adapter claim; this prerequisite does not link or call zlib.
+
 ## Lexbor
 
 The pinned Lexbor v3.0.0 source builds as a static archive, and the FFI/ABI

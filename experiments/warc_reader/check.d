@@ -102,7 +102,18 @@ class Parser {
                 else if (name == "warc-type") { require(kind.length == 0, "duplicate type"); kind = value; }
                 else if (name == "content-length") { require(lenText.length == 0, "duplicate length"); lenText = value; }
             }
-            require(id.startsWith("<urn:") && id.endsWith(">") && uri.length && date.length && kind.length, "required fields");
+            require(id.length >= 4 && id[0] == '<' && id[$ - 1] == '>' && date.length && kind.length,
+                "required fields");
+            auto idUri = id[1 .. $ - 1];
+            auto schemeEnd = idUri.indexOf(':');
+            require(schemeEnd > 0, "record-id URI scheme");
+            foreach (i, ch; idUri[0 .. cast(size_t) schemeEnd]) {
+                bool alpha = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+                bool allowed = alpha || (i > 0 && ((ch >= '0' && ch <= '9') || ch == '+' || ch == '-' || ch == '.'));
+                require(allowed, "record-id URI scheme");
+            }
+            if (kind == "warcinfo") require(uri.length == 0, "warcinfo target URI forbidden");
+            else if (kind != "metadata") require(uri.length > 0, "target URI required");
             require(lenText.length > 0, "missing length");
             size_t bodyLength;
             foreach (digit; lenText) {
@@ -127,9 +138,11 @@ import std.string : endsWith, split, strip, toLower;
 
 ubyte[] warc(string id, string uri, string kind, const(ubyte)[] block,
              string lenOverride = "") {
+    auto idUri = id.indexOf(':') >= 0 ? id : "urn:uuid:" ~ id;
     auto header = "WARC/1.1\r\nWARC-Type: " ~ kind ~
-        "\r\nWARC-Record-ID: <urn:uuid:" ~ id ~ ">\r\n" ~
-        "WARC-Target-URI: " ~ uri ~ "\r\nWARC-Date: 2026-09-21T00:00:00Z\r\n" ~
+        "\r\nWARC-Record-ID: <" ~ idUri ~ ">\r\n" ~
+        (uri.length ? "WARC-Target-URI: " ~ uri ~ "\r\n" : "") ~
+        "WARC-Date: 2026-09-21T00:00:00Z\r\n" ~
         "Content-Type: " ~ (kind == "conversion" ? "text/plain" : "application/http") ~
         "\r\nContent-Length: " ~ (lenOverride.length ? lenOverride : to!string(block.length)) ~ "\r\n\r\n";
     return (cast(ubyte[]) header.dup ~ block ~ cast(ubyte[]) "\r\n\r\n").dup;
@@ -312,6 +325,19 @@ void main() {
         plain.records[1].headerHash == "E6CB6BE0F41709D716C8D871E8AFF0A60D310FEAACF69784FE1DB617E02F97DF" &&
         plain.records[1].blockHash == "1F359813ACDD5E1A8BB0EF7AA6EBF46E477889FD0387BFD5050A1B0FF6A01D61",
         "pinned fixture hashes");
+    auto warcinfo = warc("https://archive.example/id/info", "", "warcinfo", cast(const(ubyte)[]) "");
+    auto info = new Parser("archive-key"); info.feed(warcinfo); info.finish();
+    require(info.records.length == 1 && info.records[0].id == "<https://archive.example/id/info>" &&
+        info.records[0].uri.length == 0 && info.records[0].kind == "warcinfo",
+        "non-URN warcinfo without target URI");
+    auto infoGzip = new Parser("archive-key"); decodeGzip(gzipMember(warcinfo), infoGzip);
+    auto infoZstd = new Parser("archive-key"); decodeZstd(zstdFrame(warcinfo), infoZstd);
+    require(infoGzip.records == info.records && infoZstd.records == info.records,
+        "warcinfo compressed equivalence");
+    auto meta = new Parser("archive-key");
+    meta.feed(warc("https://archive.example/id/meta", "", "metadata", cast(const(ubyte)[]) "tag"));
+    meta.finish();
+    require(meta.records.length == 1 && meta.records[0].uri.length == 0, "metadata optional target URI");
     rejects({ auto p = new Parser("k"); p.feed(warc("x", "u", "response", cast(const(ubyte)[]) "x", "x")); }, "invalid length");
     rejects({ auto p = new Parser("k"); p.feed(warc("x", "u", "response", cast(const(ubyte)[]) "x", "999999999999999999999999")); }, "overflow length");
     rejects({ auto p = new Parser("k"); p.feed(warc("x", "u", "response", cast(const(ubyte)[]) "x", "65537")); }, "body cap");
@@ -328,9 +354,13 @@ void main() {
     rejects({ auto p = new Parser("k"); decodeGzip(gz[0 .. $ - 1], p); }, "truncated gzip");
     rejects({ auto p = new Parser("k"); decodeZstd(zs[0 .. $ - 1], p); }, "truncated zstd");
     auto corruptGz = gz.dup; corruptGz[$ - 5] ^= 0xff;
-    rejects({ auto p = new Parser("k"); decodeGzip(corruptGz, p); }, "corrupt gzip");
+    auto partialGz = new Parser("k");
+    rejects({ decodeGzip(corruptGz, partialGz); }, "corrupt gzip");
+    require(partialGz.records.length > 0, "gzip partial-state demonstration");
     auto corruptZs = zs.dup; corruptZs[$ - 5] ^= 0xff;
-    rejects({ auto p = new Parser("k"); decodeZstd(corruptZs, p); }, "corrupt zstd");
+    auto partialZs = new Parser("k");
+    rejects({ decodeZstd(corruptZs, partialZs); }, "corrupt zstd");
+    require(partialZs.records.length > 0, "zstd partial-state demonstration");
     auto large = new ubyte[maxBody + 1]; large[] = 'a';
     auto hugeGz = gzipMember(warc("x", "u", "response", large));
     rejects({ auto p = new Parser("k"); decodeGzip(hugeGz, p); }, "high-ratio oversized body");

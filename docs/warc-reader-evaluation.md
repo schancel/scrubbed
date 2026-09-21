@@ -27,11 +27,15 @@ presentation URL is assigned as canonical document identity here.
 
 ## Observed on macOS arm64
 
-The D-only [probe](../experiments/warc_reader/check.d) generates two records
+The D-only [probe](../experiments/warc_reader/check.d) generates two main records
 and checks plain, gzip-member, and zstd-frame decoded records for equal ID,
 URI, date, kind, source key, header SHA-256, body SHA-256, and block length.
 The response contains HTTP header bytes plus `hi\0there`; the WET-style
-conversion contains UTF-8 `café`. Exact hashes observed:
+conversion contains UTF-8 `café`. Separate positive fixtures exercise
+`warcinfo` without a Target-URI and with a bracketed non-URN HTTPS record ID
+through plain, gzip, and zstd decode, plus `metadata` with optional absent
+Target-URI. The parser checks a record-ID URI scheme's basic character shape;
+it does **not** fully validate RFC 3986 URIs. Exact main-fixture hashes observed:
 
 | Record ID suffix | Header SHA-256 | Body SHA-256 |
 | --- | --- | --- |
@@ -44,10 +48,15 @@ member, truncated/corrupt zstd frame, compressed-input cap, and a highly
 compressible oversized block for each codec. These are code checks via
 exceptions, not D `assert`, so `-release` does not remove them. One-byte input
 chunks and 127-byte output chunks stress progress and boundary handling.
-Unknown fields are ignored. Field names are handled case-insensitively, but
+Unknown fields are ignored. The probe requires Target-URI for every evaluated
+type except `warcinfo` (forbidden) and `metadata` (optional), consistent with
+the WARC 1.1 field rule. Field names are handled case-insensitively, but
 folded UTF-8 headers and RFC 2047 encoded-word decoding required of full
 WARC/1.1 readers are not implemented. A failure rejects the entire archive, not a
-best-effort skip; no resynchronization is promised.
+best-effort skip; no resynchronization is promised. The parser can retain
+earlier or current records when a late gzip/zstd checksum fails; release-active
+negative cases prove this partial state. A caller **must discard the parser
+and all its records on any decode error**. There is no atomic rollback claim.
 
 Bounds precede potentially large decompression output: at most 1 MiB
 compressed input in memory; fixed 127-byte inflate output; at most 128 KiB

@@ -5,7 +5,6 @@ import std.digest.sha : sha256Of;
 import std.digest : LetterCase, toHexString;
 import std.exception : enforce;
 import std.conv : to;
-import std.mmfile : MmFile;
 import std.string : indexOf;
 import std.uni : normalize;
 import std.utf : validate;
@@ -118,24 +117,25 @@ private void appendField(ref Appender!(ubyte[]) bytes, string field) {
     bytes.put(cast(const(ubyte)[]) field);
 }
 
-/// Owns the backing lifetime for borrowed byte ranges. A file mapping is
-/// created here, never accepted from a caller that could close it separately.
-/// Close invalidates every view, including copies of a view struct.
+/// Owns the backing lifetime for borrowed byte ranges. Effects may transfer
+/// an opaque release callback with borrowed bytes; no concrete I/O is opened
+/// here. Close invalidates every view, including copies of a view struct.
 final class DocumentViewOwner {
     private const(ubyte)[] bytes;
-    private MmFile mapping;
+    private void delegate() releaseBacking;
     private bool closed;
 
     /// Borrow GC-owned bytes without copying. The caller must not free or
     /// reallocate the array while this owner is open; mutation remains visible.
     this(ubyte[] bytes) { this.bytes = bytes; }
 
-    /// Open and exclusively own a mapping until close; no whole-file copy.
-    static DocumentViewOwner mapFile(string filename) {
-        auto owner = new DocumentViewOwner(cast(ubyte[]) null);
-        owner.mapping = new MmFile(filename);
-        owner.bytes = cast(const(ubyte)[]) owner.mapping[];
-        return owner;
+    /// Take a checked byte view and its backing lifetime together. The caller
+    /// must not independently release or mutate the backing after transfer.
+    /// The callback is invoked once by close; it does not escape this owner.
+    this(const(ubyte)[] bytes, void delegate() releaseBacking) {
+        enforce(releaseBacking !is null, "borrowed backing needs a release callback");
+        this.bytes = bytes;
+        this.releaseBacking = releaseBacking;
     }
 
     DocumentView view(size_t start, size_t length) {
@@ -149,10 +149,9 @@ final class DocumentViewOwner {
         if (closed) return;
         closed = true;
         bytes = null;
-        if (mapping !is null) {
-            destroy(mapping);
-            mapping = null;
-        }
+        auto release = releaseBacking;
+        releaseBacking = null;
+        if (release !is null) release();
     }
 }
 
@@ -317,36 +316,15 @@ unittest {
     assert(GC.stats().usedSize <= before + 1024 * 1024);
     assert(largeOwner.view(0, 1024).size == 1024);
     largeOwner.close();
-}
 
-unittest {
-    import core.memory : GC;
-    import std.exception : assertThrown;
-    import std.file : exists, remove, tempDir, write;
-    import std.path : buildPath;
-    import std.stdio : File;
-    import std.uuid : randomUUID;
-
-    auto path = buildPath(tempDir(), "scrubbed-view-" ~ randomUUID().toString());
-    scope (exit) if (exists(path)) remove(path);
-    write(path, "mapped bytes");
-    auto owner = DocumentViewOwner.mapFile(path);
-    auto view = owner.view(7, 5);
-    assert(view.at(0) == 'b');
-    assert(view.copy() == cast(const(ubyte)[]) "bytes");
-    owner.close();
-    assertThrown(view.at(0));
-
-    // Sparse input exercises the mmap path without allocating an input-sized
-    // D array. Constructing its owner must not duplicate the full file in GC.
-    {
-        auto file = File(path, "wb");
-        file.seek(32 * 1024 * 1024 - 1);
-        file.rawWrite([cast(ubyte) 'z']);
-    }
-    auto before = GC.stats().usedSize;
-    auto largeOwner = DocumentViewOwner.mapFile(path);
-    assert(GC.stats().usedSize <= before + 1024 * 1024);
-    assert(largeOwner.view(32 * 1024 * 1024 - 1, 1).at(0) == 'z');
-    largeOwner.close();
+    size_t releases;
+    auto leased = new DocumentViewOwner(cast(const(ubyte)[]) backing,
+        () { ++releases; });
+    auto borrowed = leased.view(0, 1);
+    auto copiedView = borrowed;
+    leased.close();
+    leased.close();
+    assert(releases == 1);
+    assertThrown(borrowed.at(0));
+    assertThrown(copiedView.size);
 }

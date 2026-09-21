@@ -9,7 +9,7 @@ int main(string[] args) {
     try {
         return runApp(args);
     } catch (Exception error) {
-        stderr.writeln("scrubd: ", error.msg);
+        stderr.writeln("scrubbed: ", error.msg);
         return 2;
     }
 }

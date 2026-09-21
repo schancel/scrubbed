@@ -1,4 +1,4 @@
-/// Command-line orchestration and filesystem boundary for scrubd.
+/// Command-line orchestration and filesystem boundary for scrubbed.
 module cli;
 
 import core.atomic : atomicLoad, atomicOp;
@@ -124,7 +124,7 @@ private void atomicWrite(string destination, string outputRoot, const void[] con
     }
 
     auto temporary = buildPath(parent, "." ~ baseName(destination) ~
-        ".scrubd-" ~ randomUUID.toString ~ ".tmp");
+        ".scrubbed-" ~ randomUUID.toString ~ ".tmp");
     scope(failure) if (exists(temporary)) remove(temporary);
     write(temporary, content);
     if (destinationExists)
@@ -238,7 +238,7 @@ int runApp(string[] args) {
         "threads", "Worker thread count for the TaskPool (default: all cores)", &nThreads,
         "list-filters", "Print registered filter names and exit", &listFilters);
     if (helpInfo.helpWanted) {
-        defaultGetoptPrinter("scrubd", helpInfo.options);
+        defaultGetoptPrinter("scrubbed", helpInfo.options);
         return 0;
     }
     if (listFilters) {
@@ -310,41 +310,41 @@ unittest {
     import std.exception : assertThrown;
     import std.file : rmdirRecurse, tempDir;
 
-    auto root = buildPath(tempDir, "scrubd-cli-" ~ randomUUID.toString);
+    auto root = buildPath(tempDir, "scrubbed-cli-" ~ randomUUID.toString);
     scope(exit) if (exists(root)) rmdirRecurse(root);
     mkdir(root);
-    assert(runApp(["scrubd"]) == 2);
+    assert(runApp(["scrubbed"]) == 2);
     assert(backgroundWorkers(1) == 0);
     assert(backgroundWorkers(4) == 3);
 
     auto same = buildPath(root, "same.txt");
     write(same, "already clean");
-    assert(runApp(["scrubd", "--input", same, "--output", same,
+    assert(runApp(["scrubbed", "--input", same, "--output", same,
         "--filters", "fix-mojibake", "--threads", "1"]) == 0);
     assert(readText(same) == "already clean");
 
     auto empty = buildPath(root, "empty.txt");
     auto emptyOut = buildPath(root, "empty-out.txt");
     write(empty, "");
-    assert(runApp(["scrubd", "--input", empty, "--output", emptyOut,
+    assert(runApp(["scrubbed", "--input", empty, "--output", emptyOut,
         "--threads", "1"]) == 0);
     assert(exists(emptyOut) && getSize(emptyOut) == 0);
 
     auto inputDir = buildPath(root, "input");
     mkdir(inputDir);
-    assertThrown(runApp(["scrubd", "--input", inputDir,
+    assertThrown(runApp(["scrubbed", "--input", inputDir,
         "--output", buildPath(inputDir, "out"), "--threads", "1"]));
-    assertThrown(runApp(["scrubd", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
         "--config", "x.json", "--filters", "fix-mojibake"]));
-    assertThrown(runApp(["scrubd", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
         "--config", "x.json", "--FILTERS", "fix-mojibake"]));
-    assertThrown(runApp(["scrubd", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
         "--threads", "0"]));
 
     auto badConfig = buildPath(root, "bad.json");
     write(badConfig, `{ "filters": [{ "name": "fix-mojibake", ` ~
         `"options": { "max-pass": 0 } }] }`);
-    assertThrown(runApp(["scrubd", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
         "--config", badConfig, "--threads", "1"]));
 
     auto invalidValueConfig = buildPath(root, "invalid-value.json");
@@ -353,7 +353,7 @@ unittest {
     auto noFiles = buildPath(root, "no-files");
     auto noFilesOutput = buildPath(root, "no-files-output");
     mkdir(noFiles);
-    assertThrown(runApp(["scrubd", "--input", noFiles,
+    assertThrown(runApp(["scrubbed", "--input", noFiles,
         "--output", noFilesOutput, "--config", invalidValueConfig,
         "--threads", "1"]));
     assert(!exists(noFilesOutput));
@@ -365,19 +365,19 @@ unittest {
     auto configuredInput = buildPath(root, "configured.txt");
     auto configuredOutput = buildPath(root, "configured-output.txt");
     write(configuredInput, "“schÃ¶n”\0");
-    assert(runApp(["scrubd", "--input", configuredInput,
+    assert(runApp(["scrubbed", "--input", configuredInput,
         "--output", configuredOutput, "--config", validConfig,
         "--threads", "1"]) == 0);
     assert(readText(configuredOutput) == `"schÃ¶n"`);
 
     auto blockedParent = buildPath(root, "not-a-directory");
     write(blockedParent, "x");
-    assertThrown(runApp(["scrubd", "--input", same,
+    assertThrown(runApp(["scrubbed", "--input", same,
         "--output", buildPath(blockedParent, "out.txt"), "--threads", "1"]));
 
     auto invalidUtf8 = buildPath(root, "invalid-utf8.bin");
     write(invalidUtf8, [cast(ubyte) 0xFF]);
-    assert(runApp(["scrubd", "--input", invalidUtf8,
+    assert(runApp(["scrubbed", "--input", invalidUtf8,
         "--output", buildPath(root, "invalid-output.txt"),
         "--threads", "1"]) == 1);
 
@@ -386,7 +386,7 @@ unittest {
     foreach (index; 0 .. 64)
         write(buildPath(sharedInput, index.to!string ~ ".txt"), "clean");
     auto sharedOutput = buildPath(root, "shared-output");
-    assert(runApp(["scrubd", "--input", dirName(sharedInput),
+    assert(runApp(["scrubbed", "--input", dirName(sharedInput),
         "--output", sharedOutput, "--filters", "fix-mojibake",
         "--threads", "4"]) == 0);
     foreach (index; 0 .. 64)
@@ -397,20 +397,20 @@ unittest {
         import std.file : symlink;
         auto link = buildPath(root, "input-link");
         symlink(same, link);
-        assertThrown(runApp(["scrubd", "--input", link,
+        assertThrown(runApp(["scrubbed", "--input", link,
             "--output", emptyOut, "--threads", "1"]));
 
         auto external = buildPath(root, "external.txt");
         auto outputLink = buildPath(root, "output-link.txt");
         write(external, "must survive");
         symlink(external, outputLink);
-        assertThrown(runApp(["scrubd", "--input", same,
+        assertThrown(runApp(["scrubbed", "--input", same,
             "--output", outputLink, "--threads", "1"]));
         assert(readText(external) == "must survive");
 
         auto treeLink = buildPath(inputDir, "outside-link");
         symlink(external, treeLink);
-        assertThrown(runApp(["scrubd", "--input", inputDir,
+        assertThrown(runApp(["scrubbed", "--input", inputDir,
             "--output", buildPath(root, "tree-output"), "--threads", "1"]));
     }
 }

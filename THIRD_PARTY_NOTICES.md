@@ -7,7 +7,7 @@ The mojibake detector design and selected regression-test inputs in
 model of [ftfy](https://github.com/rspeer/python-ftfy), copyright 2023 Robyn
 Speer, licensed under the Apache License 2.0.
 
-scrubd's implementation is independently written in D and currently covers
+scrubbed's implementation is independently written in D and currently covers
 only reversible Latin-1 and Windows-1252/UTF-8 round trips. It is not a full
 port of ftfy.
 

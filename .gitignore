@@ -1,4 +1,13 @@
 .dub
+scrubbed
+scrubbed-test-*
+scrubbed.so
+scrubbed.dylib
+scrubbed.dll
+libscrubbed.a
+scrubbed.a
+scrubbed.lib
+# Legacy build artifacts from before the executable rename.
 scrubd
 scrubd-test-*
 scrubd.so

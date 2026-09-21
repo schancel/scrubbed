@@ -17,8 +17,8 @@ Build and run it from the repository root:
 ```sh
 ldc2 -O -release -enable-inlining -Isource \
   benchmarks/mojibake_ranges.d source/filters/mojibake.d source/pipeline.d \
-  -of=/tmp/scrubd-mojibake-benchmark
-/tmp/scrubd-mojibake-benchmark
+  -of=/tmp/scrubbed-mojibake-benchmark
+/tmp/scrubbed-mojibake-benchmark
 ```
 
 On an Apple M4 with LDC 1.43.0, two consecutive runs produced these ranges:
@@ -47,8 +47,8 @@ git clone https://github.com/rspeer/python-ftfy.git /tmp/python-ftfy
 git -C /tmp/python-ftfy checkout 74dd0452b48286a3770013b3a02755313bd5575e
 ldc2 -O -release -Isource benchmarks/ftfy_corpus.d \
   source/filters/mojibake.d source/pipeline.d \
-  -of=/tmp/scrubd-ftfy-corpus
-/tmp/scrubd-ftfy-corpus \
+  -of=/tmp/scrubbed-ftfy-corpus
+/tmp/scrubbed-ftfy-corpus \
   /path/to/python-ftfy/tests/test-cases/negative.json \
   /path/to/python-ftfy/tests/test-cases/synthetic.json \
   /path/to/python-ftfy/tests/test-cases/in-the-wild.json \

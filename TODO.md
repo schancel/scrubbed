@@ -1,6 +1,11 @@
-# scrubd roadmap
+# scrubbed roadmap
 
 Status key: [x] done and verified, [~] partially done, [ ] not started.
+
+Planning status (2026-09-20): [67 accepted GitHub issues](https://github.com/schancel/scrubd/issues)
+cover the broader corpus-curation roadmap with 136 native dependency edges.
+Acceptance is not an implementation claim; worker readiness is tracked per
+issue. This file remains the status record for implemented work.
 
 ## Phase 0 — scaffold
 - [x] dub project, MIT license, git repo
@@ -77,10 +82,15 @@ Status key: [x] done and verified, [~] partially done, [ ] not started.
       specifying the filter chain and per-filter options. Implemented with
       ordered string/object entries; mojibake exposes `encodings` and
       `max-passes`; unknown keys are rejected by registry-owned option
-      schemas. See `scrubd.example.json`.
+      schemas. See `scrubbed.example.json`.
 - [ ] `--dry-run` / diff mode: show what would change without writing
       output, useful for validating the mojibake scorer against a new
       corpus before trusting it on real data.
+- [ ] Evaluate D `argparse` 2.x for a Cobra-like command tree: generated
+      root/subcommand help, typed options, validation, and shell completion.
+      Keep today's flags working while adding proposed `repair`/`extract`/`run`
+      verbs; test help text, errors, and exit codes. Parser choice should not
+      be confused with per-document throughput.
 
 ## Phase 4 — HTML->Markdown (`filters/html2md.d`, currently a stub)
 - [ ] Check code.dlang.org for an existing D HTML/XML parser before

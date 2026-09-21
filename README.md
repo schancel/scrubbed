@@ -1,4 +1,4 @@
-# scrubd
+# scrubbed
 
 A text-sanitization CLI in D: mojibake/encoding repair, normalization, and
 (eventually) HTML->Markdown conversion, composed as a pluggable filter
@@ -13,7 +13,7 @@ being upfront about that matters more than sounding impressive:
 
 - ftfy's real value isn't speed, it's years of tuned heuristics for
   distinguishing "this text is corrupted, fix it" from "this text is fine,
-  leave it alone." scrubd now has a conservative badness scorer for its
+  leave it alone." scrubbed now has a conservative badness scorer for its
   Latin-1/Windows-1252 scope. Against the current ftfy JSON corpus it repairs
   all 39 passing cases mechanically reachable through those two encodings
   and preserves all 48 encoding-negative cases. It is still not ftfy: other
@@ -50,9 +50,9 @@ normalization, and two basic normalization filters.
 
 ```
 dub build --build=release
-./scrubd --list-filters
-./scrubd --input path/to/docs --output path/to/clean --filters normalize-line-endings,strip-control
-./scrubd --input path/to/docs --output path/to/clean --config scrubd.example.json
+./scrubbed --list-filters
+./scrubbed --input path/to/docs --output path/to/clean --filters normalize-line-endings,strip-control
+./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -61,7 +61,7 @@ module (see `filters/normalize.d`) — nothing in `app.d` or `pipeline.d`
 needs to change to add one.
 
 `--config` accepts JSON containing an ordered `filters` array. Entries may be
-plain names or objects with `name` and `options`; see `scrubd.example.json`.
+plain names or objects with `name` and `options`; see `scrubbed.example.json`.
 `fix-mojibake` supports `encodings` (`latin1`, `cp1252`, or both) and
 `max-passes`. Unknown option names are errors, and `--config` cannot be
 combined with `--filters`. Put `uncurl-quotes` before it when typographic quotes surround
@@ -91,13 +91,16 @@ mapped as one region, the complete path list is retained, and output-producing
 stages may materialize whole-file strings. The explicit scale-readiness gates
 in `TODO.md` cover windowed/chunked processing, bounded in-flight bytes and
 descriptors, resumability, and benchmarks on datasets larger than RAM. Until
-those pass, scrubd is suitable for large collections of reasonably-sized
+those pass, scrubbed is suitable for large collections of reasonably-sized
 files, not yet a proven terabyte-scale engine.
 
 ## Status
 
 Phases 0-2 are usable within the documented scope; JSON configuration from
 Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
+The broader corpus-curation plan is tracked in
+[GitHub issues](https://github.com/schancel/scrubd/issues); accepted tickets do
+not imply the features are implemented or worker-ready.
 
 Reproducible D correctness and allocation microbenchmarks, including the
 reconstructed pre-range mojibake implementation, are under `benchmarks/`.

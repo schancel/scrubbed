@@ -149,7 +149,7 @@ private bool asciiLetter(dchar c) {
 private bool whitespace(dchar c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 /// Count unlikely character juxtapositions. This is a conservative subset of
-/// ftfy's badness model, restricted to the encodings scrubd supports.
+/// ftfy's badness model, restricted to the encodings scrubbed supports.
 size_t mojibakeBadness(Range)(Range text)
 if (isInputRange!Range) {
     dchar previous = dchar.init;

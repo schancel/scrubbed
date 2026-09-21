@@ -132,3 +132,33 @@ version metadata are also 1.2.12. Because this is runtime dynamic loading,
 `otool -L` on the probe does **not** list libz as a link-time load command;
 the D runtime may itself contain separate bundled zlib symbols, which the
 adapter does not call. No standalone-static package claim is made.
+
+## Local-file transport (partial W06 slice)
+
+`effects.warc_file.readWarcFile(root, relativePath, format, sourceKey, visit)`
+streams one local regular file through the plain, gzip, or zstd reader. The
+caller supplies a trusted input root and a stable source key; the relative path
+is not used as record identity. The function returns the exact count of
+callbacks that returned true. It opens each relative path component with
+`openat` and no-follow semantics, rejects absolute paths, empty/dot/dot-dot
+components, NUL, symlinks, directories, and non-regular leaves, and verifies
+the opened leaf with `fstat`. A FIFO leaf is opened nonblocking before being
+rejected, so it cannot hang the caller. The trusted root itself is opened as a
+no-follow directory; its own ancestor path is trusted by the caller.
+
+The transport reads into a fixed 16 KiB buffer and keeps the opened file
+descriptor through EOF, then calls the reader's `finish`. Compressed native
+state and the descriptor are explicitly released on success, parser failure,
+callback cancellation, and thrown callback exceptions. `WarcFileError`
+reports `phase` (`path`, `open`, `read`, `parser`, `cancel`, or `callback`),
+`completed`, and the original parser/callback exception when applicable.
+Earlier successful callbacks remain visible after a late error: there is no
+archive-wide rollback or resynchronization. A callback returning false is
+not counted as completed. The parser still checks compressed checksums before
+each member's callback, and preserves source key, ordinal, headers, and block.
+
+The adapter does **not** snapshot contents of a regular file modified by
+another process while it is open. It has no file-discovery, CLI, S3, WARC/1.0,
+Common Crawl, or throughput guarantee. Gzip retains the explicit macOS
+runtime system-zlib dependency. The release-active D on-disk probe is
+`ldc2 -O3 -release -i -Isource experiments/warc_reader/file_check.d .dub/zstd/libzstd_decompress.a -of=<binary> && <binary>`.

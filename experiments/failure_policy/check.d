@@ -6,7 +6,7 @@ import std.algorithm.searching : canFind, startsWith;
 import std.array : split;
 import std.conv : to;
 import std.file : SpanMode, dirEntries, exists, isSymlink, mkdir, readText,
-    rmdirRecurse, tempDir, write;
+    remove, rmdirRecurse, tempDir, write;
 import std.path : baseName, buildPath;
 import std.process : execute;
 import std.stdio : writeln;
@@ -324,6 +324,30 @@ int main(string[] args) {
         uncertainDecision.output.canFind("sink_key=\"local-primary:v1\"") &&
         state(decisionDb) == "uncertain", "uncertain exact manifest key");
     writeln("ok: exact unresolved manifest decisions");
+    auto aliasFolder = buildPath(root, "stored-destination-alias");
+    mkdir(aliasFolder);
+    auto aliasInput = buildPath(aliasFolder, "input.txt");
+    auto aliasOutput = buildPath(aliasFolder, "output.txt");
+    auto aliasDb = buildPath(aliasFolder, "state.db");
+    write(aliasInput, "one\r\n");
+    auto aliasCommand = [args[1], "run", "--input", aliasInput,
+        "--output", aliasOutput, "--manifest", aliasDb,
+        "--filters", "normalize-line-endings", "--explain"];
+    result = execute(aliasCommand);
+    need(result.status == 0 && state(aliasDb) == "committed" &&
+        readText(aliasOutput) == "one\n", "stored alias setup committed");
+    auto aliasId = firstDocumentId(aliasDb);
+    changeDestination(aliasDb, aliasDb);
+    result = execute(aliasCommand);
+    need(result.status == 2 && result.output.canFind("FATAL") &&
+        result.output.canFind("status=failure") &&
+        result.output.canFind("destination aliases manifest file") &&
+        result.output.canFind("document_id=\"" ~ aliasId ~ "\"") &&
+        result.output.canFind("sink_key=\"local-primary:v1\"") &&
+        result.output.split("EXPLAIN\tinput=").length == 2 &&
+        state(aliasDb) == "committed" && readText(aliasOutput) == "one\n",
+        "stored manifest alias is fatal without overwriting DB or output");
+    writeln("ok: stored manifest alias policy fatal");
     foreach (kind; ["changed", "unchanged"]) {
         auto positiveFolder = buildPath(root, "positive-" ~ kind);
         mkdir(positiveFolder);
@@ -341,6 +365,15 @@ int main(string[] args) {
             result.output.canFind("sink_key=\"local-primary:v1\"") &&
             result.output.split("EXPLAIN\tinput=").length == 2,
             kind ~ " exact manifest key once");
+        if (kind == "changed") {
+            remove(positiveOutput);
+            result = execute(positiveCommand);
+            need(result.status == 1 && result.output.canFind("status=uncertain") &&
+                result.output.canFind("document_id=\"" ~ positiveId ~ "\"") &&
+                result.output.canFind("sink_key=\"local-primary:v1\"") &&
+                state(positiveDb) == "uncertain",
+                "ordinary deleted output remains uncertain retry");
+        }
         writeln("ok: positive ", kind, " exact manifest key");
     }
     foreach (spec; ["open-EMFILE", "read-ENFILE", "fstat-ENOSPC",

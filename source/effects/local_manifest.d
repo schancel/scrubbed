@@ -8,7 +8,7 @@ import std.digest.sha : sha256Of, SHA256;
 import std.digest : LetterCase, toHexString;
 import core.stdc.stdlib : free;
 import core.stdc.errno : errno, EINTR, ENOSPC, EDQUOT, EMFILE, ENFILE;
-import effects.atomic_piece_sink : ResourceExhaustion;
+import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
 import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
 import core.sys.posix.unistd : close, read;
@@ -151,14 +151,21 @@ private string resolvedName(string path) {
 
 private extern(C) char* realpath(const(char)*, char*);
 
-private void safeRegularOrAbsent(string path) {
+private void safeRegularOrAbsent(string path, bool outputDestination = false) {
     bool link;
     try link = isSymlink(path);
     catch (FileException failure) {
         if (exists(path)) throw failure;
     }
+    if (outputDestination && link)
+        throw new OutputPolicyViolation("local manifest: symlink path refused: " ~ path);
     require(!link, "symlink path refused: " ~ path);
-    if (exists(path)) require(isFile(path), "non-regular path refused: " ~ path);
+    if (exists(path)) {
+        const regular = isFile(path);
+        if (outputDestination && !regular)
+            throw new OutputPolicyViolation("local manifest: non-regular path refused: " ~ path);
+        require(regular, "non-regular path refused: " ~ path);
+    }
 }
 
 private bool sameInode(string left, string right) {
@@ -323,13 +330,14 @@ final class LocalManifest {
     }
     private void safeDestination(string destination) {
         auto resolved = resolvedName(destination);
-        safeRegularOrAbsent(resolved);
-        require(resolved != databasePath && resolved != databasePath ~ "-wal" &&
-            resolved != databasePath ~ "-shm", "destination aliases manifest file");
-        require(!sameInode(resolved, databasePath) &&
-            !sameInode(resolved, databasePath ~ "-wal") &&
-            !sameInode(resolved, databasePath ~ "-shm"),
-            "destination hard-links manifest file");
+        safeRegularOrAbsent(resolved, true);
+        if (resolved == databasePath || resolved == databasePath ~ "-wal" ||
+            resolved == databasePath ~ "-shm")
+            throw new OutputPolicyViolation("local manifest: destination aliases manifest file");
+        if (sameInode(resolved, databasePath) ||
+            sameInode(resolved, databasePath ~ "-wal") ||
+            sameInode(resolved, databasePath ~ "-shm"))
+            throw new OutputPolicyViolation("local manifest: destination hard-links manifest file");
     }
 
     /// Planning never upgrades an existing failed, uncertain or committed row.
@@ -389,6 +397,7 @@ final class LocalManifest {
                 hashFile(row.destination) == row.outputSha256)
                 return Inspection.verifiedCommitted;
         } catch (ResourceExhaustion failure) { throw failure; }
+        catch (OutputPolicyViolation failure) { throw failure; }
         catch (Exception) { }
         transition(key, SinkState.uncertain, false, row.outputSha256);
         return Inspection.retryRequired;

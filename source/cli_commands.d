@@ -32,6 +32,10 @@ mixin template ProcessingOptions() {
     bool dryRun;
     @(NamedArgument.Description("Print one decision record per input file"))
     bool explain;
+    @(NamedArgument.Description("Opt-in local SQLite restart manifest path"))
+    string manifest;
+    @(NamedArgument("manifest-retry").Description("Inspect and explicitly replace an unresolved manifest output"))
+    bool manifestRetry;
     @(NamedArgument("jsonl-fields").Description("Comma-separated top-level JSON text fields for stdin/stdout JSONL"))
     string jsonlFields;
     @(NamedArgument("dataset-namespace").Description("Stable JSONL dataset namespace"))
@@ -94,6 +98,8 @@ private int process(T)(ref T options, const string[] original) {
     if (options.validate) forwarded ~= "--validate";
     if (options.dryRun) forwarded ~= "--dry-run";
     if (options.explain) forwarded ~= "--explain";
+    if (present(original, "--manifest")) forwarded ~= "--manifest=" ~ options.manifest;
+    if (options.manifestRetry) forwarded ~= "--manifest-retry";
     if (present(original, "--jsonl-fields"))
         forwarded ~= "--jsonl-fields=" ~ options.jsonlFields;
     if (present(original, "--dataset-namespace"))

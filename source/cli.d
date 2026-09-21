@@ -5,6 +5,10 @@ import core.sync.mutex : Mutex;
 import effects.bounded_input : BoundedInput, InputLimits;
 import effects.jsonl_stream : JsonlFailure, JsonlLimits;
 import effects.stdio_stream : processStandardJsonl;
+import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
+    configDigest, inputDigest, outputDigest;
+import effects.atomic_piece_sink : writeAtomicPieces;
+import content.pieces : Content, ContentPiece;
 import domain.document : DocumentId, SourceLocator;
 import filters.entities;
 import filters.mojibake;
@@ -16,7 +20,7 @@ import std.array : split;
 import std.conv : to;
 import std.file : FileException, SpanMode, dirEntries, exists, getAttributes,
     getSize, isDir, isFile, isSymlink, mkdir, mkdirRecurse, remove, rename, readText,
-    setAttributes, write;
+    setAttributes, write, thisExePath;
 import std.getopt : config, defaultGetoptPrinter, getopt;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.mmfile : MmFile;
@@ -27,6 +31,12 @@ import std.stdio : File, stderr, writefln, writeln;
 import std.string : join;
 import std.utf : validate;
 import std.uuid : randomUUID;
+import std.digest.sha : SHA256;
+import core.stdc.errno : errno, EINTR;
+import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
+import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
+import core.sys.posix.unistd : close, posixRead = read;
+import std.string : toStringz;
 
 private string normalizedAbsolute(string path) {
     return buildNormalizedPath(absolutePath(path));
@@ -170,8 +180,8 @@ private void atomicWrite(string destination, string outputRoot, const void[] con
     rename(temporary, destination);
 }
 
-private FilterSpec[] loadFilterConfig(string path) {
-    const root = parseJSON(readText(path));
+private FilterSpec[] parseFilterConfig(string contents) {
+    const root = parseJSON(contents);
     if (root.type != JSONType.object || "filters" !in root.object ||
         root.object["filters"].type != JSONType.array)
         throw new Exception("config must contain a 'filters' array");
@@ -212,6 +222,10 @@ private FilterSpec[] loadFilterConfig(string path) {
         specs ~= spec;
     }
     return specs;
+}
+
+private FilterSpec[] loadFilterConfig(string path) {
+    return parseFilterConfig(readText(path));
 }
 
 private string destinationFor(string file, string inputRoot, string outputRoot,
@@ -274,18 +288,20 @@ bool processOne(string file, string inputRoot, string outputRoot,
 }
 
 private string explanationRecord(string file, string destination, string chain,
-                                 string decision, string reason = "") {
+                                 string decision, string reason = "",
+                                 string detail = "") {
     auto record = "EXPLAIN\tinput=" ~ JSONValue(file).toString ~
         "\toutput=" ~ JSONValue(destination).toString ~
         "\tchain=" ~ JSONValue(chain).toString ~
         "\tstatus=" ~ decision;
     if (reason.length) record ~= "\treason=" ~ JSONValue(reason).toString;
+    if (detail.length) record ~= "\tdetail=" ~ JSONValue(detail).toString;
     return record;
 }
 
 private void explainOne(string file, string destination, string chain,
-                        string decision, string reason = "") {
-    writeln(explanationRecord(file, destination, chain, decision, reason));
+                        string decision, string reason = "", string detail = "") {
+    writeln(explanationRecord(file, destination, chain, decision, reason, detail));
 }
 
 /// Only admitted or admission-blocked paths live here. The scheduler bounds
@@ -324,6 +340,190 @@ private bool canFindOption(const string[] args, string option) {
     return false;
 }
 
+private bool sameFile(string a, string b) {
+    if (!exists(a) || !exists(b)) return false;
+    stat_t left, right;
+    if (stat(a.toStringz, &left) != 0 || stat(b.toStringz, &right) != 0)
+        throw new Exception("cannot stat manifest route");
+    return left.st_dev == right.st_dev && left.st_ino == right.st_ino;
+}
+
+private void preflightManifest(string path, string inputPath, string outputPath,
+                               bool inputIsDir) {
+    if (!path.length) throw new Exception("--manifest path is required");
+    foreach (candidate; [path, path ~ "-wal", path ~ "-shm"]) {
+        auto resolved = resolveExistingPrefix(candidate);
+        bool link;
+        try link = isSymlink(candidate);
+        catch (FileException failure) { if (exists(candidate)) throw failure; }
+        if (link || (exists(candidate) && !isFile(candidate)))
+            throw new Exception("manifest and companions must be plain files");
+        if ((inputIsDir && pathIsWithin(resolved, inputPath)) ||
+            (!inputIsDir && (resolved == inputPath || sameFile(candidate, inputPath))) ||
+            (inputIsDir && pathIsWithin(resolved, outputPath)) ||
+            (!inputIsDir && (resolved == outputPath || sameFile(candidate, outputPath))))
+            throw new Exception("manifest and companions must be outside input and output");
+        if (exists(candidate)) {
+            // A hard link to any tree member would be expensive to discover;
+            // reject every multiply linked DB/companion instead.
+            stat_t info;
+            if (stat(candidate.toStringz, &info) != 0 || info.st_nlink != 1)
+                throw new Exception("manifest companion has a hard-link alias");
+        }
+    }
+}
+
+private ubyte[32] runningExecutableDigest() {
+    auto path = thisExePath();
+    if (!path.length || isSymlink(path))
+        throw new Exception("cannot prove running executable path");
+    stat_t before, opened, after;
+    if (stat(path.toStringz, &before) != 0 || !S_ISREG(before.st_mode))
+        throw new Exception("cannot stat running executable");
+    int fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) throw new Exception("cannot open running executable");
+    scope(exit) close(fd);
+    if (fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode) ||
+        before.st_dev != opened.st_dev || before.st_ino != opened.st_ino ||
+        before.st_size != opened.st_size)
+        throw new Exception("running executable changed before hashing");
+    SHA256 digest;
+    ubyte[64 * 1024] buffer;
+    ulong total;
+    while (true) {
+        auto n = posixRead(fd, buffer.ptr, buffer.length);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) throw new Exception("running executable read failed");
+        if (n == 0) break;
+        digest.put(buffer[0 .. cast(size_t)n]);
+        total += cast(ulong)n;
+    }
+    if (stat(path.toStringz, &after) != 0 ||
+        opened.st_dev != after.st_dev || opened.st_ino != after.st_ino ||
+        opened.st_size != after.st_size || total != cast(ulong)opened.st_size)
+        throw new Exception("running executable changed while hashing");
+    return digest.finish();
+}
+
+private void appendField(ref string bytes, string field) {
+    bytes ~= field.length.to!string ~ ":" ~ field;
+}
+
+private ubyte[32] manifestConfig(string filterList, string configContents,
+                                  bool configured,
+                                  string outputPath, bool inputIsDir) {
+    string bytes = "scrubbed:cli-output:v1;";
+    appendField(bytes, configured ? "config" : "filters");
+    appendField(bytes, configured ? configContents : filterList);
+    appendField(bytes, inputIsDir ? "tree" : "file");
+    appendField(bytes, outputPath);
+    appendField(bytes, "utf8-text:atomic-piece:v1");
+    appendField(bytes, cast(string)runningExecutableDigest()[]);
+    return configDigest(cast(const(ubyte)[])bytes);
+}
+
+version (ManifestCliHarness) {
+    // A separate release-mode D harness binary injects deterministic process
+    // crashes. This branch is absent from the shipping executable.
+    private void manifestKillAt(string databasePath, string phase) {
+        import core.sys.posix.signal : kill, SIGKILL;
+        import core.sys.posix.unistd : getpid;
+        if (exists(databasePath ~ ".kill-" ~ phase))
+            kill(getpid(), SIGKILL);
+    }
+}
+
+private struct ManifestOutcome {
+    string status;
+    string detail;
+}
+
+private class ManifestDecisionFailure : Exception {
+    string status;
+    this(string status, string message) {
+        super(message);
+        this.status = status;
+    }
+}
+
+private ManifestOutcome processManifestOne(LocalManifest manifest, string databasePath,
+        string file, string inputRoot,
+        string outputRoot, bool inputIsDir, const ref Pipeline chain,
+        ulong reservedBytes, ubyte[32] configHash, bool retry, bool dryRun) {
+    if (isSymlink(file)) throw new Exception("refusing symlink input: " ~ file);
+    auto destination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
+    preflightDestination(destination, inputIsDir ? outputRoot : dirName(outputRoot));
+    if (getSize(file) != reservedBytes)
+        throw new Exception("input changed size after admission: " ~ file);
+    scope mm = reservedBytes ? new MmFile(file, MmFile.Mode.read, reservedBytes, null) : null;
+    string text;
+    if (mm !is null) text = cast(string)(cast(ubyte[])mm[]);
+    else {
+        scope input = File(file, "rb");
+        if (input.size != 0) throw new Exception("empty input grew after admission");
+    }
+    auto firstHash = inputDigest(cast(const(ubyte)[])text);
+    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
+    auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
+    SinkKey key = SinkKey(id, firstHash, configHash, "local-primary:v1");
+    bool replacing;
+    if (!dryRun) {
+        auto inspected = manifest.inspect(key);
+        if (inspected == Inspection.verifiedCommitted)
+            return ManifestOutcome("skipped", "");
+        auto previous = manifest.lookup(key);
+        bool destinationExists = exists(destination);
+        bool unresolved = !previous.isNull && previous.get.state != SinkState.planned;
+        if (!retry && (destinationExists || unresolved))
+            throw new ManifestDecisionFailure(
+                !previous.isNull && previous.get.state == SinkState.uncertain
+                    ? "uncertain" : "retry-required",
+                "manifest output requires explicit --manifest-retry after inspection: " ~ destination);
+        auto row = manifest.plan(key, destination);
+        replacing = retry && (destinationExists || row.state != SinkState.planned);
+        if (replacing)
+            manifest.retry(key);
+        version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
+    }
+    bool published;
+    try {
+        auto cleaned = chain.run(text);
+        if (getSize(file) != reservedBytes ||
+            inputDigest(mm is null ? cast(const(ubyte)[])"" :
+                cast(const(ubyte)[])mm[]) != firstHash)
+            throw new Exception("mapped input changed before publish: " ~ file);
+        const changed = cleaned != text;
+        if (dryRun) return ManifestOutcome(changed ? "dry-run-changed" :
+            "dry-run-unchanged", "");
+        version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
+        // The F08 sink owns its buffer and fsync-before-rename publication.
+        ensurePlainDirectory(inputIsDir ? outputRoot : dirName(outputRoot),
+            dirName(destination));
+        auto content = new Content([ContentPiece.own(cast(const(ubyte)[])cleaned)]);
+        // A no-op filter may return the mapped input. Keep its owner live
+        // until ContentPiece.own has copied those bytes.
+        if (mm !is null && mm[].length != reservedBytes)
+            throw new Exception("mapped input length changed");
+        writeAtomicPieces(destination, content.pieces());
+        published = true;
+        version (ManifestCliHarness) manifestKillAt(databasePath, "after-publish");
+        manifest.commitPublished(key, destination,
+            outputDigest(cast(const(ubyte)[])cleaned));
+        version (ManifestCliHarness) manifestKillAt(databasePath, "after-commit");
+        return ManifestOutcome(replacing ? "retry" :
+            (changed ? "changed" : "unchanged"),
+            replacing ? (changed ? "changed" : "unchanged") : "");
+    } catch (Throwable failure) {
+        if (!dryRun) {
+            try {
+                if (published) manifest.markUncertain(key);
+                else manifest.markFailed(key);
+            } catch (Throwable) { }
+        }
+        throw failure;
+    }
+}
+
 int runApp(string[] args) {
     string inputPath;
     string outputPath;
@@ -337,6 +537,8 @@ int runApp(string[] args) {
     bool validateOnly;
     bool dryRun;
     bool explain;
+    string manifestPath;
+    bool manifestRetry;
     string jsonlFields, datasetNamespace, sourceKey;
     size_t maxJsonlLineBytes, maxJsonlOutputBytes;
     const filtersExplicit = args.canFindOption("--filters");
@@ -346,6 +548,7 @@ int runApp(string[] args) {
     const sourceExplicit = args.canFindOption("--source-key");
     const lineCapExplicit = args.canFindOption("--max-jsonl-line-bytes");
     const outputCapExplicit = args.canFindOption("--max-jsonl-output-bytes");
+    const manifestExplicit = args.canFindOption("--manifest");
     const fileSchedulingExplicit = args.canFindOption("--threads") ||
         args.canFindOption("--max-queued-docs") ||
         args.canFindOption("--max-input-bytes") || descriptorsExplicit;
@@ -364,6 +567,8 @@ int runApp(string[] args) {
         "validate", "Validate invocation, filter chain and roots without processing", &validateOnly,
         "dry-run", "Run filters without creating or writing output", &dryRun,
         "explain", "Print one decision record per input file", &explain,
+        "manifest", "Opt-in local SQLite restart manifest path", &manifestPath,
+        "manifest-retry", "Inspect and replace unresolved manifest output", &manifestRetry,
         "jsonl-fields", "Comma-separated selected JSONL text fields", &jsonlFields,
         "dataset-namespace", "Stable JSONL dataset namespace", &datasetNamespace,
         "source-key", "Stable JSONL source key", &sourceKey,
@@ -376,7 +581,13 @@ int runApp(string[] args) {
     const jsonlOptions = fieldsExplicit || namespaceExplicit || sourceExplicit ||
         lineCapExplicit || outputCapExplicit;
     const jsonlRoute = jsonlOptions || inputPath == "-" || outputPath == "-";
+    if (manifestExplicit && !manifestPath.length)
+        throw new Exception("--manifest path must be nonempty");
+    if (manifestRetry && !manifestPath.length)
+        throw new Exception("--manifest-retry requires --manifest");
     if (jsonlRoute) {
+        if (manifestPath.length || manifestRetry)
+            throw new Exception("--manifest is unavailable in JSONL mode");
         if (inputPath != "-" || outputPath != "-" ||
             !fieldsExplicit || !namespaceExplicit || !sourceExplicit ||
             !lineCapExplicit || !outputCapExplicit)
@@ -448,8 +659,11 @@ int runApp(string[] args) {
     inputPath = resolveExistingPrefix(inputPath);
     outputPath = resolveExistingPrefix(outputPath);
 
+    auto configContents = manifestPath.length && configPath.length
+        ? readText(configPath) : "";
     auto chain = configPath.length
-        ? Pipeline.buildConfigured(loadFilterConfig(configPath))
+        ? Pipeline.buildConfigured(manifestPath.length
+            ? parseFilterConfig(configContents) : loadFilterConfig(configPath))
         : Pipeline.build(filterList.split(","));
     writeln("filter chain: ", chain.names.join(" -> "));
 
@@ -461,30 +675,54 @@ int runApp(string[] args) {
             throw new Exception("output directory must not be inside the input tree");
     }
     preflightOutput(outputPath, inputIsDir);
+    if (manifestPath.length) {
+        manifestPath = resolveExistingPrefix(manifestPath);
+        preflightManifest(manifestPath, inputPath, outputPath, inputIsDir);
+    }
     if (validateOnly) {
+        if (manifestPath.length)
+            manifestConfig(filterList, configContents, configPath.length != 0,
+                outputPath, inputIsDir);
         writeln("valid. No files processed.");
         return 0;
     }
+    ubyte[32] configHash;
+    LocalManifest manifest;
+    if (manifestPath.length) {
+        configHash = manifestConfig(filterList, configContents,
+            configPath.length != 0, outputPath, inputIsDir);
+        if (!dryRun) manifest = new LocalManifest(manifestPath);
+    }
+    scope(exit) if (manifest !is null) manifest.close();
     if (!dryRun)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
     const chainLabel = chain.names.join(" -> ");
     auto pending = explain ? new PendingExplanations : null;
     auto scheduler = new BoundedInput(
-        InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs), nThreads,
+        InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs),
+        manifestPath.length ? 1 : nThreads,
         (string file, ulong bytes) {
-            const changed = processOne(file, inputPath, outputPath, inputIsDir,
-                chain, bytes, dryRun);
+            ManifestOutcome decision;
+            if (manifestPath.length)
+                decision = processManifestOne(manifest, manifestPath, file, inputPath, outputPath,
+                    inputIsDir, chain, bytes, configHash, manifestRetry, dryRun);
+            else
+                decision.status = processOne(file, inputPath, outputPath, inputIsDir,
+                    chain, bytes, dryRun) ? "changed" : "unchanged";
             if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, changed ? "changed" : "unchanged");
+                    chainLabel, decision.status, "", decision.detail);
             if (explain) pending.remove(file);
         },
         (string file, Throwable error) {
             stderr.writefln("SKIP %s: %s", file, error.msg);
-            if (explain)
+            if (explain) {
+                auto manifestDecision = cast(ManifestDecisionFailure)error;
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, "failure", error.msg);
+                    chainLabel, manifestDecision is null ? "failure" :
+                        manifestDecision.status, error.msg);
+            }
             if (explain) pending.remove(file);
         });
     size_t rejected;
@@ -543,6 +781,7 @@ int runApp(string[] args) {
         throw error;
     }
     const counts = scheduler.finish();
+    if (manifest !is null) manifest.checkpoint();
     const failures = counts.failed + rejected;
     writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");
     return failures == 0 ? 0 : 1;

@@ -11,7 +11,8 @@ document processing stays in `cli`.
 incremental directory traversal, input `MmFile` lifetime, and atomic output
 replacement. [`effects/bounded_input.d`](effects/bounded_input.d) owns the
 local queue and independent queued-document, reserved-byte, and file-work
-callback limits; it invokes `cli.processOne` through a supplied callback.
+callback limits; it invokes `cli.processOne` or the opt-in manifest processor
+through a supplied callback.
 `runApp(string[] args)` builds a `Pipeline` before walking files. A file failure is
 reported as `SKIP`; `runApp` returns 1 if any file failed and 0 otherwise.
 The module imports the implemented filter modules so their `static this()`
@@ -33,21 +34,24 @@ also importing filter modules for registration and filters importing
 filters. The current `filters.entities` import of `filters.mojibake` is only
 for its CP1252 mapping helper.
 
-[`domain/document.d`](domain/document.d) is a standalone future-facing domain
+[`domain/document.d`](domain/document.d) is the typed domain
 facade for logical `SourceLocator`/`DocumentId` identity, distinct `OutputName`,
 and owner-checked zero-copy byte views with explicit selected-range copying.
-It is tested in place and supplies stable line-ordinal IDs to JSONL CLI mode;
-the file/tree CLI and document-stage pipeline do not use it yet. Its
+It supplies stable line-ordinal IDs to JSONL CLI mode and root-relative IDs
+to opt-in local manifest file/tree mode. The document-stage pipeline does not
+use it yet. Its
 canonical key format and lifetime rule are in the
 [architecture map](../docs/architecture.md); transport-specific source keys
 and content/job stages are not implemented here.
 
 [`content/pieces.d`](content/pieces.d) provides ordered borrowed/owned byte
-pieces for future text and output stages. It depends on `domain.document`'s
+pieces. The opt-in manifest CLI wraps the existing string pipeline's output
+as an owned piece for F08 publication; future text and output stages are not
+wired. It depends on `domain.document`'s
 checked view, not CLI mapping internals. Edits use byte offsets; `replace`
 can insert, delete, or replace without copying untouched source bytes. `stream`
-emits bounded, temporary chunks to a sink. The CLI and filters are not yet
-wired to this facade.
+emits bounded, temporary chunks to a sink. The filters and no-manifest CLI
+do not use this facade.
 
 `Content.pieces()` is a lazy Phobos InputRange of checked piece descriptors.
 It preserves empty descriptors and borrowing checks without flattening bytes.
@@ -83,8 +87,9 @@ does not establish production backpressure or corpus-throughput readiness.
 single-active-lease mmap reader with checked borrows, bounded owning carry,
 and mapped-byte counters. [`effects/atomic_piece_sink.d`](effects/atomic_piece_sink.d)
 streams `Content.pieces()` through a bounded buffer to one atomic local
-destination. Both have D evidence harnesses, but neither is wired to CLI or
-to the future document-stage runner; their resource bounds do not make
+destination. The opt-in manifest file/tree CLI uses the atomic piece sink;
+the mapped windowed input remains standalone. Neither is wired to the future
+document-stage runner; their resource bounds do not make
 context-heavy filters streaming.
 
 [`effects/jsonl_stream.d`](effects/jsonl_stream.d) and
@@ -92,14 +97,14 @@ context-heavy filters streaming.
 JSONL selected-field and stream adapters with semantic-value preservation of
 untouched fields. The command adapter now routes explicit paired `--input -`
 and `--output -` `run`/`repair` mode through them, with caller-provided stable
-namespace/source keys and line-ordinal `DocumentId`s. The file/tree CLI still
-does not use `DocumentId`; there is no JSONL checkpoint or graceful signal
-cancellation.
+namespace/source keys and line-ordinal `DocumentId`s. There is no JSONL
+checkpoint or graceful signal cancellation.
 
 [`effects/local_manifest.d`](effects/local_manifest.d) is a standalone,
 versioned local SQLite sink ledger with independent per-sink states and bounded
-replay. It verifies observed output bytes before a committed skip. It is not
-wired to the CLI; see [local manifest API and crash limits](../docs/local-manifest.md).
+replay. It verifies observed output bytes before a committed skip. The
+file/tree CLI wires it only in opt-in `--manifest PATH` mode; see
+[local manifest restart behavior and crash limits](../docs/local-manifest.md).
 
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run

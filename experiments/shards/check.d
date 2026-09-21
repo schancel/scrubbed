@@ -127,6 +127,17 @@ private void formatChecks(string root) {
     rejects({ encodeAnnotation(dupField); });
     auto longPayload = new ubyte[maxDocumentPayload + 1];
     rejects({ frame(longPayload, maxDocumentPayload); });
+    auto huge = new ubyte[8 * 1024 * 1024];
+    GC.collect();
+    GC.disable();
+    auto beforeReject = GC.stats().usedSize;
+    rejects({ encodeDocument(document("huge", huge)); });
+    auto hugeAnnotation = annotation(doc, huge);
+    rejects({ encodeAnnotation(hugeAnnotation); });
+    auto rejectionGrowth = GC.stats().usedSize - beforeReject;
+    GC.enable();
+    check(rejectionGrowth <= 64 * 1024,
+        "oversized encode allocated a frame before rejection");
     check(hex(headerBytes ~ frame(encoded, maxAnnotationPayload)) ==
         "53435242414e4e31002e0008616e616c7973697300027631fe01ee7270ec6320d5e38a7c0c0058b53c6a974452e44150ac034fe23c34bb490234e56d99fa5214a1e09bd260563b7ab553d4d993ca082521dcc8822aece915000000770047646f633a76313a34363666623166643034363439323663343864333166376438333439336534363736623839316563366634323838303063363230613661393962373336363735ea5dbf9596d187e9500f23e9a680109475341cf4e81f7e043f7d97152c10772f00010006616e7377657200000000626d26a07271f4ba1ff6d25a554157aec63f92f9311bd3ca78aa7fd1360f498c",
         "overlay golden changed");
@@ -163,6 +174,33 @@ private void fileChecks(string root) {
     rejectDocumentFile(root, "extra.shard", (cast(ubyte[])sourceBytes) ~ [cast(ubyte)1]);
     rejectDocumentFile(root, "duplicate.shard", (cast(ubyte[])sourceBytes) ~
         (cast(ubyte[])sourceBytes)[8 .. $]);
+    auto left = document("left");
+    auto right = document("right");
+    auto higher = left.id.text > right.id.text ? left : right;
+    auto lower = left.id.text > right.id.text ? right : left;
+    rejectDocumentFile(root, "descending.shard", documentMagic ~
+        frame(encodeDocument(higher), maxDocumentPayload) ~
+        frame(encodeDocument(lower), maxDocumentPayload));
+    auto testHeader = encodeOverlayHeader(OverlayHeader("order", "1", originalDigest));
+    auto highFrame = frame(encodeAnnotation(annotation(higher, [])), maxAnnotationPayload);
+    auto lowFrame = frame(encodeAnnotation(annotation(lower, [])), maxAnnotationPayload);
+    rejectOverlayFile(root, "duplicate.overlay", testHeader ~ highFrame ~ highFrame);
+    rejectOverlayFile(root, "descending.overlay", testHeader ~ highFrame ~ lowFrame);
+    foreach (destination; [docPath, root ~ "/./documents.shard"]) {
+        auto unsafeOverlay = new OverlayWriter(destination, docPath, "a", "1");
+        rejects({ unsafeOverlay.publish(); });
+        unsafeOverlay.abort();
+        check(read(docPath) == sourceBytes && inode(docPath) == originalInode,
+            "overlay path alias changed immutable source shard");
+    }
+    auto sourceAlias = buildPath(root, "source-hardlink.shard");
+    check(link(docPath.toStringz, sourceAlias.toStringz) == 0,
+        "source hardlink setup failed");
+    auto hardlinkOverlay = new OverlayWriter(sourceAlias, docPath, "a", "1");
+    rejects({ hardlinkOverlay.publish(); });
+    hardlinkOverlay.abort();
+    check(read(docPath) == sourceBytes && inode(docPath) == originalInode,
+        "overlay hardlink alias changed immutable source shard");
     auto aPath = buildPath(root, "a.overlay");
     auto bPath = buildPath(root, "b.overlay");
     auto a = new OverlayWriter(aPath, docPath, "a", "1");

@@ -68,6 +68,11 @@ private void text16(ref ubyte[] outBytes, string value) {
     outBytes ~= cast(const(ubyte)[])value;
 }
 
+private void budget(ref size_t remaining, size_t amount) {
+    require(amount <= remaining, "payload exceeds cap");
+    remaining -= amount;
+}
+
 private struct Cursor {
     const(ubyte)[] bytes;
     size_t at;
@@ -96,6 +101,16 @@ private struct Cursor {
 }
 
 ubyte[] encodeDocument(ShardDocument record) {
+    // Validate the complete encoded size before copying opaque caller content.
+    size_t remaining = maxDocumentPayload;
+    foreach (field; [record.source.datasetNamespace, record.source.sourceKey,
+            record.source.recordKey, record.outputName.text]) {
+        canonical(field);
+        budget(remaining, 2);
+        budget(remaining, field.length);
+    }
+    budget(remaining, 4);
+    budget(remaining, record.content.length);
     ubyte[] payload;
     text16(payload, record.source.datasetNamespace);
     text16(payload, record.source.sourceKey);
@@ -128,15 +143,25 @@ private bool canonicalId(string value) {
 
 ubyte[] encodeAnnotation(AnnotationRecord record) {
     require(canonicalId(record.documentId), "noncanonical source document ID");
-    ubyte[] payload;
-    text16(payload, record.documentId);
-    payload ~= record.contentDigest[];
-    u16(payload, record.fields.length);
+    require(record.fields.length <= ushort.max, "too many annotation fields");
+    // Preflight every key and opaque value before allocating the frame payload.
+    size_t remaining = maxAnnotationPayload;
+    budget(remaining, 2 + record.documentId.length);
+    budget(remaining, 32 + 2);
     string previous;
     foreach (field; record.fields) {
         canonical(field.key);
         require(previous.length == 0 || previous < field.key, "fields not strictly sorted");
         previous = field.key;
+        budget(remaining, 2 + field.key.length);
+        budget(remaining, 4);
+        budget(remaining, field.value.length);
+    }
+    ubyte[] payload;
+    text16(payload, record.documentId);
+    payload ~= record.contentDigest[];
+    u16(payload, record.fields.length);
+    foreach (field; record.fields) {
         text16(payload, field.key);
         u32(payload, field.value.length);
         payload ~= field.value;
@@ -165,6 +190,12 @@ AnnotationRecord decodeAnnotation(const(ubyte)[] payload) {
 }
 
 ubyte[] encodeOverlayHeader(OverlayHeader header) {
+    canonical(header.analyzerKey);
+    canonical(header.analyzerVersion);
+    size_t remaining = maxOverlayMetadata;
+    budget(remaining, 2 + header.analyzerKey.length);
+    budget(remaining, 2 + header.analyzerVersion.length);
+    budget(remaining, 32);
     ubyte[] metadata;
     text16(metadata, header.analyzerKey);
     text16(metadata, header.analyzerVersion);

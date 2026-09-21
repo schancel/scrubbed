@@ -17,6 +17,8 @@ more frames. A frame is u32 payload length, payload, and 32 raw SHA-256 bytes
 of the payload. Maximum document payload is 1 MiB. EOF is legal only at a
 frame boundary; empty files, truncated frames, extra bytes, bad digests,
 noncanonical metadata, oversize, and duplicate/unsorted IDs fail.
+Writers preflight complete encoded lengths before copying opaque content or
+field values, so an oversized caller buffer does not become a transient frame.
 
 Overlay header bytes are exactly `SCRBANN1 || u16BE(H) || H metadata bytes ||
 SHA256(all preceding header bytes)`. H is at most 4096. Metadata is u16-key
@@ -44,7 +46,8 @@ name is absent; a concurrent loser cannot replace the winner's inode or bytes.
 `OverlayWriter` holds the source shard open read-only while writing and hashes
 that open descriptor. It fsyncs a same-directory temporary and atomically
 renames it over a regular single-link overlay target. It refuses symlink and
-hardlink targets and a symlink parent at inspection time. Writers expose
+hardlink targets, any destination with the source shard's device/inode
+(including alternate path spellings), and a symlink parent at inspection time. Writers expose
 `abort`; publication/append failures also clean their temporary files.
 Injected pre-publication failures preserve the prior overlay. Neither path
 fsyncs the parent directory, so neither promises power-loss durability of the

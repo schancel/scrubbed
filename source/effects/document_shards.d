@@ -9,7 +9,7 @@ import domain.shard_format;
 import std.digest.sha : SHA256, sha256Of;
 import std.exception : enforce;
 import std.file : isDir, isSymlink, rename;
-import std.path : baseName, buildPath, dirName;
+import std.path : absolutePath, baseName, buildNormalizedPath, buildPath, dirName;
 import std.string : toStringz;
 import std.uuid : randomUUID;
 
@@ -173,11 +173,11 @@ private final class TemporaryFile {
     private string temporaryZ;
     int fd = -1;
     this(string destination) {
-        this.destination = destination;
-        auto parent = dirName(destination);
+        this.destination = buildNormalizedPath(absolutePath(destination));
+        auto parent = dirName(this.destination);
         require(isDir(parent) && !isSymlink(parent), "unsafe parent directory");
         foreach (_; 0 .. 10) {
-            temporary = buildPath(parent, "." ~ baseName(destination) ~
+            temporary = buildPath(parent, "." ~ baseName(this.destination) ~
                 ".scrubbed-" ~ randomUUID.toString ~ ".tmp");
             temporaryZ = temporary ~ "\0";
             fd = open(temporaryZ.ptr, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 384);
@@ -238,7 +238,7 @@ final class DocumentShardWriter {
     void abort() { file.discard(); }
 }
 
-private void checkReplaceTarget(string destination) {
+private void checkReplaceTarget(string destination, int sourceFd) {
     stat_t observed;
     if (lstat(destination.toStringz, &observed) != 0) {
         require(errno == ENOENT, "cannot inspect overlay target");
@@ -253,15 +253,22 @@ private void checkReplaceTarget(string destination) {
     require(fstat(fd, &info) == 0 && S_ISREG(info.st_mode) && info.st_nlink == 1 &&
         info.st_dev == observed.st_dev && info.st_ino == observed.st_ino,
         "overlay target is nonregular or hardlinked");
+    stat_t sourceInfo;
+    require(fstat(sourceFd, &sourceInfo) == 0 && S_ISREG(sourceInfo.st_mode),
+        "source shard changed while publishing overlay");
+    require(info.st_dev != sourceInfo.st_dev || info.st_ino != sourceInfo.st_ino,
+        "overlay destination aliases immutable source shard");
 }
 
 final class OverlayWriter {
     private TemporaryFile file;
+    private string sourcePath;
     private string previous;
     private bool published;
     private int sourceFd = -1;
     this(string destination, string documentPath, string analyzerKey,
             string analyzerVersion) {
+        sourcePath = buildNormalizedPath(absolutePath(documentPath));
         sourceFd = open(documentPath.toStringz, O_RDONLY | O_NOFOLLOW);
         require(sourceFd >= 0, "cannot open source shard read-only");
         try {
@@ -283,7 +290,9 @@ final class OverlayWriter {
         scope(failure) abort();
         require(!published, "writer already published");
         file.syncClose(fault);
-        checkReplaceTarget(file.destination);
+        require(buildNormalizedPath(absolutePath(file.destination)) != sourcePath,
+            "overlay destination is the immutable source shard path");
+        checkReplaceTarget(file.destination, sourceFd);
         rename(file.temporary, file.destination);
         file.temporary = null;
         file.temporaryZ = null;

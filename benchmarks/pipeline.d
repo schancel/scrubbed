@@ -357,9 +357,11 @@ private void validate(JSONValue report) {
     }
     require(report["source_binary_mapping"].str == "UNVERIFIED",
         "unverified source/binary relation must not be claimed verified");
+    bool darwinReport = report["os"].str.startsWith("Darwin ");
+    bool linuxReport = report["os"].str.startsWith("Linux ");
     require(report["ram_bytes"].integer > 0 &&
-        (report["ram_source"].str == "sysctl hw.memsize" ||
-         report["ram_source"].str == "/proc/meminfo MemTotal"),
+        ((darwinReport && report["ram_source"].str == "sysctl hw.memsize") ||
+         (linuxReport && report["ram_source"].str == "/proc/meminfo MemTotal")),
         "RAM metadata was not measured");
     require(report["unsupported"].toString == unsupportedCases().toString,
         "unsupported status must be host-neutral and complete");
@@ -382,7 +384,8 @@ private void selfTest() {
     JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v1"),
         "source_sha": JSONValue("0".replicate(40)),
         "binary_sha256": JSONValue("0".replicate(64)),
-        "harness_sha256": JSONValue("0".replicate(64)), "os": JSONValue("x"),
+        "harness_sha256": JSONValue("0".replicate(64)),
+        "os": JSONValue("Linux test"),
         "cpu": JSONValue("x"), "compiler": JSONValue("x"),
         "build_flags": JSONValue("x"),
         "source_binary_mapping": JSONValue("UNVERIFIED"),
@@ -430,6 +433,11 @@ private void selfTest() {
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "unmeasured Linux RAM negative did not fail");
+    bad = report;
+    bad["ram_source"] = "sysctl hw.memsize";
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "cross-host RAM source negative did not fail");
     bad = report;
     bad["unsupported"] = arr(["greater-than-RAM unsafe on measured 16 GiB RAM and 23.75 GiB scratch"]);
     failed = false;

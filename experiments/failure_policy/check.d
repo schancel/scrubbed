@@ -83,11 +83,32 @@ int main(string[] args) {
         need(result.output.canFind(phase == "log-ack" ? "FATAL" : "SKIP"),
             phase ~ " classification");
         need(result.output.canFind("EXPLAIN") &&
-            result.output.canFind("sink=local-primary:v1") &&
-            result.output.canFind("id=doc:v1:"), phase ~ " exact explanation");
+            result.output.canFind("sink_key=\"local-primary:v1\"") &&
+            result.output.canFind("document_id=\"doc:v1:"), phase ~ " exact explanation");
         need(!exists(output), phase ~ " unexpectedly published");
         writeln("ok: ", phase);
     }
+    auto preMarkFolder = buildPath(root, "pre-mark");
+    mkdir(preMarkFolder);
+    auto preMarkInput = buildPath(preMarkFolder, "input.txt");
+    auto preMarkOutput = buildPath(preMarkFolder, "output.txt");
+    auto preMarkDb = buildPath(preMarkFolder, "state.db");
+    write(preMarkInput, "fault");
+    write(preMarkDb ~ ".fault-filter", "");
+    write(preMarkDb ~ ".fault-pre-mark", "");
+    auto preMarkResult = execute([args[1], "run", "--input", preMarkInput,
+        "--output", preMarkOutput, "--manifest", preMarkDb,
+        "--filters", "normalize-line-endings", "--explain"]);
+    need(preMarkResult.status == 2 &&
+        preMarkResult.output.split("EXPLAIN\tinput=").length == 2 &&
+        preMarkResult.output.canFind("status=unacknowledged") &&
+        !preMarkResult.output.canFind("status=failed") &&
+        !preMarkResult.output.canFind("status=uncertain") &&
+        countState(preMarkDb, "planned") == 1 &&
+        countState(preMarkDb, "failed") == 0 &&
+        countState(preMarkDb, "uncertain") == 0 &&
+        !exists(preMarkOutput), "pre-mark failure stays unacknowledged");
+    writeln("ok: pre-mark failure truthful EXPLAIN");
     auto folder = buildPath(root, "continuation");
     mkdir(folder);
     auto input = buildPath(folder, "input");
@@ -138,22 +159,29 @@ int main(string[] args) {
         readText(policyInput) == "original", "post-preflight policy swap fatal");
     writeln("ok: post-preflight policy swap fatal");
     foreach (spec; ["open-ENFILE", "write-ENOSPC", "fsync-EDQUOT",
-            "close-EMFILE", "write-EACCES", "fsync-EIO"]) {
+            "close-EMFILE", "write-EACCES", "fsync-EIO",
+            "setattrs-ENOSPC", "rename-EDQUOT",
+            "setattrs-EACCES", "rename-EIO"]) {
         auto ioFolder = buildPath(root, "io-" ~ spec);
         mkdir(ioFolder);
         auto ioInput = buildPath(ioFolder, "input.txt");
         auto ioOutput = buildPath(ioFolder, "output.txt");
         auto ioDb = buildPath(ioFolder, "state.db");
         write(ioInput, "input\r\n");
+        const replacing = spec.startsWith("setattrs-");
+        if (replacing) write(ioOutput, "prior output");
         write(ioOutput ~ ".fault-" ~ spec, "");
-        result = execute([args[1], "run", "--input", ioInput,
+        auto ioCommand = [args[1], "run", "--input", ioInput,
             "--output", ioOutput, "--manifest", ioDb,
-            "--filters", "normalize-line-endings", "--explain"]);
+            "--filters", "normalize-line-endings", "--explain"];
+        if (replacing) ioCommand ~= "--manifest-retry";
+        result = execute(ioCommand);
         const resource = !spec.canFind("EACCES") && !spec.canFind("EIO");
         need(result.status == (resource ? 2 : 1) &&
             result.output.canFind(resource ? "FATAL" : "SKIP") &&
             result.output.canFind("status=uncertain") &&
-            state(ioDb) == "uncertain" && !exists(ioOutput),
+            state(ioDb) == "uncertain" &&
+            (replacing ? readText(ioOutput) == "prior output" : !exists(ioOutput)),
             "injected sink errno " ~ spec);
         writeln("ok: injected sink errno ", spec);
     }
@@ -203,17 +231,73 @@ int main(string[] args) {
     result = execute(decisionCommand ~ ["--manifest-retry"]);
     need(result.status == 0, "explicit decision retry");
     auto exactId = firstDocumentId(decisionDb);
-    need(retryRequired.output.canFind("id=" ~ exactId) &&
-        retryRequired.output.canFind("sink=local-primary:v1"),
+    need(retryRequired.output.canFind("document_id=\"" ~ exactId ~ "\"") &&
+        retryRequired.output.canFind("sink_key=\"local-primary:v1\""),
         "retry-required exact manifest key");
+    need(result.output.canFind("status=retry") &&
+        result.output.canFind("document_id=\"" ~ exactId ~ "\"") &&
+        result.output.canFind("sink_key=\"local-primary:v1\"") &&
+        result.output.split("EXPLAIN\tinput=").length == 2,
+        "retry success exact manifest key once");
+    auto skippedDecision = execute(decisionCommand);
+    need(skippedDecision.status == 0 &&
+        skippedDecision.output.canFind("status=skipped") &&
+        skippedDecision.output.canFind("document_id=\"" ~ exactId ~ "\"") &&
+        skippedDecision.output.canFind("sink_key=\"local-primary:v1\"") &&
+        skippedDecision.output.split("EXPLAIN\tinput=").length == 2,
+        "verified skip exact manifest key once");
     write(decisionOutput, "tampered");
     auto uncertainDecision = execute(decisionCommand);
     need(uncertainDecision.status == 1 &&
         uncertainDecision.output.canFind("status=uncertain") &&
-        uncertainDecision.output.canFind("id=" ~ exactId) &&
-        uncertainDecision.output.canFind("sink=local-primary:v1") &&
+        uncertainDecision.output.canFind("document_id=\"" ~ exactId ~ "\"") &&
+        uncertainDecision.output.canFind("sink_key=\"local-primary:v1\"") &&
         state(decisionDb) == "uncertain", "uncertain exact manifest key");
     writeln("ok: exact unresolved manifest decisions");
+    foreach (kind; ["changed", "unchanged"]) {
+        auto positiveFolder = buildPath(root, "positive-" ~ kind);
+        mkdir(positiveFolder);
+        auto positiveInput = buildPath(positiveFolder, "input.txt");
+        auto positiveOutput = buildPath(positiveFolder, "output.txt");
+        auto positiveDb = buildPath(positiveFolder, "state.db");
+        write(positiveInput, kind == "changed" ? "one\r\n" : "plain");
+        auto positiveCommand = [args[1], "run", "--input", positiveInput,
+            "--output", positiveOutput, "--manifest", positiveDb,
+            "--filters", "normalize-line-endings", "--explain"];
+        result = execute(positiveCommand);
+        auto positiveId = firstDocumentId(positiveDb);
+        need(result.status == 0 && result.output.canFind("status=" ~ kind) &&
+            result.output.canFind("document_id=\"" ~ positiveId ~ "\"") &&
+            result.output.canFind("sink_key=\"local-primary:v1\"") &&
+            result.output.split("EXPLAIN\tinput=").length == 2,
+            kind ~ " exact manifest key once");
+        writeln("ok: positive ", kind, " exact manifest key");
+    }
+    foreach (spec; ["open-EMFILE", "read-ENFILE", "fstat-ENOSPC",
+            "read-EDQUOT", "fstat-EIO"]) {
+        auto rehashFolder = buildPath(root, "rehash-" ~ spec);
+        mkdir(rehashFolder);
+        auto rehashInput = buildPath(rehashFolder, "input.txt");
+        auto rehashOutput = buildPath(rehashFolder, "output.txt");
+        auto rehashDb = buildPath(rehashFolder, "state.db");
+        write(rehashInput, "one\r\n");
+        auto rehashCommand = [args[1], "run", "--input", rehashInput,
+            "--output", rehashOutput, "--manifest", rehashDb,
+            "--filters", "normalize-line-endings", "--explain"];
+        result = execute(rehashCommand);
+        need(result.status == 0 && state(rehashDb) == "committed",
+            "rehash setup " ~ spec);
+        write(rehashOutput ~ ".fault-rehash-" ~ spec, "");
+        result = execute(rehashCommand);
+        const resource = !spec.canFind("EIO");
+        need(result.status == (resource ? 2 : 1) &&
+            state(rehashDb) == (resource ? "committed" : "uncertain") &&
+            readText(rehashOutput) == "one\n" &&
+            (resource ? result.output.canFind("FATAL") :
+                result.output.canFind("status=uncertain")),
+            "rehash errno " ~ spec);
+        writeln("ok: rehash errno ", spec);
+    }
     auto fatalFolder = buildPath(root, "fatal");
     mkdir(fatalFolder);
     auto fatalInput = buildPath(fatalFolder, "input.txt");

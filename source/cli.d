@@ -292,19 +292,25 @@ bool processOne(string file, string inputRoot, string outputRoot,
 
 private string explanationRecord(string file, string destination, string chain,
                                  string decision, string reason = "",
-                                 string detail = "") {
+                                 string detail = "", string documentId = "",
+                                 string sinkKey = "") {
     auto record = "EXPLAIN\tinput=" ~ JSONValue(file).toString ~
         "\toutput=" ~ JSONValue(destination).toString ~
         "\tchain=" ~ JSONValue(chain).toString ~
         "\tstatus=" ~ decision;
     if (reason.length) record ~= "\treason=" ~ JSONValue(reason).toString;
     if (detail.length) record ~= "\tdetail=" ~ JSONValue(detail).toString;
+    if (sinkKey.length)
+        record ~= "\tdocument_id=" ~ JSONValue(documentId).toString ~
+            "\tsink_key=" ~ JSONValue(sinkKey).toString;
     return record;
 }
 
 private void explainOne(string file, string destination, string chain,
-                        string decision, string reason = "", string detail = "") {
-    writeln(explanationRecord(file, destination, chain, decision, reason, detail));
+                        string decision, string reason = "", string detail = "",
+                        string documentId = "", string sinkKey = "") {
+    writeln(explanationRecord(file, destination, chain, decision, reason, detail,
+        documentId, sinkKey));
 }
 
 /// Only admitted or admission-blocked paths live here. The scheduler bounds
@@ -439,6 +445,12 @@ version (ManifestCliHarness) {
 private struct ManifestOutcome {
     string status;
     string detail;
+    SinkKey key;
+    bool hasKey;
+}
+
+private ManifestOutcome manifestOutcome(string status, string detail, SinkKey key) {
+    return ManifestOutcome(status, detail, key, true);
 }
 
 private class ManifestDecisionFailure : Exception {
@@ -463,9 +475,11 @@ private class DocumentFailure : Exception {
 
 private class FatalDocumentFailure : Exception {
     FailureRecord record;
-    this(FailureRecord record, Exception cause) {
+    bool acknowledged;
+    this(FailureRecord record, Exception cause, bool acknowledged) {
         super("fatal document failure: " ~ cause.msg);
         this.record = record;
+        this.acknowledged = acknowledged;
     }
 }
 
@@ -503,7 +517,7 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
     if (!dryRun) {
         auto inspected = manifest.inspect(key);
         if (inspected == Inspection.verifiedCommitted)
-            return ManifestOutcome("skipped", "");
+            return manifestOutcome("skipped", "", key);
         auto previous = manifest.lookup(key);
         bool destinationExists = exists(destination);
         bool unresolved = !previous.isNull && previous.get.state != SinkState.planned;
@@ -537,8 +551,8 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
                 cast(const(ubyte)[])mm[]) != firstHash)
             throw new Exception("mapped input changed before publish: " ~ file);
         const changed = cleaned != text;
-        if (dryRun) return ManifestOutcome(changed ? "dry-run-changed" :
-            "dry-run-unchanged", "");
+        if (dryRun) return manifestOutcome(changed ? "dry-run-changed" :
+            "dry-run-unchanged", "", key);
         version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
         // The F08 sink owns its buffer and fsync-before-rename publication.
         phase = FailurePhase.policy;
@@ -564,9 +578,9 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
         manifest.commitPublished(key, destination,
             outputDigest(cast(const(ubyte)[])cleaned));
         version (ManifestCliHarness) manifestKillAt(databasePath, "after-commit");
-        return ManifestOutcome(replacing ? "retry" :
+        return manifestOutcome(replacing ? "retry" :
             (changed ? "changed" : "unchanged"),
-            replacing ? (changed ? "changed" : "unchanged") : "");
+            replacing ? (changed ? "changed" : "unchanged") : "", key);
     } catch (Exception failure) {
         if (dryRun) throw failure;
         if (phase == FailurePhase.policy || phase == FailurePhase.scheduler)
@@ -586,15 +600,16 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
         // be mistaken for a quarantined document.
         try {
             version (FailurePolicyHarness) {
+                failureAt(databasePath, "pre-mark", file);
                 recordDocumentFailure(manifest, key, record,
                     (in FailureRecord logged) { failureAt(databasePath, "log-ack", file); });
             } else recordDocumentFailure(manifest, key, record);
         } catch (Exception acknowledgmentFailure) {
             record.classification = FailureClass.fatal;
-            throw new FatalDocumentFailure(record, acknowledgmentFailure);
+            throw new FatalDocumentFailure(record, acknowledgmentFailure, false);
         }
         if (fatal)
-            throw new FatalDocumentFailure(record, failure);
+            throw new FatalDocumentFailure(record, failure, true);
         throw new DocumentFailure(record);
     }
 }
@@ -789,7 +804,9 @@ int runApp(string[] args) {
                     chain, bytes, dryRun) ? "changed" : "unchanged";
             if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, decision.status, "", decision.detail);
+                    chainLabel, decision.status, "", decision.detail,
+                    decision.hasKey ? decision.key.document.text : "",
+                    decision.hasKey ? decision.key.sink : "");
             if (explain) pending.remove(file);
             if (manifestPath.length) ++manifestCompletedPrefix;
         },
@@ -801,23 +818,27 @@ int runApp(string[] args) {
                 documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
                 file, error.msg);
             if (explain) {
+                string status = "failure", detail, documentId, sinkKey;
+                if (documentFailure !is null) {
+                    status = documentFailure.record.sinkTouched ? "uncertain" : "failed";
+                    detail = "completed-prefix=" ~
+                        documentFailure.record.completedPrefix.to!string;
+                    documentId = documentFailure.record.documentId.text;
+                    sinkKey = documentFailure.record.sinkKey;
+                } else if (fatalDocumentFailure !is null) {
+                    status = !fatalDocumentFailure.acknowledged ? "unacknowledged" :
+                        (fatalDocumentFailure.record.sinkTouched ? "uncertain" : "failed");
+                    detail = "completed-prefix=" ~
+                        fatalDocumentFailure.record.completedPrefix.to!string;
+                    documentId = fatalDocumentFailure.record.documentId.text;
+                    sinkKey = fatalDocumentFailure.record.sinkKey;
+                } else if (manifestDecision !is null) {
+                    status = manifestDecision.status;
+                    documentId = manifestDecision.documentId.text;
+                    sinkKey = manifestDecision.sinkKey;
+                }
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, documentFailure is null ?
-                        (fatalDocumentFailure !is null ?
-                            (fatalDocumentFailure.record.sinkTouched ? "uncertain" : "failed") :
-                            (manifestDecision is null ? "failure" : manifestDecision.status)) :
-                        (documentFailure.record.sinkTouched ? "uncertain" : "failed"),
-                    error.msg, documentFailure !is null ?
-                        ("id=" ~ documentFailure.record.documentId.text ~
-                        " sink=" ~ documentFailure.record.sinkKey ~
-                        " completed-prefix=" ~ documentFailure.record.completedPrefix.to!string) :
-                        (fatalDocumentFailure !is null ?
-                            ("id=" ~ fatalDocumentFailure.record.documentId.text ~
-                            " sink=" ~ fatalDocumentFailure.record.sinkKey ~
-                            " completed-prefix=" ~ fatalDocumentFailure.record.completedPrefix.to!string) :
-                            (manifestDecision !is null ?
-                                ("id=" ~ manifestDecision.documentId.text ~
-                                " sink=" ~ manifestDecision.sinkKey) : "")));
+                    chainLabel, status, error.msg, detail, documentId, sinkKey);
             }
             if (explain) pending.remove(file);
             if (documentFailure !is null) ++manifestCompletedPrefix;

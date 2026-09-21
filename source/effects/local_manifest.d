@@ -7,7 +7,8 @@ import std.datetime.systime : Clock;
 import std.digest.sha : sha256Of, SHA256;
 import std.digest : LetterCase, toHexString;
 import core.stdc.stdlib : free;
-import core.stdc.errno : errno, EINTR;
+import core.stdc.errno : errno, EINTR, ENOSPC, EDQUOT, EMFILE, ENFILE;
+import effects.atomic_piece_sink : ResourceExhaustion;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
 import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
 import core.sys.posix.unistd : close, read;
@@ -168,18 +169,54 @@ private bool sameInode(string left, string right) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
+private void failRehashResource(string message, int errorCode) {
+    if (errorCode == ENOSPC || errorCode == EDQUOT ||
+        errorCode == EMFILE || errorCode == ENFILE)
+        throw new ResourceExhaustion("local manifest: " ~ message, errorCode);
+}
+
+version (FailurePolicyHarness) {
+    private void injectedRehashFault(string path, string phase) {
+        import core.stdc.errno : EIO;
+        struct Fault { string name; int code; }
+        foreach (spec; [Fault("EMFILE", EMFILE), Fault("ENFILE", ENFILE),
+                Fault("ENOSPC", ENOSPC), Fault("EDQUOT", EDQUOT),
+                Fault("EIO", EIO)]) {
+            if (exists(path ~ ".fault-rehash-" ~ phase ~ "-" ~ spec.name)) {
+                failRehashResource("injected output rehash " ~ phase ~ " failure", spec.code);
+                throw new Exception("local manifest: injected output rehash " ~ phase ~ " failure");
+            }
+        }
+    }
+}
+
 private ubyte[32] hashFile(string path) {
+    version (FailurePolicyHarness) injectedRehashFault(path, "open");
     auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+        const savedErrno = errno;
+        failRehashResource("cannot open observed output", savedErrno);
+    }
     require(fd >= 0, "cannot open observed output without following symlink");
     scope(exit) close(fd);
     stat_t info;
-    require(fstat(fd, &info) == 0 && S_ISREG(info.st_mode),
-        "observed output is not regular");
+    version (FailurePolicyHarness) injectedRehashFault(path, "fstat");
+    const statResult = fstat(fd, &info);
+    if (statResult != 0) {
+        const savedErrno = errno;
+        failRehashResource("cannot stat observed output", savedErrno);
+    }
+    require(statResult == 0 && S_ISREG(info.st_mode), "observed output is not regular");
     SHA256 digest;
     ubyte[64 * 1024] buffer;
     while (true) {
+        version (FailurePolicyHarness) injectedRehashFault(path, "read");
         auto amount = read(fd, buffer.ptr, buffer.length);
-        if (amount < 0 && errno == EINTR) continue;
+        if (amount < 0) {
+            const savedErrno = errno;
+            if (savedErrno == EINTR) continue;
+            failRehashResource("observed output read failed", savedErrno);
+        }
         require(amount >= 0, "observed output read failed");
         if (amount == 0) break;
         digest.put(buffer[0 .. cast(size_t)amount]);
@@ -351,7 +388,8 @@ final class LocalManifest {
             if (exists(row.destination) && row.hasOutput &&
                 hashFile(row.destination) == row.outputSha256)
                 return Inspection.verifiedCommitted;
-        } catch (Exception) { }
+        } catch (ResourceExhaustion failure) { throw failure; }
+        catch (Exception) { }
         transition(key, SinkState.uncertain, false, row.outputSha256);
         return Inspection.retryRequired;
     }

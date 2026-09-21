@@ -25,7 +25,7 @@ scrubbed --input ./incoming --output ./cleaned --config examples/inspection.json
 Records are tab-separated with fixed fields:
 
 ```text
-EXPLAIN<TAB>input="..."<TAB>output="..."<TAB>chain="..."<TAB>status=... [<TAB>reason="..."] [<TAB>detail="..."]
+EXPLAIN<TAB>input="..."<TAB>output="..."<TAB>chain="..."<TAB>status=... [<TAB>reason="..."] [<TAB>detail="..."] [<TAB>document_id="..."<TAB>sink_key="..."]
 ```
 
 The quoted values are JSON strings, so tabs, newlines and other special
@@ -34,11 +34,12 @@ output are absolute paths; avoid `--explain` if those paths are sensitive.
 `changed` and `unchanged` compare filter output to input, including in dry-run;
 normal processing still writes successful files even when unchanged. File mode
 uses `changed`, `unchanged`, `failure`, or `canceled`; opt-in manifest mode also
-uses `failed`, `uncertain`, `retry-required`, `retry`, `skipped`,
+uses `failed`, `uncertain`, `unacknowledged`, `retry-required`, `retry`, `skipped`,
 `dry-run-changed`, and `dry-run-unchanged`. Failures and cancellations include
-a reason. Manifest failures and unresolved retry decisions include the exact
-document ID and sink key in `detail`; acknowledged failures also include the
-completed prefix. Parallel completion may reorder whole
+a reason. Every manifest decision with a known key includes exact
+`document_id` and `sink_key` fields. Acknowledged failures also include the
+completed prefix in `detail`; `unacknowledged` means no terminal failure state
+and failure-log acknowledgment were confirmed. Parallel completion may reorder whole
 records, but the field format is stable and records are not buffered for
 whole-tree sorting.
 

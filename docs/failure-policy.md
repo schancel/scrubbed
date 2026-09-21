@@ -17,9 +17,11 @@ errors, admission stops, active work drains, and the command exits 2.
 Previously committed rows remain intact. A completed run exits 0; a run with
 acknowledged per-document failures or unresolved retry decisions exits 1.
 
-`--explain` shows one decision per file. For acknowledged failures it includes
-the exact document ID, sink key, and count of prior terminal acknowledged
-manifest decisions in `detail`; the summary counts include each processed file
+`--explain` shows one decision per file. Every keyed manifest decision includes
+exact `document_id` and `sink_key` fields. Acknowledged failures include the
+count of prior terminal acknowledged manifest decisions in `detail`; failed
+state/log acknowledgment is instead `unacknowledged`, never a claimed terminal
+`failed` or `uncertain` state. The summary counts include each processed file
 once. The failure row itself remains the restart authority. Pre-plan open/read
 faults cannot be assigned an exact manifest key and therefore remain fatal;
 the injected read/decode probes exercise post-plan routing only.

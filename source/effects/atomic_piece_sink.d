@@ -48,6 +48,19 @@ version (FailurePolicyHarness) {
                 failIo("injected atomic output " ~ phase ~ " failure", spec.code);
         }
     }
+
+    private void injectedPhobosFault(string destination, string phase) {
+        import core.stdc.errno : EACCES, EIO;
+        import std.file : exists;
+        struct Fault { string name; int code; }
+        foreach (spec; [
+                Fault("ENOSPC", ENOSPC), Fault("EDQUOT", EDQUOT),
+                Fault("EMFILE", EMFILE), Fault("ENFILE", ENFILE),
+                Fault("EACCES", EACCES), Fault("EIO", EIO)]) {
+            if (exists(destination ~ ".fault-" ~ phase ~ "-" ~ spec.name))
+                throw new FileException(destination, cast(uint)spec.code);
+        }
+    }
 }
 
 /// The checkpoint runs after each complete buffer and once immediately before
@@ -139,8 +152,26 @@ void writeAtomicPieces(string destination, Content.PieceRange pieces,
         failIo("atomic output close failed", closeError);
     }
     version (FailurePolicyHarness) injectedIoFault(destination, "close");
-    if (prior) setAttributes(temporary, attributes);
-    rename(temporary, destination);
+    if (prior) {
+        try {
+            version (FailurePolicyHarness) injectedPhobosFault(destination, "setattrs");
+            setAttributes(temporary, attributes);
+        } catch (FileException error) {
+            if (isResourceCode(cast(int)error.errno))
+                throw new ResourceExhaustion("atomic output attributes failed",
+                    cast(int)error.errno);
+            throw error;
+        }
+    }
+    try {
+        version (FailurePolicyHarness) injectedPhobosFault(destination, "rename");
+        rename(temporary, destination);
+    } catch (FileException error) {
+        if (isResourceCode(cast(int)error.errno))
+            throw new ResourceExhaustion("atomic output rename failed",
+                cast(int)error.errno);
+        throw error;
+    }
     committed = true;
 }
 

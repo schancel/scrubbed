@@ -114,6 +114,9 @@ not imply the features are implemented or worker-ready.
 
 Reproducible D correctness and allocation microbenchmarks, including the
 reconstructed pre-range mojibake implementation, are under `benchmarks/`.
+The D-only per-fix text corpus adds small exact-output and clean-preservation
+gates; its two clean examples per fix are not a population-level false-positive
+estimate.
 The first whole-CLI baseline there is sobering: on one synthetic 4,096-line
 mojibake input, scrubbed took roughly 3 seconds versus roughly 0.16 seconds
 for pinned ftfy. That is not a corpus-wide comparison, but it rules out a

@@ -130,6 +130,11 @@ issue. This file remains the status record for implemented work.
       checked-in D harness pins input hashes and emits JSON results: 39/39
       in-scope positives, 48/48 encoding-negative cases, and 64 unsupported
       positives; see `benchmarks/ftfy_corpus.d`.
+- [x] Add a separate D-only, held-out synthetic per-fix text corpus and scorer
+      (`benchmarks/text_fixes.d`): each of six fix/context rows currently has
+      2/2 exact positives and 2/2 clean preserves, with actual out-of-scope
+      examples excluded explicitly. This is a narrow regression gate, not a
+      statistical false-positive estimate or general ftfy parity evidence.
 - [ ] Throughput: benchmark against Python ftfy/trafilatura on both a
       controlled document tree and a corpus larger than RAM. Report wall
       time, CPU time, peak RSS, bytes/sec, files/sec, allocation volume, and

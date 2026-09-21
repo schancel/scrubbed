@@ -13,8 +13,10 @@ replacement. [`effects/bounded_input.d`](effects/bounded_input.d) owns the
 local queue and independent queued-document, reserved-byte, and file-work
 callback limits; it invokes `cli.processOne` or the opt-in manifest processor
 through a supplied callback.
-`runApp(string[] args)` builds a `Pipeline` before walking files. A file failure is
-reported as `SKIP`; `runApp` returns 1 if any file failed and 0 otherwise.
+`runApp(string[] args)` builds a `Pipeline` before walking files. Only an
+acknowledged per-document failure in opt-in manifest mode is reported as
+`SKIP` and yields incomplete exit 1. Run-fatal failures, including no-manifest
+worker errors, are reported as `FATAL` and exit 2; a completed run exits 0.
 The module imports the implemented filter modules so their `static this()`
 registrations run. It does not contain the filter algorithms.
 

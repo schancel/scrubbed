@@ -63,6 +63,7 @@ dub build --build=release
 ./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json
 ./scrubbed --input path/to/docs --output path/to/clean --threads 4 --max-queued-docs 64 --max-input-bytes 268435456 --max-open-inputs 4
 ./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json --dry-run --explain
+./scrubbed repair --input path/to/docs --output path/to/clean --dry-run --explain
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -84,6 +85,9 @@ without creating output. `--explain` emits one bounded JSON-quoted, tab-separate
 decision record per visited file; parallel record order is not fixed. See the
 [inspection guide](docs/cli-inspection.md). A later traversal error can cancel
 already-admitted files; those receive failure records, and the command exits 2.
+`run` and `repair` also route to the implemented filter pipeline, with generated
+help and command/option-name completion; `extract` is shown as unavailable and
+exits 2 without writing output. See the [command guide](docs/cli-commands.md).
 
 Outputs are written beside their destination and atomically renamed into
 place, so a clean zero-copy result is safe even when input and output are the
@@ -117,6 +121,10 @@ Standalone POSIX effects now demonstrate [bounded mapped windows](docs/windowed-
 and [atomic streaming of content pieces](docs/atomic-piece-output.md), including
 a verified 1.075 GB output without an output-sized D allocation. Neither
 effect is wired into the CLI or proves that context-heavy filters can stream.
+A [bounded JSONL/stdin-stdout adapter](docs/jsonl-stream.md) is also tested as
+an effects-layer API, but is not an end-user CLI mode. A separate
+[SQLite manifest experiment](docs/sqlite-manifest-evaluation.md) tests local
+crash/restart states; no production resume store or format has been adopted.
 
 ## Status
 

@@ -1,8 +1,11 @@
 # Source ownership
 
-The executable entry is [`app.d`](app.d): `main(string[] args)` calls
-`cli.runApp`, prints an uncaught exception, and returns exit code 2. Its only
-application dependency is `cli`.
+The executable entry is [`app.d`](app.d): `main(string[] args)` calls the
+[`cli_commands.d`](cli_commands.d) argparse command adapter, reports an
+uncaught exception, and returns exit code 2. The adapter routes implemented
+`run`/`repair` and legacy no-verb flags into `cli.runApp`; `extract` fails
+explicitly as unavailable. Command/option-name completion is supported;
+document processing stays in `cli`.
 
 [`cli.d`](cli.d) owns argument and JSON-config parsing, path validation,
 incremental directory traversal, input `MmFile` lifetime, and atomic output
@@ -82,6 +85,11 @@ streams `Content.pieces()` through a bounded buffer to one atomic local
 destination. Both have D evidence harnesses, but neither is wired to CLI or
 to the future document-stage runner; their resource bounds do not make
 context-heavy filters streaming.
+
+[`effects/jsonl_stream.d`](effects/jsonl_stream.d) and
+[`effects/stdio_stream.d`](effects/stdio_stream.d) provide standalone bounded
+JSONL selected-field and stream adapters with semantic-value preservation of
+untouched fields. They are not wired to the command adapter or current CLI.
 
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run

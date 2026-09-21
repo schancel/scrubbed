@@ -130,11 +130,13 @@ issue. This file remains the status record for implemented work.
       a late traversal error cancels admitted files. This is not a diff view,
       full-tree transaction, or durable manifest; add a checked-in end-to-end
       stdout-record regression beyond the current formatter/scheduler tests.
-- [ ] Evaluate D `argparse` 2.x for a Cobra-like command tree: generated
-      root/subcommand help, typed options, validation, and shell completion.
-      Keep today's flags working while adding proposed `repair`/`extract`/`run`
-      verbs; test help text, errors, and exit codes. Parser choice should not
-      be confused with per-document throughput.
+- [x] Integrate pinned D `argparse` 2.0.2 for generated root/subcommand help
+      and command/option-name completion. `run` and `repair` preserve the
+      implemented filter pipeline and old no-verb flags; `extract` fails
+      explicitly as unavailable. Release-active CLI tests cover help, errors,
+      exits and a real queued-cancellation `--explain` path. Value/path/filter
+      completion is not supported; parser startup/size observations are not
+      per-document throughput evidence (`docs/cli-commands.md`).
 
 ## Phase 4 — HTML->Markdown (`filters/html2md.d`, currently a stub)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
@@ -227,9 +229,17 @@ is useful, but it is not sufficient on its own.
       endpoint/TLS behavior, and publication-safe error labels
       (`docs/s3-capability-evaluation.md`). No production client, AWS SigV4,
       real-service compatibility, or secret-bearing credential path exists yet.
-- [ ] Add a durable run manifest with input identity/checksum, selected filter
-      config, success/failure state, and safe resume/retry. Atomic output alone
-      prevents partial files but does not make a multi-day corpus run resumable.
+- [~] Add a durable run manifest with input identity/checksum, selected filter
+      config, per-sink state and safe resume/retry. A D-only evidence harness
+      evaluates pinned static SQLite, indexed v1 state and four process-exit
+      sink/DB crash windows (`docs/sqlite-manifest-evaluation.md`). No
+      production format, reconciliation policy, dependency or CLI resume has
+      been adopted; atomic output alone does not make a multi-day run resumable.
+- [~] Add bounded JSONL selected-field and stdin/stdout adapters. Effects-only
+      D modules preserve untouched JSON values semantically, derive stable
+      caller-key/line IDs, cap records, and test malformed JSON separately
+      from invalid document text (`docs/jsonl-stream.md`). No CLI stream mode
+      is wired yet; raw formatting/field order is not preserved.
 - [ ] Stress interruption, disk-full, invalid UTF-8, permission failures,
       changing inputs, and process restart. Never report success for skipped or
       partially written data; emit a machine-readable failure manifest.

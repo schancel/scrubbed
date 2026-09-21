@@ -28,6 +28,13 @@ also importing filter modules for registration and filters importing
 filters. The current `filters.entities` import of `filters.mojibake` is only
 for its CP1252 mapping helper.
 
+[`domain/document.d`](domain/document.d) is a standalone future-facing domain
+facade for logical `SourceLocator`/`DocumentId` identity, distinct `OutputName`,
+and owner-checked borrowed byte views. It is tested in place but not yet used
+by the CLI or pipeline. Its canonical key format and lifetime rule are in the
+[architecture map](../docs/architecture.md); transport-specific source keys
+and content/job stages are not implemented here.
+
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.

@@ -85,7 +85,10 @@ ubyte[] zstdFrame(const(ubyte)[] plain) {
 
 string signature(WarcRecord r) {
     string result = r.sourceKey ~ ":" ~ r.ordinal.to!string ~ ":" ~
-        r.recordId ~ ":" ~ r.type ~ ":" ~ cast(string) r.block;
+        r.recordId ~ ":" ~ r.date ~ ":" ~ r.type ~ ":" ~
+        (r.hasTargetUri ? "target=" ~ r.targetUri : "no-target") ~ ":" ~
+        "content-type=" ~ r.contentType ~ ":" ~ cast(string) r.block ~ ":" ~
+        (r.isConversionText() ? "conversion=" ~ r.conversionText() : "not-conversion");
     foreach (f; r.fields) result ~= ":" ~ f.name ~ "=" ~ f.value;
     return result;
 }
@@ -189,6 +192,12 @@ void main() {
             actual ~= signature(r); return true;
         }) == 2 && expected == actual, "on-disk parity " ~ item);
         need(actual[0].canFind(":1:") && actual[1].canFind(":2:"), "ordinals");
+        need(actual[0].canFind("2026-09-21T00:00:00Z") &&
+            actual[0].canFind("target=https://example.org/a") &&
+            actual[1].canFind("content-type=text/plain") &&
+            actual[1].canFind(item == "zstd" ? "conversion=yyy" :
+                "conversion=caf\xc3\xa9\n"),
+            "date/URI/Content-Type/WET parity " ~ item);
     }
     auto bad = gzipBytes.dup;
     bad[$ - 8] ^= 1;
@@ -232,6 +241,24 @@ void main() {
         }
         need(thrown, "thrown callback classification " ~ item);
     }
+    size_t outerCalls;
+    bool nestedClassified;
+    try readWarcFile(root, "plain", WarcFileFormat.plain, "source-key",
+        (WarcRecord r) {
+            ++outerCalls;
+            if (outerCalls == 2)
+                readWarcFile(root, "../plain", WarcFileFormat.plain,
+                    "nested-source", (WarcRecord inner) => true);
+            return true;
+        });
+    catch (WarcFileError error) {
+        auto inner = cast(WarcFileError) error.original;
+        nestedClassified = error.phase == WarcFilePhase.callback &&
+            error.completed == 1 && inner !is null &&
+            inner.phase == WarcFilePhase.path && inner.completed == 0;
+    }
+    need(nestedClassified && outerCalls == 2,
+        "nested WARC file error must be outer callback failure with completed prefix");
     mkdir(buildPath(root, "sub"));
     need(symlink("../plain", buildPath(root, "sub", "link").toStringz) == 0,
         "leaf symlink fixture");

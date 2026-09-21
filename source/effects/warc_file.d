@@ -109,6 +109,9 @@ size_t readWarcFile(string root, string relativePath, WarcFileFormat format,
         else compressed.finish();
         return completed;
     } catch (WarcFileError error) {
+        if (callbackError !is null)
+            throw new WarcFileError(WarcFilePhase.callback, completed,
+                callbackError.msg, callbackError);
         throw error;
     } catch (Exception error) {
         auto phase = callbackFailure;

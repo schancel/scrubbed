@@ -106,6 +106,16 @@ replay. It verifies observed output bytes before a committed skip. The
 file/tree CLI wires it only in opt-in `--manifest PATH` mode; see
 [local manifest restart behavior and crash limits](../docs/local-manifest.md).
 
+[`effects/zstd_ffi.d`](effects/zstd_ffi.d) declares the narrow ABI for the
+vendored static zstd decompressor used by the WARC codec adapter.
+
+[`domain/shard_format.d`](domain/shard_format.d) defines the standalone binary-v1
+immutable source-document and keyed analyzer-overlay records.
+[`effects/document_shards.d`](effects/document_shards.d) streams their bounded
+frames, performs version/revision-checked joins, and publishes source shards
+create-only or replaces one overlay atomically. No CLI or SQLite route uses
+these artifacts yet; see the [format and publication limits](../docs/document-shards.md).
+
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.

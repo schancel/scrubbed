@@ -140,7 +140,12 @@ parsers (SHA-256 of the full observation):
 | omitted `</li>` list | `7ef210348064d303fdabaaf9ac2d39c9ba15e32cc987de7bcf3520ef5ead2972` | implied ends and `class` |
 
 The mode then runs eight D threads, each constructing, observing, and
-destroying 100 independent native trees from one read-only input. Both
+destroying 100 independent native trees from one read-only input. Every
+iteration is compared with the pre-thread golden; the first mismatch and its
+worker/iteration are retained even if later iterations recover, and all
+threads are joined before failure is reported. A deliberately wrong first
+observation followed by a correct one is rejected by the release-active
+negative control. Both
 candidate runs matched SHA-256
 `5a448ed3366b5994b7dafd3669f26ce3d34fcbfb08fe27da5c81b6fce22d8d33`;
 this is a bounded reentrancy/ownership probe, not a thread-safety guarantee

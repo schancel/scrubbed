@@ -292,25 +292,49 @@ void concurrencyProbe(string candidate) {
     class Worker {
         string candidate;
         const(ubyte)[] input;
-        string result;
-        this(string candidate, const(ubyte)[] input) {
+        string expected;
+        bool mismatched;
+        size_t firstMismatchIndex;
+        string firstMismatchValue;
+        this(string candidate, const(ubyte)[] input, string expected) {
             this.candidate = candidate;
             this.input = input;
+            this.expected = expected;
+        }
+        void record(size_t iteration, string observed) {
+            if (!mismatched && observed != expected) {
+                mismatched = true;
+                firstMismatchIndex = iteration;
+                firstMismatchValue = observed;
+            }
         }
         void run() {
-            foreach (_; 0 .. 100) result = evidence(candidate, input);
+            foreach (i; 0 .. 100) record(i, evidence(candidate, input));
         }
     }
+    auto negative = new Worker(candidate, input, expected);
+    negative.record(0, "deliberately wrong");
+    negative.record(1, expected);
+    if (!negative.mismatched || negative.firstMismatchIndex != 0 ||
+        negative.firstMismatchValue != "deliberately wrong")
+        throw new Exception("concurrency negative control accepted later recovery");
     Worker[8] workers;
     Thread[8] threads;
     foreach (i; 0 .. threads.length) {
-        workers[i] = new Worker(candidate, input);
+        workers[i] = new Worker(candidate, input, expected);
         threads[i] = new Thread(&workers[i].run);
         threads[i].start();
     }
-    foreach (thread; threads) thread.join();
-    foreach (worker; workers) if (worker.result != expected)
-        throw new Exception("concurrent observation mismatch: " ~ worker.result);
+    string firstJoinFailure;
+    foreach (thread; threads) {
+        try thread.join();
+        catch (Throwable error) if (!firstJoinFailure.length) firstJoinFailure = error.toString();
+    }
+    if (firstJoinFailure.length) throw new Exception("concurrent thread failed: " ~ firstJoinFailure);
+    foreach (i, worker; workers) if (worker.mismatched)
+        throw new Exception("concurrent observation mismatch worker=" ~ to!string(i) ~
+            " iteration=" ~ to!string(worker.firstMismatchIndex) ~
+            " observation=" ~ worker.firstMismatchValue);
     writeln("concurrent_threads=8 iterations_per_thread=100 quality=pass observation_sha256=",
         format("%(%02x%)", sha256Of(expected)));
 }

@@ -1,7 +1,7 @@
 /// Command-line orchestration and filesystem boundary for scrubbed.
 module cli;
 
-import core.atomic : atomicLoad, atomicOp;
+import effects.bounded_input : BoundedInput, InputLimits;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
@@ -16,10 +16,10 @@ import std.file : FileException, SpanMode, dirEntries, exists, getAttributes,
 import std.getopt : config, defaultGetoptPrinter, getopt;
 import std.json : JSONType, parseJSON;
 import std.mmfile : MmFile;
-import std.parallelism : TaskPool, totalCPUs;
+import std.parallelism : totalCPUs;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
-import std.stdio : stderr, writefln, writeln;
+import std.stdio : File, stderr, writefln, writeln;
 import std.string : join;
 import std.uuid : randomUUID;
 
@@ -177,7 +177,7 @@ private FilterSpec[] loadFilterConfig(string path) {
 }
 
 void processOne(string file, string inputRoot, string outputRoot,
-                bool inputIsDir, const ref Pipeline chain) {
+                bool inputIsDir, const ref Pipeline chain, ulong reservedBytes) {
     if (isSymlink(file))
         throw new Exception("refusing symlink input: " ~ file);
 
@@ -185,17 +185,30 @@ void processOne(string file, string inputRoot, string outputRoot,
         ? buildPath(outputRoot, relativePath(file, inputRoot))
         : outputRoot;
 
-    if (getSize(file) == 0) {
+    if (reservedBytes == 0) {
+        // MmFile cannot map an empty file. Check size on an opened handle so
+        // growth between traversal and open cannot bypass the byte budget.
+        {
+            scope input = File(file, "rb");
+            if (input.size != 0)
+                throw new Exception("input changed size after admission: " ~ file);
+        }
         atomicWrite(outPath, inputIsDir ? outputRoot : dirName(outputRoot), chain.run(""));
         return;
     }
 
     string cleaned;
     {
+        if (getSize(file) != reservedBytes)
+            throw new Exception("input changed size after admission: " ~ file);
         // Close the mapping before rename: Windows does not grant delete/
         // rename sharing to MmFile's read handle. Only copy when a no-op (or
         // custom slicing) filter returns storage that aliases the mapping.
-        scope mm = new MmFile(file);
+        // A fixed-size map cannot transiently map beyond the byte token if
+        // the file grows after traversal but before this open.
+        scope mm = new MmFile(file, MmFile.Mode.read, reservedBytes, null);
+        if (getSize(file) != reservedBytes)
+            throw new Exception("input changed size after admission: " ~ file);
         auto text = cast(string)(cast(ubyte[]) mm[]);
         cleaned = chain.run(text);
         if (cleaned.length) {
@@ -215,19 +228,18 @@ private bool canFindOption(const string[] args, string option) {
     return false;
 }
 
-private size_t backgroundWorkers(size_t executionThreads) {
-    assert(executionThreads > 0);
-    return executionThreads - 1;
-}
-
 int runApp(string[] args) {
     string inputPath;
     string outputPath;
     string filterList = "normalize-line-endings,strip-control";
     string configPath;
     size_t nThreads = totalCPUs;
+    size_t maxQueuedDocuments = 64;
+    ulong maxInputBytes = 256UL * 1024 * 1024;
+    size_t maxOpenInputs;
     bool listFilters;
     const filtersExplicit = args.canFindOption("--filters");
+    const descriptorsExplicit = args.canFindOption("--max-open-inputs");
 
     auto helpInfo = getopt(args,
         config.caseSensitive,
@@ -236,6 +248,9 @@ int runApp(string[] args) {
         "filters", "Comma-separated filter chain, applied in order", &filterList,
         "config", "JSON file containing an ordered filter list and per-filter options", &configPath,
         "threads", "Worker thread count for the TaskPool (default: all cores)", &nThreads,
+        "max-queued-docs", "Maximum queued input documents (default: 64)", &maxQueuedDocuments,
+        "max-input-bytes", "Maximum reserved input bytes (default: 268435456)", &maxInputBytes,
+        "max-open-inputs", "Maximum worker-held input descriptors (default: threads)", &maxOpenInputs,
         "list-filters", "Print registered filter names and exit", &listFilters);
     if (helpInfo.helpWanted) {
         defaultGetoptPrinter("scrubbed", helpInfo.options);
@@ -251,6 +266,9 @@ int runApp(string[] args) {
     }
     if (nThreads == 0)
         throw new Exception("--threads must be positive");
+    if (maxOpenInputs == 0 && !descriptorsExplicit) maxOpenInputs = nThreads;
+    if (maxQueuedDocuments == 0 || maxInputBytes == 0 || maxOpenInputs == 0)
+        throw new Exception("input limits must be positive");
     if (configPath.length && filtersExplicit)
         throw new Exception("--config and --filters are mutually exclusive");
     if (!exists(inputPath))
@@ -269,40 +287,49 @@ int runApp(string[] args) {
         : Pipeline.build(filterList.split(","));
     writeln("filter chain: ", chain.names.join(" -> "));
 
-    string[] files;
     const inputIsDir = isDir(inputPath);
     if (inputIsDir) {
         if (pathIsWithin(outputPath, inputPath))
             throw new Exception("output directory must not be inside the input tree");
-        foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
-            if (entry.isSymlink)
-                throw new Exception("refusing symlink in input tree: " ~ entry.name);
-            if (entry.isFile)
-                files ~= entry.name;
-        }
-    } else {
-        files ~= inputPath;
     }
     ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
         inputIsDir ? outputPath : dirName(outputPath));
-    writeln("processing ", files.length, " file(s) across ", nThreads, " thread(s)");
-
-    // TaskPool.parallel also runs one task on the caller, so N requested
-    // execution threads means N-1 background workers plus this thread.
-    auto pool = new TaskPool(backgroundWorkers(nThreads));
-    scope(exit) pool.finish();
-
-    shared size_t failed;
-    foreach (file; pool.parallel(files)) {
-        try {
-            processOne(file, inputPath, outputPath, inputIsDir, chain);
-        } catch (Exception error) {
+    auto scheduler = new BoundedInput(
+        InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs), nThreads,
+        (string file, ulong bytes) {
+            processOne(file, inputPath, outputPath, inputIsDir, chain, bytes);
+        },
+        (string file, Throwable error) {
             stderr.writefln("SKIP %s: %s", file, error.msg);
-            failed.atomicOp!"+="(1);
+        });
+    size_t rejected;
+    try {
+        if (inputIsDir) {
+            foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
+                if (entry.isSymlink)
+                    throw new Exception("refusing symlink in input tree: " ~ entry.name);
+                if (!entry.isFile) continue;
+                try scheduler.submit(entry.name, getSize(entry.name));
+                catch (Exception error) {
+                    stderr.writefln("SKIP %s: %s", entry.name, error.msg);
+                    ++rejected;
+                }
+            }
+        } else {
+            try scheduler.submit(inputPath, getSize(inputPath));
+            catch (Exception error) {
+                stderr.writefln("SKIP %s: %s", inputPath, error.msg);
+                ++rejected;
+            }
         }
+    } catch (Exception error) {
+        scheduler.cancel();
+        scheduler.finish();
+        throw error;
     }
-    const failures = failed.atomicLoad;
-    writeln("done. ", files.length - failures, " succeeded, ", failures, " failed.");
+    const counts = scheduler.finish();
+    const failures = counts.failed + rejected;
+    writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");
     return failures == 0 ? 0 : 1;
 }
 
@@ -314,8 +341,6 @@ unittest {
     scope(exit) if (exists(root)) rmdirRecurse(root);
     mkdir(root);
     assert(runApp(["scrubbed"]) == 2);
-    assert(backgroundWorkers(1) == 0);
-    assert(backgroundWorkers(4) == 3);
 
     auto same = buildPath(root, "same.txt");
     write(same, "already clean");
@@ -388,10 +413,31 @@ unittest {
     auto sharedOutput = buildPath(root, "shared-output");
     assert(runApp(["scrubbed", "--input", dirName(sharedInput),
         "--output", sharedOutput, "--filters", "fix-mojibake",
-        "--threads", "4"]) == 0);
+        "--threads", "4", "--max-queued-docs", "1",
+        "--max-input-bytes", "5", "--max-open-inputs", "1"]) == 0);
     foreach (index; 0 .. 64)
         assert(readText(buildPath(sharedOutput, "nested",
             index.to!string ~ ".txt")) == "clean");
+
+    auto oversized = buildPath(root, "oversized.txt");
+    write(oversized, "too large");
+    auto oversizedOutput = buildPath(root, "oversized-output.txt");
+    assert(runApp(["scrubbed", "--input", oversized,
+        "--output", oversizedOutput, "--threads", "1",
+        "--max-input-bytes", "2"]) == 1);
+    assert(!exists(oversizedOutput));
+
+    auto changed = buildPath(root, "changed.txt");
+    auto changedOutput = buildPath(root, "changed-output.txt");
+    write(changed, "old");
+    write(changed, "larger");
+    auto changedChain = Pipeline.build(["fix-mojibake"]);
+    assertThrown(processOne(changed, changed, changedOutput, false,
+        changedChain, 3));
+    assert(!exists(changedOutput));
+    assertThrown(processOne(changed, changed, changedOutput, false,
+        changedChain, 0));
+    assert(!exists(changedOutput));
 
     version (Posix) {
         import std.file : symlink;

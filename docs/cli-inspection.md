@@ -32,8 +32,11 @@ normal processing still writes successful files even when unchanged. Failures
 include a reason. Parallel completion may reorder whole records, but the field
 format is stable and records are not buffered for whole-tree sorting.
 
-Exit status is `0` for success, `1` if a visited file fails, and `2` for an
-invocation/configuration error. Validation is a preflight of config and roots,
+Exit status is `0` for success, `1` for a per-file processing or admission
+failure, and `2` for an invocation/configuration or traversal error (including
+a symlink found later in an input tree). Queued files canceled after a traversal
+error receive a `failure` record with reason `canceled after traversal error`.
+Validation is a preflight of config and roots,
 not a transactional scan of an entire tree. A later traversal error, such as a
 symlink discovered after earlier files, does not roll back earlier normal-mode
 outputs. The existing `--threads` and input-resource limits still apply.

@@ -1,13 +1,14 @@
 /// Command-line orchestration and filesystem boundary for scrubbed.
 module cli;
 
+import core.sync.mutex : Mutex;
 import effects.bounded_input : BoundedInput, InputLimits;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
 import filters.punctuation;
 import pipeline;
-import std.algorithm.searching : startsWith;
+import std.algorithm.searching : canFind, startsWith;
 import std.array : split;
 import std.conv : to;
 import std.file : FileException, SpanMode, dirEntries, exists, getAttributes,
@@ -283,6 +284,36 @@ private void explainOne(string file, string destination, string chain,
     writeln(explanationRecord(file, destination, chain, decision, reason));
 }
 
+/// Only admitted or admission-blocked paths live here. The scheduler bounds
+/// this set to its queued/active reservation plus one waiting producer.
+private final class PendingExplanations {
+    private Mutex mutex;
+    private bool[string] paths;
+
+    this() { mutex = new Mutex; }
+
+    void add(string path) {
+        mutex.lock();
+        scope(exit) mutex.unlock();
+        paths[path] = true;
+    }
+
+    void remove(string path) {
+        mutex.lock();
+        scope(exit) mutex.unlock();
+        paths.remove(path);
+    }
+
+    string[] drain() {
+        mutex.lock();
+        scope(exit) mutex.unlock();
+        string[] remaining;
+        foreach (path; paths.keys) remaining ~= path;
+        paths = null;
+        return remaining;
+    }
+}
+
 private bool canFindOption(const string[] args, string option) {
     foreach (arg; args)
         if (arg == option || arg.startsWith(option ~ "=")) return true;
@@ -370,6 +401,7 @@ int runApp(string[] args) {
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
     const chainLabel = chain.names.join(" -> ");
+    auto pending = explain ? new PendingExplanations : null;
     auto scheduler = new BoundedInput(
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs), nThreads,
         (string file, ulong bytes) {
@@ -378,12 +410,14 @@ int runApp(string[] args) {
             if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, changed ? "changed" : "unchanged");
+            if (explain) pending.remove(file);
         },
         (string file, Throwable error) {
             stderr.writefln("SKIP %s: %s", file, error.msg);
             if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, "failure", error.msg);
+            if (explain) pending.remove(file);
         });
     size_t rejected;
     try {
@@ -397,8 +431,16 @@ int runApp(string[] args) {
                     throw new Exception(reason);
                 }
                 if (!entry.isFile) continue;
-                try scheduler.submit(entry.name, getSize(entry.name));
+                try {
+                    auto bytes = getSize(entry.name);
+                    if (explain) pending.add(entry.name);
+                    if (!scheduler.submit(entry.name, bytes)) {
+                        if (explain) pending.remove(entry.name);
+                        throw new Exception("input admission canceled: " ~ entry.name);
+                    }
+                }
                 catch (Exception error) {
+                    if (explain) pending.remove(entry.name);
                     stderr.writefln("SKIP %s: %s", entry.name, error.msg);
                     if (explain)
                         explainOne(entry.name, destinationFor(entry.name, inputPath,
@@ -407,8 +449,16 @@ int runApp(string[] args) {
                 }
             }
         } else {
-            try scheduler.submit(inputPath, getSize(inputPath));
+            try {
+                auto bytes = getSize(inputPath);
+                if (explain) pending.add(inputPath);
+                if (!scheduler.submit(inputPath, bytes)) {
+                    if (explain) pending.remove(inputPath);
+                    throw new Exception("input admission canceled: " ~ inputPath);
+                }
+            }
             catch (Exception error) {
+                if (explain) pending.remove(inputPath);
                 stderr.writefln("SKIP %s: %s", inputPath, error.msg);
                 if (explain)
                     explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
@@ -418,6 +468,10 @@ int runApp(string[] args) {
     } catch (Exception error) {
         scheduler.cancel();
         scheduler.finish();
+        if (explain)
+            foreach (file; pending.drain())
+                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
+                    chainLabel, "failure", "canceled after traversal error");
         throw error;
     }
     const counts = scheduler.finish();
@@ -626,4 +680,42 @@ unittest {
         "--filters", "normalize-line-endings", "--threads", "1"]) == 0,
         "legacy invocation exit");
     requireCli(readText(plainOutput) == "line\n", "legacy invocation output");
+}
+
+// Model the late-traversal-fault boundary deterministically: one worker has
+// begun, another file is admitted but queued, then traversal discovers the
+// fault and cancels. The scheduler skips the queued callback by design.
+unittest {
+    import core.sync.semaphore : Semaphore;
+
+    auto entered = new Semaphore(0);
+    auto release = new Semaphore(0);
+    auto pending = new PendingExplanations;
+    auto scheduler = new BoundedInput(InputLimits(2, 2, 1), 2,
+        (string file, ulong bytes) {
+            entered.notify();
+            release.wait();
+            pending.remove(file);
+        },
+        (string file, Throwable error) {
+            pending.remove(file);
+            throw new Exception("unexpected worker failure: " ~ error.msg);
+        });
+    pending.add("working.txt");
+    requireCli(scheduler.submit("working.txt", 1), "first file admitted");
+    entered.wait();
+    pending.add("queued.txt");
+    requireCli(scheduler.submit("queued.txt", 1), "second file admitted");
+    // A late symlink is a traversal error, not a per-file filter failure.
+    scheduler.cancel();
+    release.notify();
+    auto counts = scheduler.finish();
+    auto canceled = pending.drain();
+    requireCli(counts.succeeded == 1 && counts.skipped == 1,
+        "late traversal cancellation retained scheduler semantics");
+    requireCli(canceled.length == 1 && canceled[0] == "queued.txt",
+        "exactly queued path requires a canceled explanation");
+    requireCli(explanationRecord(canceled[0], "out/queued.txt", "strip-control",
+        "failure", "canceled after traversal error").canFind("status=failure"),
+        "canceled path has a failure record");
 }

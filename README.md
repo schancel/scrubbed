@@ -61,6 +61,7 @@ dub build --build=release
 ./scrubbed --list-filters
 ./scrubbed --input path/to/docs --output path/to/clean --filters normalize-line-endings,strip-control
 ./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json
+./scrubbed --input path/to/docs --output path/to/clean --threads 4 --max-queued-docs 64 --max-input-bytes 268435456 --max-open-inputs 4
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -93,14 +94,16 @@ range with Phobos's strict UTF-8 decoder, so rejected candidates are scored
 without allocation and only a winning repair is materialized. The type-erased
 registry still materializes at each `string -> string` stage boundary.
 
-For terabyte-scale corpora, mmap keeps input bytes out of the GC heap but does
-not by itself make the full pipeline bounded-memory: each file is currently
-mapped as one region, the complete path list is retained, and output-producing
-stages may materialize whole-file strings. The explicit scale-readiness gates
-in `TODO.md` cover windowed/chunked processing, bounded in-flight bytes and
-descriptors, resumability, and benchmarks on datasets larger than RAM. Until
-those pass, scrubbed is suitable for large collections of reasonably-sized
-files, not yet a proven terabyte-scale engine.
+For terabyte-scale corpora, mmap keeps input bytes out of the GC heap and the
+CLI now walks paths incrementally through a bounded local task queue. Separate
+limits cap queued documents, reserved input bytes, and concurrent file-work
+callbacks; oversized files fail, and detected size changes are skipped. The
+callback limit is not a count of every OS handle, and this is not a stable
+input snapshot. Each file is still mapped as one region, output-producing
+stages may materialize whole-file strings, and there is no durable resume.
+The [bounded-input contract](docs/bounded-input.md) and `TODO.md` describe
+the remaining scale-readiness gates. Scrubbed is not yet a proven
+terabyte-scale engine.
 
 ## Status
 
@@ -109,9 +112,11 @@ Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
 The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
 describe the current module boundaries. A typed document-identity and borrowed
 view module, ordered borrowed/owned content-piece module with a lazy range,
-standalone document stage contracts, and typed source/parser/sink ports with
-a per-document runner exist, but they are not yet wired into the CLI or a
-bounded-memory scheduler. The file-mapping opener now lives in the effects
+standalone document stage contracts, a typed self-registering stage registry
+and strict nested v2 config API, and typed source/parser/sink ports with a
+per-document runner exist, but they are not yet wired into the CLI's v1
+filter pipeline or its bounded local file scheduler. V2 is not a CLI mode.
+The file-mapping opener now lives in the effects
 layer; the CLI's own mmap path is unchanged. High-edit list scaling is not
 ready for a throughput path. A D module-boundary check is under `scripts/`.
 The document model distinguishes original source IDs from derived-child IDs;
@@ -130,3 +135,8 @@ mojibake input, scrubbed took roughly 3 seconds versus roughly 0.16 seconds
 for pinned ftfy. That is not a corpus-wide comparison, but it rules out a
 current blanket speed claim. Full-pipeline, larger-than-RAM, and additional
 quality-matched tool comparisons remain open.
+
+An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
+compares pinned Lexbor and Gumbo on seven authored cases. It does not select
+or link a production parser; charset, real-page, concurrency, and license
+redistribution gates remain open.

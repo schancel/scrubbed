@@ -5,9 +5,11 @@ The executable entry is [`app.d`](app.d): `main(string[] args)` calls
 application dependency is `cli`.
 
 [`cli.d`](cli.d) owns argument and JSON-config parsing, path validation,
-directory traversal, parallel per-file work, input `MmFile` lifetime, and
-atomic output replacement. `runApp(string[] args)` builds a `Pipeline` before
-walking files, then calls `processOne` for each file. A file failure is
+incremental directory traversal, input `MmFile` lifetime, and atomic output
+replacement. [`effects/bounded_input.d`](effects/bounded_input.d) owns the
+local queue and independent queued-document, reserved-byte, and file-work
+callback limits; it invokes `cli.processOne` through a supplied callback.
+`runApp(string[] args)` builds a `Pipeline` before walking files. A file failure is
 reported as `SKIP`; `runApp` returns 1 if any file failed and 0 otherwise.
 The module imports the implemented filter modules so their `static this()`
 registrations run. It does not contain the filter algorithms.
@@ -60,7 +62,8 @@ API format and resolves typed transforms before document execution. Its
 [`stages/fixture.d`](stages/fixture.d) registration exists only in unittest
 builds. V2 is not accepted by the CLI; the existing v1 `--config` path remains
 unchanged. Registration and parsing do not reserve resources or establish
-production backpressure; F04's high-edit content path still needs measurement.
+production document-stage backpressure; F04's high-edit content path still
+needs measurement. The CLI's bounded local file queue is a separate seam.
 
 [`effects/runner.d`](effects/runner.d) defines typed `Source`, `Parser`, and
 `Sink` ports and the one-document-at-a-time `runEffects` composition root.

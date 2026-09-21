@@ -40,8 +40,10 @@ issue. This file remains the status record for implemented work.
       path until representation/backpressure is revisited.
 - [~] Standalone document stage contracts now cover ordered map, reject,
       quarantine, split, cancellation and resource declarations, with tagged
-      derived-child IDs. They are tested but not wired into the CLI or a
-      bounded-memory scheduler; a stage result currently batches its events.
+      derived-child IDs. Typed stage self-registration and strict nested v2
+      config validation are tested; v2 execution is not wired into the CLI.
+      These stages are not wired to the local bounded file scheduler, and a
+      stage result currently batches its events.
 - [~] Typed source/parser/sink ports and a per-document effects runner now
       exercise the same ordered path with in-memory and faulting D adapters.
       The file-mapping opener lives in the effects layer, not domain. The
@@ -96,8 +98,9 @@ issue. This file remains the status record for implemented work.
       both "fix this" and "don't touch this" cases, since the latter is
       the more dangerous failure mode). Selected fixtures are attributed in
       `THIRD_PARTY_NOTICES.md` under ftfy's Apache-2.0 license.
-- [ ] Localized repair inside text that cannot round-trip as one buffer (for
-      example, intentional punctuation or emoji surrounding a damaged span).
+- [~] Localized repair inside text that cannot round-trip as one buffer:
+      conservative evidenced Latin-1/CP1252 spans beside emoji or other
+      scripts are covered, but general span detection remains open.
 
 ## Phase 2 — more normalization filters
 - [x] HTML entity decoding (`&amp;` etc.) as its own filter, separate
@@ -131,8 +134,12 @@ issue. This file remains the status record for implemented work.
       be confused with per-document throughput.
 
 ## Phase 4 — HTML->Markdown (`filters/html2md.d`, currently a stub)
-- [ ] Check code.dlang.org for an existing D HTML/XML parser before
-      writing one.
+- [~] Evaluate existing D/native HTML parsers before writing one. A D-only
+      evidence harness compares pinned Lexbor and Gumbo on seven authored
+      malformed/structural cases, with ownership, license, and noisy local
+      timing/RSS notes (`docs/html-parser-evaluation.md`). No parser has been
+      selected or linked into production; charset, real-page, sanitizer,
+      concurrency, platform, and redistribution gates remain open.
 - [ ] Tag->markdown mapping (see the stub's TODO comment for the concrete
       list: headings, links, emphasis, lists, code, blockquotes, images;
       tables deferred/flattened if not worth the complexity).
@@ -185,9 +192,12 @@ issue. This file remains the status record for implemented work.
 These are release gates for claiming terabyte-scale support. Whole-file mmap
 is useful, but it is not sufficient on its own.
 
-- [ ] Replace eager collection of every input pathname with a bounded
-      producer/consumer walk; cap both queued files and total in-flight input
-      bytes rather than scheduling solely by thread count.
+- [x] Replace eager collection of every input pathname with an incremental,
+      bounded local producer/consumer walk. Independent queued-file,
+      reserved-input-byte, and file-work callback limits are tested at low
+      ceilings, including cancellation, worker faults, oversize files and
+      detected size changes. The callback limit is not a count of every OS
+      handle; whole-file output allocations and input mutation races remain.
 - [ ] Add windowed mmap or buffered chunks for very large individual files.
       Preserve UTF-8 codepoint boundaries and filter state across windows
       (including CRLF pairs, HTML entities, and mojibake candidate spans), with
@@ -198,7 +208,8 @@ is useful, but it is not sufficient on its own.
       explicit bounded-memory/spill behavior.
 - [ ] Add backpressure-aware output and configurable concurrency for storage
       topology (local SSD, network filesystem, object-store staging). Verify
-      descriptor and mapping counts stay bounded under low OS limits.
+      actual OS descriptor and mapping counts stay bounded under low OS limits;
+      the current local callback and input-byte tokens are narrower evidence.
 - [ ] Add a durable run manifest with input identity/checksum, selected filter
       config, success/failure state, and safe resume/retry. Atomic output alone
       prevents partial files but does not make a multi-day corpus run resumable.

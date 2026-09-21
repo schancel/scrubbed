@@ -87,7 +87,7 @@ private int process(T)(ref T options, const string[] original) {
     if (present(original, "--threads"))
         forwarded ~= ["--threads", options.threads.to!string];
     if (present(original, "--filters")) forwarded ~= ["--filters", options.filters];
-    if (options.config.length) forwarded ~= ["--config", options.config];
+    if (options.config.length) forwarded ~= "--config=" ~ options.config;
     if (present(original, "--max-open-inputs"))
         forwarded ~= ["--max-open-inputs", options.maxOpenInputs.to!string];
     if (options.listFilters) forwarded ~= "--list-filters";
@@ -95,11 +95,11 @@ private int process(T)(ref T options, const string[] original) {
     if (options.dryRun) forwarded ~= "--dry-run";
     if (options.explain) forwarded ~= "--explain";
     if (present(original, "--jsonl-fields"))
-        forwarded ~= ["--jsonl-fields", options.jsonlFields];
+        forwarded ~= "--jsonl-fields=" ~ options.jsonlFields;
     if (present(original, "--dataset-namespace"))
-        forwarded ~= ["--dataset-namespace", options.datasetNamespace];
+        forwarded ~= "--dataset-namespace=" ~ options.datasetNamespace;
     if (present(original, "--source-key"))
-        forwarded ~= ["--source-key", options.sourceKey];
+        forwarded ~= "--source-key=" ~ options.sourceKey;
     if (present(original, "--max-jsonl-line-bytes"))
         forwarded ~= ["--max-jsonl-line-bytes", options.maxJsonlLineBytes.to!string];
     if (present(original, "--max-jsonl-output-bytes"))

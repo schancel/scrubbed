@@ -9,8 +9,8 @@ import core.thread : Thread;
 import core.time : seconds;
 import std.file : exists, readText, rmdirRecurse, tempDir, write;
 import std.json : parseJSON;
-import std.path : buildPath;
-import std.process : Redirect, execute, kill, pipeProcess, wait;
+import std.path : absolutePath, buildPath;
+import std.process : Config, Redirect, execute, kill, pipeProcess, wait;
 import std.stdio : File, writeln;
 import std.string : splitLines, toStringz;
 import std.uuid : randomUUID;
@@ -31,8 +31,8 @@ private string readAll(File file) {
     return result;
 }
 
-private Result invoke(string[] args, string input = "") {
-    auto child = pipeProcess(args, Redirect.all);
+private Result invoke(string[] args, string input = "", string workDir = null) {
+    auto child = pipeProcess(args, Redirect.all, null, Config.none, workDir);
     if (input.length) child.stdin.rawWrite(cast(const(ubyte)[]) input);
     child.stdin.close();
     auto output = readAll(child.stdout);
@@ -141,12 +141,21 @@ void main(string[] args) {
         "implicit JSONL mode accepted");
     require(invoke([args[1], "--input", "-", "--output", "out",
         "--jsonl-fields", "text"]).code == 2, "one-sided dash accepted");
+    auto optionLike = invoke([args[1], "run", "--input", "-", "--output", "-",
+        "--jsonl-fields=--threads", "--dataset-namespace=--threads",
+        "--source-key=--threads", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "2048"], "{\"--threads\":\"literal\"}\n");
+    require(optionLike.code == 0 && optionLike.output.splitLines().length == 1 &&
+        parseJSON(optionLike.output.splitLines()[0])["--threads"].str == "literal",
+        "option-like JSONL field/identity values were reparsed as flags: " ~
+        optionLike.diagnostics);
     auto root = buildPath(tempDir(), "scrubbed-jsonl-cli-" ~ randomUUID().toString());
     scope(exit) if (exists(root)) rmdirRecurse(root);
     import std.file : mkdir;
     mkdir(root);
     auto configPath = buildPath(root, "filters.json");
     write(configPath, "{\"filters\":[\"strip-control\"]}");
+    write(buildPath(root, "--threads"), "{\"filters\":[\"strip-control\"]}");
     auto configured = invoke(base ~ ["--config", configPath],
         "{\"text\":\"\\u0001clean\"}\n");
     require(configured.code == 0 &&
@@ -154,6 +163,15 @@ void main(string[] args) {
         "JSONL did not use configured filter chain");
     require(invoke(base ~ ["--config", configPath, "--filters", "strip-control"],
         "").code == 2, "config/filter conflict accepted");
+    auto optionLikeConfig = invoke([absolutePath(args[1]), "run", "--input", "-",
+        "--output", "-", "--jsonl-fields", "text", "--dataset-namespace", "batch",
+        "--source-key", "stable-source", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "2048", "--config=--threads"],
+        "{\"text\":\"\\u0001clean\"}\n", root);
+    require(optionLikeConfig.code == 0 &&
+        parseJSON(optionLikeConfig.output.splitLines()[0])["text"].str == "clean",
+        "option-like config path was reparsed as a flag: " ~
+        optionLikeConfig.diagnostics);
     auto fileInput = buildPath(root, "input.txt");
     auto fileOutput = buildPath(root, "output.txt");
     write(fileInput, "plain\r\ntext\r\n");

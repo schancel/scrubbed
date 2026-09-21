@@ -108,6 +108,8 @@ describe the current module boundaries. A typed document-identity and borrowed
 view module and an ordered borrowed/owned content-piece module exist, but they
 are not yet wired into the CLI or pipeline. A D module-boundary check is under
 `scripts/`.
+The document model distinguishes original source IDs from derived-child IDs;
+the stage pipeline that will use those child IDs is still under review.
 The broader corpus-curation plan is tracked in
 [GitHub issues](https://github.com/schancel/scrubbed/issues); accepted tickets do
 not imply the features are implemented or worker-ready.

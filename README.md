@@ -64,6 +64,7 @@ dub build --build=release
 ./scrubbed --input path/to/docs --output path/to/clean --threads 4 --max-queued-docs 64 --max-input-bytes 268435456 --max-open-inputs 4
 ./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json --dry-run --explain
 ./scrubbed repair --input path/to/docs --output path/to/clean --dry-run --explain
+./scrubbed extract --input page.html --output page.tree.json --format tree-json
 ./scrubbed run --input - --output - --jsonl-fields text,title --dataset-namespace corpus-v1 --source-key shard-0001 --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 < input.jsonl > clean.jsonl
 ```
 
@@ -87,8 +88,10 @@ decision record per visited file; parallel record order is not fixed. See the
 [inspection guide](docs/cli-inspection.md). A later traversal error can cancel
 already-admitted files; those receive failure records, and the command exits 2.
 `run` and `repair` also route to the implemented filter pipeline, with generated
-help and command/option-name completion; `extract` is shown as unavailable and
-exits 2 without writing output. See the [command guide](docs/cli-commands.md).
+help and command/option-name completion. `extract --format=tree-json` is a
+separate opt-in bounded selected HTML parse-tree export, not article text or
+Markdown; see the [HTML parser guide](docs/html-parser.md) and
+[command guide](docs/cli-commands.md).
 The explicit paired `--input - --output -` JSONL mode transforms selected
 top-level text fields through the same filter chain. It requires a stable
 dataset namespace, source key, and input/output record byte caps. Untouched
@@ -196,9 +199,11 @@ standards page through owned UTF-8 decoding, bounded Lexbor observations,
 sanitizers, and a full LICENSE/NOTICE bundle dry run. Pinned Lexbor source,
 a static archive, and a [restricted D-owned selected-tree wrapper](docs/html-parser.md)
 now exist with release-active ownership, cap, and exact accessor checks.
-The shipping CLI still has no Lexbor caller or HTML extraction mode; HTML
-charset sniffing, broader page coverage, richer DOM fidelity, bounded native
-RSS, and other-platform builds remain open.
+The shipping CLI now has a bounded `extract --format=tree-json` selected-tree
+route, with real-binary JSON goldens and a self-registering stage. It is not
+main-content extraction, Markdown, or a trafilatura replacement. HTML charset
+sniffing, broader page coverage, richer DOM fidelity, bounded native RSS,
+other-platform builds, and extraction-quality benchmarks remain open.
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.

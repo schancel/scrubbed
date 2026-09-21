@@ -132,8 +132,9 @@ issue. This file remains the status record for implemented work.
       view, full-tree transaction, or durable manifest.
 - [x] Integrate pinned D `argparse` 2.0.2 for generated root/subcommand help
       and command/option-name completion. `run` and `repair` preserve the
-      implemented filter pipeline and old no-verb flags; `extract` fails
-      explicitly as unavailable. Release-active CLI tests cover help, errors,
+      implemented filter pipeline and old no-verb flags; `extract` now accepts
+      only the separately reviewed `--format=tree-json` selected-tree route.
+      Release-active CLI tests cover help, errors,
       exits and a real queued-cancellation `--explain` path. Value/path/filter
       completion is not supported; parser startup/size observations are not
       per-document throughput evidence (`docs/cli-commands.md`).
@@ -148,9 +149,11 @@ issue. This file remains the status record for implemented work.
       bundle dry run led to a restricted validated-UTF-8,
       D-owned [selected-tree wrapper](docs/html-parser.md). Pinned source,
       static archive, exact accessor goldens, and ownership/cap/fault tests now
-      exist. The shipping CLI has no Lexbor caller or HTML extraction mode;
-      charset sniffing, broad real-page coverage, richer DOM, bounded native
-      RSS, and other-platform builds remain open.
+      exist. The shipping CLI now exposes bounded `extract --format=tree-json`
+      via a self-registering effects-stage adapter, with release-active exact
+      JSON and observation-limit tests. This exports a selected parse tree,
+      not main content or Markdown; charset sniffing, broad real-page coverage,
+      richer DOM, bounded native RSS, and other-platform builds remain open.
 - [ ] Tag->markdown mapping (see the stub's TODO comment for the concrete
       list: headings, links, emphasis, lists, code, blockquotes, images;
       tables deferred/flattened if not worth the complexity).

@@ -128,6 +128,62 @@ runs.
 
 ## Text comparison: pinned ftfy fixtures
 
+### Held-out per-fix text evidence (T03)
+
+`text_fixes.d` is a separate D-only, authored synthetic corpus and scorer. Its
+31 cases are version `issue-22-v1`, MIT-licensed, and pinned by SHA-256
+`e9bdf677ad9754fe77c1057351c4903fdb5423ed04b01d6529b5d01a6ed99296`.
+The digest covers a length-prefixed serialization of each case's ID, fix,
+class, input, expected output, and pair ID, in source order. The JSON report
+identifies every case by ID, class, paired negative/positive, and input and
+expected byte hashes. Cases are held out from production tuning: none is used
+in the implementation or unit tests under `source/**` or `tests/**`. Do not
+reuse these IDs or bytes for tuning; add new separately identified held-out
+cases if a filter changes.
+
+Build and run from the repository root:
+
+```sh
+ldc2 -O -release -Isource benchmarks/text_fixes.d \
+  source/filters/mojibake.d source/filters/entities.d \
+  source/filters/entities_data.d source/filters/punctuation.d \
+  source/filters/normalize.d source/pipeline.d \
+  -of=/tmp/scrubbed-text-fixes
+/tmp/scrubbed-text-fixes --self-test
+/tmp/scrubbed-text-fixes
+```
+
+The self-test checks a recall miss, a false positive, unsupported exclusion,
+both zero-denominator `null` values, and hash rejection. The following fault
+injections must each exit nonzero: `--inject-miss`,
+`--inject-false-positive`, and `--inject-hash-mismatch`. The ordinary run
+must exit zero. Each fix's `fix_recall` is exact expected-output matches over
+supported expected changes; `clean_false_positive_rate` is changed clean
+inputs over supported unchanged cases. Both rates are `null` when their
+denominator is zero. A missed positive or edited clean negative fails that
+fix's gate. Unsupported and invalid-input cases have separate counts and
+never enter either denominator. This benchmark does not parse malformed
+fixture declarations as cases: missing fields, broken pairs, duplicate IDs,
+or a changed corpus digest invalidate the entire run. `mi` is intentionally
+invalid UTF-8 (`FF`), excluded before invoking a filter.
+
+| Fix/context | Supported task in this corpus | Deliberately unsupported |
+|---|---|---|
+| `fix-mojibake` | Latin-1/CP1252-looking UTF-8 repair on text | UTF-16 and other encodings; F01 has broader pinned mojibake evidence below. |
+| `decode-entities/text` | One-pass character references in text | HTML tokenizer state, including script and comments. |
+| `decode-entities/attribute` | One-pass references in an already-tokenized attribute value | Markup parsing and attribute extraction. |
+| `uncurl-quotes` | Straighten the filter's fixed curly-quote set | Locale-aware typography or smart quote insertion. |
+| `strip-control` | Remove Cc controls except tab, CR, LF | Unicode format characters and whitespace policy. |
+| `normalize-line-endings` | CRLF/CR to LF | Unicode line separators and paragraph semantics. |
+
+This is exact-output evidence for these filter APIs with explicit context,
+not a `ftfy.fix_text` parity or speed comparison. The F01 runner below remains
+the pinned upstream-reference mojibake gate; its 64 unsupported changed cases
+are not silently reclassified here. No third-party fixture bytes are included
+in this new corpus.
+
+### Pinned F01 mojibake reference gate
+
 The reference inputs are four files from `tests/test-cases/` in the public
 [ftfy repository](https://github.com/rspeer/python-ftfy), commit
 `74dd0452b48286a3770013b3a02755313bd5575e`. The upstream project

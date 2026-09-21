@@ -1,9 +1,44 @@
 # Local SQLite manifest API (F09 production slice)
 
-`effects.local_manifest.LocalManifest` is a standalone local effects API. It
-is **not wired to the CLI**. `scrubbed` does not yet offer restart/resume.
-Callers own source-record enumeration, canonical config bytes and versioning,
-safe retry decisions, and the sink publication step.
+`effects.local_manifest.LocalManifest` is the v1 local effects API. The
+`run`/`repair`/no-verb CLI offers an opt-in local-file/tree restart path with
+`--manifest PATH`. Without that flag, existing file/tree and JSONL behavior is
+unchanged. JSONL stdin/stdout cannot use a local manifest.
+
+The CLI uses `local-files:v1`, the canonical selected input root as source key,
+and a normalized root-relative record path (`.` for one file) for typed
+`DocumentId`. Moving the root intentionally creates a new identity. The one
+output sink is `local-primary:v1`; this does not imply multi-sink completion.
+The input digest is from the same admitted mapping used by the filter chain,
+hashed before transformation and again before publication. A changed size or
+SHA-256 fails. Concurrent in-place writers are not a snapshot guarantee.
+
+The CLI's versioned canonical config bytes include the exact selected filter
+string or config-file bytes used to build the chain, file/tree output policy,
+canonical output route, and a bounded stream SHA-256 of the running executable
+path. `--manifest-retry` is deliberately excluded. The executable path is
+checked for inode and size changes around hashing. On macOS, `thisExePath()`
+resolves a filesystem path rather than a stable mapped-image handle: concurrent
+replacement of the executable is outside this guarantee, including replacement
+before the path is opened. Keep the executable path stable for a run; rebuilt
+executables may safely invalidate old work. No cross-machine equivalence is
+claimed.
+
+An exact committed row skips only after the API rehashes the actual output.
+Unresolved failed/uncertain rows or any pre-existing destination fail by
+default. A planned row with no destination can resume. After inspecting a
+destination, `--manifest-retry` explicitly authorizes replacement; it is not
+part of output identity. `--validate` checks paths/config without creating a
+DB, and `--dry-run` runs filters but creates neither DB nor output. `--explain`
+reports one status per input, including skip/failure. Manifest DB, `-wal`, and
+`-shm` must lie outside the selected input and output trees; aliases and
+hardlinks are rejected. The first CLI slice serializes manifest work even when
+`--threads` is larger, while preserving bounded input admission. It makes no
+general throughput claim. The existing string pipeline materializes output;
+adapting it to F08's `ContentPiece.own` adds a temporary whole-output copy,
+so the CLI does not claim bounded output memory. The F08 sink publishes before
+the DB commit. A crash in between may require explicit retry; it never grants
+a false committed skip.
 
 The v1 schema fixes `application_id=0x53435242` and `user_version=1`.
 `sink_state` is keyed by `(document_id,input_sha256,config_sha256,sink_key)`
@@ -70,3 +105,30 @@ On macOS, `otool -L scrubbed` and `otool -L
 `ldd`. The checker exercises actual SIGKILL points before/after publish and
 after commit, two sinks, config/input revisions, tamper/deletion, lock failure,
 foreign/incompatible version, symlink/path hazards and bounded replay.
+
+The opt-in CLI release harness runs against the built executable (not a mock
+CLI) and covers validate/dry-run non-mutation, committed skip, changed
+input/config/executable/output routes, tamper/reconcile, two independent tree
+files, path/alias/resource gates and a live SIGKILL after observing a durable
+`planned` row. Run it with:
+
+```sh
+ldc2 -O3 -release -Isource experiments/manifest_cli/check.d \
+  source/domain/document.d source/effects/sqlite_ffi.d \
+  source/effects/local_manifest.d third_party/sqlite/sqlite3.o \
+  -of=/tmp/scrubbed-manifest-cli-check
+ldc2 -i -O3 -release -d-version=ManifestCliHarness -Isource \
+  -I"$ARGPARSE_SOURCE" \
+  source/app.d third_party/sqlite/sqlite3.o \
+  -of=/tmp/scrubbed-manifest-cli-hook
+/tmp/scrubbed-manifest-cli-check ./scrubbed /tmp/scrubbed-manifest-cli-hook
+```
+
+Set `ARGPARSE_SOURCE` to the local argparse 2.0.2 source path reported by
+`dub describe --data=import-paths` first. `ManifestCliHarness` compiles marker-file
+SIGKILL checkpoints only into the second, separate release-mode D executable;
+the shipping `dub build` binary has no kill-marker behavior. The actual
+shipping binary is exercised by the live post-plan SIGKILL test; the separate
+release harness deterministically covers after-plan, before-publish,
+after-publish/before-DB-commit, and after-commit windows. Neither proof is a
+power-loss guarantee.

@@ -92,14 +92,14 @@ context-heavy filters streaming.
 JSONL selected-field and stream adapters with semantic-value preservation of
 untouched fields. The command adapter now routes explicit paired `--input -`
 and `--output -` `run`/`repair` mode through them, with caller-provided stable
-namespace/source keys and line-ordinal `DocumentId`s. The file/tree CLI still
-does not use `DocumentId`; there is no JSONL checkpoint or graceful signal
-cancellation.
+namespace/source keys and line-ordinal `DocumentId`s. There is no JSONL
+checkpoint or graceful signal cancellation.
 
 [`effects/local_manifest.d`](effects/local_manifest.d) is a standalone,
 versioned local SQLite sink ledger with independent per-sink states and bounded
-replay. It verifies observed output bytes before a committed skip. It is not
-wired to the CLI; see [local manifest API and crash limits](../docs/local-manifest.md).
+replay. It verifies observed output bytes before a committed skip. The
+file/tree CLI wires it only in opt-in `--manifest PATH` mode; see
+[local manifest restart behavior and crash limits](../docs/local-manifest.md).
 
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run

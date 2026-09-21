@@ -1,5 +1,6 @@
 .dub
 scrubd
+scrubd-test-*
 scrubd.so
 scrubd.dylib
 scrubd.dll
@@ -11,3 +12,8 @@ scrubd.lib
 *.o
 *.obj
 *.lst
+.DS_Store
+.serena/
+.worktrees/
+__pycache__/
+*.pyc

@@ -1,0 +1,15 @@
+{
+  "filters": [
+    "uncurl-quotes",
+    {
+      "name": "fix-mojibake",
+      "options": {
+        "encodings": "latin1,cp1252",
+        "max-passes": 4
+      }
+    },
+    "decode-html-entities",
+    "normalize-line-endings",
+    "strip-control"
+  ]
+}

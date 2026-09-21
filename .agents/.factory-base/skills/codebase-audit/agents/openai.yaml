@@ -1,0 +1,7 @@
+interface:
+  display_name: "Codebase Audit"
+  short_description: "Whole-tree audit for dead code, seams, and earned abstractions"
+  default_prompt: "Use $codebase-audit to survey the tree and draft tickets. Do not refactor in place."
+
+policy:
+  allow_implicit_invocation: true

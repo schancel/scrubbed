@@ -1,0 +1,133 @@
+#!/bin/sh
+# Mechanical lint for the kernel docs. Humans retain authority.
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+DEFAULT_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
+case $# in
+    0) ROOT=$DEFAULT_ROOT ;;
+    1) ROOT=$1 ;;
+    *) printf 'ERROR: usage: %s [repository-root]\n' "$0" >&2; exit 2 ;;
+esac
+
+REFS="$ROOT/.agents/references"
+CLAIMS="$REFS/work-claims.md"
+SKILLS="$ROOT/.agents/skills"
+checks=0 failures=0
+
+pass() { checks=$((checks + 1)); printf 'ok %s - %s\n' "$checks" "$1"; }
+fail() { checks=$((checks + 1)); failures=$((failures + 1)); printf 'not ok %s - %s\n' "$checks" "$1" >&2; }
+require_file() { test -f "$2" && pass "$1" || fail "$1: missing $2"; }
+normalized() { tr '\n' ' ' | tr -s '[:space:]' ' '; }
+matches() { printf '%s\n' "$2" | normalized | grep -E -i -q -- "$1"; }
+require_pattern() { matches "$2" "$3" && pass "$1" || fail "$1: required structure absent"; }
+forbid_pattern() { matches "$2" "$3" && fail "$1: harmful rule matched" || pass "$1"; }
+reject_fixture() { matches "$2" "$3" && pass "$1" || fail "$1: harmful fixture was accepted"; }
+accept_fixture() { matches "$2" "$3" && fail "$1: harmless fixture was rejected" || pass "$1"; }
+
+for path in \
+    .agents/skills/ticket-creation/SKILL.md \
+    .agents/skills/backlog-grooming/SKILL.md \
+    .agents/skills/backlog-loop/SKILL.md \
+    .agents/skills/implement/SKILL.md \
+    .agents/skills/coordinate/SKILL.md \
+    .agents/skills/review/SKILL.md \
+    .agents/skills/codebase-audit/SKILL.md \
+    .agents/references/review-protocol.md \
+    .agents/references/solution-contract.md \
+    .agents/references/issue-readiness.md \
+    .agents/references/execution-efficiency.md \
+    .agents/references/task-packet.md \
+    .agents/references/work-claims.md \
+    .agents/references/engineering-judgment.md \
+    .agents/references/factory-rationale.md \
+    .agents/references/load-binding.md \
+    .agents/references/queue.md \
+    .agents/references/parallel-coordination.md \
+    .agents/binding \
+    .agents/bindings/github.md \
+    .agents/bindings/pyramid.md \
+    .agents/bindings/linear.md \
+    .agents/harnesses/claude-code.md \
+    .agents/harnesses/codex.md \
+    .agents/harnesses/grok-build.md \
+    .agents/scripts/ticket_poset.py \
+    .agents/scripts/ticket_triage.py
+do
+    require_file "required process file exists: $path" "$ROOT/$path"
+done
+
+if test -d "$SKILLS/implement-ticket" || test -f "$SKILLS/backlog/SKILL.md"; then
+    fail "legacy all-in-one backlog skill must not be present"
+else
+    pass "legacy all-in-one backlog skill is absent"
+fi
+
+DOCS=$(for file in "$SKILLS"/*/SKILL.md "$REFS"/*.md "$ROOT/.agents/bindings"/*.md "$ROOT/.agents/harnesses"/*.md; do
+    normalized < "$file"
+    printf ' '
+done)
+
+require_pattern "direct requests bypass backlog ceremony" 'direct[^.]{0,160}(skip|without|is the contract)[^.]{0,160}(issue|claim)' "$DOCS"
+require_pattern "simplest coherent architecture rather than diff size" 'simplest coherent (resulting )?architecture[^.]{0,160}(not|rather than)[^.]{0,100}(fewest changed lines|diff)' "$DOCS"
+require_pattern "replacement sequence creates, integrates, then deletes" 'create / switch / delete|replacement[^.]{0,200}(integration points|production integration)[^.]{0,200}(predecessor|old implementation)[^.]{0,80}(delete|deleted)' "$DOCS"
+require_pattern "temporary coexistence has an owner and removal trigger" 'temporary coexistence[^.]{0,160}owner[^.]{0,160}removal trigger' "$DOCS"
+require_pattern "refactor proof covers equivalence and integration" 'refactor(ing|s)?[^.]{0,100}equivalence[^.]{0,100}integration' "$DOCS"
+require_pattern "deletion proof covers reachability and tests" 'deletion[^.]{0,100}(reference/reachability|reachability)[^.]{0,100}tests' "$DOCS"
+require_pattern "enabling work proves a downstream seam" 'enabling work[^.]{0,100}(usable )?downstream seam' "$DOCS"
+require_pattern "architectural boundaries support local reasoning" 'narrow deliberate facade[^.]{0,180}dependency direction' "$DOCS"
+require_pattern "cost of reversal is the shape test" 'cost of reversal' "$DOCS"
+require_pattern "shape perspective is selected for models" 'Shape[^.]{0,80}cost of reversal|shape questions' "$DOCS"
+require_pattern "review is the only skill that lands" 'only skill that lands' "$DOCS"
+require_pattern "packets name a model lane" 'model lane' "$DOCS"
+require_pattern "cost does not pick a model lane" 'cost does not pick' "$DOCS"
+require_pattern "do not silently substitute the model" 'silently substitut' "$DOCS"
+require_pattern "kernel never chooses a vendor model" 'never (names?|chooses?)[^.]{0,80}vendor model' "$DOCS"
+require_pattern "poset script is invoked from .agents/scripts" '\.agents/scripts/ticket_poset' "$DOCS"
+require_pattern "skills load the tracker from .agents/binding" 'load-binding' "$DOCS"
+require_pattern "Linear binding names the community CLI" 'schpet/linear-cli' "$DOCS"
+
+GH_BIND=$(normalized < "$ROOT/.agents/bindings/github.md")
+require_pattern "github binding names blocked-by write path" 'blocked-by|add-blocked-by' "$GH_BIND"
+
+GROOM=$(normalized < "$SKILLS/backlog-grooming/SKILL.md")
+forbid_pattern "grooming does not dispatch the pool" 'replenishing worker pool' "$GROOM"
+COORD=$(normalized < "$SKILLS/coordinate/SKILL.md")
+forbid_pattern "coordinate does not land" 'Land per the binding' "$COORD"
+
+COUNT_CANCEL='(auto|automatic(ally)?)[- ]*(cancel|close|waive)[^.]{0,100}(count|severity)|(count|severity)[^.]{0,100}(auto|automatic(ally)?)[- ]*(cancel|close|waive)'
+FIXED_REVIEW='(require(d)?|exactly|fixed)[^.]{0,80}(two|three|[2-9])[^.]{0,50}(review(er)?s?|rounds?|passes?)'
+TOOL_AUTH='(script|linter|tool)[^.]{0,100}(grants|authorizes|declares)[^.]{0,80}(ready|ownership|merge|approval)'
+INDEFINITE_DUAL='(allow|leave|permit)[^.]{0,100}(indefinite|permanent)[^.]{0,80}(dual architecture|coexistence|compatibility)'
+SMALLEST_DIFF='(always|must|should)[^.]{0,80}(smallest|fewest)[^.]{0,60}(diff|changed lines)'
+forbid_pattern "count or severity cannot auto-cancel" "$COUNT_CANCEL" "$DOCS"
+forbid_pattern "fixed review counts are absent" "$FIXED_REVIEW" "$DOCS"
+forbid_pattern "tooling cannot confer authority" "$TOOL_AUTH" "$DOCS"
+forbid_pattern "indefinite dual architecture is forbidden" "$INDEFINITE_DUAL" "$DOCS"
+forbid_pattern "smallest diff is not the architectural objective" "$SMALLEST_DIFF" "$DOCS"
+reject_fixture "automatic count cancellation is rejected" "$COUNT_CANCEL" 'Automatically cancel review when finding count is high.'
+reject_fixture "fixed review count is rejected" "$FIXED_REVIEW" 'Require three review rounds for every patch.'
+reject_fixture "tool authority is rejected" "$TOOL_AUTH" 'The linter grants READY status.'
+accept_fixture "equivalent advisory wording remains valid" "$TOOL_AUTH" 'People decide readiness; a checker only reports documentation gaps.'
+reject_fixture "indefinite coexistence is rejected" "$INDEFINITE_DUAL" 'Allow indefinite coexistence of both architectures.'
+reject_fixture "smallest-diff mandate is rejected" "$SMALLEST_DIFF" 'Always choose the smallest diff even when it preserves competing representations.'
+
+extract_block() {
+    awk -v wanted="$1" '
+        /<!-- work-claim:v1/ { number++; active=(number == wanted) }
+        active { print }
+        active && /-->/ { exit }
+    ' "$CLAIMS"
+}
+expected_claim=$(printf '%s\n' '<!-- work-claim:v1' 'event: claim' 'claim-id: <globally unique stable id>' 'worker: <tool/person and stable session or agent identity>' 'github-actor: <responsible @user or none>' 'branch: <remote branch>' 'worktree: <absolute path or remote environment id>' 'base: <full commit SHA>' 'scope: <single-line bounded scope>' 'timestamp: <UTC RFC 3339>' '-->')
+expected_terminal=$(printf '%s\n' '<!-- work-claim:v1' 'event: <release|complete|supersede>' 'claim-id: <the original claim id>' 'worker: <the exact worker value from the original claim>' 'timestamp: <UTC RFC 3339>' 'replacement-claim: <claim id or none>' 'authority-comment: <none or immutable prior GitHub comment URL>' '-->')
+test "$(extract_block 1)" = "$expected_claim" && pass "v1 claim schema is preserved" || fail "v1 claim schema changed"
+test "$(extract_block 2)" = "$expected_terminal" && pass "v1 terminal schema is preserved" || fail "v1 terminal schema changed"
+claim_markers=$(grep -F -c '<!-- work-claim:v1' "$CLAIMS" || true)
+test "$claim_markers" = 2 && pass "v1 has exactly claim and terminal examples" || fail "v1 marker count expected=2 actual=$claim_markers"
+CLAIM_TEXT=$(normalized < "$CLAIMS")
+require_pattern "v1 is the sole backlog ownership record" 'sole recorded ownership mechanism' "$CLAIM_TEXT"
+require_pattern "claim collision winner is deterministic" 'earlier tracker timestamp wins[^.]*equal[^.]*lower durable record id wins' "$CLAIM_TEXT"
+
+test "$failures" -eq 0 || { printf 'FAILED: %s of %s mechanical checks failed\n' "$failures" "$checks" >&2; exit 1; }
+printf 'PASS: %s mechanical documentation checks; no authority decisions made\n' "$checks"

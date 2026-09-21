@@ -13,13 +13,11 @@ being upfront about that matters more than sounding impressive:
 
 - ftfy's real value isn't speed, it's years of tuned heuristics for
   distinguishing "this text is corrupted, fix it" from "this text is fine,
-  leave it alone" (their own docs report under 1 false positive per
-  million tweets). `source/filters/mojibake.d` has the *mechanical* half
-  done correctly (the reversible round-trip transform for Latin-1/CP1252
-  mis-decoding, CP1252's table verified against the Unicode Consortium's
-  own mapping file) — the scoring heuristic that decides which candidate
-  fix is actually right is **not implemented yet**. See the TODO in that
-  file.
+  leave it alone." scrubd now has a conservative badness scorer for its
+  Latin-1/Windows-1252 scope. Against the current ftfy JSON corpus it repairs
+  all 39 passing cases mechanically reachable through those two encodings
+  and preserves all 48 encoding-negative cases. It is still not ftfy: other
+  encodings, lossy repairs, and localized mixed-encoding spans are not covered.
 - trafilatura does DOM-based main-content extraction with boilerplate
   removal (nav bars, ads, footers) — genuinely harder than HTML->Markdown
   conversion, which is the more tractable thing actually planned here
@@ -28,9 +26,10 @@ being upfront about that matters more than sounding impressive:
 What *is* real and working right now: a pluggable filter-registry
 pipeline, a CLI that walks an input directory tree and mirrors it to an
 output path, parallel processing across files via `std.parallelism`'s
-`TaskPool` (real OS threads, not Fibers — see the note in `app.d` on why),
-zero-copy reads via `std.mmfile.MmFile`, and two working normalization
-filters (line-ending normalization, control-character stripping).
+`TaskPool` (real OS threads, not Fibers — per-file work is CPU-parallel),
+zero-copy reads via `std.mmfile.MmFile`, deterministic per-file mapping cleanup,
+atomic output replacement, mojibake repair, entity decoding, smart-quote
+normalization, and two basic normalization filters.
 
 ## Why D
 
@@ -53,6 +52,7 @@ filters (line-ending normalization, control-character stripping).
 dub build --build=release
 ./scrubd --list-filters
 ./scrubd --input path/to/docs --output path/to/clean --filters normalize-line-endings,strip-control
+./scrubd --input path/to/docs --output path/to/clean --config scrubd.example.json
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -60,7 +60,44 @@ names. New filters register themselves via `static this()` in their own
 module (see `filters/normalize.d`) — nothing in `app.d` or `pipeline.d`
 needs to change to add one.
 
+`--config` accepts JSON containing an ordered `filters` array. Entries may be
+plain names or objects with `name` and `options`; see `scrubd.example.json`.
+`fix-mojibake` supports `encodings` (`latin1`, `cp1252`, or both) and
+`max-passes`. Unknown option names are errors, and `--config` cannot be
+combined with `--filters`. Put `uncurl-quotes` before it when typographic quotes surround
+otherwise mojibaked text, because the current repair operates on whole-buffer
+round-trip candidates rather than isolated spans.
+
+Outputs are written beside their destination and atomically renamed into
+place, so a clean zero-copy result is safe even when input and output are the
+same path. Empty files are mirrored. Directory outputs must be outside the
+input tree. It rejects symlink roots, symlink entries inside the input tree,
+destination-file links, and links below the selected output root. Existing
+POSIX ancestor links are resolved before containment checks; Windows ancestor
+reparse points are rejected because lexical normalization cannot prove their
+physical target. Any processing failure produces a nonzero exit status.
+
+Input is already memory-mapped: the source `string` is a zero-copy view kept
+alive by `MmFile`. Output-producing filters still allocate. The line-ending,
+control-character, and quote transforms use composable lazy range/Voldemort
+types internally. Mojibake candidates compose a lazy legacy-byte Voldemort
+range with Phobos's strict UTF-8 decoder, so rejected candidates are scored
+without allocation and only a winning repair is materialized. The type-erased
+registry still materializes at each `string -> string` stage boundary.
+
+For terabyte-scale corpora, mmap keeps input bytes out of the GC heap but does
+not by itself make the full pipeline bounded-memory: each file is currently
+mapped as one region, the complete path list is retained, and output-producing
+stages may materialize whole-file strings. The explicit scale-readiness gates
+in `TODO.md` cover windowed/chunked processing, bounded in-flight bytes and
+descriptors, resumability, and benchmarks on datasets larger than RAM. Until
+those pass, scrubd is suitable for large collections of reasonably-sized
+files, not yet a proven terabyte-scale engine.
+
 ## Status
 
-Early scaffold. See `TODO.md` for the actual roadmap and what's real vs.
-stubbed.
+Phases 0-2 are usable within the documented scope; JSON configuration from
+Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
+
+Reproducible D correctness and allocation microbenchmarks, including the
+reconstructed pre-range mojibake implementation, are under `benchmarks/`.

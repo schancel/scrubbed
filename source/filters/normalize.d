@@ -6,9 +6,10 @@
 /// via config, not code changes.
 module filters.normalize;
 
-import std.algorithm : filter, map, joiner;
+import std.algorithm : filter;
 import std.array : array;
 import std.conv : to;
+import std.range.primitives : ElementType, empty, front, isInputRange, popFront;
 import std.uni : isControl;
 import pipeline : registerFilter;
 
@@ -22,28 +23,30 @@ auto stripControlChars(Range)(Range chars) {
     return chars.filter!(c => !isControl(c) || c == '\n' || c == '\t' || c == '\r');
 }
 
-/// Normalize CRLF/CR line endings to plain \n. Also a lazy range
-/// transform: a sliding pairwise view rather than a full-string replace.
-auto normalizeLineEndings(string text) {
-    // std.range's `zip`/manual state machine would avoid the intermediate
-    // array below for a truly zero-allocation version; kept simple and
-    // correct here since it's a small, well-scoped starting filter --
-    // worth revisiting if profiling shows this matters at real corpus
-    // scale.
-    char[] out_;
-    out_.reserve(text.length);
-    size_t i = 0;
-    while (i < text.length) {
-        if (text[i] == '\r') {
-            out_ ~= '\n';
-            if (i + 1 < text.length && text[i + 1] == '\n')
-                i++;
-        } else {
-            out_ ~= text[i];
+/// Normalize CRLF/CR line endings lazily. The function-local range is a D
+/// "Voldemort type": callers compose it through `auto` without being able to
+/// name its implementation type. No output storage exists until materialized.
+auto normalizeLineEndings(Range)(Range input)
+if (isInputRange!Range && is(ElementType!Range : dchar)) {
+    struct NormalizedLineEndings {
+        private Range source;
+
+        @property bool empty() const { return source.empty; }
+
+        @property dchar front() const {
+            assert(!empty);
+            return source.front == '\r' ? '\n' : source.front;
         }
-        i++;
+
+        void popFront() {
+            assert(!empty);
+            const wasCR = source.front == '\r';
+            source.popFront();
+            if (wasCR && !source.empty && source.front == '\n')
+                source.popFront();
+        }
     }
-    return cast(string) out_;
+    return NormalizedLineEndings(input);
 }
 
 string stripControlCharsFilter(string text) {
@@ -55,7 +58,18 @@ string stripControlCharsFilter(string text) {
     return text.stripControlChars.array.to!string;
 }
 
+string normalizeLineEndingsFilter(string text) {
+    return text.normalizeLineEndings.to!string;
+}
+
 static this() {
     registerFilter("strip-control", &stripControlCharsFilter);
-    registerFilter("normalize-line-endings", &normalizeLineEndings);
+    registerFilter("normalize-line-endings", &normalizeLineEndingsFilter);
+}
+
+unittest {
+    assert("a\r\nb\rc\n".normalizeLineEndings.to!string == "a\nb\nc\n");
+    // Demonstrate composition of two unnamed lazy range types with one final
+    // allocation at the registry boundary.
+    assert("a\r\n\0b".normalizeLineEndings.stripControlChars.to!string == "a\nb");
 }

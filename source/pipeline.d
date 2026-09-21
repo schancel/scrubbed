@@ -10,21 +10,43 @@
 /// context (mojibake repair has to see the whole string to score
 /// candidates). Filters that CAN be true zero-allocation streaming
 /// transforms (e.g. control-character stripping) should still be written
-/// as range pipelines internally -- `Filter.apply` is just the boundary
-/// each filter presents to the chain, not a constraint on how it's
-/// implemented inside.
+/// as range pipelines internally -- the registered function is just the
+/// boundary each filter presents to the chain, not a constraint on how it is
+/// implemented inside. Option-aware factories parse immutable string options
+/// once while the pipeline is built and return a typed configured closure.
 module pipeline;
 
+alias FilterOptions = string[string];
+/// Original public filter contract, retained for source compatibility.
 alias Filter = string function(string);
+/// A configured stage may capture typed options parsed once at build time.
+alias ConfiguredFilter = string delegate(string);
+alias FilterFactory = ConfiguredFilter function(const ref FilterOptions);
 
-private Filter[string] registry;
+struct FilterSpec {
+    string name;
+    FilterOptions options;
+}
+
+private struct FilterRegistration {
+    Filter plain;
+    FilterFactory factory;
+}
+
+private FilterRegistration[string] registry;
 
 /// Register a filter under `name`. Call once per filter, typically from a
 /// module constructor (`static this()`) in that filter's own module, so
 /// registration stays next to the implementation rather than centralized
 /// in one big list someone has to remember to update.
 void registerFilter(string name, Filter f) {
-    registry[name] = f;
+    registry[name] = FilterRegistration(f, null);
+}
+
+/// Register an option-aware factory. It must validate and parse every option;
+/// Pipeline.build calls it once and stores the returned typed closure.
+void registerFilterFactory(string name, FilterFactory factory) {
+    registry[name] = FilterRegistration(null, factory);
 }
 
 string[] availableFilters() {
@@ -35,25 +57,45 @@ string[] availableFilters() {
 /// registry. Throws if any name isn't registered -- fail at pipeline
 /// construction time, not partway through processing a document tree.
 struct Pipeline {
-    private Filter[] stages;
+    private struct Stage {
+        Filter plain;
+        ConfiguredFilter configured;
+    }
+    private Stage[] stages;
     private string[] stageNames;
 
     static Pipeline build(const(string)[] filterNames) {
+        FilterSpec[] specs;
+        foreach (name; filterNames) specs ~= FilterSpec(name);
+        return buildConfigured(specs);
+    }
+
+    static Pipeline buildConfigured(FilterSpec[] specs) {
         Pipeline p;
-        foreach (name; filterNames) {
-            auto f = name in registry;
-            if (f is null)
-                throw new Exception("unknown filter: " ~ name ~
+        foreach (spec; specs) {
+            auto registration = spec.name in registry;
+            if (registration is null)
+                throw new Exception("unknown filter: " ~ spec.name ~
                     " (available: " ~ availableFilters.idup.to!string ~ ")");
-            p.stages ~= *f;
-            p.stageNames ~= name;
+            if (registration.factory !is null) {
+                p.stages ~= Stage(null, registration.factory(spec.options));
+            } else {
+                if (spec.options.length)
+                    throw new Exception("filter '" ~ spec.name ~ "' accepts no options");
+                p.stages ~= Stage(registration.plain, null);
+            }
+            p.stageNames ~= spec.name;
         }
         return p;
     }
 
     string run(string text) const {
-        foreach (stage; stages)
-            text = stage(text);
+        foreach (stage; stages) {
+            if (stage.configured !is null)
+                text = stage.configured(text);
+            else
+                text = stage.plain(text);
+        }
         return text;
     }
 
@@ -63,3 +105,14 @@ struct Pipeline {
 }
 
 import std.conv : to;
+
+private string legacyFilterTest(string text) { return text ~ "!"; }
+
+unittest {
+    Filter typedLegacy = &legacyFilterTest;
+    auto registrar = &registerFilter;
+    registrar("__legacy-filter-test", typedLegacy);
+    assert(Pipeline.build(["__legacy-filter-test"]).run("ok") == "ok!");
+    assert(Pipeline.build([]).names.length == 0);
+    assert(Pipeline.build(null).names.length == 0);
+}

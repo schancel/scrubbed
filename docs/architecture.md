@@ -48,9 +48,12 @@ UTF-8 without NUL and are NFC-normalized. Case and path-like spelling remain
 significant: no case-folding, slash cleanup, absolute-path resolution, or
 provider-specific source interpretation occurs here. This leaves annotation
 joins and shard reassignment stable without defining S3/WARC identity policy.
-`OutputName` is separate and does not enter the key. The view owner copies
-input bytes at construction, so a caller may release a mapping independently.
-`read` returns another copy, and reads of views fail after owner close. The
+`OutputName` is separate and does not enter the key. `DocumentViewOwner.mapFile`
+opens and exclusively owns a mapping until `close`; its checked `at`/iteration
+access borrows bytes without an eager whole-file copy or an escaping slice.
+The in-memory constructor borrows a GC-owned array instead, which the caller
+must not manually free or reallocate while open. `copy` explicitly retains
+only the selected range; all view access is rejected after owner close. The
 current CLI retains its own mapping-lifetime logic and is not wired to this
 facade.
 

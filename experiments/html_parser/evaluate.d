@@ -11,6 +11,7 @@ import std.stdio : writeln, stderr;
 import std.algorithm.searching : canFind, count;
 import std.digest.sha : sha256Of;
 import std.format : format;
+import core.thread : Thread;
 
 extern(C) {
     struct LNode {
@@ -27,6 +28,10 @@ extern(C) {
     int lxb_html_document_parse(void*, const(ubyte)*, size_t);
     void* lxb_html_document_destroy(void*);
     const(char)* lxb_dom_element_qualified_name(LNode*, size_t*);
+    void* lxb_dom_element_first_attribute_noi(LNode*);
+    void* lxb_dom_element_next_attribute_noi(void*);
+    const(char)* lxb_dom_attr_qualified_name(void*, size_t*);
+    const(char)* lxb_dom_attr_value_noi(void*, size_t*);
 
     struct GVector { void** data; uint length, capacity; }
     struct GPiece { const(char)* data; size_t length; }
@@ -57,6 +62,16 @@ extern(C) {
     void gumbo_destroy_output(const void*, GOutput*);
     extern const ubyte kGumboDefaultOptions;
     const(char)* gumbo_normalized_tagname(int);
+    void gumbo_tag_from_original_text(GPiece*);
+}
+
+struct GAttribute {
+    int nameSpace;
+    const(char)* name;
+    GPiece originalName;
+    const(char)* value;
+    GPiece originalValue;
+    GPosition nameStart, nameEnd, valueStart, valueEnd;
 }
 
 struct Fixture { string name; ubyte[] input; string[] required; string expected; size_t tagCount; }
@@ -155,7 +170,181 @@ bool quality(string observation, const(string)[] required, string expected = "",
     return true;
 }
 
+// Separate from the original tree-only run: these are selected semantic
+// observations, not a claim of full DOM/namespace/source-span parity.
+void lexEvidenceWalk(LNode* node, ref string observation) {
+    for (; node !is null; node = node.next) {
+        if (node.type == 1) {
+            size_t length;
+            auto ptr = lxb_dom_element_qualified_name(node, &length);
+            auto tag = ptr[0 .. length].idup;
+            observation ~= "<" ~ tag;
+            for (auto attr = lxb_dom_element_first_attribute_noi(node);
+                 attr !is null; attr = lxb_dom_element_next_attribute_noi(attr)) {
+                auto name = lxb_dom_attr_qualified_name(attr, &length);
+                observation ~= " " ~ name[0 .. length].idup ~ "=\"";
+                auto value = lxb_dom_attr_value_noi(attr, &length);
+                if (value !is null) observation ~= value[0 .. length].idup;
+                observation ~= "\"";
+            }
+            observation ~= ">";
+            lexEvidenceWalk(node.first, observation);
+            observation ~= "</" ~ tag ~ ">";
+        } else if (node.type == 3) {
+            auto data = (cast(LText*)node).data;
+            appendText(observation, data.data, data.length);
+        } else lexEvidenceWalk(node.first, observation);
+    }
+}
+
+void gumboEvidenceWalk(GNode* node, ref string observation) {
+    if (node is null) return;
+    GVector children;
+    if (node.type == 0) children = node.document.children;
+    else if (node.type == 1 || node.type == 6) {
+        auto name = gumbo_normalized_tagname(node.element.tag);
+        auto tag = name is null ? "" : name[0 .. strlen(name)].idup;
+        if (!tag.length && node.element.originalTag.length) {
+            auto piece = node.element.originalTag;
+            gumbo_tag_from_original_text(&piece);
+            if (piece.data !is null) tag = piece.data[0 .. piece.length].idup;
+        }
+        observation ~= "<" ~ tag;
+        foreach (i; 0 .. node.element.attributes.length) {
+            auto attr = cast(GAttribute*)node.element.attributes.data[i];
+            observation ~= " " ~ attr.name[0 .. strlen(attr.name)].idup ~ "=\"";
+            if (attr.value !is null) observation ~= attr.value[0 .. strlen(attr.value)].idup;
+            observation ~= "\"";
+        }
+        observation ~= ">";
+        children = node.element.children;
+        foreach (i; 0 .. children.length) gumboEvidenceWalk(cast(GNode*)children.data[i], observation);
+        observation ~= "</" ~ tag ~ ">";
+        return;
+    } else if (node.type == 2 || node.type == 3 || node.type == 5) {
+        auto value = node.text.text;
+        appendText(observation, value, value is null ? 0 : strlen(value));
+    }
+    foreach (i; 0 .. children.length) gumboEvidenceWalk(cast(GNode*)children.data[i], observation);
+}
+
+string evidence(string candidate, const(ubyte)[] input) {
+    string observation;
+    if (candidate == "lexbor") {
+        auto document = lxb_html_document_create();
+        if (document is null) throw new Exception("Lexbor create returned null");
+        scope(exit) lxb_html_document_destroy(document);
+        if (lxb_html_document_parse(document, input.ptr, input.length) != 0)
+            throw new Exception("Lexbor parse failed");
+        lexEvidenceWalk((cast(LNode*)document).first, observation);
+    } else {
+        auto output = gumbo_parse_with_options(&kGumboDefaultOptions, cast(const(char)*)input.ptr, input.length);
+        if (output is null) throw new Exception("Gumbo parse returned null");
+        scope(exit) gumbo_destroy_output(&kGumboDefaultOptions, output);
+        gumboEvidenceWalk(output.document, observation);
+    }
+    return observation;
+}
+
+void evidenceCases(string candidate) {
+    // Authored fixtures: no third-party page text is redistributed.
+    auto cases = [
+        Fixture("custom-attribute", cast(ubyte[])"<x-note data-id='a&amp;b' disabled>Hi</x-note>", [],
+            "<html><head></head><body><x-note data-id=\"a&b\" disabled=\"\">{Hi}</x-note></body></html>"),
+        Fixture("misnested-link", cast(ubyte[])"<article><a href='/one'><b>A</a>B</b></article>", [],
+            "<html><head></head><body><article><a href=\"/one\"><b>{A}</b></a><b>{B}</b></article></body></html>"),
+        Fixture("broken-list", cast(ubyte[])"<ul><li class='x'>A<li>B</ul>", [],
+            "<html><head></head><body><ul><li class=\"x\">{A}</li><li>{B}</li></ul></body></html>"),
+    ];
+    foreach (item; cases) {
+        auto observed = evidence(candidate, item.input);
+        if (item.expected.length && observed != item.expected)
+            throw new Exception(item.name ~ " exact quality failure: " ~ observed);
+        writeln(item.name, " quality=", item.expected.length ? "exact-pass" : "unsupported-golden",
+            " observation_sha256=", format("%(%02x%)", sha256Of(observed)),
+            " observation=", observed);
+    }
+    auto raw = cast(ubyte[])"<meta charset='iso-8859-1'><p>caf\xE9</p>";
+    auto decoded = cast(ubyte[])"<meta charset='iso-8859-1'><p>café</p>";
+    foreach (label, input; [raw, decoded]) {
+        auto observed = evidence(candidate, input);
+        auto hash = format("%(%02x%)", sha256Of(observed));
+        auto golden = label
+            ? "6cd3b8589e7357640a2bc60a6fc3cf7c43918d847168b626d1ed50abb529a6c3"
+            : candidate == "lexbor"
+                ? "ade52bbd2b2861033d2a6a44b4d8bc659e52dafece70494c644778f823f26efb"
+                : "e8db78c768be2b07828644e3d0c7117ba9260e6eafd1941eb15b0b65b3a42f9b";
+        if (hash != golden) throw new Exception("charset byte observation changed");
+        writeln("charset-", label ? "utf8-decoded" : "raw-latin1",
+            " quality=exact-byte-golden observation_sha256=", hash,
+            " observation_utf8_hex=", format("%(%02x%)", cast(const(ubyte)[])observed),
+            " observation=", observed);
+        if (label && !observed.canFind("{café}")) throw new Exception("UTF-8 decoded golden failed");
+    }
+    if (quality("<x-note>{bad}</x-note>", ["{Hi}"]))
+        throw new Exception("negative quality control accepted");
+    writeln("negative_control=rejected");
+}
+
+void concurrencyProbe(string candidate) {
+    auto input = cast(ubyte[])"<main><x-note data-id='v'>hello</x-note></main>";
+    auto expected = evidence(candidate, input);
+    class Worker {
+        string candidate;
+        const(ubyte)[] input;
+        string expected;
+        bool mismatched;
+        size_t firstMismatchIndex;
+        string firstMismatchValue;
+        this(string candidate, const(ubyte)[] input, string expected) {
+            this.candidate = candidate;
+            this.input = input;
+            this.expected = expected;
+        }
+        void record(size_t iteration, string observed) {
+            if (!mismatched && observed != expected) {
+                mismatched = true;
+                firstMismatchIndex = iteration;
+                firstMismatchValue = observed;
+            }
+        }
+        void run() {
+            foreach (i; 0 .. 100) record(i, evidence(candidate, input));
+        }
+    }
+    auto negative = new Worker(candidate, input, expected);
+    negative.record(0, "deliberately wrong");
+    negative.record(1, expected);
+    if (!negative.mismatched || negative.firstMismatchIndex != 0 ||
+        negative.firstMismatchValue != "deliberately wrong")
+        throw new Exception("concurrency negative control accepted later recovery");
+    Worker[8] workers;
+    Thread[8] threads;
+    foreach (i; 0 .. threads.length) {
+        workers[i] = new Worker(candidate, input, expected);
+        threads[i] = new Thread(&workers[i].run);
+        threads[i].start();
+    }
+    string firstJoinFailure;
+    foreach (thread; threads) {
+        try thread.join();
+        catch (Throwable error) if (!firstJoinFailure.length) firstJoinFailure = error.toString();
+    }
+    if (firstJoinFailure.length) throw new Exception("concurrent thread failed: " ~ firstJoinFailure);
+    foreach (i, worker; workers) if (worker.mismatched)
+        throw new Exception("concurrent observation mismatch worker=" ~ to!string(i) ~
+            " iteration=" ~ to!string(worker.firstMismatchIndex) ~
+            " observation=" ~ worker.firstMismatchValue);
+    writeln("concurrent_threads=8 iterations_per_thread=100 quality=pass observation_sha256=",
+        format("%(%02x%)", sha256Of(expected)));
+}
+
 void main(string[] args) {
+    if (args.length == 3 && (args[1] == "lexbor" || args[1] == "gumbo") && args[2] == "evidence") {
+        evidenceCases(args[1]);
+        concurrencyProbe(args[1]);
+        return;
+    }
     if (args.length != 3 || (args[1] != "lexbor" && args[1] != "gumbo")) {
         stderr.writeln("usage: evaluate lexbor|gumbo iterations");
         exit(2);

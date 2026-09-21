@@ -1,4 +1,4 @@
-# Uncompressed WARC/1.1 reader
+# WARC/1.1 readers
 
 `effects.warc_reader.WarcReader` accepts arbitrary byte chunks through `feed`,
 then requires one `finish` call. It emits one fully validated, owned `WarcRecord`
@@ -61,3 +61,64 @@ is not bounded by the parser's one-record limit.
 
 The production regression is D-only:
 `ldc2 -O3 -release -i -Isource experiments/warc_reader/production_check.d -of=<binary> && <binary>`.
+
+## Bounded gzip/zstd adapter
+
+`effects.warc_compressed.WarcCompressedReader` accepts `Compression.gzip` or
+`Compression.zstd`, a stable `sourceKey`, and the same `WarcVisit` callback.
+Feed arbitrary compressed chunks, then call `finish()`. `close()` explicitly
+abandons the stream and releases owned native state; a failed, cancelled, or
+finished adapter cannot be reused. A completed callback may catch a rejected
+reentrant `feed`/`finish` call. Uncaught callback exceptions poison the adapter.
+
+The supported subset is one independently compressed gzip member or one
+dictionary-free zstd frame with declared content size and checksum **per
+complete WARC/1.1 record**. Adjacent members/frames in a feed are valid and
+preserve global ordinal order. The adapter uses a fresh `WarcReader` per
+member, stages at most one parsed record, checks the native gzip footer or
+zstd frame checksum and exact one-record boundary, then invokes the caller.
+It feeds the plain reader byte by byte so a second record cannot grow beside
+the one staged record.
+A corrupt current member emits nothing; earlier completed members are not
+rolled back. It never copies a whole archive and has no resynchronization.
+
+Fixed limits per member are 1 MiB compressed bytes, 128 KiB expanded bytes,
+and a conservative cumulative `expanded <= 64 * consumed compressed` rule.
+The native decoder writes at most 16 KiB per call; the parser retains its own
+bounded record. Zstd frame content size and window must be at most 128 KiB,
+with `ZSTD_d_windowLogMax` set to 17 before decoding. Gzip uses system zlib's
+gzip-only window mode. Missing zstd content size/checksum, dictionaries,
+skippable/extension frames, large windows, invalid WARC, extra records in one
+member, corrupt checksums, truncation and trailing junk are rejected. A lone
+trailing byte that could begin a gzip header is reported as truncated.
+`CompressedWarcError.reason` distinguishes empty, truncated, checksum,
+over-cap, ratio, unsupported, invalid-WARC, cancellation, stopped and
+reentrancy outcomes. The adapter does not claim WARC/1.0, segmented records,
+Common Crawl compatibility, archive-wide rollback, or TB-scale throughput.
+
+The D-authored release check is:
+`ldc2 -O3 -release -i -Isource experiments/warc_reader/compressed_check.d .dub/zstd/libzstd_decompress.a -of=<binary> && <binary>`.
+It compares exact source-key/ordinal/record-ID/type/block SHA-256 output with
+plain WARC for response and WET-style conversion records under 1-byte,
+127-byte, 16-KiB and whole-feed chunks. It also exercises late corruption,
+truncation, unsupported metadata, byte/window/ratio/record caps, cancellation,
+reentrancy, and process-level GC/RSS/FD observations.
+Run `<binary> --negative-control` to force an uncaught late gzip checksum
+error under `-release`; a nonzero exit with `gzip footer checksum or size
+mismatch` is required. On one macOS arm64 run of 400 sequential decoders,
+process high-water RSS was 8,617,984 bytes, GC used bytes after collection
+were 1,058,096 before and 5,952 after, and `/dev/fd` entries were 4
+before/after.
+Those are process-level observations, not per-record or real-file bounds; no
+file adapter is included in this slice.
+
+The supported native build is macOS arm64. zstd is the separately pinned
+static v1.5.7 decompressor. Gzip explicitly opens macOS system
+`/usr/lib/libz.1.dylib` with `dlopen`/`RTLD_FIRST` and calls its symbols through
+`dlsym`; it closes the handle on finish, error, cancellation or explicit
+`close()`. The release probe's `dladdr` identifies the actual decoder image as
+that path and its `zlibVersion()` as 1.2.12. The SDK header and dylib current
+version metadata are also 1.2.12. Because this is runtime dynamic loading,
+`otool -L` on the probe does **not** list libz as a link-time load command;
+the D runtime may itself contain separate bundled zlib symbols, which the
+adapter does not call. No standalone-static package claim is made.

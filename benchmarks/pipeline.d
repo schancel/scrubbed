@@ -89,6 +89,24 @@ private JSONValue unsupportedCases() {
         "changed-executable timing not included; paired correctness gate covers identity"]);
 }
 
+private void validateBuildProvenance(JSONValue report, bool comparator) {
+    require(("compiler" in report.object) is null &&
+        ("build_flags" in report.object) is null &&
+        ("scrubbed_build_command" in report.object) is null &&
+        ("dos2unix_build_command" in report.object) is null,
+        "ambiguous measured-binary build attribution");
+    require(report["harness_compiler_available_version"].str.length != 0 &&
+        report["harness_reproduction_command"].str.length != 0,
+        "missing harness environment/recipe");
+    require(report["target_binary_compiler"].str == "UNVERIFIED" &&
+        report["target_binary_build_flags"].str == "UNVERIFIED",
+        "supplied target binary build provenance was not attested");
+    if (comparator)
+        require(report["dos2unix_binary_compiler"].str == "UNVERIFIED" &&
+            report["dos2unix_binary_build_flags"].str == "UNVERIFIED",
+            "supplied comparator binary build provenance was not attested");
+}
+
 private double elapsed(string value) {
     double result;
     foreach (field; value.split(":")) result = result * 60 + field.to!double;
@@ -394,16 +412,17 @@ private void validateRestart(JSONValue probe) {
 }
 
 private void validate(JSONValue report) {
-    require(report["schema"].str == "scrubbed-pipeline-v1", "report schema");
+    require(report["schema"].str == "scrubbed-pipeline-v2", "report schema");
     foreach (key; ["source_sha", "binary_sha256", "harness_sha256", "os",
-                   "cpu", "compiler", "build_flags"])
+                   "cpu"])
         require(key in report.object && report[key].str.length,
             "missing report metadata " ~ key);
+    validateBuildProvenance(report, false);
     require(digestField(report["source_sha"].str, 40) &&
         digestField(report["binary_sha256"].str, 64) &&
         digestField(report["harness_sha256"].str, 64),
         "invalid report hash metadata");
-    foreach (key; ["os", "cpu", "compiler"]) {
+    foreach (key; ["os", "cpu", "harness_compiler_available_version"]) {
         auto value = report[key].str;
         require(!value.canFind('/') && !value.canFind('\\') &&
             !value.canFind('\n') && !value.canFind('\r') &&
@@ -435,13 +454,16 @@ private void validate(JSONValue report) {
 }
 
 private void selfTest() {
-    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v1"),
+    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v2"),
         "source_sha": JSONValue("0".replicate(40)),
         "binary_sha256": JSONValue("0".replicate(64)),
         "harness_sha256": JSONValue("0".replicate(64)),
         "os": JSONValue("Linux test"),
-        "cpu": JSONValue("x"), "compiler": JSONValue("x"),
-        "build_flags": JSONValue("x"),
+        "cpu": JSONValue("x"),
+        "harness_compiler_available_version": JSONValue("x"),
+        "harness_reproduction_command": JSONValue("x"),
+        "target_binary_compiler": JSONValue("UNVERIFIED"),
+        "target_binary_build_flags": JSONValue("UNVERIFIED"),
         "source_binary_mapping": JSONValue("UNVERIFIED"),
         "ram_bytes": JSONValue(1024),
         "ram_source": JSONValue("/proc/meminfo MemTotal"),
@@ -451,7 +473,8 @@ private void selfTest() {
     report["cases"] = JSONValue([JSONValue(["samples":
         JSONValue([sample, sample, sample])])]);
     validate(report);
-    foreach (key; ["binary_sha256", "harness_sha256", "source_sha", "compiler"]) {
+    foreach (key; ["binary_sha256", "harness_sha256", "source_sha",
+                   "harness_compiler_available_version"]) {
         auto bad = report;
         bad[key] = "";
         bool failed;
@@ -478,10 +501,33 @@ private void selfTest() {
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "hostile absolute path negative did not fail");
     bad = report;
-    bad["build_flags"] = "-of=/Users/alice/private";
+    bad["harness_reproduction_command"] = "-of=/Users/alice/private";
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "hostile build flags negative did not fail");
+    bad = report;
+    bad["compiler"] = "LDC 1.43.0";
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "ambiguous compiler attribution negative did not fail");
+    bad = report;
+    bad["target_binary_compiler"] = "LDC 1.43.0";
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "unattested target compiler negative did not fail");
+    JSONValue comparison = JSONValue([
+        "harness_compiler_available_version": JSONValue("LDC available"),
+        "harness_reproduction_command": JSONValue("ldc2 -O3 -release"),
+        "target_binary_compiler": JSONValue("UNVERIFIED"),
+        "target_binary_build_flags": JSONValue("UNVERIFIED"),
+        "dos2unix_binary_compiler": JSONValue("UNVERIFIED"),
+        "dos2unix_binary_build_flags": JSONValue("UNVERIFIED")]);
+    validateBuildProvenance(comparison, true);
+    comparison["dos2unix_binary_build_flags"] = "-O2";
+    failed = false;
+    try { validateBuildProvenance(comparison, true); }
+    catch (Exception) { failed = true; }
+    require(failed, "unattested comparator flags negative did not fail");
     bad = report;
     bad["ram_bytes"] = -1;
     failed = false;
@@ -632,7 +678,7 @@ private void compareDos2unix(string scrubbed, string dos2unix,
         samples[1]["tool"].str == "dos2unix" &&
         samples[2]["tool"].str == "scrubbed" &&
         samples[3]["tool"].str == "dos2unix", "A/B/A/B order");
-    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-comparator-v1")]);
+    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-comparator-v2")]);
     report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
     report["source_binary_mapping"] = "UNVERIFIED";
     report["harness_sha256"] = hashFile("benchmarks/pipeline.d");
@@ -643,21 +689,28 @@ private void compareDos2unix(string scrubbed, string dos2unix,
     report["source_tar_binary_mapping"] = "UNVERIFIED; observed manual build";
     report["dos2unix_version"] = toolVersion;
     report["dos2unix_license"] = "FreeBSD (official COPYING.txt)";
-    report["dos2unix_build_command"] = "make ENABLE_NLS= dos2unix (cc, default -O2)";
-    report["scrubbed_build_command"] = "dub build --build=release --compiler=ldc2";
+    report["dos2unix_reproduction_recipe"] = "make ENABLE_NLS= dos2unix (cc, default -O2)";
+    report["harness_reproduction_command"] =
+        "ldc2 -O3 -release benchmarks/pipeline.d -of=<path>";
+    report["target_binary_compiler"] = "UNVERIFIED";
+    report["target_binary_build_flags"] = "UNVERIFIED";
+    report["dos2unix_binary_compiler"] = "UNVERIFIED";
+    report["dos2unix_binary_build_flags"] = "UNVERIFIED";
     report["input_sha256"] = hashFile(input);
     report["output_sha256"] = samples[0]["output_sha256"];
     report["input_bytes"] = cast(long)(65536 * "alpha\r\nbeta\r\n".length);
     report["output_bytes"] = cast(long)(65536 * expected.length);
     report["os"] = os ~ " " ~ checked(["uname", "-r"]) ~ " " ~
         checked(["uname", "-m"]);
-    report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
+    report["harness_compiler_available_version"] =
+        checked(["ldc2", "--version"]).splitLines[0];
     report["scrubbed_command_template"] =
         "<scrubbed-binary> --input <fixture> --output <output> --filters normalize-line-endings --threads 1";
     report["dos2unix_command_template"] =
         "<dos2unix-binary> -n <fixture> <output>";
     report["boundary"] = "single file to fresh file; full process; CRLF-only text; exact bytes";
     report["samples"] = JSONValue(samples);
+    validateBuildProvenance(report, true);
     auto published = report.toString.replace("\\/", "/");
     require(!published.canFind(root) && !published.canFind(scrubbed) &&
         !published.canFind(dos2unix) && !published.canFind(checked(["uname", "-n"])) &&
@@ -705,7 +758,7 @@ int main(string[] args) {
                 "steps": manifestTransitions(command, input, output, files,
                     records, os == "Darwin")]);
         }
-        JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v1")]);
+        JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v2")]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["binary_sha256"] = hashFile(args[1]);
         report["source_binary_mapping"] = "UNVERIFIED";
@@ -720,8 +773,12 @@ int main(string[] args) {
             linuxRamBytes(readText("/proc/meminfo"));
         report["ram_source"] = os == "Darwin" ?
             "sysctl hw.memsize" : "/proc/meminfo MemTotal";
-        report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
-        report["build_flags"] = "dub build --build=release --compiler=ldc2; ldc2 -O3 -release benchmarks/pipeline.d";
+        report["harness_compiler_available_version"] =
+            checked(["ldc2", "--version"]).splitLines[0];
+        report["harness_reproduction_command"] =
+            "ldc2 -O3 -release benchmarks/pipeline.d -of=<path>";
+        report["target_binary_compiler"] = "UNVERIFIED";
+        report["target_binary_build_flags"] = "UNVERIFIED";
         report["cases"] = JSONValue(cases);
         report["manifest_transitions"] = JSONValue(transitions);
         report["restart_probe"] = restartProbe(args[1], root, os == "Darwin");

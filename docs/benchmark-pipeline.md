@@ -62,10 +62,11 @@ is a correctness gate, not a timed sample, and it does not claim power-loss
 durability. The optional marker-instrumented build described in
 [`local-manifest.md`](local-manifest.md) covers additional crash windows.
 
-The report uses only path tokens in its command templates; it does not embed
-checkout, fixture, manifest, executable, or hostname paths. It includes the
+The version-2 reports use only path tokens in their command templates; they do not embed
+checkout, fixture, manifest, executable, or hostname paths. They include the
 source revision observed at run time and exact binary/harness/config hashes,
-compiler and build flags, OS/architecture/CPU, measured physical RAM and its
+the available host LDC version and harness reproduction command,
+OS/architecture/CPU, measured physical RAM and its
 source, per-run status, phase, wall,
 user and system CPU seconds, peak process RSS, fixture input bytes, expected
 output bytes, and raw samples. Fixture and expected-output byte counts are
@@ -84,7 +85,11 @@ explicitly unsupported, not reported as zero.
 The report explicitly labels the source-to-supplied-binary mapping
 `UNVERIFIED`: the executable's SHA-256 is measured, but merely reading Git
 HEAD does not prove which source commit produced an externally supplied
-binary. The filter digest hashes the selected filter string, not the
+binary. The supplied target binary's compiler and build flags are also
+`UNVERIFIED`; `harness_compiler_available_version` identifies only an LDC
+installation available on the benchmark host, while
+`harness_reproduction_command` is a recipe, not an attested build log.
+The filter digest hashes the selected filter string, not the
 manifest's entire effective canonical configuration (which also includes
 output route, binary and other policy bytes).
 On Linux, the D harness reads `model name`, `Hardware`, or `Processor` from
@@ -149,7 +154,8 @@ normalize-line-endings --threads 1`; dos2unix uses `-n INPUT OUTPUT`.
 Every run must exactly match the independently specified bytes before its
 timing is included. The committed raw Apple M4 samples are 0.03/0.05/0.02/0.05
 seconds in A/B/A/B order—too coarse for a speed ranking. The report marks
-source-tar-to-binary mapping unverified despite recording the observed build;
+source-tar-to-binary mapping and both supplied binaries' compiler/flags
+unverified despite recording the observed build recipe;
 the exact binary hash is the reproducible identity.
 
 For the *combined* filter task, no equivalent executable was verified. ICU's

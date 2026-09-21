@@ -17,7 +17,7 @@ import std.json : JSONValue;
 import std.path : buildPath, relativePath;
 import std.process : execute, spawnProcess, wait;
 import std.stdio : File, stderr, writeln;
-import std.string : split, splitLines, strip;
+import std.string : replace, split, splitLines, strip;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string message) {
@@ -326,8 +326,11 @@ private void validate(JSONValue report) {
             require(sample["exact_output"].boolean && sample["status"].integer == 0,
                 "bad sample");
     }
-    auto published = report.toString;
-    require(!published.canFind(tempDir) && !published.canFind(checked(["uname", "-n"])),
+    auto published = report.toString.replace("\\/", "/");
+    require(!published.canFind(tempDir) && !published.canFind(checked(["uname", "-n"])) &&
+        !published.canFind("/Users/") && !published.canFind("/home/") &&
+        !published.canFind("/private/") && !published.canFind("/tmp/") &&
+        !published.canFind("\\\\Users\\\\"),
         "private path or hostname in report");
 }
 
@@ -370,6 +373,11 @@ private void selfTest() {
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "hostile absolute path negative did not fail");
+    bad = report;
+    bad["build_flags"] = "-of=/Users/alice/private";
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "hostile build flags negative did not fail");
     bad = report;
     bad["source_binary_mapping"] = "VERIFIED";
     failed = false;
@@ -500,9 +508,11 @@ private void compareDos2unix(string scrubbed, string dos2unix,
         "<dos2unix-binary> -n <fixture> <output>";
     report["boundary"] = "single file to fresh file; full process; CRLF-only text; exact bytes";
     report["samples"] = JSONValue(samples);
-    auto published = report.toString;
+    auto published = report.toString.replace("\\/", "/");
     require(!published.canFind(root) && !published.canFind(scrubbed) &&
-        !published.canFind(dos2unix) && !published.canFind(checked(["uname", "-n"])),
+        !published.canFind(dos2unix) && !published.canFind(checked(["uname", "-n"])) &&
+        !published.canFind("/Users/") && !published.canFind("/home/") &&
+        !published.canFind("/private/") && !published.canFind("/tmp/"),
         "private comparator report path/host");
     if (reportPath.length) write(reportPath, published ~ "\n");
     else writeln(published);

@@ -61,6 +61,20 @@ private long countState(string path, string wanted) {
     return sqlite3_column_int64(query, 0);
 }
 
+private void changeDestination(string path, string destination) {
+    sqlite3* db;
+    need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READWRITE, null) == SQLITE_OK,
+        "open manifest for destination fixture");
+    scope(exit) sqlite3_close(db);
+    sqlite3_stmt* update;
+    need(sqlite3_prepare_v2(db, "UPDATE sink_state SET destination=?1".toStringz,
+        -1, &update, null) == SQLITE_OK, "prepare destination fixture");
+    scope(exit) sqlite3_finalize(update);
+    need(sqlite3_bind_text(update, 1, destination.toStringz, -1, null) == SQLITE_OK &&
+        sqlite3_step(update) == SQLITE_DONE && sqlite3_changes(db) == 1,
+        "change one destination fixture row");
+}
+
 int main(string[] args) {
     need(args.length == 2, "usage: check <release harness executable>");
     auto root = buildPath(tempDir, "scrubbed-failure-" ~ randomUUID.toString);
@@ -181,6 +195,31 @@ int main(string[] args) {
             "post-plan pre-sink " ~ phase ~ " fault remains planned with exact key");
         writeln("ok: post-plan pre-sink ", phase, " identity");
     }
+    auto prefilterFolder = buildPath(root, "pre-filter-manifest");
+    mkdir(prefilterFolder);
+    auto prefilterInput = buildPath(prefilterFolder, "input.txt");
+    auto prefilterOutput = buildPath(prefilterFolder, "output.txt");
+    auto prefilterDb = buildPath(prefilterFolder, "state.db");
+    write(prefilterInput, "original");
+    write(prefilterDb ~ ".fault-policy", "");
+    auto prefilterCommand = [args[1], "run", "--input", prefilterInput,
+        "--output", prefilterOutput, "--manifest", prefilterDb,
+        "--filters", "normalize-line-endings", "--explain"];
+    result = execute(prefilterCommand);
+    need(result.status == 2 && state(prefilterDb) == "planned",
+        "pre-filter manifest setup planned");
+    auto prefilterId = firstDocumentId(prefilterDb);
+    changeDestination(prefilterDb, buildPath(prefilterFolder, "different.txt"));
+    result = execute(prefilterCommand ~ ["--manifest-retry"]);
+    need(result.status == 2 && result.output.canFind("FATAL") &&
+        result.output.canFind("status=failure") &&
+        result.output.canFind("same sink key has a different destination") &&
+        result.output.canFind("document_id=\"" ~ prefilterId ~ "\"") &&
+        result.output.canFind("sink_key=\"local-primary:v1\"") &&
+        result.output.split("EXPLAIN\tinput=").length == 2 &&
+        state(prefilterDb) == "planned" && !exists(prefilterOutput),
+        "pre-filter manifest plan rejection keeps exact key and planned row");
+    writeln("ok: pre-filter manifest fatal identity");
     foreach (spec; ["open-ENFILE", "write-ENOSPC", "fsync-EDQUOT",
             "close-EMFILE", "write-EACCES", "fsync-EIO",
             "setattrs-ENOSPC", "rename-EDQUOT",

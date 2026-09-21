@@ -465,10 +465,10 @@ private class ManifestDecisionFailure : Exception {
     }
 }
 
-private class FatalManifestInspection : Exception {
+private class FatalManifestPreFilter : Exception {
     SinkKey key;
-    this(SinkKey key, ResourceExhaustion cause) {
-        super("fatal manifest inspection: " ~ cause.msg);
+    this(SinkKey key, Exception cause) {
+        super("fatal manifest pre-filter operation: " ~ cause.msg);
         this.key = key;
     }
 }
@@ -531,28 +531,29 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
     SinkKey key = SinkKey(id, firstHash, configHash, "local-primary:v1");
     bool replacing;
     if (!dryRun) {
-        Inspection inspected;
         try {
-            inspected = manifest.inspect(key);
-        } catch (ResourceExhaustion error) {
-            throw new FatalManifestInspection(key, error);
+            auto inspected = manifest.inspect(key);
+            if (inspected == Inspection.verifiedCommitted)
+                return manifestOutcome("skipped", "", key);
+            auto previous = manifest.lookup(key);
+            bool destinationExists = exists(destination);
+            bool unresolved = !previous.isNull && previous.get.state != SinkState.planned;
+            if (!retry && (destinationExists || unresolved))
+                throw new ManifestDecisionFailure(
+                    !previous.isNull && previous.get.state == SinkState.uncertain
+                        ? "uncertain" : "retry-required",
+                    "manifest output requires explicit --manifest-retry after inspection: " ~ destination,
+                    id, key.sink);
+            auto row = manifest.plan(key, destination);
+            replacing = retry && (destinationExists || row.state != SinkState.planned);
+            if (replacing)
+                manifest.retry(key);
+            version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
+        } catch (ManifestDecisionFailure decision) {
+            throw decision;
+        } catch (Exception failure) {
+            throw new FatalManifestPreFilter(key, failure);
         }
-        if (inspected == Inspection.verifiedCommitted)
-            return manifestOutcome("skipped", "", key);
-        auto previous = manifest.lookup(key);
-        bool destinationExists = exists(destination);
-        bool unresolved = !previous.isNull && previous.get.state != SinkState.planned;
-        if (!retry && (destinationExists || unresolved))
-            throw new ManifestDecisionFailure(
-                !previous.isNull && previous.get.state == SinkState.uncertain
-                    ? "uncertain" : "retry-required",
-                "manifest output requires explicit --manifest-retry after inspection: " ~ destination,
-                id, key.sink);
-        auto row = manifest.plan(key, destination);
-        replacing = retry && (destinationExists || row.state != SinkState.planned);
-        if (replacing)
-            manifest.retry(key);
-        version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
     }
     bool sinkTouched;
     FailurePhase phase = FailurePhase.filter;
@@ -837,7 +838,7 @@ int runApp(string[] args) {
             auto documentFailure = cast(DocumentFailure)error;
             auto fatalDocumentFailure = cast(FatalDocumentFailure)error;
             auto manifestDecision = cast(ManifestDecisionFailure)error;
-            auto fatalInspection = cast(FatalManifestInspection)error;
+            auto fatalPreFilter = cast(FatalManifestPreFilter)error;
             auto fatalPlanned = cast(FatalPlannedFailure)error;
             stderr.writefln("%s %s: %s",
                 documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
@@ -861,9 +862,9 @@ int runApp(string[] args) {
                     status = manifestDecision.status;
                     documentId = manifestDecision.documentId.text;
                     sinkKey = manifestDecision.sinkKey;
-                } else if (fatalInspection !is null) {
-                    documentId = fatalInspection.key.document.text;
-                    sinkKey = fatalInspection.key.sink;
+                } else if (fatalPreFilter !is null) {
+                    documentId = fatalPreFilter.key.document.text;
+                    sinkKey = fatalPreFilter.key.sink;
                 } else if (fatalPlanned !is null) {
                     status = "unacknowledged";
                     detail = "manifest-state=planned";

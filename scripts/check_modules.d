@@ -1,0 +1,107 @@
+// Check the documented module seams without parsing the whole D language.
+module check_modules;
+
+import std.algorithm.searching : canFind, startsWith;
+import std.file : SpanMode, dirEntries, exists, readText;
+import std.path : baseName, buildPath, dirName, stripExtension;
+import std.regex : matchAll, matchFirst, regex;
+import std.stdio : stderr, writeln;
+import std.string : replace, split, splitLines, strip;
+
+private bool projectModule(string name) {
+    foreach (prefix; ["app", "cli", "pipeline", "filters", "domain", "content"])
+        if (name == prefix || name.startsWith(prefix ~ "."))
+            return true;
+    return false;
+}
+
+private string modulePath(string root, string path) {
+    auto prefix = root ~ "/";
+    return (path.startsWith(prefix) ? path[prefix.length .. $] : path).replace("\\", "/");
+}
+
+private string importRule(string owner, string dependency) {
+    if (!projectModule(dependency)) return null;
+    if (owner == "app" && dependency != "cli")
+        return "app may import only cli among project modules";
+    if (owner == "cli") return null;
+    if (owner == "pipeline" && (dependency == "app" || dependency == "cli" || dependency == "filters" || dependency.startsWith("filters.")))
+        return "pipeline must not import app, cli, or concrete filters";
+    if (owner == "domain" || owner.startsWith("domain.")) {
+        if (dependency != "domain" && !dependency.startsWith("domain."))
+            return "domain modules must remain independent of other project layers";
+    }
+    if (owner == "content" || owner.startsWith("content.")) {
+        if (dependency == "app" || dependency == "cli")
+            return "content may import domain, but not app or cli";
+    }
+    if (owner == "filters" || owner.startsWith("filters.")) {
+        if (dependency == "app" || dependency == "cli")
+            return "filters must not import app or cli";
+        if (dependency == "filters" || dependency.startsWith("filters.")) {
+            if (owner == "filters.entities" && (dependency == "filters.entities_data" || dependency == "filters.mojibake"))
+                return null;
+            return "cross-filter imports are limited to entities -> entities_data/mojibake";
+        }
+    }
+    return null;
+}
+
+private bool hasModuleDoc(string root, string path, string source, string name) {
+    if (name == "filters.entities_data") return true; // pinned generated table
+    auto declaration = matchFirst(source, regex(`(?m)^\s*module\s+[A-Za-z_][\w.]*\s*;`));
+    if (!declaration.empty) {
+        auto before = source[0 .. declaration.pre.length];
+        foreach (line; before.splitLines)
+            if (line.strip.startsWith("///") && line.strip[3 .. $].strip.length) return true;
+    }
+    auto relative = modulePath(root, path);
+    foreach (guide; [buildPath(root, "README.md"), buildPath(dirName(path), "README.md")])
+        if (exists(guide) && (readText(guide).canFind(relative) || readText(guide).canFind(baseName(path))))
+            return true;
+    return false;
+}
+
+string[] checkTree(string root) {
+    string[] failures;
+    foreach (entry; dirEntries(root, "*.d", SpanMode.depth)) {
+        auto path = entry.name;
+        auto relative = modulePath(root, path);
+        auto expected = stripExtension(relative).replace("/", ".");
+        auto source = readText(path);
+        auto declaration = matchFirst(source, regex(`(?m)^\s*module\s+([A-Za-z_][\w.]*)\s*;`));
+        if (declaration.empty) {
+            failures ~= relative ~ ": missing module declaration (expected " ~ expected ~ ")";
+            continue;
+        }
+        auto name = declaration.captures[1];
+        if (name != expected)
+            failures ~= relative ~ ": module " ~ name ~ ": declaration must match path (" ~ expected ~ ")";
+        if (!hasModuleDoc(root, path, source, name))
+            failures ~= relative ~ ": module " ~ name ~ ": missing module doc (/// header or README entry)";
+        foreach (statement; matchAll(source, regex(`(?m)^\s*(?:(?:public|private|static|protected|package)\s+)*import\s+([^;]+);`))) {
+            foreach (part; statement.captures[1].split(",")) {
+                auto aliases = part.split(":")[0].split("=");
+                auto dependency = aliases[$ - 1].strip;
+                auto rule = importRule(name, dependency);
+                if (rule.length)
+                    failures ~= relative ~ ": module " ~ name ~ " imports " ~ dependency ~ ": " ~ rule;
+            }
+        }
+    }
+    return failures;
+}
+
+version (moduleCheckRunner) {} else {
+    int main(string[] args) {
+        if (args.length != 2) {
+            stderr.writeln("usage: check_modules <source-root>");
+            return 2;
+        }
+        auto failures = checkTree(args[1]);
+        foreach (failure; failures) stderr.writeln(failure);
+        if (failures.length) return 1;
+        writeln("module check: ok");
+        return 0;
+    }
+}

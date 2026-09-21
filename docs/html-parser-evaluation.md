@@ -58,7 +58,10 @@ completed without a crash; this is not fuzzing or a memory-sanitizer proof.
 Observations are the same D-owned format for both candidates: element start/end
 names and decoded text leaves, in tree order. Attributes, comments, namespace,
 doctype and source spans are intentionally excluded, so this is selected tree
-semantics, not full DOM parity. The first four small cases use exact goldens;
+semantics, not full DOM parity. The Gumbo binding uses
+`gumbo_normalized_tagname`; unknown/custom tags become empty names in this
+observation, so custom-tag parity is untested. The first four small cases use
+exact goldens;
 the charset case checks only structural/text prefix because the decoded bytes
 diverge; deep/wide cases assert 256/512 corresponding start tags and end text.
 Each iteration's output must equal that candidate's first output. The harness

@@ -3,8 +3,9 @@
 The executable entry is [`app.d`](app.d): `main(string[] args)` calls the
 [`cli_commands.d`](cli_commands.d) argparse command adapter, reports an
 uncaught exception, and returns exit code 2. The adapter routes implemented
-`run`/`repair` and legacy no-verb flags into `cli.runApp`; `extract` fails
-explicitly as unavailable. Command/option-name completion is supported;
+`run`/`repair` and legacy no-verb flags into `cli.runApp`; opt-in `extract`
+routes local HTML to `cli.runExtract` for selected `tree-json:v1` output only.
+Command/option-name completion is supported;
 document processing stays in `cli`.
 
 [`cli.d`](cli.d) owns argument and JSON-config parsing, path validation,
@@ -70,8 +71,11 @@ module to make it available. [`stages/config.d`](stages/config.d) strictly
 parses the nested `{"version":2,"stages":[{"name":"...","options":{...}}]}`
 API format and resolves typed transforms before document execution. Its
 [`stages/fixture.d`](stages/fixture.d) registration exists only in unittest
-builds. V2 is not accepted by the CLI; the existing v1 `--config` path remains
-unchanged. Registration and parsing do not reserve resources or establish
+builds. [`effects/html_tree_json_stage.d`](effects/html_tree_json_stage.d) is a concrete
+effects-owned, self-registering v2 stage used only by `extract`; that route resolves its typed
+plan without exposing a general v2-config CLI option. Its 32 MiB resource
+declaration is descriptive, not an enforced RSS limit. The existing v1
+`--config` path remains unchanged. Registration and parsing do not reserve resources or establish
 production document-stage backpressure; F04's high-edit content path still
 needs measurement. The CLI's bounded local file queue is a separate seam.
 
@@ -93,6 +97,12 @@ destination. The opt-in manifest file/tree CLI uses the atomic piece sink;
 the mapped windowed input remains standalone. Neither is wired to the future
 document-stage runner; their resource bounds do not make
 context-heavy filters streaming.
+
+[`effects/html_tree_export.d`](effects/html_tree_export.d) serializes the
+restricted D-owned selected parse tree to deterministic, versioned JSON with
+a 4 MiB pre-publication cap. `extract` uses the local bounded scheduler,
+explicit charset/BOM decode, and F08 atomic piece sink. It does not perform
+article selection, Markdown conversion, metadata extraction, or restart.
 
 [`effects/jsonl_stream.d`](effects/jsonl_stream.d) and
 [`effects/stdio_stream.d`](effects/stdio_stream.d) provide standalone bounded

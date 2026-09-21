@@ -34,7 +34,14 @@ issue. This file remains the status record for implemented work.
       use this module; callers must explicitly close view owners.
 - [~] Ordered borrowed/owned content pieces and bounded streaming exist in
       `source/content/pieces.d`; a D experiment compares list and rope edits.
-      This is not yet a Phobos InputRange or integrated into CLI filters/output.
+      `Content.pieces()` now exposes a lazy Phobos InputRange. Neither content
+      nor document stages are integrated into CLI filters/output; optimized
+      wired-list evidence shows high-edit scaling unsuitable for a throughput
+      path until representation/backpressure is revisited.
+- [~] Standalone document stage contracts now cover ordered map, reject,
+      quarantine, split, cancellation and resource declarations, with tagged
+      derived-child IDs. They are tested but not wired into the CLI or a
+      bounded-memory scheduler; a stage result currently batches its events.
 - [~] A strict byte-to-Unicode facade in `source/text/decoding.d` decodes
       UTF-8 and BOM/declared UTF-16 LE/BE, with typed quarantine for malformed,
       conflicting, unsupported, or binary-looking input. It is tested but not

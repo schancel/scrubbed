@@ -102,10 +102,17 @@ Phases 0-2 are usable within the documented scope; JSON configuration from
 Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
 The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
 describe the current module boundaries. A typed document-identity and borrowed
-view module exists, but it is not yet wired into the CLI or pipeline.
+view module and an ordered borrowed/owned content-piece module exist, but they
+are not yet wired into the CLI or pipeline. A D module-boundary check is under
+`scripts/`.
 The broader corpus-curation plan is tracked in
 [GitHub issues](https://github.com/schancel/scrubbed/issues); accepted tickets do
 not imply the features are implemented or worker-ready.
 
 Reproducible D correctness and allocation microbenchmarks, including the
 reconstructed pre-range mojibake implementation, are under `benchmarks/`.
+The first whole-CLI baseline there is sobering: on one synthetic 4,096-line
+mojibake input, scrubbed took roughly 3 seconds versus roughly 0.16 seconds
+for pinned ftfy. That is not a corpus-wide comparison, but it rules out a
+current blanket speed claim. Full-pipeline, larger-than-RAM, and additional
+quality-matched tool comparisons remain open.

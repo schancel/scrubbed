@@ -15,8 +15,11 @@ The no-evidence default is strict UTF-8. UTF-8 (`utf-8`, `utf8`), UTF-16LE
 ASCII case-insensitively with surrounding ASCII whitespace ignored. The
 generic labels `utf-16` and `utf16` require a UTF-16 BOM to resolve byte
 order; without one they quarantine as ambiguous. Other labels, including
-Latin-1 and CP1252, quarantine as unsupported. An explicitly supplied blank
-or unrecognized label does not silently become the default.
+Latin-1 and CP1252, quarantine as unsupported. An omitted declaration is
+represented by D `null`; explicitly supplied `""`, an owned empty slice, a
+whitespace-only label, or an unrecognized label quarantines as unsupported.
+The evidence retains the exact supplied declaration, including its original
+spelling and null-versus-empty distinction; none silently becomes the default.
 
 A UTF-8 or UTF-16LE/BE BOM selects the encoding and is consumed, not emitted
 as text. A declaration must match that selection; conflict quarantines before

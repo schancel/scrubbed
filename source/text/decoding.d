@@ -62,7 +62,7 @@ private bool asciiSpace(char c) {
 }
 
 private Charset parseCharset(string label) {
-    if (label.length == 0) return Charset.absent;
+    if (label is null) return Charset.absent;
     size_t start;
     size_t end = label.length;
     while (start < end && asciiSpace(label[start])) ++start;
@@ -186,7 +186,7 @@ private bool decodeUtf16(const(ubyte)[] raw, size_t start, TextEncoding encoding
 
 /// Decode a borrowed byte slice. The returned text is owned; quarantine
 /// retains only metadata so large failed inputs are not copied or pinned.
-DecodeOutcome decodeBytes(const(ubyte)[] raw, string declaredCharset = "",
+DecodeOutcome decodeBytes(const(ubyte)[] raw, string declaredCharset = null,
     string source = "") {
     DecodeOutcome result;
     auto evidence = DecodeEvidence(source, declaredCharset, raw.length, findBom(raw));
@@ -242,14 +242,16 @@ DecodeOutcome decodeBytes(const(ubyte)[] raw, string declaredCharset = "",
 unittest {
     import std.exception : assertThrown;
 
-    auto empty = decodeBytes(null, "", "empty-record");
+    auto empty = decodeBytes(null, null, "empty-record");
     assert(empty.isDecoded && empty.decoded.text == "");
+    assert(empty.decoded.evidence.declaredCharset is null);
+    assert(decodeBytes(null).isDecoded); // omitted declaration
     assertThrown(empty.quarantined());
     assert(empty.decoded.consumedByteCount == 0);
     assert(empty.decoded.evidence.source == "empty-record");
 
     ubyte[] mutableBytes = [cast(ubyte) 'h', 0xc3, 0xa9];
-    auto clean = decodeBytes(mutableBytes, "", "article-1");
+    auto clean = decodeBytes(mutableBytes, null, "article-1");
     assert(clean.isDecoded && clean.decoded.text == "hé");
     assert(clean.decoded.encoding == TextEncoding.utf8);
     assert(clean.decoded.evidence.bom == ByteOrderMark.none);
@@ -280,6 +282,11 @@ unittest {
 unittest {
     import std.exception : assertThrown;
 
+    assert("" !is null); // explicit literal is distinguishable from omission
+    char[] ownedLabel = ['x'];
+    string ownedEmpty = cast(string) ownedLabel[0 .. 0];
+    assert(ownedEmpty !is null); // empty slice with owned backing
+
     void check(const(ubyte)[] bytes, string charset, string source,
         QuarantineReason reason, bool hasOffset, size_t offset,
         ByteOrderMark bom = ByteOrderMark.none) {
@@ -288,6 +295,7 @@ unittest {
         assert(result.quarantined.reason == reason);
         assert(result.quarantined.evidence.source == source);
         assert(result.quarantined.evidence.declaredCharset == charset);
+        assert(result.quarantined.evidence.declaredCharset.ptr == charset.ptr);
         assert(result.quarantined.evidence.rawByteCount == bytes.length);
         assert(result.quarantined.evidence.bom == bom);
         assert(result.quarantined.hasOffendingOffset == hasOffset);
@@ -299,33 +307,41 @@ unittest {
         QuarantineReason.conflictingCharset, false, 0, ByteOrderMark.utf16be);
     check([cast(ubyte) 0x41], "cp1252", "legacy",
         QuarantineReason.unsupportedCharset, false, 0);
+    check([cast(ubyte) 0x41], "", "literal-blank",
+        QuarantineReason.unsupportedCharset, false, 0);
+    check([cast(ubyte) 0x41], ownedEmpty, "owned-blank",
+        QuarantineReason.unsupportedCharset, false, 0);
+    check([cast(ubyte) 0x41], " \t ", "whitespace-blank",
+        QuarantineReason.unsupportedCharset, false, 0);
+    check([cast(ubyte) 0xef, 0xbb, 0xbf], "", "bom-blank",
+        QuarantineReason.unsupportedCharset, false, 0, ByteOrderMark.utf8);
     check([cast(ubyte) 0x41], "\u00a0utf-8", "nonascii-label",
         QuarantineReason.unsupportedCharset, false, 0);
     assertThrown(decodeBytes([cast(ubyte) 0x41], "cp1252").decoded());
     check([cast(ubyte) 0x41], "utf-16", "ambiguous",
         QuarantineReason.ambiguousCharset, false, 0);
-    check([cast(ubyte) 0xe9], "", "undecidable",
+    check([cast(ubyte) 0xe9], null, "undecidable",
         QuarantineReason.malformedUnicode, true, 0);
-    check([cast(ubyte) 0xc0, 0xaf], "", "overlong",
+    check([cast(ubyte) 0xc0, 0xaf], null, "overlong",
         QuarantineReason.malformedUnicode, true, 0);
-    check([cast(ubyte) 0x61, 0xe2, 0x82], "", "truncated",
+    check([cast(ubyte) 0x61, 0xe2, 0x82], null, "truncated",
         QuarantineReason.malformedUnicode, true, 1);
-    check([cast(ubyte) 0xed, 0xa0, 0x80], "", "surrogate-utf8",
+    check([cast(ubyte) 0xed, 0xa0, 0x80], null, "surrogate-utf8",
         QuarantineReason.malformedUnicode, true, 0);
-    check([cast(ubyte) 0xf4, 0x90, 0x80, 0x80], "", "range",
+    check([cast(ubyte) 0xf4, 0x90, 0x80, 0x80], null, "range",
         QuarantineReason.malformedUnicode, true, 0);
-    check([cast(ubyte) 0x61, 0x00, 0x62], "", "nul",
+    check([cast(ubyte) 0x61, 0x00, 0x62], null, "nul",
         QuarantineReason.binaryControl, true, 1);
-    check([cast(ubyte) 0x61, 0x1b, 0x62], "", "escape",
+    check([cast(ubyte) 0x61, 0x1b, 0x62], null, "escape",
         QuarantineReason.binaryControl, true, 1);
-    assert(decodeBytes([cast(ubyte) 0xc2, 0x85], "", "c1-text").decoded.text == "\u0085");
-    check([cast(ubyte) 0xff, 0xfe, 0x00], "", "odd-utf16",
+    assert(decodeBytes([cast(ubyte) 0xc2, 0x85], null, "c1-text").decoded.text == "\u0085");
+    check([cast(ubyte) 0xff, 0xfe, 0x00], null, "odd-utf16",
         QuarantineReason.malformedUnicode, true, 2, ByteOrderMark.utf16le);
-    check([cast(ubyte) 0xff, 0xfe, 0x00, 0xd8], "", "high-surrogate",
+    check([cast(ubyte) 0xff, 0xfe, 0x00, 0xd8], null, "high-surrogate",
         QuarantineReason.malformedUnicode, true, 2, ByteOrderMark.utf16le);
-    check([cast(ubyte) 0xfe, 0xff, 0xdc, 0x00], "", "low-surrogate",
+    check([cast(ubyte) 0xfe, 0xff, 0xdc, 0x00], null, "low-surrogate",
         QuarantineReason.malformedUnicode, true, 2, ByteOrderMark.utf16be);
-    check([cast(ubyte) 0xff, 0xfe, 0x41, 0x00, 0x00, 0x00], "", "utf16-nul",
+    check([cast(ubyte) 0xff, 0xfe, 0x41, 0x00, 0x00, 0x00], null, "utf16-nul",
         QuarantineReason.binaryControl, true, 4, ByteOrderMark.utf16le);
     assert(decodeBytes([cast(ubyte) 0xff, 0xfe], "utf-16").decoded.text == "");
 }

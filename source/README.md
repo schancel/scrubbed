@@ -43,6 +43,14 @@ can insert, delete, or replace without copying untouched source bytes. `stream`
 emits bounded, temporary chunks to a sink. The CLI and filters are not yet
 wired to this facade.
 
+`Content.pieces()` is a lazy Phobos InputRange of checked piece descriptors.
+It preserves empty descriptors and borrowing checks without flattening bytes.
+[`stages/contract.d`](stages/contract.d) defines ordered document-range
+map/reject/quarantine/split decisions, child provenance, cancellation safe
+points, and validated descriptive resources. Its pass-mode metadata describes
+single-pass or resumable stage behavior; it does not implement checkpoints or
+scheduling. These stages are not wired to the current string pipeline or CLI.
+
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.

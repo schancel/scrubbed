@@ -1,5 +1,24 @@
 # Third-party notices
 
+## Lexbor
+
+The restricted HTML-tree boundary statically links unmodified Lexbor v3.0.0,
+copyright 2018–2026 Alexander Borisov, under Apache License 2.0. The complete
+upstream [`LICENSE`](third_party/lexbor/LICENSE) and
+[`NOTICE`](third_party/lexbor/NOTICE) are bundled. Exact commit, source-tree
+identity, copied-file hashes, omitted upstream material, static build and
+supported platform are recorded in
+[`third_party/lexbor/README.md`](third_party/lexbor/README.md).
+
+Lexbor's numeric-conversion source includes BSD-style notices attributed to
+NGINX, Inc.; F5, Inc.; Igor Sysoev; Dmitry Volyntsev; Alexander Borisov; and
+Vadim Zhestikov. Those complete notices are preserved in the unmodified
+`source/lexbor/core/{diyfp,dtoa,strtod}.{c,h}` files, including the binary
+redistribution condition. The pinned CMake archive also includes Lexbor's
+other source modules; no independently licensed bundled library or build-time
+network dependency was found in the copied source/build graph. This is a
+source/license inventory, not legal approval for a published binary package.
+
 ## SQLite
 
 The standalone local manifest API statically links SQLite 3.53.4's unmodified

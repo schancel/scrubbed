@@ -16,8 +16,9 @@ is retained GC memory, not a count of all allocations or a throughput claim.
 Run-to-run timing and GC collection can vary. The trace does not replace the
 F01 or T03 quality gates.
 
-`compare_cli.d` reads two JSON reports from the unchanged A00 D CLI harness,
+`compare_cli.d` reads JSON reports from the unchanged A00 D CLI harness,
 requires identical fixture/harness hashes and byte-exact successful outputs,
-then prints the five raw mojibake wall-time samples. It performs no benchmark
+then prints the five raw mojibake wall and CPU (user plus system) samples per
+run, with binary hashes. It performs no benchmark
 run itself. Compile with `ldc2 -O -release experiments/text/compare_cli.d
 -of=/tmp/scrubbed-compare-cli`, then pass the base and candidate report paths.

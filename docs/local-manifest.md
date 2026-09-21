@@ -71,9 +71,9 @@ before storing committed. `inspect(key, intendedDestination)` may return
 `verifiedCommitted` only after the canonical route matches and a present output
 rehashes correctly. Missing output or changed bytes makes the committed row
 uncertain and requires retry. An unsafe stored destination/path alias or output
-rehash EIO/resource fault is keyed run-fatal (exit 2), not an uncertain retry.
-A process killed after publish
-but before the DB update leaves planned; the caller must reconcile before
+rehash syscall failure (including EACCES, EIO, or resource exhaustion) is keyed
+run-fatal (exit 2), not an uncertain retry. A process killed after publish but
+before the DB update leaves planned; the caller must reconcile before
 `retry(key)`, which is the explicit acknowledgement of replacement/partial-
 write risk. Failed and uncertain rows cannot directly become committed. Sink
 A never completes sink B. No transaction atomically covers filesystem rename

@@ -2,12 +2,13 @@
 module experiments.failure_policy.check;
 
 import effects.sqlite_ffi;
+import core.stdc.errno : EACCES;
 import std.algorithm.searching : canFind, startsWith;
 import std.array : split;
 import std.conv : to;
 import std.digest.sha : sha256Of;
-import std.file : SpanMode, dirEntries, exists, isSymlink, mkdir, readText,
-    remove, rmdirRecurse, tempDir, write;
+import std.file : SpanMode, dirEntries, exists, getAttributes, isSymlink,
+    mkdir, readText, remove, rmdirRecurse, setAttributes, tempDir, write;
 import std.path : baseName, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
 import std.stdio : writeln;
@@ -438,7 +439,8 @@ int main(string[] args) {
         writeln("ok: positive ", kind, " exact manifest key");
     }
     foreach (spec; ["open-EMFILE", "read-ENFILE", "fstat-ENOSPC",
-            "read-EDQUOT", "open-EIO", "fstat-EIO", "read-EIO"]) {
+            "read-EDQUOT", "open-EIO", "fstat-EIO", "read-EIO",
+            "open-EPERM", "open-ELOOP"]) {
         auto rehashFolder = buildPath(root, "rehash-" ~ spec);
         mkdir(rehashFolder);
         auto rehashInput = buildPath(rehashFolder, "input.txt");
@@ -488,6 +490,33 @@ int main(string[] args) {
     auto secondEioOutput = buildPath(eioOutput, baseName(eioPaths[1]));
     auto firstOutputBytes = readText(firstEioOutput);
     auto secondOutputBytes = readText(secondEioOutput);
+    auto priorAttributes = getAttributes(firstEioOutput);
+    setAttributes(firstEioOutput, 0);
+    auto deniedResult = separately(eioCommand);
+    setAttributes(firstEioOutput, priorAttributes);
+    size_t deniedDecisions, deniedCanceled;
+    foreach (line; deniedResult.output.splitLines()) {
+        if (!line.startsWith("EXPLAIN\tinput=")) continue;
+        if (line.canFind(baseName(eioPaths[0])) &&
+            line.canFind("status=failure") &&
+            line.canFind("cannot open observed output") &&
+            line.canFind("document_id=\"" ~ eioId ~ "\"") &&
+            line.canFind("sink_key=\"local-primary:v1\""))
+            ++deniedDecisions;
+        if (line.canFind(baseName(eioPaths[1])) &&
+            line.canFind("status=canceled") &&
+            line.canFind("canceled after fatal processing failure"))
+            ++deniedCanceled;
+    }
+    need(deniedResult.status == 2 && deniedResult.error.canFind("FATAL") &&
+        deniedResult.error.canFind("errno=" ~ EACCES.to!string) &&
+        deniedResult.output.split("EXPLAIN\tinput=").length == 3 &&
+        deniedDecisions == 1 && deniedCanceled == 1 &&
+        countState(eioDb, "committed") == 2 &&
+        readText(firstEioOutput) == firstOutputBytes &&
+        readText(secondEioOutput) == secondOutputBytes,
+        "output rehash EACCES stops tree without changing committed rows");
+    writeln("ok: real output rehash EACCES fatal cancellation");
     write(firstEioOutput ~ ".fault-rehash-read-EIO", "");
     auto eioResult = separately(eioCommand);
     size_t fatalEioDecisions, canceledEioDecisions;

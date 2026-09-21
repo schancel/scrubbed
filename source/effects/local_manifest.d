@@ -4,10 +4,12 @@ module effects.local_manifest;
 import domain.document : DocumentId;
 import effects.sqlite_ffi;
 import std.datetime.systime : Clock;
+import std.conv : to;
 import std.digest.sha : sha256Of, SHA256;
 import std.digest : LetterCase, toHexString;
 import core.stdc.stdlib : free;
-import core.stdc.errno : errno, EINTR, EIO, ENOSPC, EDQUOT, EMFILE, ENFILE;
+import core.stdc.errno : errno, EINTR, ENOENT, EIO, EACCES, EPERM, ELOOP,
+    ENOSPC, EDQUOT, EMFILE, ENFILE;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
 import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
@@ -182,19 +184,27 @@ private void failRehashResource(string message, int errorCode) {
         throw new ResourceExhaustion("local manifest: " ~ message, errorCode);
 }
 
-/// A non-resource output rehash I/O fault is not evidence of changed output.
+/// A non-resource output rehash syscall failure is not evidence of changed output.
 class OutputRehashIoFailure : Exception {
     int errorCode;
     this(string message, int errorCode) {
-        super("local manifest: " ~ message);
+        super("local manifest: " ~ message ~ " (errno=" ~ errorCode.to!string ~ ")");
         this.errorCode = errorCode;
     }
 }
 
 private void failRehashIo(string message, int errorCode) {
     failRehashResource(message, errorCode);
-    if (errorCode == EIO)
-        throw new OutputRehashIoFailure(message, errorCode);
+    throw new OutputRehashIoFailure(message, errorCode);
+}
+
+private bool observedPathExists(string path, string message) {
+    stat_t info;
+    if (stat(path.toStringz, &info) == 0) return true;
+    const savedErrno = errno;
+    if (savedErrno == ENOENT) return false;
+    failRehashIo(message, savedErrno);
+    assert(0);
 }
 
 version (FailurePolicyHarness) {
@@ -202,7 +212,8 @@ version (FailurePolicyHarness) {
         struct Fault { string name; int code; }
         foreach (spec; [Fault("EMFILE", EMFILE), Fault("ENFILE", ENFILE),
                 Fault("ENOSPC", ENOSPC), Fault("EDQUOT", EDQUOT),
-                Fault("EIO", EIO)]) {
+                Fault("EIO", EIO), Fault("EACCES", EACCES),
+                Fault("EPERM", EPERM), Fault("ELOOP", ELOOP)]) {
             if (exists(path ~ ".fault-rehash-" ~ phase ~ "-" ~ spec.name)) {
                 failRehashIo("injected output rehash " ~ phase ~ " failure", spec.code);
                 throw new Exception("local manifest: injected output rehash " ~ phase ~ " failure");
@@ -405,19 +416,25 @@ final class LocalManifest {
         if (prior.isNull) return Inspection.absent;
         auto row = prior.get;
         if (row.state != SinkState.committed) return Inspection.retryRequired;
-        try {
-            safeDestination(row.destination);
+        if (!observedPathExists(dirName(row.destination),
+                "cannot stat observed output parent")) {
             if (intendedDestination.length &&
                 row.destination != resolvedName(intendedDestination))
                 throw new OutputPolicyViolation(
                     "local manifest: committed destination differs from selected output");
-            if (exists(row.destination) && row.hasOutput &&
-                hashFile(row.destination) == row.outputSha256)
+            transition(key, SinkState.uncertain, false, row.outputSha256);
+            return Inspection.retryRequired;
+        }
+        safeDestination(row.destination);
+        if (intendedDestination.length &&
+            row.destination != resolvedName(intendedDestination))
+            throw new OutputPolicyViolation(
+                "local manifest: committed destination differs from selected output");
+        if (observedPathExists(row.destination, "cannot stat observed output")) {
+            require(row.hasOutput, "committed row is missing output digest");
+            if (hashFile(row.destination) == row.outputSha256)
                 return Inspection.verifiedCommitted;
-        } catch (ResourceExhaustion failure) { throw failure; }
-        catch (OutputRehashIoFailure failure) { throw failure; }
-        catch (OutputPolicyViolation failure) { throw failure; }
-        catch (Exception) { }
+        }
         transition(key, SinkState.uncertain, false, row.outputSha256);
         return Inspection.retryRequired;
     }

@@ -1,0 +1,13 @@
+.dub
+scrubd
+scrubd.so
+scrubd.dylib
+scrubd.dll
+libscrubd.a
+scrubd.a
+scrubd.lib
+*.exe
+*.pdb
+*.o
+*.obj
+*.lst

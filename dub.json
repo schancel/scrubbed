@@ -1,0 +1,14 @@
+{
+	"name": "scrubd",
+	"description": "Text sanitization CLI in D: mojibake repair + normalization filters, range-based pipeline, parallel multi-document processing",
+	"authors": ["Shammah Chancellor"],
+	"license": "MIT",
+	"targetType": "executable",
+	"sourcePaths": ["source"],
+	"dflags": ["-g"],
+	"buildTypes": {
+		"release": {
+			"buildOptions": ["releaseMode", "optimize", "inline"]
+		}
+	}
+}

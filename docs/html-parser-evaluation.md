@@ -186,3 +186,103 @@ next reviewed continuation under #24 should resolve those gaps and obtain
 @schancel's adoption decision before any parser enters `source/`, the package
 lock, or a release artifact. Rollback of this landing deletes only this report
 and `experiments/html_parser/evaluate.d`.
+
+## Third and final prerequisite: restricted wrapper decision
+
+**GO for a restricted, reviewed production wrapper contract; NO-GO for an
+unrestricted HTML parser claim.** This is a decision to specify and review a
+wrapper, not to vendor, link, publish, or expose Lexbor yet. The evidence is
+`experiments/html_parser/final_check.d`, linked only in an external local
+executable to the pinned Lexbor v3.0.0 static archive. The intended wrapper
+accepts raw bytes only through `source/text/decoding.d`'s `decodeBytes`, then
+hands its **owned validated UTF-8** to Lexbor. It returns a bounded D-owned
+selected tree observation (element qualified names, ordered decoded
+attributes, text leaves). It does not promise full HTML5 conformance,
+namespaces, source spans, duplicate-attribute fidelity, HTML encoding
+sniffing, script execution, or another platform's build/ABI.
+
+One public standards fixture is pinned, fetched but **not committed**:
+[WPT `ambiguous-ampersand.html`](https://github.com/web-platform-tests/wpt/blob/532766fee262a2b41054665505b9dc37bd7c0a25/html/syntax/parsing/ambiguous-ampersand.html)
+from exact WPT commit `532766fee262a2b41054665505b9dc37bd7c0a25`,
+SHA-256 `c10358bda1648db3138d1a20c5bc21961cef0eee0f613f8718a317650240efe1`.
+Its repository [LICENSE.md](https://github.com/web-platform-tests/wpt/blob/532766fee262a2b41054665505b9dc37bd7c0a25/LICENSE.md)
+is BSD-3-Clause, SHA-256
+`5fac07febb0e2a97fb0d7b0def149ec08b642e1ba4b9c345283ab1cbd2af6570`;
+redistribution would require its copyright notice, conditions, and disclaimer.
+No third-party fixture is redistributed here. The harness checks the exact
+input hash, selected `<title>`, decoded link attribute and paragraph text,
+plus the full selected-observation hash
+`72c7704cb54e8cca442036822e609149e33da68a25c53aff7ae18b852b23f4f3`.
+Its embedded browser test uses `document.write` and URL serialization; this
+standalone parser does neither. Thus the chosen static tree/decoded entities
+are corroborated by that test's stated text/attribute oracle, but the browser
+test as a whole is **not** passed. Corpus breadth is one standards page plus
+authored examples, not representative web-wide coverage.
+
+The authored exact cases cover article/nav/list markup, broken nesting,
+table fostering, custom attributes/entities, script/style text, UTF-8 BOM,
+UTF-16LE BOM, and declared UTF-16BE. Latin-1 labels, a meta charset with
+invalid UTF-8 bytes (no sniffing), malformed Unicode, and BOM/declaration
+conflicts quarantine before a native owner exists. A 64-KiB raw-byte cap,
+128-level selected traversal depth, 8,192-node cap, and 1-MiB observation cap
+are active in optimized release D; oversized raw input and deep/wide trees
+are rejected. These are **prototype thresholds**, not approved product limits.
+The returned D string is checked after Lexbor destruction and source-input
+mutation. Four injected failures (before parse, after parse, during observation,
+before cleanup) each close the single native owner exactly once according to
+the wrapper's create/destroy accounting. The post-create paths genuinely run
+Lexbor destruction. The pre-parse and pre-cleanup injections are D control
+flow, not induced Lexbor allocator/destructor faults; those and OOM behavior
+remain unproved. A deliberately wrong golden is rejected with optimized
+release checks, independent of D `assert`.
+
+Reproduce on Darwin arm64, Apple clang 21.0.0, LDC 1.43.0, using the earlier
+pinned Lexbor source/build and the uncommitted WPT file:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/web-platform-tests/wpt/532766fee262a2b41054665505b9dc37bd7c0a25/html/syntax/parsing/ambiguous-ampersand.html -o /tmp/scrubd-wpt-amp-final.html
+shasum -a 256 /tmp/scrubd-wpt-amp-final.html
+ldc2 -O -release -enable-asserts=true -Isource -of=/tmp/scrubd-html-final-check experiments/html_parser/final_check.d source/text/decoding.d /tmp/scrubd-lexbor-v3-eval-install/lib/liblexbor_static.a
+/tmp/scrubd-html-final-check /tmp/scrubd-wpt-amp-final.html
+otool -L /tmp/scrubd-html-final-check
+```
+
+Local result: eight authored exact positives, seven release-active negatives
+(including two resource caps), four closed-owner injected failures, one rejected
+quality control, and selected WPT observation passed. The static binary has
+no Lexbor dylib dependency; `otool -L` lists only Apple's `libSystem.B` and
+`libobjc.A`. This demonstrates a static link on this host, not a portable
+native build. The same executable linked against the previously built
+Lexbor ASan+UBSan static archive passed with no sanitizer diagnostic:
+
+```sh
+ldc2 -O -release -enable-asserts=true -Isource -of=/tmp/scrubd-html-final-check-asan experiments/html_parser/final_check.d source/text/decoding.d /tmp/scrubd-lexbor-v3-eval-asan/liblexbor_static.a -L-L/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin -L-lclang_rt.asan_osx_dynamic -L-lclang_rt.ubsan_osx_dynamic -L-rpath -L/Library/Developer/CommandLineTools/usr/lib/clang/21/lib/darwin
+/tmp/scrubd-html-final-check-asan /tmp/scrubd-wpt-amp-final.html
+```
+
+The upstream [full Apache-2.0 LICENSE](https://github.com/lexbor/lexbor/blob/2ae88a1c6b5261830eff73ee12bb3cdf805f3cfe/LICENSE)
+(12,261 bytes, SHA-256
+`7321caa1f366dfbebf799b6c6c2604772dbb12ef10ed6a6b7cbb384b3401c4dd`)
+and [upstream NOTICE](https://github.com/lexbor/lexbor/blob/2ae88a1c6b5261830eff73ee12bb3cdf805f3cfe/NOTICE)
+(606 bytes, SHA-256
+`b87f965fd2eba846a0a502d633dd7e7a680b93de5c514c404c948ccf1e5c9dc7`)
+were copied **in full** to a disposable `licenses/Lexbor-LICENSE` and
+`licenses/Lexbor-NOTICE` bundle and byte-compared to the exact upstream
+checkout. Both hashes matched. A distributable package would have to ship
+both unabridged files and attribute `Lexbor; Copyright 2018–2020 Alexander
+Borisov; Apache License 2.0`, preserving upstream notices and documenting
+modifications if any. This is a bundle dry run, not legal approval or a
+production packaging step. No generated native object/archive is committed.
+
+The next **production** contract under #24 must pin the Lexbor source SHA,
+recheck the C struct/function ABI against its exact headers, own the sole
+document with guaranteed destroy on parse/observe/error/close, copy all
+returned strings before destroy, prohibit native pointers escaping, fix input
+and output/node/depth caps and failure behavior, choose and verify the
+supported native build matrix, bundle the full LICENSE/NOTICE, and run
+sanitizers plus boundary regressions in CI. It must explicitly keep unsupported
+HTML byte-sniffing and richer DOM semantics out of the public API until
+separately specified. @schancel owns adoption, limits, platform, and package
+authorization. Issue #24 remains open for that reviewed production adoption;
+there is no fourth prerequisite evidence loop absent a concrete blocker.
+Rollback of this slice deletes only `final_check.d` and this section.

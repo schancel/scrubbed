@@ -115,6 +115,12 @@ issue. This file remains the status record for implemented work.
       time, CPU time, peak RSS, bytes/sec, files/sec, allocation volume, and
       cold/warm-cache runs on the same storage. This is the actual claim
       ("D version could be faster") that has not been established yet.
+- [ ] Broaden the comparison beyond ftfy/trafilatura where functionality
+      overlaps: pin relevant alternative tool versions and options by task
+      (repair, web extraction, metadata, full corpus pipeline), use the same
+      input corpus and quality gates, and report unsupported capabilities
+      separately. Include startup, steady-state throughput, memory, and
+      operational cost; do not compare unlike outputs as if they were parity.
 - [~] Allocation benchmark: `benchmarks/mojibake_ranges.d` compares the
       reconstructed eager implementation, eager plus the clean-input guard,
       and lazy candidates using GC allocation counters. The independent guard

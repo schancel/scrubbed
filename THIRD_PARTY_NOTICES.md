@@ -2,8 +2,10 @@
 
 ## Lexbor
 
-The restricted HTML-tree boundary statically links unmodified Lexbor v3.0.0,
-copyright 2018–2026 Alexander Borisov, under Apache License 2.0. The complete
+The pinned Lexbor v3.0.0 source builds as a static archive, and the FFI/ABI
+unit-test binary links it. The shipping CLI does not yet link Lexbor; that
+awaits the restricted production wrapper in the next slice. Lexbor is
+copyright 2018–2026 Alexander Borisov and licensed under Apache 2.0. The complete
 upstream [`LICENSE`](third_party/lexbor/LICENSE) and
 [`NOTICE`](third_party/lexbor/NOTICE) are bundled. Exact commit, source-tree
 identity, copied-file hashes, omitted upstream material, static build and

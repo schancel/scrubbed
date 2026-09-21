@@ -35,4 +35,15 @@ build graph rather than silently pruning a dependency closure by hand.
 For a clean checkout, `dub test --compiler=ldc2` and
 `dub build --build=release` configure and build `.dub/lexbor/liblexbor_static.a`.
 The `source/effects/lexbor_ffi.d` layout checks and native parser smoke test
-are the narrow verified ABI surface; they do not prove other platforms.
+are the narrow verified ABI surface; they do not prove other platforms. To
+exercise that ABI probe as a standalone static-linked test executable:
+
+```sh
+ldc2 -unittest -main -Isource source/effects/lexbor_ffi.d .dub/lexbor/liblexbor_static.a -of=/tmp/scrubbed-lexbor-ffi-test
+/tmp/scrubbed-lexbor-ffi-test
+otool -L /tmp/scrubbed-lexbor-ffi-test
+```
+
+The shipping CLI currently has no Lexbor caller and does not include Lexbor
+symbols. The restricted production wrapper and its accessor goldens are the
+next independently reviewed slice.

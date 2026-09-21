@@ -250,6 +250,13 @@ is useful, but it is not sufficient on its own.
       crash/restart tests. JSONL and unflagged runs have no resume. This is a
       serial local path, not power-loss durability, a concurrent input snapshot,
       or bounded output materialization.
+- [~] Store immutable source documents and keyed analyzer overlays. A
+      standalone binary-v1 artifact API now has bounded integrity-checked
+      frames, version/revision-checked streaming joins, create-only source
+      publication, and atomic one-overlay replacement, with release-active D
+      ordering, corruption, fault, alias, and concurrent no-clobber tests
+      (`docs/document-shards.md`; C01/#32 complete). CLI/analyzer wiring,
+      interchange exports, and corpus-scale storage proof remain open.
 - [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
       adapter and explicit paired-dash `run`/`repair` mode preserve untouched
       JSON values semantically, derive stable caller-key/line IDs, cap records,

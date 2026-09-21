@@ -158,6 +158,12 @@ layer; the CLI's own mmap path is unchanged. High-edit list scaling is not
 ready for a throughput path. A D module-boundary check is under `scripts/`.
 The document model distinguishes original source IDs from derived-child IDs;
 split stages now use the latter, without changing original source IDs.
+A standalone [binary-v1 document shard and annotation-overlay API](docs/document-shards.md)
+now provides bounded, integrity-checked frames, version/revision-checked joins,
+create-only immutable source publication, and atomic replacement of one
+overlay. Its release-active D tests cover ordering, corruption, aliases,
+faults, and concurrent no-clobber publication. No CLI, analyzer, or SQLite
+route uses these artifacts yet; this is not a corpus-scale storage claim.
 The broader corpus-curation plan is tracked in
 [GitHub issues](https://github.com/schancel/scrubbed/issues); accepted tickets do
 not imply the features are implemented or worker-ready.

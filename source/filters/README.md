@@ -40,5 +40,18 @@ construction. A plain filter rejects nonempty options. [`entities.d`](entities.d
 decodes a limited set of HTML entities and uses `mojibake`'s CP1252 helper;
 [`punctuation.d`](punctuation.d) owns quote normalization.
 
+`fix-mojibake` first scores the existing whole-string Latin-1/CP1252 round
+trip. If that cannot improve the input because surrounding codepoints are
+unmappable in the enabled legacy encoding(s), it scans UTF-8 codepoints for exact
+legacy-byte sequences (two to four bytes) and considers short adjacent runs.
+It accepts a local edit only when plausibility strictly improves, except for
+a first-pass tie with an exact second-pass improvement. The configured
+`max-passes` still bounds the number of actual edits. A standalone `Â`/C2
+sequence is intentionally ambiguous and is left alone in mixed text; invalid
+or incomplete sequences also abstain. Boundaries are codepoint offsets, and
+every unmatched byte slice is copied verbatim. This is not charset guessing.
+`normalize-line-endings`, `uncurl-quotes`, and `strip-control` operate in the
+user's chosen order; none supplies evidence that a span is mojibake.
+
 [`html2md.d`](html2md.d) is a stub, deliberately unregistered and not a
 working HTML-to-Markdown filter. It is not an extension API.

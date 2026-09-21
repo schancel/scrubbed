@@ -7,7 +7,7 @@ import std.datetime.systime : Clock;
 import std.digest.sha : sha256Of, SHA256;
 import std.digest : LetterCase, toHexString;
 import core.stdc.stdlib : free;
-import core.stdc.errno : errno, EINTR, ENOSPC, EDQUOT, EMFILE, ENFILE;
+import core.stdc.errno : errno, EINTR, EIO, ENOSPC, EDQUOT, EMFILE, ENFILE;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
 import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
@@ -182,15 +182,29 @@ private void failRehashResource(string message, int errorCode) {
         throw new ResourceExhaustion("local manifest: " ~ message, errorCode);
 }
 
+/// A non-resource output rehash I/O fault is not evidence of changed output.
+class OutputRehashIoFailure : Exception {
+    int errorCode;
+    this(string message, int errorCode) {
+        super("local manifest: " ~ message);
+        this.errorCode = errorCode;
+    }
+}
+
+private void failRehashIo(string message, int errorCode) {
+    failRehashResource(message, errorCode);
+    if (errorCode == EIO)
+        throw new OutputRehashIoFailure(message, errorCode);
+}
+
 version (FailurePolicyHarness) {
     private void injectedRehashFault(string path, string phase) {
-        import core.stdc.errno : EIO;
         struct Fault { string name; int code; }
         foreach (spec; [Fault("EMFILE", EMFILE), Fault("ENFILE", ENFILE),
                 Fault("ENOSPC", ENOSPC), Fault("EDQUOT", EDQUOT),
                 Fault("EIO", EIO)]) {
             if (exists(path ~ ".fault-rehash-" ~ phase ~ "-" ~ spec.name)) {
-                failRehashResource("injected output rehash " ~ phase ~ " failure", spec.code);
+                failRehashIo("injected output rehash " ~ phase ~ " failure", spec.code);
                 throw new Exception("local manifest: injected output rehash " ~ phase ~ " failure");
             }
         }
@@ -202,7 +216,7 @@ private ubyte[32] hashFile(string path) {
     auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
     if (fd < 0) {
         const savedErrno = errno;
-        failRehashResource("cannot open observed output", savedErrno);
+        failRehashIo("cannot open observed output", savedErrno);
     }
     require(fd >= 0, "cannot open observed output without following symlink");
     scope(exit) close(fd);
@@ -211,7 +225,7 @@ private ubyte[32] hashFile(string path) {
     const statResult = fstat(fd, &info);
     if (statResult != 0) {
         const savedErrno = errno;
-        failRehashResource("cannot stat observed output", savedErrno);
+        failRehashIo("cannot stat observed output", savedErrno);
     }
     require(statResult == 0 && S_ISREG(info.st_mode), "observed output is not regular");
     SHA256 digest;
@@ -222,7 +236,7 @@ private ubyte[32] hashFile(string path) {
         if (amount < 0) {
             const savedErrno = errno;
             if (savedErrno == EINTR) continue;
-            failRehashResource("observed output read failed", savedErrno);
+            failRehashIo("observed output read failed", savedErrno);
         }
         require(amount >= 0, "observed output read failed");
         if (amount == 0) break;
@@ -401,6 +415,7 @@ final class LocalManifest {
                 hashFile(row.destination) == row.outputSha256)
                 return Inspection.verifiedCommitted;
         } catch (ResourceExhaustion failure) { throw failure; }
+        catch (OutputRehashIoFailure failure) { throw failure; }
         catch (OutputPolicyViolation failure) { throw failure; }
         catch (Exception) { }
         transition(key, SinkState.uncertain, false, row.outputSha256);

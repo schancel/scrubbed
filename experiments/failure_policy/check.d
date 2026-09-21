@@ -5,16 +5,32 @@ import effects.sqlite_ffi;
 import std.algorithm.searching : canFind, startsWith;
 import std.array : split;
 import std.conv : to;
+import std.digest.sha : sha256Of;
 import std.file : SpanMode, dirEntries, exists, isSymlink, mkdir, readText,
     remove, rmdirRecurse, tempDir, write;
 import std.path : baseName, buildPath;
-import std.process : execute;
+import std.process : Redirect, execute, pipeProcess, wait;
 import std.stdio : writeln;
 import std.string : splitLines, toStringz;
 import std.uuid : randomUUID;
 
 private void need(bool okay, string label) {
     if (!okay) throw new Exception("failure policy: " ~ label);
+}
+
+private struct Captured {
+    int status;
+    string output;
+    string error;
+}
+
+private Captured separately(string[] command) {
+    auto pipes = pipeProcess(command, Redirect.stdout | Redirect.stderr);
+    Captured result;
+    foreach (line; pipes.stdout.byLineCopy) result.output ~= line ~ "\n";
+    foreach (line; pipes.stderr.byLineCopy) result.error ~= line ~ "\n";
+    result.status = pipes.pid.wait();
+    return result;
 }
 
 private string state(string path) {
@@ -43,6 +59,23 @@ private string firstDocumentId(string path) {
         -1, &query, null) == SQLITE_OK, "prepare identity");
     scope(exit) sqlite3_finalize(query);
     need(sqlite3_step(query) == SQLITE_ROW, "identity row");
+    import std.string : fromStringz;
+    return sqlite3_column_text(query, 0).fromStringz.idup;
+}
+
+private string documentIdForInput(string path, string input) {
+    sqlite3* db;
+    need(sqlite3_open_v2(path.toStringz, &db, 0x00000001, null) == SQLITE_OK,
+        "open keyed manifest");
+    scope(exit) sqlite3_close(db);
+    sqlite3_stmt* query;
+    need(sqlite3_prepare_v2(db,
+        "SELECT document_id FROM sink_state WHERE input_sha256=?1".toStringz,
+        -1, &query, null) == SQLITE_OK, "prepare keyed identity");
+    scope(exit) sqlite3_finalize(query);
+    auto digest = sha256Of(cast(const(ubyte)[])readText(input));
+    need(sqlite3_bind_blob(query, 1, digest.ptr, 32, null) == SQLITE_OK &&
+        sqlite3_step(query) == SQLITE_ROW, "keyed identity row");
     import std.string : fromStringz;
     return sqlite3_column_text(query, 0).fromStringz.idup;
 }
@@ -405,7 +438,7 @@ int main(string[] args) {
         writeln("ok: positive ", kind, " exact manifest key");
     }
     foreach (spec; ["open-EMFILE", "read-ENFILE", "fstat-ENOSPC",
-            "read-EDQUOT", "fstat-EIO"]) {
+            "read-EDQUOT", "open-EIO", "fstat-EIO", "read-EIO"]) {
         auto rehashFolder = buildPath(root, "rehash-" ~ spec);
         mkdir(rehashFolder);
         auto rehashInput = buildPath(rehashFolder, "input.txt");
@@ -421,19 +454,65 @@ int main(string[] args) {
         auto rehashId = firstDocumentId(rehashDb);
         write(rehashOutput ~ ".fault-rehash-" ~ spec, "");
         result = execute(rehashCommand);
-        const resource = !spec.canFind("EIO");
-        need(result.status == (resource ? 2 : 1) &&
-            state(rehashDb) == (resource ? "committed" : "uncertain") &&
+        need(result.status == 2 && state(rehashDb) == "committed" &&
             readText(rehashOutput) == "one\n" &&
             result.output.canFind("document_id=\"" ~ rehashId ~ "\"") &&
             result.output.canFind("sink_key=\"local-primary:v1\"") &&
             result.output.split("EXPLAIN\tinput=").length == 2 &&
-            (resource ? result.output.canFind("FATAL") &&
-                result.output.canFind("status=failure") :
-                result.output.canFind("status=uncertain")),
+            result.output.canFind("FATAL") &&
+            result.output.canFind("status=failure") &&
+            result.output.canFind("injected output rehash"),
             "rehash errno " ~ spec);
         writeln("ok: rehash errno ", spec);
     }
+    auto eioFolder = buildPath(root, "rehash-eio-stops-tree");
+    mkdir(eioFolder);
+    auto eioInput = buildPath(eioFolder, "input");
+    auto eioOutput = buildPath(eioFolder, "output");
+    auto eioDb = buildPath(eioFolder, "state.db");
+    mkdir(eioInput);
+    write(buildPath(eioInput, "a.txt"), "alpha\r\n");
+    write(buildPath(eioInput, "b.txt"), "beta\r\n");
+    string[] eioPaths;
+    foreach (entry; dirEntries(eioInput, SpanMode.depth, false))
+        if (entry.isFile) eioPaths ~= entry.name;
+    need(eioPaths.length == 2, "rehash EIO setup has two files");
+    auto eioCommand = [args[1], "run", "--input", eioInput,
+        "--output", eioOutput, "--manifest", eioDb,
+        "--filters", "normalize-line-endings", "--explain"];
+    result = execute(eioCommand);
+    need(result.status == 0 && countState(eioDb, "committed") == 2,
+        "rehash EIO tree setup committed");
+    auto eioId = documentIdForInput(eioDb, eioPaths[0]);
+    auto firstEioOutput = buildPath(eioOutput, baseName(eioPaths[0]));
+    auto secondEioOutput = buildPath(eioOutput, baseName(eioPaths[1]));
+    auto firstOutputBytes = readText(firstEioOutput);
+    auto secondOutputBytes = readText(secondEioOutput);
+    write(firstEioOutput ~ ".fault-rehash-read-EIO", "");
+    auto eioResult = separately(eioCommand);
+    size_t fatalEioDecisions, canceledEioDecisions;
+    foreach (line; eioResult.output.splitLines()) {
+        if (!line.startsWith("EXPLAIN\tinput=")) continue;
+        if (line.canFind(baseName(eioPaths[0])) &&
+            line.canFind("status=failure") &&
+            line.canFind("injected output rehash read failure") &&
+            line.canFind("document_id=\"" ~ eioId ~ "\"") &&
+            line.canFind("sink_key=\"local-primary:v1\""))
+            ++fatalEioDecisions;
+        if (line.canFind(baseName(eioPaths[1])) &&
+            line.canFind("status=canceled") &&
+            line.canFind("canceled after fatal processing failure"))
+            ++canceledEioDecisions;
+    }
+    need(eioResult.status == 2 && eioResult.error.canFind("FATAL") &&
+        eioResult.error.canFind("injected output rehash read failure") &&
+        eioResult.output.split("EXPLAIN\tinput=").length == 3 &&
+        fatalEioDecisions == 1 && canceledEioDecisions == 1 &&
+        countState(eioDb, "committed") == 2 &&
+        readText(firstEioOutput) == firstOutputBytes &&
+        readText(secondEioOutput) == secondOutputBytes,
+        "rehash EIO stops later tree work without changing committed rows");
+    writeln("ok: rehash EIO fatal cancellation reconciliation");
     auto fatalFolder = buildPath(root, "fatal");
     mkdir(fatalFolder);
     auto fatalInput = buildPath(fatalFolder, "input.txt");

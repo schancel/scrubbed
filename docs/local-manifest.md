@@ -24,7 +24,8 @@ before the path is opened. Keep the executable path stable for a run; rebuilt
 executables may safely invalidate old work. No cross-machine equivalence is
 claimed.
 
-An exact committed row skips only after the API rehashes the actual output.
+An exact committed row skips only after the CLI checks the canonical stored
+destination against its selected output and the API rehashes that output.
 Unresolved failed/uncertain rows or any pre-existing destination fail by
 default. A planned row with no destination can resume. After inspecting a
 destination, `--manifest-retry` explicitly authorizes replacement; it is not
@@ -66,9 +67,12 @@ of exact published bytes. Diagnostics display `sha256:` followed by lowercase
 Sequence for each sink: `plan(key,destination)`, publish via the existing
 `writeAtomicPieces` sink, then `commitPublished(key,destination,digest)`.
 `commitPublished` independently reads and hashes the observed destination
-before storing committed. `inspect(key)` may return `verifiedCommitted` only
-after independently rehashing a present, matching output. Missing, changed, or
-unsafe output changes committed to uncertain. A process killed after publish
+before storing committed. `inspect(key, intendedDestination)` may return
+`verifiedCommitted` only after the canonical route matches and a present output
+rehashes correctly. Missing output or changed bytes makes the committed row
+uncertain and requires retry. An unsafe stored destination/path alias or output
+rehash EIO/resource fault is keyed run-fatal (exit 2), not an uncertain retry.
+A process killed after publish
 but before the DB update leaves planned; the caller must reconcile before
 `retry(key)`, which is the explicit acknowledgement of replacement/partial-
 write risk. Failed and uncertain rows cannot directly become committed. Sink

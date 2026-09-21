@@ -170,8 +170,11 @@ estimate.
 The first whole-CLI baseline there is sobering: on one synthetic 4,096-line
 mojibake input, scrubbed took roughly 3 seconds versus roughly 0.16 seconds
 for pinned ftfy. That is not a corpus-wide comparison, but it rules out a
-current blanket speed claim. Full-pipeline, larger-than-RAM, and additional
-quality-matched tool comparisons remain open.
+current blanket speed claim. A newer [quality-gated local pipeline harness](docs/benchmark-pipeline.md)
+adds small-tree first/skip/retry runs, a real planned-row kill/restart probe,
+and an exact-output CRLF task comparison with pinned dos2unix. It does not
+establish broad speed parity; larger-than-RAM, OS-cold, resource instrumentation,
+and HTML extraction comparisons remain open.
 
 An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
 compares pinned Lexbor and Gumbo on authored cases, then tests one pinned public
@@ -190,10 +193,11 @@ tests authored WARC 1.1 records in independent gzip members and proposed
 zstd-WARC frames with bounded D/native decoding. A separate
 [production uncompressed WARC/1.1 reader](docs/warc-reader.md) now handles
 bounded, chunk-invariant records and a validated WET-style text view. Neither
-is wired to file/CLI input. Pinned zstd v1.5.7 source, a static decompression
-archive, and D ABI tests now exist; the shipping CLI still has no zstd caller.
-Gzip/zstd production adapters, Common Crawl WARC 1.0 compatibility, and
-real-corpus coverage remain open.
+is wired to file/CLI input. Pinned zstd v1.5.7 source and static decompression
+archive now back [bounded gzip/zstd WARC adapters](docs/warc-reader.md) with
+checksum-before-callback and genuine compressed-block tests. The shipping CLI
+still has no compressed-WARC source. Common Crawl WARC 1.0 compatibility,
+real archive files, and real-corpus coverage remain open.
 A [macOS arm64 text-core packaging probe](docs/package-core-evaluation.md)
 checks an isolated binary, license/notice inventory, and clean-`PATH` execution.
 It is not a release or proof of Linux/Windows support, HTML packaging, a fully

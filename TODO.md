@@ -189,6 +189,12 @@ issue. This file remains the status record for implemented work.
       input corpus and quality gates, and report unsupported capabilities
       separately. Include startup, steady-state throughput, memory, and
       operational cost; do not compare unlike outputs as if they were parity.
+      A D-only [local pipeline harness](docs/benchmark-pipeline.md) now gates
+      exact output across small-tree first/verified-skip/retry and a real
+      planned-row kill/restart, plus pinned dos2unix on a CRLF-only task.
+      This is partial evidence only: >RAM, OS-cold, FD/GC/syscall-byte peaks,
+      changed-executable timing, HTML extraction parity and broad speed claims
+      remain unproved.
 - [~] Allocation benchmark: `benchmarks/mojibake_ranges.d` compares the
       reconstructed eager implementation, eager plus the clean-input guard,
       and lazy candidates using GC allocation counters. The independent guard
@@ -258,11 +264,12 @@ is useful, but it is not sufficient on its own.
       (`docs/warc-reader-evaluation.md`). A separate bounded production
       uncompressed WARC/1.1 reader now proves arbitrary feed-chunk invariance,
       record ownership/identity, and WET-style UTF-8 conversion on authored
-      fixtures (`docs/warc-reader.md`). Production gzip/zstd adapters, real
-      archive/file/CLI integration, Common Crawl WARC 1.0 compatibility, and
-      full format conformance remain open. Pinned zstd v1.5.7 source, a static
-      decompression archive, and D ABI tests are present, but the shipping CLI
-      has no zstd caller or compressed-WARC reader yet.
+      fixtures (`docs/warc-reader.md`). Real archive/file/CLI integration,
+      Common Crawl WARC 1.0 compatibility, and full format conformance remain
+      open. Pinned zstd v1.5.7 source and a
+      static archive now support bounded gzip/zstd adapters with checksum-before-
+      callback and genuine compressed-block D tests. The shipping CLI still
+      has no compressed-WARC source; real archives and TB throughput are unproved.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

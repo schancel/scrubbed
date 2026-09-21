@@ -8,7 +8,7 @@ import std.exception : enforce;
 import std.json : JSONType, JSONValue, parseJSON;
 
 struct ConfiguredStage {
-    StageDeclaration declaration;
+    const(StageDeclaration) declaration;
     StageTransform transform;
 }
 
@@ -27,7 +27,7 @@ private void exactKeys(JSONValue value, const(string)[] allowed, string context)
 }
 
 /// Parse and resolve every stage before any document is evaluated.
-StagePlan buildConfigV2(string json, StageRegistry* registry = null) {
+StagePlan buildConfigV2(string json, const(StageRegistry)* registry = null) {
     if (registry is null) registry = availableStages();
     auto root = parseJSON(json);
     exactKeys(root, ["version", "stages"], "config");
@@ -81,9 +81,7 @@ StagePlan buildConfigV2(string json, StageRegistry* registry = null) {
                     "missing option for " ~ name ~ ": " ~ declared.key);
         auto transform = registration.factory(options);
         enforce(transform !is null, "stage factory returned no transform: " ~ name);
-        auto declared = registration.declaration;
-        plan.stages ~= ConfiguredStage(StageDeclaration(declared.key, declared.passMode,
-            declared.resources), transform);
+        plan.stages ~= ConfiguredStage(registration.declaration, transform);
     }
     // Relative constraints refer to configured peers, not compulsory stages.
     foreach (i, stage; plan.stages) {
@@ -109,10 +107,8 @@ unittest {
     import stages.contract : DecisionKind, PassMode, ResourceDeclaration,
         StageDecision, StageDocument;
     import stages.registry : OptionDeclaration, StageRegistration;
-    import std.exception : assertThrown;
-
-    // Unlike assert, enforce keeps these boundary checks active in release tests.
-    void mustReject(string input, StageRegistry* registry = null) {
+    // Enforce keeps these boundary checks active in release tests.
+    void mustReject(string input, const(StageRegistry)* registry = null) {
         bool rejected;
         try buildConfigV2(input, registry);
         catch (Exception) rejected = true;
@@ -121,35 +117,32 @@ unittest {
 
     auto global = buildConfigV2(`{"version":2,"stages":[{"name":"fixture",` ~
         `"options":{"suffix":"rejected","enabled":true}}]}`);
-    assert(global.stages.length == 1 && global.stages[0].declaration.key == "fixture");
-    assert(global.stages[0].transform(StageDocument.init).kind == DecisionKind.reject);
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture-later",` ~
+    enforce(global.stages.length == 1 && global.stages[0].declaration.key == "fixture");
+    enforce(global.stages[0].transform(StageDocument.init).kind == DecisionKind.reject);
+    mustReject(`{"version":2,"stages":[{"name":"fixture-later",` ~
         `"options":{"suffix":"x"}},{"name":"fixture",` ~
-        `"options":{"suffix":"x"}}]}`));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"missing"}]}`));
+        `"options":{"suffix":"x"}}]}`);
     mustReject(`{"version":2,"stages":[{"name":"missing"}]}`);
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture"}]}`));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture",` ~
-        `"options":{"suffix":1}}]}`));
+    mustReject(`{"version":2,"stages":[{"name":"fixture"}]}`);
     mustReject(`{"version":2,"stages":[{"name":"fixture",` ~
         `"options":{"suffix":1}}]}`);
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture",` ~
-        `"options":{"suffix":"x","enabled":"true"}}]}`));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture",` ~
-        `"options":{"suffix":"x","unknown":0}}]}`));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture",` ~
-        `"options":[]}]}`));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture",` ~
-        `"unexpected":0,"options":{"suffix":"x"}}]}`));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"fixture",` ~
+    mustReject(`{"version":2,"stages":[{"name":"fixture",` ~
+        `"options":{"suffix":"x","enabled":"true"}}]}`);
+    mustReject(`{"version":2,"stages":[{"name":"fixture",` ~
+        `"options":{"suffix":"x","unknown":0}}]}`);
+    mustReject(`{"version":2,"stages":[{"name":"fixture",` ~
+        `"options":[]}]}`);
+    mustReject(`{"version":2,"stages":[{"name":"fixture",` ~
+        `"unexpected":0,"options":{"suffix":"x"}}]}`);
+    mustReject(`{"version":2,"stages":[{"name":"fixture",` ~
         `"options":{"suffix":"x"}},{"name":"fixture",` ~
-        `"options":{"suffix":"x"}}]}`));
+        `"options":{"suffix":"x"}}]}`);
     foreach (bad; [`{"version":1,"stages":[]}`, `{"version":"2","stages":[]}`,
-            `{"version":2.0,"stages":[]}`, `{"version":2,"stages":{},"x":1}`,
+            `{"version":2.0,"stages":[]}`, `{"version":2,"stages":[],"x":1}`,
             `{"version":2,"stages":{}}`, `{"version":2}`, `{"stages":[]}`,
             `{"version":2,"stages":["fixture"]}`,
             `{"version":2,"stages":[{"name":3}]}`])
-        assertThrown(buildConfigV2(bad));
+        mustReject(bad);
 
     StageRegistry isolated;
     auto simple = (const ref StageOptions options) {
@@ -159,21 +152,37 @@ unittest {
     };
     isolated.add(StageRegistration(StageDeclaration("early", PassMode.singlePass,
         ResourceDeclaration(1, 0)), null, ["late"], null, simple));
+    auto typed = (const ref StageOptions options) {
+        auto count = options["count"].asInteger();
+        auto active = options["active"].asBoolean();
+        return cast(typeof(global.stages[0].transform)) ((StageDocument input) {
+            if (count == 4 && active) return StageDecision.reject("typed values arrived");
+            return StageDecision.map(input);
+        });
+    };
     isolated.add(StageRegistration(StageDeclaration("late", PassMode.singlePass,
-        ResourceDeclaration(1, 0)), [OptionDeclaration("count", OptionType.integer, true)],
-        null, ["early"], simple));
+        ResourceDeclaration(1, 0)), [OptionDeclaration("count", OptionType.integer, true),
+        OptionDeclaration("active", OptionType.boolean, true)],
+        null, ["early"], typed));
     auto valid = buildConfigV2(`{"version":2,"stages":[{"name":"early"},` ~
-        `{"name":"late","options":{"count":4}}]}`, &isolated);
-    assert(valid.stages.length == 2);
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"late",` ~
-        `"options":{"count":4}},{"name":"early"}]}`, &isolated));
+        `{"name":"late","options":{"count":4,"active":true}}]}`, &isolated);
+    enforce(valid.stages.length == 2);
+    bool controlFailed;
+    try mustReject(`{"version":2,"stages":[]}`, &isolated);
+    catch (Exception) controlFailed = true;
+    enforce(controlFailed, "negative-test helper did not fail on valid input");
+    enforce(valid.stages[1].transform(StageDocument.init).kind == DecisionKind.reject,
+        "typed integer and boolean values did not reach the factory");
+    auto falseFlag = buildConfigV2(`{"version":2,"stages":[{"name":"late",` ~
+        `"options":{"count":4,"active":false}}]}`, &isolated);
+    enforce(falseFlag.stages[0].transform(StageDocument.init).kind == DecisionKind.map,
+        "typed false boolean value did not reach the factory");
     mustReject(`{"version":2,"stages":[{"name":"late",` ~
-        `"options":{"count":4}},{"name":"early"}]}`, &isolated);
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"late",` ~
-        `"options":{"count":true}}]}`, &isolated));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"late"}]}`, &isolated));
+        `"options":{"count":4,"active":true}},{"name":"early"}]}`, &isolated);
+    mustReject(`{"version":2,"stages":[{"name":"late",` ~
+        `"options":{"count":true,"active":true}}]}`, &isolated);
+    mustReject(`{"version":2,"stages":[{"name":"late"}]}`, &isolated);
     isolated.add(StageRegistration(StageDeclaration("orphan", PassMode.singlePass,
         ResourceDeclaration(1, 0)), null, ["not-registered"], null, simple));
-    assertThrown(buildConfigV2(`{"version":2,"stages":[{"name":"orphan"}]}`,
-        &isolated));
+    mustReject(`{"version":2,"stages":[{"name":"orphan"}]}`, &isolated);
 }

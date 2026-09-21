@@ -109,7 +109,7 @@ struct StageRegistry {
         registrations[declaration.key] = registration;
     }
 
-    StageRegistration* find(string key) {
+    const(StageRegistration)* find(string key) const {
         return key in registrations;
     }
 }
@@ -121,7 +121,7 @@ void registerStage(StageRegistration registration) {
     registeredStages.add(registration);
 }
 
-StageRegistry* availableStages() {
+const(StageRegistry)* availableStages() {
     return &registeredStages;
 }
 
@@ -139,7 +139,12 @@ unittest {
         ResourceDeclaration(1, 0)), [OptionDeclaration("label", OptionType.text, true)],
         null, null, factory);
     registry.add(item);
-    assert(registry.find("sample") !is null);
+    auto found = registry.find("sample");
+    assert(found !is null);
+    static assert(!__traits(compiles, found.options[0].key = "bypass"));
+    static assert(!__traits(compiles, found.before ~= "bypass"));
+    static assert(!__traits(compiles, availableStages().add(item)));
+    static assert(!__traits(compiles, *availableStages() = StageRegistry.init));
     assertThrown(registry.add(item));
     item.declaration.key = "other";
     item.options = [OptionDeclaration("x", OptionType.text),

@@ -9,8 +9,11 @@ not part of this policy. The row is `uncertain` whenever sink publication may
 have begun, even if no destination file is ultimately visible.
 
 An acknowledgment or manifest write failure, output-policy violation,
-unclassifiable pre-plan input failure, scheduler failure, or missing durable
-ledger is fatal. Admission stops, active work drains, and the command exits 2.
+unclassifiable pre-plan input failure, scheduler failure, missing durable
+ledger, or sink `ENOSPC`/`EDQUOT`/`EMFILE`/`ENFILE` resource error is fatal.
+Ordinary sink `EACCES`/`EIO` errors retain per-document classification when
+their uncertain manifest state and failure record are acknowledged. On fatal
+errors, admission stops, active work drains, and the command exits 2.
 Previously committed rows remain intact. A completed run exits 0; a run with
 acknowledged per-document failures or unresolved retry decisions exits 1.
 

@@ -25,21 +25,30 @@ scrubbed --input ./incoming --output ./cleaned --config examples/inspection.json
 Records are tab-separated with fixed fields:
 
 ```text
-EXPLAIN<TAB>input="..."<TAB>output="..."<TAB>chain="..."<TAB>status=changed|unchanged|failure[<TAB>reason="..."]
+EXPLAIN<TAB>input="..."<TAB>output="..."<TAB>chain="..."<TAB>status=... [<TAB>reason="..."] [<TAB>detail="..."]
 ```
 
 The quoted values are JSON strings, so tabs, newlines and other special
 characters in paths or reasons cannot create extra fields or lines. Input and
 output are absolute paths; avoid `--explain` if those paths are sensitive.
 `changed` and `unchanged` compare filter output to input, including in dry-run;
-normal processing still writes successful files even when unchanged. Failures
-include a reason. Parallel completion may reorder whole records, but the field
-format is stable and records are not buffered for whole-tree sorting.
+normal processing still writes successful files even when unchanged. File mode
+uses `changed`, `unchanged`, `failure`, or `canceled`; opt-in manifest mode also
+uses `failed`, `uncertain`, `retry-required`, `retry`, `skipped`,
+`dry-run-changed`, and `dry-run-unchanged`. Failures and cancellations include
+a reason. Manifest failures and unresolved retry decisions include the exact
+document ID and sink key in `detail`; acknowledged failures also include the
+completed prefix. Parallel completion may reorder whole
+records, but the field format is stable and records are not buffered for
+whole-tree sorting.
 
-Exit status is `0` for success, `1` for a per-file processing or admission
-failure, and `2` for an invocation/configuration or traversal error (including
-a symlink found later in an input tree). Queued files canceled after a traversal
-error receive a `failure` record with reason `canceled after traversal error`.
+Exit status is `0` for success, `1` for acknowledged manifest per-document
+failures or unresolved retry decisions, and `2` for invocation/configuration,
+output-policy, resource/admission, traversal, lost-acknowledgment, or
+unrecorded worker failures. A discovered file rejected from admission after a
+worker-fatal event receives `status=canceled` with reason `canceled after fatal
+processing failure`; pending files canceled by a traversal error receive
+`status=failure` with reason `canceled after traversal error`.
 Validation is a preflight of config and roots,
 not a transactional scan of an entire tree. A later traversal error, such as a
 symlink discovered after earlier files, does not roll back earlier normal-mode

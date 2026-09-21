@@ -7,7 +7,8 @@ import effects.jsonl_stream : JsonlFailure, JsonlLimits;
 import effects.stdio_stream : processStandardJsonl;
 import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
     configDigest, inputDigest, outputDigest;
-import effects.atomic_piece_sink : OutputPolicyViolation, writeAtomicPieces;
+import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
+    writeAtomicPieces;
 import effects.failure_policy : recordDocumentFailure;
 import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
@@ -442,9 +443,13 @@ private struct ManifestOutcome {
 
 private class ManifestDecisionFailure : Exception {
     string status;
-    this(string status, string message) {
+    DocumentId documentId;
+    string sinkKey;
+    this(string status, string message, DocumentId documentId, string sinkKey) {
         super(message);
         this.status = status;
+        this.documentId = documentId;
+        this.sinkKey = sinkKey;
     }
 }
 
@@ -506,7 +511,8 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
             throw new ManifestDecisionFailure(
                 !previous.isNull && previous.get.state == SinkState.uncertain
                     ? "uncertain" : "retry-required",
-                "manifest output requires explicit --manifest-retry after inspection: " ~ destination);
+                "manifest output requires explicit --manifest-retry after inspection: " ~ destination,
+                id, key.sink);
         auto row = manifest.plan(key, destination);
         replacing = retry && (destinationExists || row.state != SinkState.planned);
         if (replacing)
@@ -567,9 +573,12 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
             throw failure;
         if (cast(OutputPolicyViolation)failure !is null)
             phase = FailurePhase.policy;
+        if (cast(ResourceExhaustion)failure !is null)
+            phase = FailurePhase.resource;
         if (phase == FailurePhase.filter && cast(UTFException)failure !is null)
             phase = FailurePhase.decode;
-        const fatal = phase == FailurePhase.policy || phase == FailurePhase.manifest;
+        const fatal = phase == FailurePhase.policy ||
+            phase == FailurePhase.resource || phase == FailurePhase.manifest;
         auto record = FailureRecord(id, key.sink, phase,
             fatal ? FailureClass.fatal : FailureClass.document,
             sinkTouched, completedPrefix, failure.msg, failure);
@@ -805,7 +814,10 @@ int runApp(string[] args) {
                         (fatalDocumentFailure !is null ?
                             ("id=" ~ fatalDocumentFailure.record.documentId.text ~
                             " sink=" ~ fatalDocumentFailure.record.sinkKey ~
-                            " completed-prefix=" ~ fatalDocumentFailure.record.completedPrefix.to!string) : ""));
+                            " completed-prefix=" ~ fatalDocumentFailure.record.completedPrefix.to!string) :
+                            (manifestDecision !is null ?
+                                ("id=" ~ manifestDecision.documentId.text ~
+                                " sink=" ~ manifestDecision.sinkKey) : "")));
             }
             if (explain) pending.remove(file);
             if (documentFailure !is null) ++manifestCompletedPrefix;
@@ -813,6 +825,7 @@ int runApp(string[] args) {
             return cast(DocumentFailure)error is null &&
                 cast(ManifestDecisionFailure)error is null;
         });
+    bool workerFatalAdmission;
     try {
         if (inputIsDir) {
             foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
@@ -830,6 +843,7 @@ int runApp(string[] args) {
                     auto bytes = getSize(entry.name);
                     if (!scheduler.submit(entry.name, bytes)) {
                         admissionCanceled = true;
+                        workerFatalAdmission = true;
                         throw new Exception("input admission canceled: " ~ entry.name);
                     }
                 }
@@ -849,6 +863,7 @@ int runApp(string[] args) {
                 auto bytes = getSize(inputPath);
                 if (!scheduler.submit(inputPath, bytes)) {
                     admissionCanceled = true;
+                    workerFatalAdmission = true;
                     throw new Exception("input admission canceled: " ~ inputPath);
                 }
             }
@@ -866,7 +881,9 @@ int runApp(string[] args) {
         if (explain)
             foreach (file; pending.drain())
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, "failure", "canceled after traversal error");
+                    chainLabel, workerFatalAdmission ? "canceled" : "failure",
+                    workerFatalAdmission ? "canceled after fatal processing failure" :
+                        "canceled after traversal error");
         throw error;
     }
     const counts = scheduler.finish();

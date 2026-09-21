@@ -2,7 +2,7 @@
 module effects.atomic_piece_sink;
 
 import content.pieces : Content;
-import core.stdc.errno : errno, EINTR;
+import core.stdc.errno : errno, EINTR, ENOSPC, EDQUOT, EMFILE, ENFILE;
 import core.sys.posix.fcntl : open, O_CREAT, O_EXCL, O_WRONLY;
 import core.sys.posix.unistd : close, fsync, write;
 import std.file : FileException, exists, getAttributes, isDir, isFile, isSymlink,
@@ -13,6 +13,41 @@ import std.uuid : randomUUID;
 /// Existing destination-policy guards failed. Callers decide run severity.
 class OutputPolicyViolation : Exception {
     this(string message) { super(message); }
+}
+
+/// The sink observed a resource condition that makes continuing unsafe.
+class ResourceExhaustion : Exception {
+    int errorCode;
+    this(string message, int errorCode) {
+        super(message);
+        this.errorCode = errorCode;
+    }
+}
+
+private bool isResourceCode(int errorCode) {
+    return errorCode == ENOSPC || errorCode == EDQUOT ||
+        errorCode == EMFILE || errorCode == ENFILE;
+}
+
+private void failIo(string message, int errorCode) {
+    if (isResourceCode(errorCode))
+        throw new ResourceExhaustion(message, errorCode);
+    throw new Exception(message);
+}
+
+version (FailurePolicyHarness) {
+    private void injectedIoFault(string destination, string phase) {
+        import core.stdc.errno : EACCES, EIO;
+        import std.file : exists;
+        struct Fault { string name; int code; }
+        foreach (spec; [
+                Fault("ENOSPC", ENOSPC), Fault("EDQUOT", EDQUOT),
+                Fault("EMFILE", EMFILE), Fault("ENFILE", ENFILE),
+                Fault("EACCES", EACCES), Fault("EIO", EIO)]) {
+            if (exists(destination ~ ".fault-" ~ phase ~ "-" ~ spec.name))
+                failIo("injected atomic output " ~ phase ~ " failure", spec.code);
+        }
+    }
 }
 
 /// The checkpoint runs after each complete buffer and once immediately before
@@ -42,14 +77,19 @@ void writeAtomicPieces(string destination, Content.PieceRange pieces,
 
     string temporary;
     int fd = -1;
+    int openError;
     // O_EXCL makes random-name collisions harmless and never truncates another file.
     foreach (_; 0 .. 10) {
         temporary = buildPath(parent, "." ~ baseName(destination) ~
                 ".scrubbed-" ~ randomUUID.toString ~ ".tmp");
+        version (FailurePolicyHarness) injectedIoFault(destination, "open");
         fd = open(temporary.toStringz, O_WRONLY | O_CREAT | O_EXCL, 384);
         if (fd >= 0) break;
+        openError = errno;
+        if (isResourceCode(openError))
+            failIo("cannot create atomic output temporary", openError);
     }
-    if (fd < 0) throw new Exception("cannot create atomic output temporary");
+    if (fd < 0) failIo("cannot create atomic output temporary", openError);
     bool committed;
     scope (exit) {
         if (fd >= 0) close(fd);
@@ -62,9 +102,14 @@ void writeAtomicPieces(string destination, Content.PieceRange pieces,
     void drain() {
         size_t offset;
         while (offset < filled) {
+            version (FailurePolicyHarness) injectedIoFault(destination, "write");
             auto result = write(fd, buffer.ptr + offset, filled - offset);
-            if (result < 0 && errno == EINTR) continue;
-            if (result <= 0) throw new Exception("atomic output write failed");
+            if (result < 0) {
+                const savedErrno = errno;
+                if (savedErrno == EINTR) continue;
+                failIo("atomic output write failed", savedErrno);
+            }
+            if (result == 0) failIo("atomic output write failed", 0);
             offset += cast(size_t) result;
         }
         total += filled;
@@ -81,10 +126,19 @@ void writeAtomicPieces(string destination, Content.PieceRange pieces,
     }
     if (filled) drain();
     if (checkpoint !is null) checkpoint(total);
-    if (fsync(fd) != 0) throw new Exception("atomic output flush failed");
+    version (FailurePolicyHarness) injectedIoFault(destination, "fsync");
+    if (fsync(fd) != 0) {
+        const savedErrno = errno;
+        failIo("atomic output flush failed", savedErrno);
+    }
     auto closing = fd;
     fd = -1;
-    if (close(closing) != 0) throw new Exception("atomic output close failed");
+    const closeResult = close(closing);
+    const closeError = closeResult == 0 ? 0 : errno;
+    if (closeResult != 0) {
+        failIo("atomic output close failed", closeError);
+    }
+    version (FailurePolicyHarness) injectedIoFault(destination, "close");
     if (prior) setAttributes(temporary, attributes);
     rename(temporary, destination);
     committed = true;

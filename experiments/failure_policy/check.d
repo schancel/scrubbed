@@ -31,6 +31,21 @@ private string state(string path) {
     return sqlite3_column_text(query, 0).fromStringz.idup;
 }
 
+private string firstDocumentId(string path) {
+    sqlite3* db;
+    need(sqlite3_open_v2(path.toStringz, &db, 0x00000001, null) == SQLITE_OK,
+        "open identity manifest");
+    scope(exit) sqlite3_close(db);
+    sqlite3_stmt* query;
+    need(sqlite3_prepare_v2(db,
+        "SELECT document_id FROM sink_state LIMIT 1".toStringz,
+        -1, &query, null) == SQLITE_OK, "prepare identity");
+    scope(exit) sqlite3_finalize(query);
+    need(sqlite3_step(query) == SQLITE_ROW, "identity row");
+    import std.string : fromStringz;
+    return sqlite3_column_text(query, 0).fromStringz.idup;
+}
+
 private long countState(string path, string wanted) {
     sqlite3* db;
     need(sqlite3_open_v2(path.toStringz, &db, 0x00000001, null) == SQLITE_OK,
@@ -122,6 +137,26 @@ int main(string[] args) {
         state(policyDb) == "uncertain" && isSymlink(policyOutput) &&
         readText(policyInput) == "original", "post-preflight policy swap fatal");
     writeln("ok: post-preflight policy swap fatal");
+    foreach (spec; ["open-ENFILE", "write-ENOSPC", "fsync-EDQUOT",
+            "close-EMFILE", "write-EACCES", "fsync-EIO"]) {
+        auto ioFolder = buildPath(root, "io-" ~ spec);
+        mkdir(ioFolder);
+        auto ioInput = buildPath(ioFolder, "input.txt");
+        auto ioOutput = buildPath(ioFolder, "output.txt");
+        auto ioDb = buildPath(ioFolder, "state.db");
+        write(ioInput, "input\r\n");
+        write(ioOutput ~ ".fault-" ~ spec, "");
+        result = execute([args[1], "run", "--input", ioInput,
+            "--output", ioOutput, "--manifest", ioDb,
+            "--filters", "normalize-line-endings", "--explain"]);
+        const resource = !spec.canFind("EACCES") && !spec.canFind("EIO");
+        need(result.status == (resource ? 2 : 1) &&
+            result.output.canFind(resource ? "FATAL" : "SKIP") &&
+            result.output.canFind("status=uncertain") &&
+            state(ioDb) == "uncertain" && !exists(ioOutput),
+            "injected sink errno " ~ spec);
+        writeln("ok: injected sink errno ", spec);
+    }
     auto cancelFolder = buildPath(root, "fatal-admission");
     mkdir(cancelFolder);
     auto cancelInput = buildPath(cancelFolder, "input");
@@ -134,20 +169,51 @@ int main(string[] args) {
     result = execute([args[1], "run", "--input", cancelInput,
         "--output", cancelOutput, "--manifest", cancelDb,
         "--filters", "normalize-line-endings", "--explain"]);
-    size_t aDecisions, bDecisions;
+    size_t aDecisions, bDecisions, uncertainDecisions, canceledDecisions;
     foreach (line; result.output.splitLines()) {
         if (!line.startsWith("EXPLAIN\tinput=")) continue;
         if (line.canFind("a.txt")) ++aDecisions;
         if (line.canFind("b.txt")) ++bDecisions;
+        if (line.canFind("status=uncertain")) ++uncertainDecisions;
+        if (line.canFind("status=canceled") &&
+            line.canFind("reason=\"canceled after fatal processing failure\""))
+            ++canceledDecisions;
     }
     need(result.status == 2 &&
         result.output.split("EXPLAIN\tinput=").length == 3 &&
         aDecisions == 1 && bDecisions == 1 &&
-        result.output.canFind("status=uncertain") &&
-        result.output.canFind("canceled after traversal error") &&
+        uncertainDecisions == 1 && canceledDecisions == 1 &&
         countState(cancelDb, "uncertain") == 1,
         "fatal admission explains each discovered file once");
     writeln("ok: fatal admission EXPLAIN reconciliation");
+    auto decisionFolder = buildPath(root, "manifest-decisions");
+    mkdir(decisionFolder);
+    auto decisionInput = buildPath(decisionFolder, "input.txt");
+    auto decisionOutput = buildPath(decisionFolder, "output.txt");
+    auto decisionDb = buildPath(decisionFolder, "state.db");
+    write(decisionInput, "one\r\n");
+    write(decisionOutput, "preexisting");
+    auto decisionCommand = [args[1], "run", "--input", decisionInput,
+        "--output", decisionOutput, "--manifest", decisionDb,
+        "--filters", "normalize-line-endings", "--explain"];
+    auto retryRequired = execute(decisionCommand);
+    need(retryRequired.status == 1 &&
+        retryRequired.output.canFind("status=retry-required"),
+        "preexisting output requires retry");
+    result = execute(decisionCommand ~ ["--manifest-retry"]);
+    need(result.status == 0, "explicit decision retry");
+    auto exactId = firstDocumentId(decisionDb);
+    need(retryRequired.output.canFind("id=" ~ exactId) &&
+        retryRequired.output.canFind("sink=local-primary:v1"),
+        "retry-required exact manifest key");
+    write(decisionOutput, "tampered");
+    auto uncertainDecision = execute(decisionCommand);
+    need(uncertainDecision.status == 1 &&
+        uncertainDecision.output.canFind("status=uncertain") &&
+        uncertainDecision.output.canFind("id=" ~ exactId) &&
+        uncertainDecision.output.canFind("sink=local-primary:v1") &&
+        state(decisionDb) == "uncertain", "uncertain exact manifest key");
+    writeln("ok: exact unresolved manifest decisions");
     auto fatalFolder = buildPath(root, "fatal");
     mkdir(fatalFolder);
     auto fatalInput = buildPath(fatalFolder, "input.txt");

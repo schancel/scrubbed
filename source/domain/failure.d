@@ -3,7 +3,7 @@ module domain.failure;
 
 import domain.document : DocumentId;
 
-enum FailurePhase { read, decode, filter, sink, manifest, policy, scheduler, log }
+enum FailurePhase { read, decode, filter, sink, manifest, policy, resource, scheduler, log }
 enum FailureClass { document, fatal }
 
 struct FailureRecord {

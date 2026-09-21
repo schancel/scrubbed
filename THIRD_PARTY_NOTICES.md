@@ -11,15 +11,26 @@ manifest, omitted modules, and no-network build are documented in
 [`third_party/zstd/README.md`](third_party/zstd/README.md). The included xxHash
 implementation is credited to Yann Collet / Meta in its source files and
 shares that license alternative. No separately licensed transitive library
-is included in the linked decompression graph. This prerequisite does not yet
-ship a compressed-WARC adapter.
+is included in the linked decompression graph. The compressed-WARC adapter
+uses the same pinned static archive; it does not add a dynamic libzstd.
 
-The approved successor may use macOS system zlib dynamically, with no claim of
-a standalone-static package. On the supported build host (macOS 26.6.2 arm64),
-the SDK `zlib.h` advertises zlib 1.2.12 and `/usr/bin/gzip` links
-`/usr/lib/libz.1.dylib` with current version 1.2.12 (`otool -L`). The successor
-must establish its own runtime version and exact final-binary linkage before
-making a gzip-adapter claim; this prerequisite does not link or call zlib.
+The compressed adapter dynamically opens macOS system
+`/usr/lib/libz.1.dylib` with `dlopen`/`RTLD_FIRST`, resolves only that image's
+symbols through `dlsym`, and closes its handle on terminal paths. There is no
+standalone-static package claim. On the supported build host (macOS 26.6.2
+arm64), the release-built D probe's `dladdr` identifies that exact image and
+its `zlibVersion()` returns **1.2.12**. The SDK `zlib.h` and the system
+`/usr/bin/gzip` load-command metadata (`otool -L`) also show 1.2.12. The probe
+itself has no libz load
+command in `otool -L`, because the binding is explicit at runtime. Phobos may
+bundle independent zlib symbols in a D binary; those symbols are not used by
+this adapter. The library provided by each supported macOS installation is a
+platform dependency. zlib is copyright 1995–2022 Jean-loup
+Gailly and Mark Adler under the permissive zlib license shown in the platform
+SDK's `zlib.h`: use, modification and redistribution are permitted, with no
+warranty; redistributors must not misrepresent origin, must mark altered
+source, and must preserve the notice in source distributions. This project
+does not copy or modify zlib source.
 
 ## Lexbor
 

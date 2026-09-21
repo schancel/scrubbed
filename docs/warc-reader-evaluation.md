@@ -1,10 +1,12 @@
 # WARC/WET compressed reader: prerequisite evidence
 
-Status: a scoped **uncompressed WARC/1.1 production candidate** now lives in
-[`effects.warc_reader`](../source/effects/warc_reader.d), with its API and
-limits in [warc-reader.md](warc-reader.md). The gzip/zstd evidence below remains
-experiment only. Issue #30 stays open: there is no production compressed
-reader, zstd dependency, CLI command, or S3 integration in this slice.
+Status: scoped **uncompressed and compressed WARC/1.1 production candidates**
+live in [`effects.warc_reader`](../source/effects/warc_reader.d) and
+[`effects.warc_compressed`](../source/effects/warc_compressed.d), with API and
+limits in [warc-reader.md](warc-reader.md). The older experiment evidence below
+is retained as historical context; the new release-active adapter proof is
+`experiments/warc_reader/compressed_check.d`. Issue #30 stays open: there is
+no production archive file/source adapter, CLI command, or S3 integration.
 
 ## Normative boundary
 
@@ -104,12 +106,16 @@ libzstd `ZSTD_decompressStream` FFI to cap each output call.
 
 ## Production decisions still open
 
-Before Issue #30 can close, decide and prove: real WARC/WET corpus tolerance (including folded/UTF-8 fields and
-large segmented records); whether to support proposed zstd dictionaries and
-multi-frame records; packaging/licensing on all targets; true bounded file
-streaming with descriptor closure, RSS/GC measurements, and failure recovery;
-and integration at the project reader boundary. The new plain reader makes the
-source-key/record-ID/ordinal identity policy explicit; no archive-wide
-uniqueness index is retained. Rollback of the production candidate is deletion
-of `source/effects/warc_reader.d`, `experiments/warc_reader/production_check.d`,
-and `docs/warc-reader.md`, plus restoration of this status note.
+Before Issue #30 can close, a real archive source/CLI integration and its file
+descriptor lifetime, corpus tolerance, and resource evidence still need a
+separate accepted scope. The current memory-input adapter proves only the
+bounded WARC/1.1 subset, not WARC/1.0, large segmented records, proposed
+zstd dictionaries/multi-frame records, or all-platform packaging. Its
+process-level RSS/GC/FD observations do not prove real-file descriptor
+closure, archive-scale memory behavior, or recovery after corruption. The
+source-key/record-ID/ordinal identity policy remains explicit, with no
+archive-wide uniqueness index. Rollback of this adapter slice is deletion of
+`source/effects/warc_compressed.d` and
+`experiments/warc_reader/compressed_check.d`, plus restoration of their
+documentation changes; the separately merged plain reader and pinned zstd
+prerequisite remain in place.

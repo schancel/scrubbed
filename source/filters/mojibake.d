@@ -305,20 +305,27 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
             ubyte lead;
             legacyByte(text[at .. $].front, encoding, lead);
             if (lead == 0xC2) continue;
-            // Four sequences suffice for the bounded local lookahead, and
-            // cap work even for a long run of legacy-looking clean text.
+            // Score the minimal complete sequence first. A positive score
+            // here must not carry an adjacent ambiguous C2 sequence along.
+            const atom = text[at .. end];
+            long decodedScore;
+            if (!scoreCandidate(atom, encoding, decodedScore)) continue;
+            const atomicGain = decodedScore - plausibilityScore(atom);
+            if (atomicGain > bestGain) {
+                bestGain = atomicGain;
+                bestEnd = end;
+                bestEncoding = encoding;
+            }
+            // Only exact second-pass improvement can justify grouping
+            // adjacent sequences for double-mangled text. Capping
+            // this at four sequences keeps long lookalike runs linear-time.
+            if (remainingPasses < 2) continue;
             foreach (_; 1 .. 4) {
                 const next = end < text.length ? legacySequenceEnd(text, end, encoding) : end;
                 if (next == end) break;
                 end = next;
-            }
-            const span = text[at .. end];
-            long decodedScore;
-            if (!scoreCandidate(span, encoding, decodedScore)) continue;
-            auto gain = decodedScore - plausibilityScore(span);
-            // A double-mangled island may tie on its first pass. Allow that
-            // pass only when a second, exact decode strictly improves it.
-            if (gain == 0 && remainingPasses > 1) {
+                const span = text[at .. end];
+                if (!scoreCandidate(span, encoding, decodedScore)) continue;
                 const intermediate = decodedCandidate(span, encoding).to!string;
                 foreach (nextEncoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
                     if ((nextEncoding == LegacyEncoding.latin1 && !options.useLatin1) ||
@@ -326,14 +333,14 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
                     long nextScore;
                     if (scoreCandidate(intermediate, nextEncoding, nextScore)) {
                         const improvement = nextScore - plausibilityScore(span);
-                        if (improvement > gain) gain = improvement;
+                        if (improvement > 0 && nextScore > decodedScore &&
+                            improvement >= bestGain) {
+                            bestGain = improvement;
+                            bestEnd = end;
+                            bestEncoding = encoding;
+                        }
                     }
                 }
-            }
-            if (gain > bestGain) {
-                bestGain = gain;
-                bestEnd = end;
-                bestEncoding = encoding;
             }
         }
         if (bestGain > 0) {
@@ -453,6 +460,7 @@ unittest {
         "東京 schön Αθήνα don’t العربية");
     assert(fixMojibake("🙂 ÃƒÂ¶ 🙂") == "🙂 ö 🙂");
     assert(fixMojibake("日本語 Ã¶ �🐈") == "日本語 ö �🐈");
+    assert(fixMojibake("🐈 Ã©Â© 🐈") == "🐈 éÂ© 🐈");
 
     // Plausible legacy-looking text and an incomplete UTF-8 sequence abstain.
     foreach (text; ["🙂 café Â© Ω", "東京 Ãx🙂", "🙂 Ã 🐈", "العربية § ½ Ελληνικά"])

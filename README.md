@@ -170,10 +170,12 @@ current blanket speed claim. Full-pipeline, larger-than-RAM, and additional
 quality-matched tool comparisons remain open.
 
 An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
-compares pinned Lexbor and Gumbo on authored cases, including exact custom-tag
-and attribute observations plus bounded sanitizer/concurrency probes. It does
-not select or link a production parser; actual byte decoding, representative
-real pages, other platforms, and license redistribution gates remain open.
+compares pinned Lexbor and Gumbo on authored cases, then tests one pinned public
+standards page through owned UTF-8 decoding, bounded Lexbor observations,
+sanitizers, and a full LICENSE/NOTICE bundle dry run. It supports a GO decision
+only for a future restricted validated-UTF-8, D-owned selected-tree wrapper.
+No production parser is linked; HTML charset sniffing, broader page coverage,
+richer DOM fidelity, and other-platform builds remain open.
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.

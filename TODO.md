@@ -141,12 +141,14 @@ issue. This file remains the status record for implemented work.
 ## Phase 4 — HTML->Markdown (`filters/html2md.d`, currently a stub)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
       evidence harness compares pinned Lexbor and Gumbo on seven initial
-      cases and a second authored custom-tag/attribute/charset slice, with
-      ownership, bounded native sanitizer/concurrency, license, and noisy
-      local timing/RSS notes (`docs/html-parser-evaluation.md`). No parser has
-      been selected or linked into production; actual byte decoding,
-      representative real pages, other platforms, and redistribution gates
-      remain open.
+      cases, a second authored custom-tag/attribute/charset slice, and one
+      pinned WPT standards page through owned UTF-8 decoding and bounded
+      native observations (`docs/html-parser-evaluation.md`). Release-active
+      lifetime/cap checks, native sanitizers, and full Lexbor LICENSE/NOTICE
+      bundle dry run support a GO only for a restricted validated-UTF-8,
+      D-owned selected-tree production wrapper. No parser is linked into
+      production yet; charset sniffing, broad real-page coverage, richer DOM,
+      and other-platform builds remain open.
 - [ ] Tag->markdown mapping (see the stub's TODO comment for the concrete
       list: headings, links, emphasis, lists, code, blockquotes, images;
       tables deferred/flattened if not worth the complexity).

@@ -146,9 +146,11 @@ issue. This file remains the status record for implemented work.
       native observations (`docs/html-parser-evaluation.md`). Release-active
       lifetime/cap checks, native sanitizers, and full Lexbor LICENSE/NOTICE
       bundle dry run support a GO only for a restricted validated-UTF-8,
-      D-owned selected-tree production wrapper. No parser is linked into
-      production yet; charset sniffing, broad real-page coverage, richer DOM,
-      and other-platform builds remain open.
+      D-owned selected-tree production wrapper. Pinned source, a static archive,
+      and a standalone D FFI/ABI unit test now exist; the shipping CLI has no
+      Lexbor caller or parser. Exact accessor goldens remain a wrapper gate.
+      Charset sniffing, broad real-page coverage, richer DOM, and other-platform
+      builds remain open.
 - [ ] Tag->markdown mapping (see the stub's TODO comment for the concrete
       list: headings, links, emphasis, lists, code, blockquotes, images;
       tables deferred/flattened if not worth the complexity).

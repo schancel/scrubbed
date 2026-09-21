@@ -174,8 +174,10 @@ compares pinned Lexbor and Gumbo on authored cases, then tests one pinned public
 standards page through owned UTF-8 decoding, bounded Lexbor observations,
 sanitizers, and a full LICENSE/NOTICE bundle dry run. It supports a GO decision
 only for a future restricted validated-UTF-8, D-owned selected-tree wrapper.
-No production parser is linked; HTML charset sniffing, broader page coverage,
-richer DOM fidelity, and other-platform builds remain open.
+Pinned Lexbor source and a static archive are now built, and a standalone D FFI
+unit test links it. The shipping CLI has no Lexbor caller or parser yet; HTML
+charset sniffing, broader page coverage, richer DOM fidelity, and
+other-platform builds remain open.
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.

@@ -192,7 +192,11 @@ issue. This file remains the status record for implemented work.
       A D-only [local pipeline harness](docs/benchmark-pipeline.md) now gates
       exact output across small-tree first/verified-skip/retry and a real
       planned-row kill/restart, plus pinned dos2unix on a CRLF-only task.
-      This is partial evidence only: >RAM, OS-cold, FD/GC/syscall-byte peaks,
+      A second D-only capacity-gated run adds matched many-small/few-large
+      16 MiB and 128 MiB trees, three samples per case, exact-output and
+      manifest-state gates, and process CPU/RSS observations; its v4 report
+      rejects false RAM/scratch claims. This is partial evidence only: >RAM,
+      OS-cold, FD/GC/syscall-byte peaks, source-to-binary attestation,
       changed-executable timing, HTML extraction parity and broad speed claims
       remain unproved.
 - [~] Allocation benchmark: `benchmarks/mojibake_ranges.d` compares the

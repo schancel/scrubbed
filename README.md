@@ -178,9 +178,11 @@ mojibake input, scrubbed took roughly 3 seconds versus roughly 0.16 seconds
 for pinned ftfy. That is not a corpus-wide comparison, but it rules out a
 current blanket speed claim. A newer [quality-gated local pipeline harness](docs/benchmark-pipeline.md)
 adds small-tree first/skip/retry runs, a real planned-row kill/restart probe,
-and an exact-output CRLF task comparison with pinned dos2unix. It does not
-establish broad speed parity; larger-than-RAM, OS-cold, resource instrumentation,
-and HTML extraction comparisons remain open.
+and an exact-output CRLF task comparison with pinned dos2unix. A second,
+capacity-gated D run adds matched many-small/few-large 16 MiB and 128 MiB
+local trees with repeated samples, exact-output gates, and process CPU/RSS
+measurements. It does not establish broad speed parity; larger-than-RAM,
+OS-cold, FD/GC/syscall-byte metrics, and HTML extraction comparisons remain open.
 
 An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
 compares pinned Lexbor and Gumbo on authored cases, then tests one pinned public

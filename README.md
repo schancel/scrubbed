@@ -32,6 +32,9 @@ atomic output replacement, mojibake repair, entity decoding, smart-quote
 normalization, and two basic normalization filters.
 The entity decoder now includes all 2,231 WHATWG named references and explicit
 text/attribute-value modes; it is still not an HTML tokenizer.
+An independently tested strict UTF-8/UTF-16 byte-decoding facade also exists,
+but is not yet wired into the CLI. It quarantines ambiguous, unsupported,
+malformed, and binary-looking input rather than guessing an encoding.
 
 ## Why D
 

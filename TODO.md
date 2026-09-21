@@ -33,6 +33,10 @@ issue. This file remains the status record for implemented work.
 - [~] Ordered borrowed/owned content pieces and bounded streaming exist in
       `source/content/pieces.d`; a D experiment compares list and rope edits.
       This is not yet a Phobos InputRange or integrated into CLI filters/output.
+- [~] A strict byte-to-Unicode facade in `source/text/decoding.d` decodes
+      UTF-8 and BOM/declared UTF-16 LE/BE, with typed quarantine for malformed,
+      conflicting, unsupported, or binary-looking input. It is tested but not
+      wired into the CLI; the current CLI's decoding behavior is unchanged.
 - [ ] Upstream software-factory follow-up: replace `.claude/skills` directory
       symlinks with an installer-owned portable representation. The canonical
       installer layout works on POSIX and symlink-enabled Git checkouts, but

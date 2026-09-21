@@ -3,6 +3,8 @@ module experiments.html_parser.cli_check;
 
 import domain.document : Document, OutputName, SourceLocator;
 import effects.html_tree_json_stage : htmlTreeJsonPlan;
+import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
+import effects.html_tree_export : HtmlTreeOutputLimit, serializeTreeJson;
 import stages.config : buildConfigV2;
 import stages.registry : availableStages;
 import core.stdc.stdlib : free;
@@ -45,6 +47,20 @@ int main(string[] args) {
     try buildConfigV2(`{"version":2,"stages":[{"name":"unknown-html-stage"}]}`);
     catch (Exception) unknownRejected = true;
     need(unknownRejected, "unknown stage resolved");
+    auto syntheticDocument = Document(SourceLocator("local-html:v1", "/tmp", "synthetic"),
+        OutputName("synthetic.tree.json"));
+    auto controls = new char[700_000];
+    controls[] = '\u0001';
+    HtmlTree syntheticTree;
+    syntheticTree.nodes = [HtmlNode(HtmlNodeKind.text, size_t.max, "",
+        controls.idup)];
+    syntheticTree.observedBytes = controls.length + HtmlNode.sizeof;
+    need(syntheticTree.observedBytes < 1024 * 1024,
+        "serializer test observation exceeds parser budget");
+    bool outputLimitRejected;
+    try serializeTreeJson(syntheticDocument, syntheticTree);
+    catch (HtmlTreeOutputLimit) outputLimitRejected = true;
+    need(outputLimitRejected, "defensive serializer output cap accepted expanded data");
     auto executable = args[1];
     auto root = buildPath(tempDir, "scrubbed-html-cli-" ~ randomUUID.toString);
     mkdir(root);
@@ -151,6 +167,20 @@ int main(string[] args) {
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json"], 1, "attributeLimit");
     need(readText(output) == utf16Output, "native cap replaced prior file");
+    string observed;
+    foreach (_; 0 .. 4_000) observed ~= "<br a b c d e>";
+    need(observed.length == 56_000, "observation positive fixture size");
+    write(input, observed);
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json"], 0, "1 published");
+    auto withinObservation = readText(output);
+    foreach (_; 4_000 .. 4_600) observed ~= "<br a b c d e>";
+    need(observed.length == 64_400, "observation negative fixture size");
+    write(input, observed);
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json"], 1, "observationLimit");
+    need(readText(output) == withinObservation,
+        "observation cap replaced prior completed output");
     auto tree = buildPath(root, "tree");
     mkdir(tree);
     write(buildPath(tree, "a.html"), "<p>A</p>");

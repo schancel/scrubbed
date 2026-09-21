@@ -73,7 +73,8 @@ API format and resolves typed transforms before document execution. Its
 [`stages/fixture.d`](stages/fixture.d) registration exists only in unittest
 builds. [`effects/html_tree_json_stage.d`](effects/html_tree_json_stage.d) is a concrete
 effects-owned, self-registering v2 stage used only by `extract`; that route resolves its typed
-plan without exposing a general v2-config CLI option. The existing v1
+plan without exposing a general v2-config CLI option. Its 32 MiB resource
+declaration is descriptive, not an enforced RSS limit. The existing v1
 `--config` path remains unchanged. Registration and parsing do not reserve resources or establish
 production document-stage backpressure; F04's high-edit content path still
 needs measurement. The CLI's bounded local file queue is a separate seam.

@@ -48,7 +48,7 @@ private StageTransform factory(const ref StageOptions options) {
 
 static this() {
     registerStage(StageRegistration(StageDeclaration("html-tree-json",
-        PassMode.singlePass, ResourceDeclaration(1, 5 * 1024 * 1024)),
+        PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text)], null, null, &factory));
 }
 

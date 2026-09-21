@@ -124,9 +124,12 @@ issue. This file remains the status record for implemented work.
       ordered string/object entries; mojibake exposes `encodings` and
       `max-passes`; unknown keys are rejected by registry-owned option
       schemas. See `scrubbed.example.json`.
-- [ ] `--dry-run` / diff mode: show what would change without writing
-      output, useful for validating the mojibake scorer against a new
-      corpus before trusting it on real data.
+- [x] Add CLI `--validate`, `--dry-run`, and per-file `--explain` inspection
+      without output mutation in validate/dry-run modes. Explain reports
+      changed/unchanged/failure with bounded pending-path tracking even when
+      a late traversal error cancels admitted files. This is not a diff view,
+      full-tree transaction, or durable manifest; add a checked-in end-to-end
+      stdout-record regression beyond the current formatter/scheduler tests.
 - [ ] Evaluate D `argparse` 2.x for a Cobra-like command tree: generated
       root/subcommand help, typed options, validation, and shell completion.
       Keep today's flags working while adding proposed `repair`/`extract`/`run`
@@ -135,11 +138,13 @@ issue. This file remains the status record for implemented work.
 
 ## Phase 4 — HTML->Markdown (`filters/html2md.d`, currently a stub)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
-      evidence harness compares pinned Lexbor and Gumbo on seven authored
-      malformed/structural cases, with ownership, license, and noisy local
-      timing/RSS notes (`docs/html-parser-evaluation.md`). No parser has been
-      selected or linked into production; charset, real-page, sanitizer,
-      concurrency, platform, and redistribution gates remain open.
+      evidence harness compares pinned Lexbor and Gumbo on seven initial
+      cases and a second authored custom-tag/attribute/charset slice, with
+      ownership, bounded native sanitizer/concurrency, license, and noisy
+      local timing/RSS notes (`docs/html-parser-evaluation.md`). No parser has
+      been selected or linked into production; actual byte decoding,
+      representative real pages, other platforms, and redistribution gates
+      remain open.
 - [ ] Tag->markdown mapping (see the stub's TODO comment for the concrete
       list: headings, links, emphasis, lists, code, blockquotes, images;
       tables deferred/flattened if not worth the complexity).

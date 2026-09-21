@@ -62,6 +62,7 @@ dub build --build=release
 ./scrubbed --input path/to/docs --output path/to/clean --filters normalize-line-endings,strip-control
 ./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json
 ./scrubbed --input path/to/docs --output path/to/clean --threads 4 --max-queued-docs 64 --max-input-bytes 268435456 --max-open-inputs 4
+./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json --dry-run --explain
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -76,6 +77,13 @@ plain names or objects with `name` and `options`; see `scrubbed.example.json`.
 combined with `--filters`. Put `uncurl-quotes` before it when typographic quotes surround
 otherwise mojibaked text, because the current repair operates on whole-buffer
 round-trip candidates rather than isolated spans.
+
+`--validate` checks the invocation, registered filter options, and roots
+without visiting files or writing output. `--dry-run` runs per-file transforms
+without creating output. `--explain` emits one bounded JSON-quoted, tab-separated
+decision record per visited file; parallel record order is not fixed. See the
+[inspection guide](docs/cli-inspection.md). A later traversal error can cancel
+already-admitted files; those receive failure records, and the command exits 2.
 
 Outputs are written beside their destination and atomically renamed into
 place, so a clean zero-copy result is safe even when input and output are the
@@ -137,9 +145,10 @@ current blanket speed claim. Full-pipeline, larger-than-RAM, and additional
 quality-matched tool comparisons remain open.
 
 An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
-compares pinned Lexbor and Gumbo on seven authored cases. It does not select
-or link a production parser; charset, real-page, concurrency, and license
-redistribution gates remain open.
+compares pinned Lexbor and Gumbo on authored cases, including exact custom-tag
+and attribute observations plus bounded sanitizer/concurrency probes. It does
+not select or link a production parser; actual byte decoding, representative
+real pages, other platforms, and license redistribution gates remain open.
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.

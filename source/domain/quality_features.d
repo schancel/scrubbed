@@ -5,7 +5,7 @@ import domain.document : DocumentId, OutputName, SourceLocator;
 import domain.shard_format : ShardDocument, maxDocumentPayload;
 import std.digest.sha : sha256Of;
 import std.exception : enforce;
-import std.uni : isAlpha;
+import std.uni : unicode;
 import std.utf : UTFException, validate;
 
 enum uint featureSchema = 1;
@@ -163,9 +163,10 @@ MeasuredFeatures measure(ShardDocument source) {
         return result;
     }
     auto text = cast(string)source.content;
+    static immutable letters = unicode("Letter");
     foreach (dchar scalar; text) {
         ++result.scalarCount;
-        if (isAlpha(scalar)) ++result.letterCount;
+        if (scalar in letters) ++result.letterCount;
         if (scalar <= 0x1f || (scalar >= 0x7f && scalar <= 0x9f))
             ++result.controlCount;
         if (scalar == 0xfffd) ++result.replacementCount;
@@ -206,7 +207,7 @@ private void checkMeasured(ref const MeasuredFeatures value) {
             value.letterCount <= value.scalarCount &&
             value.controlCount <= value.scalarCount &&
             value.replacementCount <= value.scalarCount &&
-            value.lineCount <= value.byteLength &&
+            value.lineCount <= value.scalarCount &&
             (value.byteLength == 0 ? value.lineCount == 0 : value.lineCount != 0) &&
             (value.lineCount == 0 ? value.duplicateLineCount == 0 :
                 value.duplicateLineCount < value.lineCount),

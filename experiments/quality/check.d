@@ -69,6 +69,10 @@ private void featureGoldens() {
     auto oversized = corpus[0];
     oversized.content = new ubyte[maxDocumentPayload + 1];
     rejects({ measure(oversized); });
+    auto combining = ShardDocument(SourceLocator("quality-heldout-v1", "negative", "mark"),
+        OutputName("mark"), cast(ubyte[])"\u0345".dup);
+    check(measure(combining).scalarCount == 1 && measure(combining).letterCount == 0,
+        "Alphabetic combining mark is not a Unicode General Category letter");
 }
 
 private void policyAndReplay() {
@@ -137,6 +141,17 @@ private void policyAndReplay() {
     corrupt = stored.dup;
     corrupt[$ - 33] ^= 1; // feature schema
     rejects({ decodeMeasured(corrupt, corpus[5].id, corpus[5].contentDigest); });
+
+    // A forged valid measurement for one space cannot claim zero decoded scalars.
+    auto space = ShardDocument(SourceLocator("quality-heldout-v1", "negative", "space"),
+        OutputName("space"), cast(ubyte[])" ".dup);
+    auto impossible = measure(space);
+    impossible.scalarCount = 0;
+    rejects({ decide(impossible, baseline); });
+    rejects({ encodeMeasured(impossible); });
+    auto forged = encodeMeasured(measure(space));
+    forged[$ - 24 .. $ - 20] = [cast(ubyte)0, 0, 0, 0];
+    rejects({ decodeMeasured(forged, space.id, space.contentDigest); });
 }
 
 void main() {

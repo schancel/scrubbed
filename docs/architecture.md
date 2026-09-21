@@ -15,6 +15,7 @@ filters.entities -> filters.mojibake (CP1252 character mapping)
 domain.document (standalone typed identity/view facade; no current CLI caller)
 content.pieces -> domain.document (checked borrowed content; no current CLI caller)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
+effects.runner -> stages.contract, content.pieces, domain.document (standalone effect composition)
 ```
 
 Keep orchestration and filesystem effects in `cli`, chain composition in
@@ -104,3 +105,24 @@ trace. It is representation evidence, not a production rope framework or a
 corpus-scale throughput claim. The ordered list remains a private, reversible
 representation pending review of the measured wired caller above; its
 high-edit scaling is not assumed adequate for production throughput.
+
+`effects.runner` is an unwired composition root. A `Source` yields one typed
+record and view owner, a `Parser` produces checked `Content`, and a `Sink`
+synchronously consumes each ordered stage event. `runEffects` calls the F04
+decision contract for one document at a time, then delivers all its events
+before fetching another record. A record's view owner stays open through sink
+calls and closes afterward; retained borrowed content rejects access after
+closure. `Content.stream` chunks must be consumed before callback return.
+Cancellation is checked before source fetch, before parse/stage evaluation,
+and before the next fetch after complete delivery. A sink exception reports
+wholly delivered decisions and the failing event ordinal with partial-write
+uncertainty; it promises no rollback, checkpoint, or successful completion.
+
+Only in-memory/faulting adapters exercise this path. It does not switch CLI
+I/O or add filesystem/S3/parser-library adapters. F04 materializes events per
+document and ordered-list content has poor high-edit scaling; production
+callers must measure representation and backpressure before using this seam
+for corpus throughput. The checker rejects lower-layer imports of effects and
+new concrete transport modules; effects imports only those lower layers. The
+pre-existing `domain.document` mapping still imports `std.mmfile` (and its
+fixture imports `std.file`); this ticket does not move it.

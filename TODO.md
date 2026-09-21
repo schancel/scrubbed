@@ -210,6 +210,11 @@ is useful, but it is not sufficient on its own.
       topology (local SSD, network filesystem, object-store staging). Verify
       actual OS descriptor and mapping counts stay bounded under low OS limits;
       the current local callback and input-byte tokens are narrower evidence.
+- [~] Evaluate a direct S3 client/auth/capability boundary. A D-only local
+      probe now tests fake credential precedence, fail-closed options, loopback
+      endpoint/TLS behavior, and publication-safe error labels
+      (`docs/s3-capability-evaluation.md`). No production client, AWS SigV4,
+      real-service compatibility, or secret-bearing credential path exists yet.
 - [ ] Add a durable run manifest with input identity/checksum, selected filter
       config, success/failure state, and safe resume/retry. Atomic output alone
       prevents partial files but does not make a multi-day corpus run resumable.

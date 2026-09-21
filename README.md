@@ -140,3 +140,6 @@ An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
 compares pinned Lexbor and Gumbo on seven authored cases. It does not select
 or link a production parser; charset, real-page, concurrency, and license
 redistribution gates remain open.
+An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
+tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
+client and has not been tested against AWS or a compatible object store.

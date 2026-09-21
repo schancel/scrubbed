@@ -73,6 +73,11 @@ issue. This file remains the status record for implemented work.
       preserved (September 2026 checkout of ftfy's public JSON fixtures).
 - [x] `fixMojibake(string) -> string` entry point, registered as
       `fix-mojibake`; supports up to four improving passes for multilayer damage.
+- [x] Conservative local repair for exact Latin-1/CP1252 mojibake sequences
+      beside otherwise-unmappable scripts/emoji; D regressions cover unchanged
+      neighboring bytes, ambiguous C2 abstention, and bounded multilayer
+      repair. F01 and per-fix held-out gates remain passing. This is not
+      general mixed-encoding detection, nor a measured throughput win.
 - [x] Make candidate evaluation lazy: Unicode-to-legacy byte Voldemort ranges
       feed Phobos's strict lazy UTF-8 decoder; losing candidates allocate no
       output buffer and only the selected repair is materialized.

@@ -17,7 +17,10 @@ being upfront about that matters more than sounding impressive:
   Latin-1/Windows-1252 scope. Against the current ftfy JSON corpus it repairs
   all 39 passing cases mechanically reachable through those two encodings
   and preserves all 48 encoding-negative cases. It is still not ftfy: other
-  encodings, lossy repairs, and localized mixed-encoding spans are not covered.
+  encodings, lossy repairs, and general mixed-encoding detection are not covered.
+  A conservative local path now repairs evidenced Latin-1/CP1252 mojibake
+  spans beside emoji or other scripts while leaving ambiguous spans alone;
+  this is not a general span detector or a demonstrated speedup.
 - trafilatura does DOM-based main-content extraction with boilerplate
   removal (nav bars, ads, footers) — genuinely harder than HTML->Markdown
   conversion, which is the more tractable thing actually planned here

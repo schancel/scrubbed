@@ -4,13 +4,16 @@ import content.pieces : Content, ContentPiece;
 import core.memory : GC;
 import domain.document : Document, DocumentViewOwner, OutputName, SourceLocator;
 import stages.contract : PassMode, ResourceDeclaration, StageDeclaration,
-    StageDecision, StageDocument, runStage;
+    StageDecision, StageDocument, EventKind, runStage;
 import std.conv : to;
 import std.datetime.stopwatch : StopWatch;
+import std.exception : enforce;
 import std.stdio : writeln;
 
 void main(string[] args) {
     enum inputSize = 1024 * 1024;
+    enforce(args.length <= 3 && (args.length < 3 || args[2] == "--probe-failure"),
+        "usage: bench [edit-count] [--probe-failure]");
     auto editCount = args.length > 1 ? args[1].to!size_t : 2000;
     auto source = new ubyte[inputSize];
     foreach (i; 0 .. source.length) source[i] = cast(ubyte) ('a' + i % 26);
@@ -39,13 +42,17 @@ void main(string[] args) {
     timer.stop();
     auto after = GC.stats().usedSize;
 
-    assert(result.processed == 1 && result.events.length == 1);
-    assert(result.events[0].payload.document.id == input.document.id);
+    enforce(result.processed == 1 && result.events.length == 1,
+        "wired stage did not emit exactly one document");
+    enforce(result.events[0].kind == EventKind.emitted &&
+        result.events[0].payload.document.id == input.document.id,
+        "wired stage changed the document disposition or identity");
     ubyte[] actual;
     result.events[0].payload.content.stream((const(ubyte)[] chunk) {
         actual ~= chunk;
     });
-    assert(actual == expected, "wired list-edit output differs from direct byte edits");
+    if (args.length == 3) actual[0] ^= 1; // Deliberate negative-control probe.
+    enforce(actual == expected, "wired list-edit output differs from direct byte edits");
     writeln("edits=", editCount, " bytes=", inputSize,
         " output_equivalent=true wall_ms=", timer.peek.total!"msecs",
         " gc_used_delta_bytes=", cast(long) after - cast(long) before,

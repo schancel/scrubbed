@@ -4,6 +4,7 @@ import content.pieces : Content;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
 import std.conv : to;
 import std.exception : enforce;
+import std.range.primitives : empty, front, isInputRange, popFront;
 import std.string : indexOf;
 import std.utf : validate;
 
@@ -113,16 +114,18 @@ alias CancellationCheck = bool delegate();
 /// visible and the next input is not visited. No sink rollback is implied.
 StageResult runStage(R)(R inputs, StageDeclaration stage,
     scope StageTransform transform, scope CancellationCheck isCancelled = null) {
+    static assert(isInputRange!R, "stage inputs must be an InputRange");
     enforce(transform !is null, "stage transform is required");
     stage = StageDeclaration(stage.key, stage.passMode,
         ResourceDeclaration(stage.resources.cpuSlots, stage.resources.memoryBytes,
             stage.resources.exclusiveNames));
     StageResult result;
-    foreach (input; inputs) {
+    for (auto pending = inputs; !pending.empty; pending.popFront()) {
         if (isCancelled !is null && isCancelled()) {
             result.cancelled = true;
             break;
         }
+        auto input = pending.front;
         // Validate identity and content before calling user stage code.
         auto inputId = input.document.id;
         enforce(input.content !is null, "stage input content is required");
@@ -234,6 +237,22 @@ unittest {
         return StageDecision.map(input);
     }, () { return ++checks == 1; });
     assert(before.cancelled && before.processed == 0 && before.events.length == 0);
+    struct ThrowingFront {
+        bool* accessed;
+        @property bool empty() { return false; }
+        @property StageDocument front() {
+            *accessed = true;
+            throw new Exception("front evaluated before cancellation");
+        }
+        void popFront() {}
+    }
+    bool accessed;
+    checks = 0;
+    auto lazyBefore = runStage(ThrowingFront(&accessed), stage,
+        (StageDocument input) { return StageDecision.map(input); },
+        () { ++checks; return true; });
+    assert(lazyBefore.cancelled && lazyBefore.processed == 0 &&
+        lazyBefore.events.length == 0 && checks == 1 && !accessed);
     checks = 0;
     auto after = runStage(inputs, stage, (StageDocument input) {
         return StageDecision.map(input);

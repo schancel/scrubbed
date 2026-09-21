@@ -80,8 +80,9 @@ reason, or split into one or more children. The result carries ordered events;
 split children occupy their parent's position and have a deterministic
 `stage-child:v1` record key derived from parent ID, stage key and zero-based
 ordinal, plus explicit parent ID/ordinal provenance. Output names do not
-define child identity. A cancellation callback is checked before a document
-and after its complete decision is recorded; cancellation never removes an
+define child identity. A cancellation callback is checked before a lazy
+range's `front` and after its complete decision is recorded; cancellation
+never removes an
 already recorded event. The result's processed count is the next input index
 for a caller that owns its own replay cursor. `singlePass` and `resumable` are
 declarations only: resumable allows replay from that boundary, but neither

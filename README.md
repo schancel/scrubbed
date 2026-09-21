@@ -176,12 +176,12 @@ quality-matched tool comparisons remain open.
 An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
 compares pinned Lexbor and Gumbo on authored cases, then tests one pinned public
 standards page through owned UTF-8 decoding, bounded Lexbor observations,
-sanitizers, and a full LICENSE/NOTICE bundle dry run. It supports a GO decision
-only for a future restricted validated-UTF-8, D-owned selected-tree wrapper.
-Pinned Lexbor source and a static archive are now built, and a standalone D FFI
-unit test links it. The shipping CLI has no Lexbor caller or parser yet; HTML
-charset sniffing, broader page coverage, richer DOM fidelity, and
-other-platform builds remain open.
+sanitizers, and a full LICENSE/NOTICE bundle dry run. Pinned Lexbor source,
+a static archive, and a [restricted D-owned selected-tree wrapper](docs/html-parser.md)
+now exist with release-active ownership, cap, and exact accessor checks.
+The shipping CLI still has no Lexbor caller or HTML extraction mode; HTML
+charset sniffing, broader page coverage, richer DOM fidelity, bounded native
+RSS, and other-platform builds remain open.
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.

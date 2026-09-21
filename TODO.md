@@ -145,12 +145,12 @@ issue. This file remains the status record for implemented work.
       pinned WPT standards page through owned UTF-8 decoding and bounded
       native observations (`docs/html-parser-evaluation.md`). Release-active
       lifetime/cap checks, native sanitizers, and full Lexbor LICENSE/NOTICE
-      bundle dry run support a GO only for a restricted validated-UTF-8,
-      D-owned selected-tree production wrapper. Pinned source, a static archive,
-      and a standalone D FFI/ABI unit test now exist; the shipping CLI has no
-      Lexbor caller or parser. Exact accessor goldens remain a wrapper gate.
-      Charset sniffing, broad real-page coverage, richer DOM, and other-platform
-      builds remain open.
+      bundle dry run led to a restricted validated-UTF-8,
+      D-owned [selected-tree wrapper](docs/html-parser.md). Pinned source,
+      static archive, exact accessor goldens, and ownership/cap/fault tests now
+      exist. The shipping CLI has no Lexbor caller or HTML extraction mode;
+      charset sniffing, broad real-page coverage, richer DOM, bounded native
+      RSS, and other-platform builds remain open.
 - [ ] Tag->markdown mapping (see the stub's TODO comment for the concrete
       list: headings, links, emphasis, lists, code, blockquotes, images;
       tables deferred/flattened if not worth the complexity).

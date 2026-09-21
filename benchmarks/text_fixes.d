@@ -6,6 +6,9 @@ import filters.normalize : normalizeLineEndingsFilter, stripControlCharsFilter;
 import filters.punctuation : uncurlQuotesFilter;
 import std.digest : toHexString;
 import std.digest.sha : sha256Of;
+import std.file : dirEntries, readText, SpanMode;
+import std.path : extension;
+import std.algorithm.searching : canFind;
 import std.conv : to;
 import std.json;
 import std.stdio : stderr, writeln;
@@ -29,12 +32,12 @@ struct Case {
 private immutable Case[] cases = [
     Case("m01", Fix.mojibake, Kind.positive, "FranÃ§ais", "Français", "m02"),
     Case("m02", Fix.mojibake, Kind.negative, "Français", "Français", "m01"),
-    Case("m03", Fix.mojibake, Kind.positive, "cafÃ©", "café", "m04"),
-    Case("m04", Fix.mojibake, Kind.negative, "café", "café", "m03"),
+    Case("m03", Fix.mojibake, Kind.positive, "jalapeÃ±o kettle", "jalapeño kettle", "m04"),
+    Case("m04", Fix.mojibake, Kind.negative, "jalapeño kettle", "jalapeño kettle", "m03"),
     Case("e01", Fix.entitiesText, Kind.positive, "fish &amp; chips", "fish & chips", "e02"),
     Case("e02", Fix.entitiesText, Kind.negative, "fish & chips", "fish & chips", "e01"),
-    Case("e03", Fix.entitiesText, Kind.positive, "&#x41;", "A", "e04"),
-    Case("e04", Fix.entitiesText, Kind.negative, "A", "A", "e03"),
+    Case("e03", Fix.entitiesText, Kind.positive, "&#x1F9ED;", "🧭", "e04"),
+    Case("e04", Fix.entitiesText, Kind.negative, "🧭", "🧭", "e03"),
     Case("a01", Fix.entitiesAttribute, Kind.positive, "Tom &amp; Jane", "Tom & Jane", "a02"),
     Case("a02", Fix.entitiesAttribute, Kind.negative, "Tom & Jane", "Tom & Jane", "a01"),
     Case("a03", Fix.entitiesAttribute, Kind.positive, "x=&amp;y", "x=&y", "a04"),
@@ -47,16 +50,16 @@ private immutable Case[] cases = [
     Case("c02", Fix.control, Kind.negative, "ab", "ab", "c01"),
     Case("c03", Fix.control, Kind.positive, "a\f b", "a b", "c04"),
     Case("c04", Fix.control, Kind.negative, "a\t b", "a\t b", "c03"),
-    Case("n01", Fix.newlines, Kind.positive, "a\r\nb", "a\nb", "n02"),
-    Case("n02", Fix.newlines, Kind.negative, "a\nb", "a\nb", "n01"),
-    Case("n03", Fix.newlines, Kind.positive, "a\rb", "a\nb", "n04"),
-    Case("n04", Fix.newlines, Kind.negative, "a\nb\n", "a\nb\n", "n03"),
-    Case("mu", Fix.mojibake, Kind.unsupported, "broken UTF-16", "", ""),
-    Case("eu", Fix.entitiesText, Kind.unsupported, "<script>&amp;</script>", "", ""),
-    Case("au", Fix.entitiesAttribute, Kind.unsupported, "<a title='&amp;'>", "", ""),
-    Case("qu", Fix.quotes, Kind.unsupported, "locale-aware typography", "", ""),
-    Case("cu", Fix.control, Kind.unsupported, "Unicode format characters", "", ""),
-    Case("nu", Fix.newlines, Kind.unsupported, "Unicode line separator", "", ""),
+    Case("n01", Fix.newlines, Kind.positive, "north\r\nsouth", "north\nsouth", "n02"),
+    Case("n02", Fix.newlines, Kind.negative, "north\nsouth", "north\nsouth", "n01"),
+    Case("n03", Fix.newlines, Kind.positive, "west\reast", "west\neast", "n04"),
+    Case("n04", Fix.newlines, Kind.negative, "west\neast\n", "west\neast\n", "n03"),
+    Case("mu", Fix.mojibake, Kind.unsupported, "Beyonc�", "", ""),
+    Case("eu", Fix.entitiesText, Kind.unsupported, "<script>const x='&amp;';</script>", "", ""),
+    Case("au", Fix.entitiesAttribute, Kind.unsupported, "<a title='a&amp;b'>", "", ""),
+    Case("qu", Fix.quotes, Kind.unsupported, "« Bonjour »", "", ""),
+    Case("cu", Fix.control, Kind.unsupported, "a\u200Bb", "", ""),
+    Case("nu", Fix.newlines, Kind.unsupported, "a\u2028b", "", ""),
     Case("mi", Fix.mojibake, Kind.invalidInput, "\xFF", "", ""),
 ];
 
@@ -96,7 +99,7 @@ private string bytesDigest(string value) {
     return toHexString(sha256Of(cast(const(ubyte)[]) value))[].toLower;
 }
 
-private enum pinnedDigest = "e9bdf677ad9754fe77c1057351c4903fdb5423ed04b01d6529b5d01a6ed99296";
+private enum pinnedDigest = "b95399c0ab5f65785af8d89adda240e7b067564a0fffc34cf86222d3b49048ca";
 
 private void require(bool condition, string message) {
     if (!condition) throw new Exception("self-test failed: " ~ message);
@@ -211,11 +214,59 @@ private void selfTest() {
     validateCorpus(cases, pinnedDigest);
 }
 
+// Read-only lexical audit: exact quoted D literals in source/tests and exact
+// JSON string values in the pinned F01 files. Findings require human review:
+// a common short literal is not necessarily a reused tuning case.
+private JSONValue auditOverlap(string sourceRoot, string testRoot, string[] upstream) {
+    string[] localFiles;
+    foreach (root; [sourceRoot, testRoot])
+        foreach (entry; dirEntries(root, SpanMode.depth))
+            if (entry.isFile && extension(entry.name) == ".d") localFiles ~= entry.name;
+    JSONValue[] rows;
+    long overlapCount;
+    foreach (c; cases) {
+        JSONValue row;
+        row["id"] = c.id;
+        JSONValue[] local, reference;
+        const literal = JSONValue(c.input).toString();
+        foreach (path; localFiles)
+            if (readText(path).canFind(literal)) local ~= JSONValue(path);
+        foreach (path; upstream) {
+            foreach (item; parseJSON(readText(path)).array) {
+                foreach (key, value; item.object) {
+                    if (value.type == JSONType.string && value.str == c.input) {
+                        JSONValue hit;
+                        hit["file"] = path;
+                        hit["field"] = key;
+                        reference ~= hit;
+                    }
+                }
+            }
+        }
+        row["local_literal_matches"] = JSONValue(local);
+        row["f01_input_matches"] = JSONValue(reference);
+        overlapCount += cast(long)(local.length + reference.length);
+        rows ~= row;
+    }
+    JSONValue result;
+    result["schema"] = "scrubbed-held-out-overlap-audit-v1";
+    result["cases_checked"] = cast(long) cases.length;
+    result["overlap_count"] = overlapCount;
+    result["gate_passed"] = overlapCount == 0;
+    result["rows"] = JSONValue(rows);
+    return result;
+}
+
 int main(string[] args) {
     try {
         if (args.length == 2 && args[1] == "--digest") {
             writeln(corpusDigest(cases));
             return 0;
+        }
+        if (args.length == 8 && args[1] == "--audit-overlap") {
+            auto report = auditOverlap(args[2], args[3], args[4 .. $]);
+            writeln(report.toString());
+            return report["gate_passed"].boolean ? 0 : 1;
         }
         if (args.length == 2 && args[1] == "--self-test") {
             selfTest();

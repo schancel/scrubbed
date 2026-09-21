@@ -132,14 +132,17 @@ runs.
 
 `text_fixes.d` is a separate D-only, authored synthetic corpus and scorer. Its
 31 cases are version `issue-22-v1`, MIT-licensed, and pinned by SHA-256
-`e9bdf677ad9754fe77c1057351c4903fdb5423ed04b01d6529b5d01a6ed99296`.
+`b95399c0ab5f65785af8d89adda240e7b067564a0fffc34cf86222d3b49048ca`.
 The digest covers a length-prefixed serialization of each case's ID, fix,
 class, input, expected output, and pair ID, in source order. The JSON report
 identifies every case by ID, class, paired negative/positive, and input and
-expected byte hashes. Cases are held out from production tuning: none is used
-in the implementation or unit tests under `source/**` or `tests/**`. Do not
-reuse these IDs or bytes for tuning; add new separately identified held-out
-cases if a filter changes.
+expected byte hashes. Cases are held out from production tuning. The overlap
+audit below checks all 31 case inputs against quoted D literals in `source/**`
+and `tests/**` and exact JSON string values in the four pinned F01 files;
+the corrected corpus has zero matches. The initial review caught `café` in a
+mojibake unittest; the repair also replaced two other incidental literal
+matches (`A`, `a\nb`). Do not reuse these IDs or bytes for tuning; add new
+separately identified held-out cases if a filter changes.
 
 Build and run from the repository root:
 
@@ -151,6 +154,12 @@ ldc2 -O -release -Isource benchmarks/text_fixes.d \
   -of=/tmp/scrubbed-text-fixes
 /tmp/scrubbed-text-fixes --self-test
 /tmp/scrubbed-text-fixes
+# After fetching and validating the pinned F01 files below:
+/tmp/scrubbed-text-fixes --audit-overlap source tests \
+  /tmp/python-ftfy/tests/test-cases/negative.json \
+  /tmp/python-ftfy/tests/test-cases/synthetic.json \
+  /tmp/python-ftfy/tests/test-cases/in-the-wild.json \
+  /tmp/python-ftfy/tests/test-cases/language-names.json
 ```
 
 The self-test checks a recall miss, a false positive, unsupported exclusion,
@@ -167,9 +176,20 @@ fixture declarations as cases: missing fields, broken pairs, duplicate IDs,
 or a changed corpus digest invalidate the entire run. `mi` is intentionally
 invalid UTF-8 (`FF`), excluded before invoking a filter.
 
+The six `unsupported` inputs are actual out-of-scope phenomena, not prose
+labels: `mu` contains U+FFFD, whose lost byte cannot be reconstructed; `eu`
+is script markup, where entity decoding needs HTML tokenizer state; `au` is
+markup rather than an extracted attribute value; `qu` contains French angle
+quotes whose locale-dependent handling is not this filter's contract; `cu`
+contains U+200B (format, not Cc); `nu` contains U+2028 (a Unicode line
+separator, not CR/LF). These are classification counts only: no unsupported
+case is scored as a filter success or failure. The audit is a literal/value
+overlap check, not a semantic proof that no independently written test could
+exercise a similar transformation.
+
 | Fix/context | Supported task in this corpus | Deliberately unsupported |
 |---|---|---|
-| `fix-mojibake` | Latin-1/CP1252-looking UTF-8 repair on text | UTF-16 and other encodings; F01 has broader pinned mojibake evidence below. |
+| `fix-mojibake` | Latin-1/CP1252-looking UTF-8 repair on text | Irrecoverable replacement characters, UTF-16 and other encodings; F01 has broader pinned mojibake evidence below. |
 | `decode-entities/text` | One-pass character references in text | HTML tokenizer state, including script and comments. |
 | `decode-entities/attribute` | One-pass references in an already-tokenized attribute value | Markup parsing and attribute extraction. |
 | `uncurl-quotes` | Straighten the filter's fixed curly-quote set | Locale-aware typography or smart quote insertion. |

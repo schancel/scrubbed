@@ -5,7 +5,7 @@ import std.file : mkdir, rmdir, remove, tempDir;
 import std.path : buildPath;
 import std.process : Config, environment, execute, spawnProcess, wait, kill;
 import std.socket : Socket, TcpSocket, InternetAddress, SocketOptionLevel, SocketOption;
-import std.string : startsWith;
+import std.string : indexOf, startsWith;
 import std.stdio : File, stdin, writeln;
 import std.uuid : randomUUID;
 import core.thread : Thread;
@@ -14,6 +14,7 @@ import core.time : msecs;
 enum AuthSource { explicit, environment, profile, missing }
 enum Addressing { path, virtualHost }
 enum Capability { getObject, listObjectsV2, unsupported }
+enum FakeResponse { ok, forbidden, notFound, serverError, malformed }
 enum Failure { none, missingCredentials, incompleteCredentials, unsupportedCapability,
                badAuth, tlsUntrusted, endpointFailure }
 
@@ -79,7 +80,7 @@ string receiveRequest(Socket peer)
 }
 
 void fakeEndpoint(Socket listener, string expectedPath, string expectedHost,
-                  string expectedKey, bool badAuth)
+                  string expectedKey, FakeResponse result)
 {
     auto peer = listener.accept();
     scope(exit) peer.close();
@@ -87,9 +88,15 @@ void fakeEndpoint(Socket listener, string expectedPath, string expectedHost,
     check(request.startsWith("GET " ~ expectedPath ~ " HTTP/1.1\r\n"), "route mismatch");
     check(request.canFind("Host: " ~ expectedHost ~ "\r\n"), "host mismatch");
     check(request.canFind("X-Fake-Access: " ~ expectedKey ~ "\r\n"), "auth precedence mismatch");
-    auto response = badAuth
-        ? "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        : "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    string status;
+    final switch (result) {
+    case FakeResponse.ok: status = "HTTP/1.1 200 OK"; break;
+    case FakeResponse.forbidden: status = "HTTP/1.1 403 Forbidden"; break;
+    case FakeResponse.notFound: status = "HTTP/1.1 404 Not Found"; break;
+    case FakeResponse.serverError: status = "HTTP/1.1 500 Internal Server Error"; break;
+    case FakeResponse.malformed: status = "HTTP/1.1 200bogus"; break;
+    }
+    auto response = status ~ "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
     peer.send(response);
 }
 
@@ -101,7 +108,7 @@ ushort unusedPort()
     return (cast(InternetAddress)sock.localAddress()).port;
 }
 
-Failure probeLocal(Endpoint endpoint, AuthSelection auth, bool badAuth)
+Failure probeLocal(Endpoint endpoint, AuthSelection auth, FakeResponse result)
 {
     auto cap = authorize(Capability.getObject, auth);
     if (cap != Failure.none) return cap;
@@ -112,7 +119,7 @@ Failure probeLocal(Endpoint endpoint, AuthSelection auth, bool badAuth)
     auto boundPort = (cast(InternetAddress)listener.localAddress()).port;
     listener.listen(1);
     auto worker = new Thread({ fakeEndpoint(listener, r.path, r.host,
-                                         auth.value.accessKey, badAuth); });
+                                         auth.value.accessKey, result); });
     worker.start();
     // A socket connection to the loopback fault server; fake header is NOT SigV4.
     auto client = new TcpSocket();
@@ -123,7 +130,17 @@ Failure probeLocal(Endpoint endpoint, AuthSelection auth, bool badAuth)
         "\r\nConnection: close\r\n\r\n";
     client.send(request);
     auto response = receiveRequest(client);
-    return response.startsWith("HTTP/1.1 200") ? Failure.none : Failure.badAuth;
+    auto endOfStatus = response.indexOf("\r\n");
+    if (endOfStatus < 0) return Failure.endpointFailure;
+    auto status = response[0 .. endOfStatus];
+    if (!status.startsWith("HTTP/1.1 ") || status.length < 12 ||
+        (status.length > 12 && status[12] != ' '))
+        return Failure.endpointFailure;
+    foreach (digit; status[9 .. 12])
+        if (digit < '0' || digit > '9') return Failure.endpointFailure;
+    if (status[9 .. 12] == "200") return Failure.none;
+    if (status[9 .. 12] == "403") return Failure.badAuth;
+    return Failure.endpointFailure;
 }
 
 void main()
@@ -155,8 +172,15 @@ void main()
     check(authorize(Capability.getObject, AuthSelection(AuthSource.missing)) ==
           Failure.missingCredentials, "missing credentials must fail closed");
     auto endpoint = Endpoint("127.0.0.1", 0, "us-west-2", Addressing.path);
-    check(probeLocal(endpoint, auth, false) == Failure.none, "local success");
-    check(probeLocal(endpoint, auth, true) == Failure.badAuth, "local 403 mapping");
+    check(probeLocal(endpoint, auth, FakeResponse.ok) == Failure.none, "local success");
+    check(probeLocal(endpoint, auth, FakeResponse.forbidden) == Failure.badAuth,
+          "local 403 mapping");
+    check(probeLocal(endpoint, auth, FakeResponse.notFound) == Failure.endpointFailure,
+          "local 404 mapping");
+    check(probeLocal(endpoint, auth, FakeResponse.serverError) == Failure.endpointFailure,
+          "local 500 mapping");
+    check(probeLocal(endpoint, auth, FakeResponse.malformed) == Failure.endpointFailure,
+          "malformed status rejected");
     // Real TLS stack, loopback-only certificate. No -k/--insecure option is used.
     auto dir = buildPath(tempDir(), "s3-capability-" ~ randomUUID().toString());
     mkdir(dir);
@@ -174,11 +198,18 @@ void main()
     auto tlsPort = unusedPort();
     auto portText = to!string(tlsPort);
     auto sink = File("/dev/null", "w");
-    auto server = spawnProcess(["openssl", "s_server", "-accept", portText,
+    auto server = spawnProcess(["openssl", "s_server", "-accept", "127.0.0.1:" ~ portText,
         "-cert", cert, "-key", key, "-www", "-quiet"],
         stdin, sink, sink, cleanEnv, Config.newEnv);
     scope(exit) { kill(server); wait(server); }
     Thread.sleep(250.msecs);
+    auto sockets = execute(["lsof", "-nP", "-a", "-p", to!string(server.processID),
+        "-iTCP:" ~ portText, "-sTCP:LISTEN"], cleanEnv, Config.newEnv);
+    check(sockets.status == 0 &&
+          sockets.output.canFind("127.0.0.1:" ~ portText ~ " (LISTEN)") &&
+          !sockets.output.canFind("*:" ~ portText ~ " (LISTEN)") &&
+          !sockets.output.canFind("0.0.0.0:" ~ portText ~ " (LISTEN)"),
+          "TLS listener must bind loopback, never wildcard");
     auto url = "https://127.0.0.1:" ~ portText ~ "/";
     auto untrusted = execute(["curl", "--disable", "--noproxy", "*",
         "--silent", "--show-error", "--max-time", "3",

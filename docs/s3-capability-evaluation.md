@@ -49,9 +49,12 @@ regions](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/specify-sign
 the latter fails closed before request dispatch. These are proposed types, not
 a claim that the candidates support the operation. Public `Failure` codes are
 fixed labels (`missing_credentials`, `incomplete_credentials`,
-`unsupported_capability`, `bad_auth`,
-`tls_untrusted`, `endpoint_failure`). Raw transport exception text, request
-headers, URLs, environment values, credential fields and certificate details
+`unsupported_capability`, `bad_auth`, `tls_untrusted`, `endpoint_failure`).
+The fake-endpoint probe parses an exact
+HTTP/1.1 status-code token: 200 is success, 403 is bad auth, and 404, 500 or
+malformed status lines are endpoint failures; it does not infer that every
+non-200 response is an authentication failure. Raw transport exception text,
+request headers, URLs, environment values, credential fields and certificate details
 must not be copied into publication-safe errors or logs. Structured diagnostics
 may later carry an operation code and non-secret request id only after review.
 
@@ -69,7 +72,9 @@ credentials and verifies precedence, path/host/region derivation, 200 vs 403
 mapping, unsupported/missing-auth rejection and fixed-label redaction. Its
 `X-Fake-Access` header deliberately is **not** AWS SigV4 or an AWS credential.
 For TLS it has OpenSSL create an ephemeral loopback-only certificate and starts
-`openssl s_server`; curl's default peer verification rejects the self-signed
+`openssl s_server` bound explicitly to `127.0.0.1:<ephemeral port>`; `lsof`
+checks the actual listening socket is that loopback address, not a wildcard.
+curl's default peer verification rejects the self-signed
 certificate, `--cacert` accepts that certificate with matching IP SAN, and a
 hostname mismatch fails. No `-k`/`--insecure` flag is used. The D harness checks
 process results in release builds with `check()`; D `assert` elision cannot
@@ -81,8 +86,8 @@ key/cert files are deleted after the run.
 
 Verified local tool versions: LDC 1.43.0 (DMD 2.113.0), DUB 1.42.0,
 OpenSSL 3.6.4, Apple curl 8.7.1 with SecureTransport. Local TLS behavior is
-platform/stack-specific and must be repeated with the chosen production
-transport and supported deployment platforms.
+platform/stack-specific; the harness also requires `lsof`. Repeat with the
+chosen production transport and supported deployment platforms.
 
 The loopback server proves only *our proposed boundary behavior*. It cannot
 prove AWS SigV4 canonicalization, IAM authorization, actual S3 error XML,

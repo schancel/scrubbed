@@ -190,9 +190,10 @@ tests authored WARC 1.1 records in independent gzip members and proposed
 zstd-WARC frames with bounded D/native decoding. A separate
 [production uncompressed WARC/1.1 reader](docs/warc-reader.md) now handles
 bounded, chunk-invariant records and a validated WET-style text view. Neither
-is wired to file/CLI input; gzip/zstd production adapters, Common Crawl WARC
-1.0 compatibility, real-corpus coverage, and zstd in the shipping build remain
-open.
+is wired to file/CLI input. Pinned zstd v1.5.7 source, a static decompression
+archive, and D ABI tests now exist; the shipping CLI still has no zstd caller.
+Gzip/zstd production adapters, Common Crawl WARC 1.0 compatibility, and
+real-corpus coverage remain open.
 A [macOS arm64 text-core packaging probe](docs/package-core-evaluation.md)
 checks an isolated binary, license/notice inventory, and clean-`PATH` execution.
 It is not a release or proof of Linux/Windows support, HTML packaging, a fully

@@ -260,7 +260,9 @@ is useful, but it is not sufficient on its own.
       record ownership/identity, and WET-style UTF-8 conversion on authored
       fixtures (`docs/warc-reader.md`). Production gzip/zstd adapters, real
       archive/file/CLI integration, Common Crawl WARC 1.0 compatibility, and
-      full format conformance remain open; zstd is not in the shipping build.
+      full format conformance remain open. Pinned zstd v1.5.7 source, a static
+      decompression archive, and D ABI tests are present, but the shipping CLI
+      has no zstd caller or compressed-WARC reader yet.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

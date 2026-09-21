@@ -1,9 +1,8 @@
-/// Run with: ldc2 -i -I=source experiments/windowed_input/check.d -of=/tmp/windowed-input-check && /tmp/windowed-input-check
+/// Run with: ldc2 -O -release -enable-inlining -i -I=source experiments/windowed_input/check.d -of=/tmp/windowed-input-check-release && /tmp/windowed-input-check-release
 module experiments.windowed_input.check;
 
 import effects.windowed_input;
 import core.memory : GC;
-import std.exception : assertThrown;
 import std.file : exists, remove, tempDir, write;
 import std.path : buildPath;
 import std.stdio : File, writeln;
@@ -18,6 +17,18 @@ private immutable(ubyte)[][] patterns() {
             cast(immutable(ubyte)[]) "&#169;",
             cast(immutable(ubyte)[]) "&#x1F642;",
             cast(immutable(ubyte)[]) "\xc3\x83\xc2\xa9"];
+}
+
+/// Assertions disappear under -release; harness evidence must not.
+private void require(bool condition, string failure) {
+    if (!condition) throw new Exception(failure);
+}
+
+private void expectThrow(void delegate() action, string failure) {
+    bool threw;
+    try action();
+    catch (Exception) threw = true;
+    require(threw, failure);
 }
 
 /// Independent whole-buffer left-to-right recognizer. This deliberately does
@@ -85,7 +96,10 @@ private size_t[] viaWindows(WindowedInput input, size_t firstChunk) {
     return result;
 }
 
-void main() {
+void main(string[] args) {
+    if (args.length == 2 && args[1] == "--negative-control")
+        require(false, "intentional release-active negative control");
+    require(args.length == 1, "unexpected harness argument");
     auto path = buildPath(tempDir(), "scrubbed-windowed-" ~ randomUUID().toString());
     scope (exit) if (exists(path)) remove(path);
     // Every relevant split offset inside and around each candidate.
@@ -97,9 +111,9 @@ void main() {
         write(path, sample);
         foreach (split; 1 .. sample.length) {
             auto input = new WindowedInput(path, 16 * 1024);
-            assert(viaWindows(input, split) == reference(sample));
-            assert(input.mappingStats.peakMappedBytes <= input.mappedByteCap);
-            assert(input.mappingStats.mappedBytes == 0);
+            require(viaWindows(input, split) == reference(sample), "split token mismatch");
+            require(input.mappingStats.peakMappedBytes <= input.mappedByteCap, "split mapping cap exceeded");
+            require(input.mappingStats.mappedBytes == 0, "split mapping retained");
             input.close();
             ++cases;
         }
@@ -114,15 +128,15 @@ void main() {
             auto lease = input.window(0, sample.length);
             auto borrowed = lease.borrow();
             auto owned = borrowed.copy();
-            assert(owned == sample);
-            assertThrown(input.window(0, 1));
+            require(owned == sample, "invalid UTF-8 bytes changed");
+            expectThrow({ input.window(0, 1); }, "second live lease accepted");
             lease.close();
-            assertThrown(borrowed.at(0));
-            assertThrown(borrowed.copy());
-            assert(owned == sample);
-        } else assertThrown(input.window(0, 1));
+            expectThrow({ borrowed.at(0); }, "closed borrow remained readable");
+            expectThrow({ borrowed.copy(); }, "closed borrow remained copyable");
+            require(owned == sample, "owning copy invalidated");
+        } else expectThrow({ input.window(0, 1); }, "empty input mapped");
         input.close();
-        assertThrown(input.window(0, 1));
+        expectThrow({ input.window(0, 1); }, "closed input accepted window");
         ++cases;
     }
 
@@ -135,19 +149,19 @@ void main() {
     write(path, pageSample);
     auto input = new WindowedInput(path, page + 17);
     auto first = input.window(page - 1, 2);
-    assert(first.length == 1 && first.borrow().at(0) == 0);
+    require(first.length == 1 && first.borrow().at(0) == 0, "page-edge window wrong");
     first.close();
     auto aligned = input.window(page, 1);
-    assert(aligned.borrow().at(0) == 0);
+    require(aligned.borrow().at(0) == 0, "aligned window wrong");
     aligned.close();
     auto last = input.window(page + 1, 100);
-    assert(last.length == 1 && last.borrow().at(0) == 0x5a);
+    require(last.length == 1 && last.borrow().at(0) == 0x5a, "EOF window wrong");
     auto stale = last.borrow();
     input.cancel();
-    assertThrown(stale.at(0));
-    assertThrown(input.window(0, 1));
-    assert(input.mappingStats.mappedBytes == 0);
-    assert(input.mappingStats.peakMappedBytes <= input.mappedByteCap);
+    expectThrow({ stale.at(0); }, "cancelled borrow remained readable");
+    expectThrow({ input.window(0, 1); }, "cancelled input accepted window");
+    require(input.mappingStats.mappedBytes == 0, "cancel retained mapping");
+    require(input.mappingStats.peakMappedBytes <= input.mappedByteCap, "page mapping cap exceeded");
     input.close();
     ++cases;
 
@@ -164,7 +178,7 @@ void main() {
     while (offset < sparse.length) {
         auto lease = sparse.window(offset, page * 2);
         if (offset + lease.length == sparse.length)
-            assert(lease.borrow().at(lease.length - 1) == 'Z');
+            require(lease.borrow().at(lease.length - 1) == 'Z', "sparse EOF byte wrong");
         offset += lease.length;
         lease.close();
         ++windows;
@@ -172,10 +186,12 @@ void main() {
     auto after = GC.stats().usedSize;
     auto used = after >= before ? after - before : 0;
     auto stats = sparse.mappingStats;
-    assert(windows > 1 && stats.mappingCount == windows);
-    assert(stats.mappedBytes == 0 && stats.peakMappedBytes <= sparse.mappedByteCap);
-    assert(used < 1024 * 1024);
-    assertThrown(new WindowCarry(2).append(cast(const(ubyte)[]) "abc"));
+    require(windows > 1 && stats.mappingCount == windows, "sparse window count wrong");
+    require(stats.mappedBytes == 0 && stats.peakMappedBytes <= sparse.mappedByteCap,
+            "sparse mapping cap exceeded or mapping retained");
+    require(used < 1024 * 1024, "sparse GC allocation bound exceeded");
+    expectThrow({ new WindowCarry(2).append(cast(const(ubyte)[]) "abc"); },
+                "carry accepted bytes over capacity");
     sparse.close();
     writeln("windowed-input cases=", cases, " sparse-bytes=", offset,
             " windows=", windows, " page=", page,

@@ -29,11 +29,14 @@ multiple readers. Mapping does not cap OS page cache or other allocations.
 The D-only harness is `experiments/windowed_input/check.d`:
 
 ```sh
-ldc2 -i -I=source experiments/windowed_input/check.d -of=/tmp/windowed-input-check
-/tmp/windowed-input-check
+ldc2 -O -release -enable-inlining -i -I=source experiments/windowed_input/check.d -of=/tmp/windowed-input-check-release
+/tmp/windowed-input-check-release
+/tmp/windowed-input-check-release --negative-control # expected exit 1
 ```
 
-It compares bounded stitched token recognition against an independent D
+All harness checks throw explicit runtime failures and remain active under
+`-release`; the deliberate negative control exits 1. The harness compares
+bounded stitched token recognition against an independent D
 whole-buffer recognizer at every split inside and around the chosen UTF-8,
 CRLF, HTML named/numeric entity, and bounded mojibake byte candidates. It
 also checks byte preservation for invalid/truncated UTF-8 (the effect does not
@@ -41,7 +44,8 @@ decode), empty input, page/EOF boundaries, lease invalidation, cancellation,
 and a real sparse file larger than the cap. On macOS arm64 in this run:
 47 cases; page 16,384 bytes; sparse length 2,097,155 bytes; 65 windows;
 peak simultaneously mapped 32,768 bytes under a 32,785-byte cap; GC
-`usedSize` delta 6,576 bytes. The latter is an observed D-GC live-used delta,
+`usedSize` delta 6,528 bytes in the release-mode harness. The latter is an
+observed D-GC live-used delta,
 not an RSS or lifetime-allocation bound. The sparse probe writes only its last
 byte and traverses all windows without creating an input-sized D buffer.
 

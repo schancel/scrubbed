@@ -91,6 +91,14 @@ in-place `fix` command rather than a quality-matched file-to-file transform;
 cases are reported as unsupported rather than assigned misleading speed
 numbers.
 
+## Full-process pipeline resource evidence
+
+The separate full-process pipeline benchmark now has an opt-in, D-only
+capacity-gated larger-corpus mode (about 16 MiB and 128 MiB per layout).
+See [the pipeline methodology](../docs/benchmark-pipeline.md) for the exact
+quality gates, run command, supported CPU/RSS metrics, and unsupported FD,
+GC, syscall-byte, OS-cold, and >RAM claims.
+
 ## Lazy mojibake candidates
 
 `mojibake_ranges.d` compares three implementations using identical scorer

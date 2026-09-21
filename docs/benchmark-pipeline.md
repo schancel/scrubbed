@@ -68,7 +68,7 @@ is a correctness gate, not a timed sample, and it does not claim power-loss
 durability. The optional marker-instrumented build described in
 [`local-manifest.md`](local-manifest.md) covers additional crash windows.
 
-The version-3 reports use only path tokens in their command templates; they do not embed
+The version-3 and version-4 reports use only path tokens in their command templates; they do not embed
 checkout, fixture, manifest, executable, or hostname paths. They include the
 source revision observed at run time and exact binary/harness/config hashes,
 the available host LDC version and harness reproduction command,
@@ -141,6 +141,64 @@ so the >RAM case is **UNSUPPORTED** rather than scored. The benchmark streams
 fixture generation into individual files rather than allocating an aggregate
 corpus in memory. Its UUID-scoped scratch tree is removed after the report;
 the report should be saved separately before process exit.
+
+### Larger, capacity-gated local corpus
+
+The opt-in `--large` mode adds matched many-small (32 files) and few-large
+(two files) layouts at 16,776,960 bytes (about 16 MiB) and 134,215,680 bytes
+(about 128 MiB) of input per layout, alongside the small cases. Both layouts
+at each size contain the same number of identical 24-byte generated records;
+they apply the same two filters and independently gate exact bytes and keyed
+per-file manifest statuses. First-process, two verified-skip repetitions,
+changed input/config/output route, and the separate planned-row restart probe
+remain included. The larger fixture uses chunked writes rather than millions
+of record-sized writes. Run with a declared local time budget of at least
+900 seconds:
+
+```sh
+/tmp/scrubbed-pipeline "$(pwd)/scrubbed" \
+  benchmarks/pipeline-resource-sample.json --large 1800
+```
+
+The D harness checks measured physical RAM and `df -Pk` scratch availability
+*before* any large fixture is created. It requires at least 2 GiB RAM, the
+large corpus to fit in RAM, about 1.63 GiB of free scratch reservation for input,
+output, alternate output, manifest/restart state and headroom, and the declared
+time budget. The check is a refusal threshold, not a deadline or guarantee
+against other users consuming disk. The version-4 report records the measured
+preflight inputs and per-sample observed fixture/output filesystem lengths.
+Version 3 small-only reports remain distinct; a version-4 report missing any
+layout or preflight fails validation. The v4 validator recomputes the scratch
+reservation from the known total input footprint and checks the independent
+2 GiB RAM floor and input-less-than-RAM rule; a report cannot validate by
+forging RAM, free scratch and reservation to mutually consistent tiny values.
+No >RAM run is attempted by this mode.
+
+The external `/usr/bin/time` supplies process user/system CPU and peak RSS.
+We investigated an FD count sampler, but the current timing wrapper owns the
+PID of the `time` process rather than a portable, directly sampled target PID;
+macOS and Linux expose different process-FD APIs. An interval sampler here
+would miss short spikes and could perturb short runs, so no FD maximum is
+published. It remains **UNSUPPORTED**, as do external-process GC counts and
+actual syscall read/write bytes. The fixture/output byte fields are measured
+file lengths or calculated expected lengths, never syscall counters. These
+synthetic scaling samples do not establish OS-cold, TB readiness, or a general
+speed advantage over other tools.
+
+The checked-in `pipeline-resource-sample.json` was collected on an Apple M4
+with 17,179,869,184 physical RAM bytes and 17,557,745,664 free scratch bytes
+at preflight. The raw report retains three samples per case, including the
+small baseline, manifest skips, all per-file output hashes/statuses, and the
+restart probe. For the 16 MiB/128 MiB first-write layouts, the raw wall ranges
+were 0.58–0.66 s / 3.27–4.05 s across three samples per layout; user+system
+CPU ranges were 0.55–0.62 s / 3.21–3.95 s, respectively. Peak RSS ranges
+across these layouts were 8.34–97.20 MiB / 75.91–668.39 MiB; the disparity
+between many-small and few-large is a useful reason to keep both layouts,
+not a general memory scaling law. The 128 MiB layouts each had 123,031,040
+bytes of exact-gated output. Wall variance reflects this host and run, and
+these are raw repetitions rather than confidence intervals. The supplied
+target binary's source mapping, compiler, and flags remain `UNVERIFIED` even
+though its executed snapshot hash is retained.
 
 ## Comparator boundary
 

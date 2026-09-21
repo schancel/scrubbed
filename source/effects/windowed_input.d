@@ -39,7 +39,11 @@ final class WindowCarry {
         enforce(bytes.length <= limit - held.length, "carry capacity exceeded");
         held ~= bytes;
     }
-    void append(WindowBorrow bytes) { append(bytes.copy()); }
+    void append(WindowBorrow bytes) {
+        // length checks the lease before any allocation, including when closed.
+        enforce(bytes.length <= limit - held.length, "carry capacity exceeded");
+        append(bytes.copy());
+    }
 }
 
 /// Checked access only: no mapping-backed slice escapes this object.
@@ -119,8 +123,7 @@ final class WindowedInput {
     private MappingStats stats;
 
     this(string path, size_t mappedByteCap) {
-        page = cast(size_t) sysconf(_SC_PAGESIZE);
-        enforce(page > 0, "page size unavailable");
+        page = checkedPageSize(sysconf(_SC_PAGESIZE));
         enforce(mappedByteCap >= page, "mapping cap must cover one page");
         descriptor = open(toStringz(path), O_RDONLY);
         enforce(descriptor >= 0, "cannot open input: " ~ path);
@@ -166,4 +169,17 @@ final class WindowedInput {
         if (descriptor >= 0) { .close(descriptor); descriptor = -1; }
     }
     ~this() { close(); }
+}
+
+private size_t checkedPageSize(long reported) {
+    enforce(reported > 0, "page size unavailable");
+    return cast(size_t) reported;
+}
+
+unittest {
+    // Explicit failure remains live when this module's unittests use -release.
+    bool rejected;
+    try checkedPageSize(-1);
+    catch (Exception) rejected = true;
+    enforce(rejected, "negative sysconf result accepted");
 }

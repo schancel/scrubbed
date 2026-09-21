@@ -32,6 +32,8 @@ The D-only harness is `experiments/windowed_input/check.d`:
 ldc2 -O -release -enable-inlining -i -I=source experiments/windowed_input/check.d -of=/tmp/windowed-input-check-release
 /tmp/windowed-input-check-release
 /tmp/windowed-input-check-release --negative-control # expected exit 1
+ldc2 -O -release -unittest -main source/effects/windowed_input.d -of=/tmp/windowed-input-release-unittests
+/tmp/windowed-input-release-unittests
 ```
 
 All harness checks throw explicit runtime failures and remain active under
@@ -41,13 +43,21 @@ whole-buffer recognizer at every split inside and around the chosen UTF-8,
 CRLF, HTML named/numeric entity, and bounded mojibake byte candidates. It
 also checks byte preservation for invalid/truncated UTF-8 (the effect does not
 decode), empty input, page/EOF boundaries, lease invalidation, cancellation,
-and a real sparse file larger than the cap. On macOS arm64 in this run:
+and a real sparse file larger than the cap. Every mapped byte of the sparse
+hole is checked as zero, followed by the terminal marker. An additional
+16 MiB borrow is rejected by an 8-byte carry before copying; GC live-used
+growth at rejection is separately bounded below 1 MiB, and appending the
+same borrow after lease close must reject. A release-mode module unittest
+injects a failed page-size result into the private validator to verify it
+rejects before unsigned conversion. On macOS arm64 in this run:
 47 cases; page 16,384 bytes; sparse length 2,097,155 bytes; 65 windows;
 peak simultaneously mapped 32,768 bytes under a 32,785-byte cap; GC
 `usedSize` delta 6,528 bytes in the release-mode harness. The latter is an
 observed D-GC live-used delta,
 not an RSS or lifetime-allocation bound. The sparse probe writes only its last
 byte and traverses all windows without creating an input-sized D buffer.
+The 16 MiB borrow rejection produced a 128-byte D-GC live-used delta under
+the 1 MiB test ceiling; this is also not a peak-RSS measurement.
 
 This proof covers the local bounded-token examples, not the current CLI's
 whole-document scoring, context-heavy HTML parsing, normalization decisions,

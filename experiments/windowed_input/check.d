@@ -177,8 +177,11 @@ void main(string[] args) {
     size_t windows;
     while (offset < sparse.length) {
         auto lease = sparse.window(offset, page * 2);
-        if (offset + lease.length == sparse.length)
-            require(lease.borrow().at(lease.length - 1) == 'Z', "sparse EOF byte wrong");
+        auto view = lease.borrow();
+        foreach (i; 0 .. view.length) {
+            auto expected = offset + i == sparse.length - 1 ? 'Z' : 0;
+            require(view.at(i) == expected, "sparse hole or EOF byte wrong");
+        }
         offset += lease.length;
         lease.close();
         ++windows;
@@ -193,8 +196,30 @@ void main(string[] args) {
     expectThrow({ new WindowCarry(2).append(cast(const(ubyte)[]) "abc"); },
                 "carry accepted bytes over capacity");
     sparse.close();
+
+    // Rejection must happen before copying a large mapped borrow into GC.
+    {
+        auto file = File(path, "wb");
+        file.seek(16 * 1024 * 1024 - 1);
+        file.rawWrite([cast(ubyte) 'Q']);
+    }
+    auto oversized = new WindowedInput(path, 16 * 1024 * 1024);
+    auto largeLease = oversized.window(0, 16 * 1024 * 1024);
+    auto largeBorrow = largeLease.borrow();
+    auto tinyCarry = new WindowCarry(8);
+    auto beforeReject = GC.stats().usedSize;
+    expectThrow({ tinyCarry.append(largeBorrow); }, "oversized borrow accepted by carry");
+    auto afterReject = GC.stats().usedSize;
+    auto rejectedGc = afterReject >= beforeReject ? afterReject - beforeReject : 0;
+    require(rejectedGc < 1024 * 1024,
+            "oversized borrow rejection allocated large GC copy");
+    require(tinyCarry.length == 0, "oversized borrow changed carry");
+    largeLease.close();
+    expectThrow({ tinyCarry.append(largeBorrow); }, "closed borrow accepted by carry");
+    oversized.close();
     writeln("windowed-input cases=", cases, " sparse-bytes=", offset,
             " windows=", windows, " page=", page,
             " peak-mapped=", stats.peakMappedBytes,
-            " cap=", sparse.mappedByteCap, " gc-used-delta=", used);
+            " cap=", sparse.mappedByteCap, " gc-used-delta=", used,
+            " oversized-reject-gc-delta=", rejectedGc);
 }

@@ -10,13 +10,17 @@
 		"uname -s | grep -qx Darwin && uname -m | grep -qx arm64",
 		"cc -O2 -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION -c third_party/sqlite/sqlite3.c -o third_party/sqlite/sqlite3.o",
 		"cmake -S third_party/lexbor -B .dub/lexbor -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_TESTS=OFF -DLEXBOR_BUILD_EXAMPLES=OFF -DLEXBOR_BUILD_BENCHMARKS=OFF -DLEXBOR_BUILD_UTILS=OFF -DLEXBOR_BUILD_SEPARATELY=OFF",
-		"cmake --build .dub/lexbor --target lexbor_static -j4"
+		"cmake --build .dub/lexbor --target lexbor_static -j4",
+		"make -C third_party/zstd"
 	],
-	"sourceFiles": ["third_party/sqlite/sqlite3.o", ".dub/lexbor/liblexbor_static.a"],
+	"sourceFiles": ["third_party/sqlite/sqlite3.o", ".dub/lexbor/liblexbor_static.a", ".dub/zstd/libzstd_decompress.a"],
 	"dflags": ["-g"],
 	"buildTypes": {
 		"release": {
 			"buildOptions": ["releaseMode", "optimize", "inline"]
+		},
+		"release-unittest": {
+			"buildOptions": ["unittests", "releaseMode", "optimize", "inline"]
 		}
 	}
 }

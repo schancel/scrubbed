@@ -1,9 +1,10 @@
 # WARC/WET compressed reader: prerequisite evidence
 
-Status: **experiment only**. Issue #30 remains open. There is no production
-reader, zstd dependency, CLI command, archive source identity policy, or S3
-integration in this change. The accountable owner must choose a separately
-reviewed production format/dependency/resource contract before adoption.
+Status: a scoped **uncompressed WARC/1.1 production candidate** now lives in
+[`effects.warc_reader`](../source/effects/warc_reader.d), with its API and
+limits in [warc-reader.md](warc-reader.md). The gzip/zstd evidence below remains
+experiment only. Issue #30 stays open: there is no production compressed
+reader, zstd dependency, CLI command, or S3 integration in this slice.
 
 ## Normative boundary
 
@@ -103,10 +104,12 @@ libzstd `ZSTD_decompressStream` FFI to cap each output call.
 
 ## Production decisions still open
 
-Before Issue #30 can close, decide and prove: source-key/record-ID identity
-policy; real WARC/WET corpus tolerance (including folded/UTF-8 fields and
+Before Issue #30 can close, decide and prove: real WARC/WET corpus tolerance (including folded/UTF-8 fields and
 large segmented records); whether to support proposed zstd dictionaries and
 multi-frame records; packaging/licensing on all targets; true bounded file
 streaming with descriptor closure, RSS/GC measurements, and failure recovery;
-and integration at the project reader boundary. The rollback for this slice
-is deletion of only `experiments/warc_reader/` and this document.
+and integration at the project reader boundary. The new plain reader makes the
+source-key/record-ID/ordinal identity policy explicit; no archive-wide
+uniqueness index is retained. Rollback of the production candidate is deletion
+of `source/effects/warc_reader.d`, `experiments/warc_reader/production_check.d`,
+and `docs/warc-reader.md`, plus restoration of this status note.

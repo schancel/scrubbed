@@ -1,5 +1,5 @@
 {
-	"name": "scrubd",
+	"name": "scrubbed",
 	"description": "Text sanitization CLI in D: mojibake repair + normalization filters, range-based pipeline, parallel multi-document processing",
 	"authors": ["Shammah Chancellor"],
 	"license": "MIT",

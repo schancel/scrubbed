@@ -51,16 +51,24 @@ private string member(string packageDir, string name) {
 
 private void verifyFiles(string packageDir) {
     size_t members;
+    size_t directories;
     foreach (entry; dirEntries(packageDir, SpanMode.depth, false)) {
         require(!entry.isSymlink, "package must not contain symlinks");
-        if (!entry.isFile) continue;
         auto name = relativePath(entry.name, packageDir);
+        if (entry.isDir) {
+            require(name == "third_party" || name == "third_party/sqlite",
+                "unexpected shipping directory: " ~ name);
+            ++directories;
+            continue;
+        }
+        require(entry.isFile, "nonregular shipping member: " ~ name);
         bool expected = name == "scrubbed" || name == "SHA256SUMS";
         foreach (notice; notices) if (name == notice) expected = true;
         require(expected, "unexpected shipping member: " ~ name);
         ++members;
     }
-    require(members == notices.length + 2, "package inventory mismatch");
+    require(members == notices.length + 2 && directories == 2,
+        "package inventory mismatch");
     auto manifest = member(packageDir, "SHA256SUMS");
     require(isFile(manifest), "missing SHA256SUMS");
     auto lines = readText(manifest).splitLines();
@@ -137,10 +145,9 @@ private void makePackage(string repository, string binary, string packageDir) {
     verifyRuntime(packageDir);
 }
 
-private void expectRejected(string packageDir, string name, bool removeFile) {
+private string clonePackage(string packageDir) {
     auto scratch = buildPath(tempDir, "scrubbed-negative-" ~ randomUUID.toString);
     mkdir(scratch);
-    scope(exit) if (exists(scratch)) rmdirRecurse(scratch);
     foreach (notice; notices) {
         auto target = member(scratch, notice);
         if (!exists(dirName(target))) mkdir(dirName(target));
@@ -150,6 +157,12 @@ private void expectRejected(string packageDir, string name, bool removeFile) {
     setAttributes(member(scratch, "scrubbed"),
         getAttributes(member(packageDir, "scrubbed")));
     copy(member(packageDir, "SHA256SUMS"), member(scratch, "SHA256SUMS"));
+    return scratch;
+}
+
+private void expectRejected(string packageDir, string name, bool removeFile) {
+    auto scratch = clonePackage(packageDir);
+    scope(exit) if (exists(scratch)) rmdirRecurse(scratch);
     auto target = member(scratch, name);
     if (removeFile) remove(target);
     else write(target, "corrupt\n");
@@ -157,6 +170,16 @@ private void expectRejected(string packageDir, string name, bool removeFile) {
     try verifyFiles(scratch);
     catch (Exception) rejected = true;
     require(rejected, "negative control accepted: " ~ name);
+}
+
+private void expectExtraDirectoryRejected(string packageDir) {
+    auto scratch = clonePackage(packageDir);
+    scope(exit) if (exists(scratch)) rmdirRecurse(scratch);
+    mkdir(member(scratch, "unlisted-empty-directory"));
+    bool rejected;
+    try verifyFiles(scratch);
+    catch (Exception) rejected = true;
+    require(rejected, "negative control accepted: extra directory");
 }
 
 private void bench(string packageDir) {
@@ -187,6 +210,7 @@ int main(string[] args) {
                 expectRejected(args[2], name, true);
                 expectRejected(args[2], name, false);
             }
+            expectExtraDirectoryRejected(args[2]);
             writeln("package verify/negative controls PASS");
         } else if (args.length == 3 && args[1] == "bench") {
             verifyFiles(args[2]);

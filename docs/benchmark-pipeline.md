@@ -117,7 +117,7 @@ Both CLIs read the same 851,968-byte CRLF-only file and write a fresh
 720,896-byte file. The scrubbed command uses `--filters
 normalize-line-endings --threads 1`; dos2unix uses `-n INPUT OUTPUT`.
 Every run must exactly match the independently specified bytes before its
-timing is included. The raw Apple M4 samples were 0.03/0.03/0.02/0.03
+timing is included. The raw Apple M4 samples were 0.02/0.03/0.02/0.03
 seconds in A/B/A/B order—too coarse for a speed ranking. The report marks
 source-tar-to-binary mapping unverified despite recording the observed build;
 the exact binary hash is the reproducible identity.

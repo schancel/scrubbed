@@ -3,6 +3,8 @@ module pipeline;
 
 import std.algorithm.searching : canFind, startsWith;
 import std.algorithm.sorting : sort;
+import std.array : replicate;
+import std.ascii : isHexDigit;
 import std.conv : to;
 import std.digest : toHexString;
 import std.digest.sha : sha256Of;
@@ -33,6 +35,17 @@ private JSONValue arr(string[] values) {
     JSONValue[] items;
     foreach (value; values) items ~= JSONValue(value);
     return JSONValue(items);
+}
+
+private bool digestField(string value, size_t length) {
+    if (value.length != length) return false;
+    foreach (letter; value)
+        if (!isHexDigit(letter)) return false;
+    return true;
+}
+
+private bool expectedDos2unixVersion(string value) {
+    return value == "dos2unix 7.5.7 (2026-08-27)";
 }
 
 private double elapsed(string value) {
@@ -154,6 +167,10 @@ private void validate(JSONValue report) {
                    "cpu", "compiler", "build_flags"])
         require(key in report.object && report[key].str.length,
             "missing report metadata " ~ key);
+    require(digestField(report["source_sha"].str, 40) &&
+        digestField(report["binary_sha256"].str, 64) &&
+        digestField(report["harness_sha256"].str, 64),
+        "invalid report hash metadata");
     foreach (key; ["os", "cpu", "compiler"]) {
         auto value = report[key].str;
         require(!value.canFind('/') && !value.canFind('\\') &&
@@ -176,8 +193,9 @@ private void validate(JSONValue report) {
 
 private void selfTest() {
     JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v1"),
-        "source_sha": JSONValue("x"), "binary_sha256": JSONValue("x"),
-        "harness_sha256": JSONValue("x"), "os": JSONValue("x"),
+        "source_sha": JSONValue("0".replicate(40)),
+        "binary_sha256": JSONValue("0".replicate(64)),
+        "harness_sha256": JSONValue("0".replicate(64)), "os": JSONValue("x"),
         "cpu": JSONValue("x"), "compiler": JSONValue("x"),
         "build_flags": JSONValue("x"),
         "source_binary_mapping": JSONValue("UNVERIFIED")]);
@@ -217,6 +235,9 @@ private void selfTest() {
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "stale binary provenance negative did not fail");
+    require(expectedDos2unixVersion("dos2unix 7.5.7 (2026-08-27)") &&
+        !expectedDos2unixVersion("dos2unix 7.5.70 (2026-08-27)"),
+        "comparator prefix-version negative did not fail");
     bad = report;
     bad["cases"][0]["samples"][0]["exact_output"] = false;
     failed = false;
@@ -249,7 +270,7 @@ private void compareDos2unix(string scrubbed, string dos2unix,
     auto os = checked(["uname", "-s"]);
     require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
     auto toolVersion = checked([dos2unix, "--version"]).splitLines[0];
-    require(toolVersion.startsWith("dos2unix 7.5.7"),
+    require(expectedDos2unixVersion(toolVersion),
         "expected official dos2unix 7.5.7, got " ~ toolVersion);
     auto root = buildPath(tempDir, "scrubbed-dos2unix-" ~ randomUUID.toString);
     mkdirRecurse(root);

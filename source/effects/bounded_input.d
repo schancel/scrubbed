@@ -61,9 +61,15 @@ final class BoundedInput {
 
     /// false means a prior fault or explicit cancellation stopped admission.
     bool submit(string path, ulong bytes) {
-        if (bytes > limits.reservedBytes)
-            throw new Exception("input exceeds --max-input-bytes: " ~ path);
         mutex.lock();
+        if (cancelled) {
+            mutex.unlock();
+            return false;
+        }
+        if (bytes > limits.reservedBytes) {
+            mutex.unlock();
+            throw new Exception("input exceeds --max-input-bytes: " ~ path);
+        }
         while (!cancelled && (counts.queuedDocuments == limits.queuedDocuments ||
             bytes > limits.reservedBytes - counts.reservedBytes))
             changed.wait();
@@ -283,6 +289,7 @@ unittest {
         (string path, Throwable error) { assert(0); });
     cancelled.cancel();
     assert(!cancelled.submit("cancelled", 1));
+    assert(!cancelled.submit("oversized after cancellation", 3));
     auto afterCancel = cancelled.finish();
     assert(afterCancel.submitted == 0 && afterCancel.reservedBytes == 0 &&
         afterCancel.workerDescriptors == 0 && afterCancel.queuedDocuments == 0);

@@ -5,8 +5,9 @@ import effects.sqlite_ffi;
 import std.algorithm.searching : canFind, startsWith;
 import std.array : split;
 import std.conv : to;
-import std.file : exists, isSymlink, mkdir, readText, rmdirRecurse, tempDir, write;
-import std.path : buildPath;
+import std.file : SpanMode, dirEntries, exists, isSymlink, mkdir, readText,
+    rmdirRecurse, tempDir, write;
+import std.path : baseName, buildPath;
 import std.process : execute;
 import std.stdio : writeln;
 import std.string : splitLines, toStringz;
@@ -191,19 +192,26 @@ int main(string[] args) {
     auto cancelOutput = buildPath(cancelFolder, "output");
     auto cancelDb = buildPath(cancelFolder, "state.db");
     mkdir(cancelInput);
-    write(buildPath(cancelInput, "a.txt"), "a");
     write(buildPath(cancelInput, "b.txt"), "b");
+    write(buildPath(cancelInput, "a.txt"), "a");
+    string[] cancelPaths;
+    foreach (entry; dirEntries(cancelInput, SpanMode.depth, false))
+        if (entry.isFile) cancelPaths ~= entry.name;
+    need(cancelPaths.length == 2, "fatal admission setup has two files");
+    write(cancelPaths[1], "oversized");
     write(cancelDb ~ ".fault-policy-swap", "");
     result = execute([args[1], "run", "--input", cancelInput,
         "--output", cancelOutput, "--manifest", cancelDb,
-        "--filters", "normalize-line-endings", "--explain"]);
+        "--filters", "normalize-line-endings", "--explain",
+        "--max-input-bytes", "1"]);
     size_t aDecisions, bDecisions, uncertainDecisions, canceledDecisions;
     foreach (line; result.output.splitLines()) {
         if (!line.startsWith("EXPLAIN\tinput=")) continue;
         if (line.canFind("a.txt")) ++aDecisions;
         if (line.canFind("b.txt")) ++bDecisions;
         if (line.canFind("status=uncertain")) ++uncertainDecisions;
-        if (line.canFind("status=canceled") &&
+        if (line.canFind(baseName(cancelPaths[1])) &&
+            line.canFind("status=canceled") &&
             line.canFind("reason=\"canceled after fatal processing failure\""))
             ++canceledDecisions;
     }
@@ -211,8 +219,9 @@ int main(string[] args) {
         result.output.split("EXPLAIN\tinput=").length == 3 &&
         aDecisions == 1 && bDecisions == 1 &&
         uncertainDecisions == 1 && canceledDecisions == 1 &&
+        !result.output.canFind("input exceeds --max-input-bytes") &&
         countState(cancelDb, "uncertain") == 1,
-        "fatal admission explains each discovered file once");
+        "fatal admission explains each discovered file once: " ~ result.output);
     writeln("ok: fatal admission EXPLAIN reconciliation");
     auto decisionFolder = buildPath(root, "manifest-decisions");
     mkdir(decisionFolder);
@@ -287,13 +296,18 @@ int main(string[] args) {
         result = execute(rehashCommand);
         need(result.status == 0 && state(rehashDb) == "committed",
             "rehash setup " ~ spec);
+        auto rehashId = firstDocumentId(rehashDb);
         write(rehashOutput ~ ".fault-rehash-" ~ spec, "");
         result = execute(rehashCommand);
         const resource = !spec.canFind("EIO");
         need(result.status == (resource ? 2 : 1) &&
             state(rehashDb) == (resource ? "committed" : "uncertain") &&
             readText(rehashOutput) == "one\n" &&
-            (resource ? result.output.canFind("FATAL") :
+            result.output.canFind("document_id=\"" ~ rehashId ~ "\"") &&
+            result.output.canFind("sink_key=\"local-primary:v1\"") &&
+            result.output.split("EXPLAIN\tinput=").length == 2 &&
+            (resource ? result.output.canFind("FATAL") &&
+                result.output.canFind("status=failure") :
                 result.output.canFind("status=uncertain")),
             "rehash errno " ~ spec);
         writeln("ok: rehash errno ", spec);

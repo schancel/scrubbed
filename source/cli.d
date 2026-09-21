@@ -465,6 +465,14 @@ private class ManifestDecisionFailure : Exception {
     }
 }
 
+private class FatalManifestInspection : Exception {
+    SinkKey key;
+    this(SinkKey key, ResourceExhaustion cause) {
+        super("fatal manifest inspection: " ~ cause.msg);
+        this.key = key;
+    }
+}
+
 private class DocumentFailure : Exception {
     FailureRecord record;
     this(FailureRecord record) {
@@ -515,7 +523,12 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
     SinkKey key = SinkKey(id, firstHash, configHash, "local-primary:v1");
     bool replacing;
     if (!dryRun) {
-        auto inspected = manifest.inspect(key);
+        Inspection inspected;
+        try {
+            inspected = manifest.inspect(key);
+        } catch (ResourceExhaustion error) {
+            throw new FatalManifestInspection(key, error);
+        }
         if (inspected == Inspection.verifiedCommitted)
             return manifestOutcome("skipped", "", key);
         auto previous = manifest.lookup(key);
@@ -814,6 +827,7 @@ int runApp(string[] args) {
             auto documentFailure = cast(DocumentFailure)error;
             auto fatalDocumentFailure = cast(FatalDocumentFailure)error;
             auto manifestDecision = cast(ManifestDecisionFailure)error;
+            auto fatalInspection = cast(FatalManifestInspection)error;
             stderr.writefln("%s %s: %s",
                 documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
                 file, error.msg);
@@ -836,6 +850,9 @@ int runApp(string[] args) {
                     status = manifestDecision.status;
                     documentId = manifestDecision.documentId.text;
                     sinkKey = manifestDecision.sinkKey;
+                } else if (fatalInspection !is null) {
+                    documentId = fatalInspection.key.document.text;
+                    sinkKey = fatalInspection.key.sink;
                 }
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, status, error.msg, detail, documentId, sinkKey);

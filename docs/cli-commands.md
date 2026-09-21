@@ -2,9 +2,10 @@
 
 `scrubbed run` (alias `clean`) and `scrubbed repair` (alias `fix`) execute the
 existing bounded filter pipeline. Running without a verb remains supported:
-all prior long options, defaults, `--list-filters`, `--validate`, `--dry-run`
-and `--explain` retain their processing and exit behavior. Use `scrubbed
---help` or `<verb> --help` for argparse-generated help and option names.
+prior long options and defaults remain available, including `--list-filters`,
+`--validate`, `--dry-run` and `--explain`. Failure exits follow the policy below.
+Use `scrubbed --help` or `<verb> --help` for argparse-generated help and option
+names.
 
 ```sh
 scrubbed --input input.txt --output clean.txt

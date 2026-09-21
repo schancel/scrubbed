@@ -34,8 +34,10 @@ exact `WARC/1.1` and CRLF framing; mandatory unique record ID, date, type,
 and decimal Content-Length; case-insensitive field names; warcinfo forbids
 Target-URI, metadata permits it, and other supported record types require it.
 Unknown header fields are retained. The reader rejects folded, RFC 2047
-encoded-word, and segmented fields. Its URI check is a conservative syntax
-screen, not full RFC 3986 validation; date values are retained, not normalized.
+encoded-word, and segmented fields. A literal `=?` that does not form a complete
+encoded-word is accepted (including in a Target-URI query). Its URI check is a
+conservative syntax screen, not full RFC 3986 validation; date values are
+retained, not normalized.
 Extension field names use the IIPC ASCII `token` grammar, and header values
 reject control characters other than horizontal tab used as linear whitespace.
 It does not support WARC/1.0, compression, recovery/resynchronization, HTTP
@@ -45,6 +47,9 @@ payload extraction, or full WARC conformance.
 `Content-Type: text/plain` and valid UTF-8 block bytes. This is a WET-style
 conversion seam, not a Common Crawl compatibility claim. A `response` block is
 never silently treated as extracted text.
+The reader validates conversion UTF-8 against the owned block without making
+another whole-block copy. Calling `conversionText()` explicitly returns an
+independent text copy owned by the caller.
 
 Fixed, release-active caps are 4 KiB header, 64 KiB declared block, and 128 KiB
 per-record parser state. Limits apply per record, not per feed; a single feed

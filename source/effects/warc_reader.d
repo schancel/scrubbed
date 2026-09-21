@@ -37,10 +37,13 @@ struct WarcRecord {
 
     string conversionText() const {
         if (!isConversionText()) throw new WarcError("not a text/plain conversion");
-        auto value = cast(string) block;
-        try validate(value);
+        validateConversionText();
+        return (cast(string) block).idup;
+    }
+
+    private void validateConversionText() const {
+        try validate(cast(string) block);
         catch (Exception) { throw new WarcError("invalid UTF-8 conversion"); }
-        return value.idup;
     }
 }
 
@@ -122,7 +125,7 @@ final class WarcReader {
     }
 
     private void emit() {
-        if (current.isConversionText()) current.conversionText();
+        if (current.isConversionText()) current.validateConversionText();
         auto record = current;
         current = WarcRecord.init;
         header = null;
@@ -159,7 +162,7 @@ final class WarcReader {
                 if ((c < 32 && c != '\t') || c == 127)
                     fail("control character in header value");
             auto value = trimSpace(raw);
-            if (value.indexOf("=?") >= 0) fail("encoded-word fields unsupported");
+            if (containsEncodedWord(value)) fail("encoded-word fields unsupported");
             try validate(value);
             catch (Exception) { fail("invalid UTF-8 header value"); }
             auto lower = asciiLower(name);
@@ -219,6 +222,36 @@ final class WarcReader {
             result = result * 10 + digit;
         }
         return result;
+    }
+
+    // RFC 2047's complete =?charset?[BQ]?encoded-text?= shape. A bare
+    // "=?" is ordinary text (and can occur in a legal query URI).
+    private static bool containsEncodedWord(string value) {
+        foreach (start; 0 .. value.length) {
+            if (value[start] != '=' || start + 1 >= value.length ||
+                value[start + 1] != '?') continue;
+            size_t at = start + 2;
+            auto charsetStart = at;
+            while (at < value.length && rfc2047Token(value[at])) ++at;
+            if (at == charsetStart || at >= value.length || value[at] != '?') continue;
+            ++at;
+            if (at + 1 >= value.length ||
+                (value[at] != 'B' && value[at] != 'b' &&
+                 value[at] != 'Q' && value[at] != 'q') || value[at + 1] != '?')
+                continue;
+            at += 2;
+            auto textStart = at;
+            while (at < value.length && value[at] >= '!' && value[at] <= '~' &&
+                value[at] != '?') ++at;
+            if (at > textStart && at + 1 < value.length && value[at] == '?' &&
+                value[at + 1] == '=' && at + 2 - start <= 75) return true;
+        }
+        return false;
+    }
+
+    private static bool rfc2047Token(char c) {
+        return c >= '!' && c <= '~' &&
+            ("()<>@,;:/[]?.= " ~ "\x22\x5c").indexOf(c) < 0;
     }
 
     private static bool uriShape(string value, bool bracketed) {

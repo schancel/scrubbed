@@ -1,5 +1,6 @@
 // Release-active integration checks for effects.warc_reader.
 import effects.warc_reader;
+import core.memory : GC;
 import std.conv : to;
 import std.digest.sha : sha256Of, toHexString;
 import std.stdio : writeln;
@@ -89,6 +90,15 @@ void main() {
         "metadata without URI");
     need(decode(record("meta", "metadata", [], "", "https://example.org/m"), 127).length == 1,
         "metadata with URI");
+    WarcRecord queryRecord;
+    auto queryReader = new WarcReader("key", (WarcRecord r) {
+        queryRecord = r; return true;
+    });
+    queryReader.feed(record("query", "response", [], "",
+        "https://example.org/?q=?value"));
+    queryReader.finish();
+    need(queryRecord.targetUri == "https://example.org/?q=?value",
+        "literal =? in target URI");
     need(decode(record("zero", "response", []), 1).length == 1,
         "zero-length block");
     WarcRecord tokenField;
@@ -167,6 +177,8 @@ void main() {
     rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
         p.feed(record("bad", "response", [], "X-Test: =?utf-8?B?QQ==?=\r\n"));
         }, "encoded word");
+    need(decode(record("literal", "response", [], "X-Test: =?value\r\n"), 127).length == 1,
+        "literal encoded-word prefix in extension value");
     rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
         p.feed(record("bad", "response", [], "WARC-Segment-Number: 1\r\n"));
         }, "segmentation");
@@ -208,5 +220,24 @@ void main() {
     catch (Exception e) { thrown = e.msg == "callback"; }
     need(thrown, "callback exception propagation");
     rejects({ callback.finish(); }, "thrown reader reuse");
-    writeln("production WARC checks passed; two near-64KiB records, aggregate=", archive.length);
+    auto largeText = record("large-text", "conversion", new ubyte[65536],
+        "Content-Type: text/plain\r\n");
+    size_t validationAllocation;
+    GC.collect();
+    GC.disable();
+    scope(exit) GC.enable();
+    auto beforeValidation = GC.stats.usedSize;
+    auto bounded = new WarcReader("key", (WarcRecord r) {
+        validationAllocation = GC.stats.usedSize - beforeValidation;
+        auto explicitCopy = r.conversionText();
+        need(explicitCopy.length == 65536 &&
+            cast(const(void)*) explicitCopy.ptr != cast(const(void)*) r.block.ptr,
+            "explicit conversion text copy");
+        return true;
+    });
+    bounded.feed(largeText); bounded.finish();
+    need(validationAllocation < 131072,
+        "implicit conversion validation allocated a second full block");
+    writeln("production WARC checks passed; two near-64KiB records, aggregate=",
+        archive.length, ", validation GC delta=", validationAllocation);
 }

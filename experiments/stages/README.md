@@ -31,14 +31,19 @@ rebuilt and again proved exact output at every count (22/245/684/2,846 ms).
 Other repository gates were running concurrently during that sweep, so its
 wall times are recorded as contended rather than used as the capacity estimate;
 the negative-control probe again exited 1 with the expected mismatch error.
+After rebasing on the derived-ID prerequisite, a later optimized sweep
+measured 4/16/67/290 ms at 500/1,000/2,000/4,000 edits; a second 4,000-edit
+run took 356 ms. Exact output equivalence and the expected negative-control
+failure both passed. This is one local sample, not a new guarantee.
 The same D source compiled without optimization measured 27/384/1,549/6,004
 ms at 500/1,000/2,000/4,000 edits in one sweep. Those debug timings must not
 be compared directly with F03's optimized result. GC timing and process
 contention add noise; the sweeps are not a fitted complexity proof.
 The isolated F03 list-vs-rope experiment reported about 60 ms / 3 MiB retained
 for the list and under 1 ms / 0.5 MiB retained for the rope on a different edit
-trace. The optimized wired trace still rises from 25–39 ms at 1,000 edits to
-about 1.3–1.7 seconds at 4,000 edits for one 1 MiB document. This list-edit
+trace. The latest sweep still grew roughly fourfold with each doubling from
+1,000 to 4,000 edits, while the absolute 4,000-edit wall time varied from
+290 ms in that sweep to over two seconds under contention. This list-edit
 path is unsuitable for a high-edit throughput caller and warrants scope/score
 review before integration; no throughput target was accepted for this
 experiment. The list remains a private, reversible representation.

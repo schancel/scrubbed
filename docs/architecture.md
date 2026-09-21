@@ -77,9 +77,10 @@ filters use it yet.
 `stages.contract` accepts a document range and makes one complete decision per
 visited document: map (same identity), reject with reason, quarantine with
 reason, or split into one or more children. The result carries ordered events;
-split children occupy their parent's position and have a deterministic
-`stage-child:v1` record key derived from parent ID, stage key and zero-based
-ordinal, plus explicit parent ID/ordinal provenance. Output names do not
+split children occupy their parent's position and have a deterministic,
+domain-separated `child:v1:` ID derived from the immediate parent ID, stage
+key and zero-based ordinal, plus explicit parent ID/ordinal provenance.
+Output names do not
 define child identity, but inputs and emitted documents must have a valid
 initialized output name. A cancellation callback is checked before a lazy
 range's `front` and after its complete decision is recorded; cancellation

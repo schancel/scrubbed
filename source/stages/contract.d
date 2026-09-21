@@ -160,10 +160,8 @@ StageResult runStage(R)(R inputs, StageDeclaration stage,
             foreach (ordinal, child; decision.documents) {
                 enforce(child.content !is null, "split child content is required");
                 child.content.size;
-                auto locator = SourceLocator(input.document.source.datasetNamespace,
-                    input.document.source.sourceKey,
-                    "stage-child:v1:" ~ inputId.text ~ ":" ~ stage.key ~ ":" ~ ordinal.to!string);
-                child.document = Document(locator, child.document.outputName);
+                child.document = Document.derivedChild(input.document, stage.key,
+                    ordinal, child.document.outputName);
                 checkedDocument(child.document);
                 result.events ~= StageEvent(EventKind.emitted, child, null,
                     inputId, ordinal, true);
@@ -250,6 +248,39 @@ unittest {
     });
     assert(repeated.events[0].payload.document.id == decisions.events[2].payload.document.id);
     assert(repeated.events[1].payload.document.id == decisions.events[3].payload.document.id);
+    auto oldTuple = "stage-child:v1:" ~ inputs[2].document.id.text ~
+        ":" ~ stage.key ~ ":0";
+    auto adversarial = Document(SourceLocator("test", "source", oldTuple),
+        OutputName("original source"));
+    assert(adversarial.id != decisions.events[2].payload.document.id);
+    assert(adversarial.id.text[0 .. "doc:v1:".length] == "doc:v1:");
+    assert(decisions.events[2].payload.document.id.text[0 .. "child:v1:".length] ==
+        "child:v1:");
+    auto renamedChildren = runStage(inputs[2 .. 3], stage, (StageDocument input) {
+        return StageDecision.split([
+            StageDocument(Document(input.document.source, OutputName("renamed first")),
+                input.content),
+            StageDocument(Document(input.document.source, OutputName("renamed second")),
+                input.content)
+        ]);
+    });
+    assert(renamedChildren.events[0].payload.document.id ==
+        decisions.events[2].payload.document.id);
+    assert(renamedChildren.events[1].payload.document.id ==
+        decisions.events[3].payload.document.id);
+    auto parentChild = decisions.events[2].payload;
+    auto nested = runStage([parentChild], stage, (StageDocument input) {
+        return StageDecision.split([
+            StageDocument(Document(input.document.source, OutputName("nested")),
+                input.content)
+        ]);
+    });
+    assert(nested.events.length == 1 && nested.events[0].isChild);
+    assert(nested.events[0].parentId == parentChild.document.id);
+    assert(nested.events[0].payload.document.id ==
+        Document.derivedChild(parentChild.document, stage.key, 0,
+            OutputName("other nested name")).id);
+    assert(nested.events[0].payload.document.id != parentChild.document.id);
     assertThrown(runStage(inputs[0 .. 1], stage, (StageDocument input) {
         auto changed = input;
         changed.document = inputs[1].document;

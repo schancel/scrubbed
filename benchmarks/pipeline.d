@@ -2,6 +2,7 @@
 module pipeline;
 
 import core.sys.posix.signal : kill, SIGKILL;
+import core.sys.posix.sys.stat : chmod, S_IRUSR, S_IXUSR, S_IRWXU;
 import core.thread : Thread;
 import std.algorithm.searching : canFind, endsWith, startsWith;
 import std.algorithm.sorting : sort;
@@ -11,13 +12,13 @@ import std.conv : to;
 import std.digest : toHexString;
 import std.digest.sha : sha256Of;
 import std.datetime : dur;
-import std.file : SpanMode, dirEntries, exists, getSize, mkdirRecurse, read, readText,
-    remove, rmdirRecurse, tempDir, write;
+import std.file : SpanMode, copy, dirEntries, exists, getSize, mkdirRecurse,
+    read, readText, remove, rename, rmdirRecurse, tempDir, write;
 import std.json : JSONValue;
 import std.path : buildPath, relativePath;
 import std.process : execute, spawnProcess, wait;
 import std.stdio : File, stderr, writeln;
-import std.string : replace, split, splitLines, strip;
+import std.string : replace, split, splitLines, strip, toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string message) {
@@ -26,6 +27,33 @@ private void require(bool condition, string message) {
 
 private string hashFile(string path) {
     return toHexString(sha256Of(read(path))).to!string;
+}
+
+private struct ExecutableSnapshot {
+    string path;
+    string sha256;
+}
+
+private string privateScratch(string prefix) {
+    auto root = buildPath(tempDir, prefix ~ randomUUID.toString);
+    mkdirRecurse(root);
+    require(chmod(root.toStringz, S_IRWXU) == 0,
+        "cannot restrict benchmark scratch directory");
+    return root;
+}
+
+private ExecutableSnapshot snapshotExecutable(string source, string root,
+                                               string name) {
+    auto target = buildPath(root, name);
+    copy(source, target);
+    require(chmod(target.toStringz, S_IRUSR | S_IXUSR) == 0,
+        "cannot make executable snapshot read-only");
+    return ExecutableSnapshot(target, hashFile(target));
+}
+
+private void verifySnapshot(ExecutableSnapshot snapshot) {
+    require(hashFile(snapshot.path) == snapshot.sha256,
+        "executable snapshot changed during benchmark");
 }
 
 private string checked(string[] args) {
@@ -89,7 +117,13 @@ private JSONValue unsupportedCases() {
         "changed-executable timing not included; paired correctness gate covers identity"]);
 }
 
+private string identityPolicy() {
+    return "private read-only executable snapshots hashed before and after all samples";
+}
+
 private void validateBuildProvenance(JSONValue report, bool comparator) {
+    require(report["binary_identity_policy"].str == identityPolicy(),
+        "report did not declare verified executable snapshot policy");
     require(("compiler" in report.object) is null &&
         ("build_flags" in report.object) is null &&
         ("scrubbed_build_command" in report.object) is null &&
@@ -412,7 +446,7 @@ private void validateRestart(JSONValue probe) {
 }
 
 private void validate(JSONValue report) {
-    require(report["schema"].str == "scrubbed-pipeline-v2", "report schema");
+    require(report["schema"].str == "scrubbed-pipeline-v3", "report schema");
     foreach (key; ["source_sha", "binary_sha256", "harness_sha256", "os",
                    "cpu"])
         require(key in report.object && report[key].str.length,
@@ -454,7 +488,7 @@ private void validate(JSONValue report) {
 }
 
 private void selfTest() {
-    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v2"),
+    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v3"),
         "source_sha": JSONValue("0".replicate(40)),
         "binary_sha256": JSONValue("0".replicate(64)),
         "harness_sha256": JSONValue("0".replicate(64)),
@@ -465,6 +499,7 @@ private void selfTest() {
         "target_binary_compiler": JSONValue("UNVERIFIED"),
         "target_binary_build_flags": JSONValue("UNVERIFIED"),
         "source_binary_mapping": JSONValue("UNVERIFIED"),
+        "binary_identity_policy": JSONValue(identityPolicy()),
         "ram_bytes": JSONValue(1024),
         "ram_source": JSONValue("/proc/meminfo MemTotal"),
         "unsupported": unsupportedCases()]);
@@ -515,7 +550,13 @@ private void selfTest() {
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "unattested target compiler negative did not fail");
+    bad = report;
+    bad["binary_identity_policy"] = "hash original path after timing";
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "post-timing original-path identity negative did not fail");
     JSONValue comparison = JSONValue([
+        "binary_identity_policy": JSONValue(identityPolicy()),
         "harness_compiler_available_version": JSONValue("LDC available"),
         "harness_reproduction_command": JSONValue("ldc2 -O3 -release"),
         "target_binary_compiler": JSONValue("UNVERIFIED"),
@@ -637,16 +678,17 @@ private void selfTest() {
     writeln("pipeline release self-test passed");
 }
 
-private void compareDos2unix(string scrubbed, string dos2unix,
-                             string reportPath) {
+private JSONValue compareDos2unix(string scrubbed, string dos2unix,
+                                  string reportPath, bool injectSwap = false) {
     auto os = checked(["uname", "-s"]);
     require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
-    auto toolVersion = checked([dos2unix, "--version"]).splitLines[0];
+    auto root = privateScratch("scrubbed-dos2unix-");
+    scope(exit) rmdirRecurse(root);
+    auto scrubbedCopy = snapshotExecutable(scrubbed, root, "scrubbed-snapshot");
+    auto dos2unixCopy = snapshotExecutable(dos2unix, root, "dos2unix-snapshot");
+    auto toolVersion = checked([dos2unixCopy.path, "--version"]).splitLines[0];
     require(expectedDos2unixVersion(toolVersion),
         "expected official dos2unix 7.5.7, got " ~ toolVersion);
-    auto root = buildPath(tempDir, "scrubbed-dos2unix-" ~ randomUUID.toString);
-    mkdirRecurse(root);
-    scope(exit) rmdirRecurse(root);
     auto input = buildPath(root, "input.txt");
     auto output = buildPath(root, "output.txt");
     auto file = File(input, "wb");
@@ -658,9 +700,9 @@ private void compareDos2unix(string scrubbed, string dos2unix,
         bool useScrubbed = index % 2 == 0;
         if (exists(output)) remove(output);
         auto command = useScrubbed ?
-            [scrubbed, "--input", input, "--output", output,
+            [scrubbedCopy.path, "--input", input, "--output", output,
              "--filters", "normalize-line-endings", "--threads", "1"] :
-            [dos2unix, "-n", input, output];
+            [dos2unixCopy.path, "-n", input, output];
         auto sample = timed(command, os == "Darwin");
         require(exists(output), "comparator produced no output");
         auto outputBytes = readText(output);
@@ -673,17 +715,26 @@ private void compareDos2unix(string scrubbed, string dos2unix,
         sample["output_sha256"] = hashFile(output);
         sample["exact_output"] = true;
         samples ~= sample;
+        if (injectSwap && index == 1) {
+            // The caller supplies only an owned disposable path in this mode.
+            auto replacement = buildPath(root, "invalid-original-replacement");
+            write(replacement, "not an executable\n");
+            rename(replacement, dos2unix);
+        }
     }
+    verifySnapshot(scrubbedCopy);
+    verifySnapshot(dos2unixCopy);
     require(samples.length == 4 && samples[0]["tool"].str == "scrubbed" &&
         samples[1]["tool"].str == "dos2unix" &&
         samples[2]["tool"].str == "scrubbed" &&
         samples[3]["tool"].str == "dos2unix", "A/B/A/B order");
-    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-comparator-v2")]);
+    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-comparator-v3")]);
     report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
     report["source_binary_mapping"] = "UNVERIFIED";
     report["harness_sha256"] = hashFile("benchmarks/pipeline.d");
-    report["scrubbed_binary_sha256"] = hashFile(scrubbed);
-    report["dos2unix_binary_sha256"] = hashFile(dos2unix);
+    report["scrubbed_binary_sha256"] = scrubbedCopy.sha256;
+    report["dos2unix_binary_sha256"] = dos2unixCopy.sha256;
+    report["binary_identity_policy"] = identityPolicy();
     report["dos2unix_source_tar_sha256"] =
         "669ee27120ae71589f638fe3a167d6ea54f8633f5ab1b282551bd7a7c9510dfa";
     report["source_tar_binary_mapping"] = "UNVERIFIED; observed manual build";
@@ -719,12 +770,33 @@ private void compareDos2unix(string scrubbed, string dos2unix,
         "private comparator report path/host");
     if (reportPath.length) write(reportPath, published ~ "\n");
     else writeln(published);
+    return report;
+}
+
+private void selfTestSnapshot(string scrubbed, string dos2unix) {
+    auto root = privateScratch("scrubbed-snapshot-test-");
+    scope(exit) rmdirRecurse(root);
+    auto disposableOriginal = buildPath(root, "dos2unix-original");
+    copy(dos2unix, disposableOriginal);
+    auto expectedHash = hashFile(disposableOriginal);
+    auto report = compareDos2unix(scrubbed, disposableOriginal,
+        buildPath(root, "race-report.json"), true);
+    require(hashFile(disposableOriginal) != expectedHash &&
+        report["dos2unix_binary_sha256"].str == expectedHash &&
+        report["samples"][1]["output_sha256"].str ==
+            report["samples"][3]["output_sha256"].str &&
+        report["samples"][3]["exact_output"].boolean,
+        "atomic original swap changed reported/executed snapshot identity");
+    writeln("atomic original-path swap remained snapshot-bound");
 }
 
 int main(string[] args) {
     try {
         if (args.length == 2 && args[1] == "--self-test") {
             selfTest(); return 0;
+        }
+        if (args.length == 4 && args[1] == "--self-test-snapshot") {
+            selfTestSnapshot(args[2], args[3]); return 0;
         }
         if ((args.length == 4 || args.length == 5) &&
             args[1] == "--compare-dos2unix") {
@@ -735,9 +807,9 @@ int main(string[] args) {
             "usage: pipeline SCRUBBED_BINARY [REPORT_JSON]");
         auto os = checked(["uname", "-s"]);
         require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
-        auto root = buildPath(tempDir, "scrubbed-pipeline-" ~ randomUUID.toString);
-        mkdirRecurse(root);
+        auto root = privateScratch("scrubbed-pipeline-");
         scope(exit) rmdirRecurse(root);
+        auto binaryCopy = snapshotExecutable(args[1], root, "scrubbed-snapshot");
         JSONValue[] cases;
         JSONValue[] transitions;
         foreach (index, name; ["many-small", "few-large"]) {
@@ -746,7 +818,7 @@ int main(string[] args) {
             auto input = buildPath(root, name ~ "-input");
             auto output = buildPath(root, name ~ "-output");
             fixture(input, files, records);
-            auto command = [args[1], "--input", input, "--output", output,
+            auto command = [binaryCopy.path, "--input", input, "--output", output,
                 "--filters", "normalize-line-endings,strip-control", "--threads", "1"];
             cases ~= caseRun(name, command, input, output, files, records,
                 os == "Darwin", false);
@@ -758,9 +830,10 @@ int main(string[] args) {
                 "steps": manifestTransitions(command, input, output, files,
                     records, os == "Darwin")]);
         }
-        JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v2")]);
+        JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v3")]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
-        report["binary_sha256"] = hashFile(args[1]);
+        report["binary_sha256"] = binaryCopy.sha256;
+        report["binary_identity_policy"] = identityPolicy();
         report["source_binary_mapping"] = "UNVERIFIED";
         report["harness_sha256"] = hashFile("benchmarks/pipeline.d");
         report["os"] = os ~ " " ~ checked(["uname", "-r"]) ~ " " ~
@@ -781,8 +854,9 @@ int main(string[] args) {
         report["target_binary_build_flags"] = "UNVERIFIED";
         report["cases"] = JSONValue(cases);
         report["manifest_transitions"] = JSONValue(transitions);
-        report["restart_probe"] = restartProbe(args[1], root, os == "Darwin");
+        report["restart_probe"] = restartProbe(binaryCopy.path, root, os == "Darwin");
         validateRestart(report["restart_probe"]);
+        verifySnapshot(binaryCopy);
         report["unsupported"] = unsupportedCases();
         validate(report);
         if (args.length == 3) write(args[2], report.toString ~ "\n");

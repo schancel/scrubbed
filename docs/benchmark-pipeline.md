@@ -28,6 +28,8 @@ dub test --compiler=ldc2
 dub build --build=release --compiler=ldc2
 ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
 /tmp/scrubbed-pipeline --self-test
+/tmp/scrubbed-pipeline --self-test-snapshot "$(pwd)/scrubbed" \
+  /tmp/dos2unix-7.5.7/dos2unix
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" > /tmp/scrubbed-pipeline-result.json
 # To preserve a publication-safe raw sample in the repository instead:
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" benchmarks/pipeline-sample.json
@@ -41,6 +43,10 @@ The checked-in
 `cli_baseline.d --self-test` separately rejects prefix-collision ftfy and
 wcwidth versions. `experiments/content/bench.d` now checks equality with a
 runtime throw, even when assertions are disabled by `-release`.
+The separate release snapshot self-test copies dos2unix into an owned
+disposable path, atomically replaces that original path with an invalid
+executable after the first comparator sample, and requires the later sample
+and published hash to remain bound to the pre-timing snapshot.
 
 The timing runner is paired with the pre-existing release-active, actual-binary
 manifest boundary check. Run it on the *same shipping executable* before
@@ -62,7 +68,7 @@ is a correctness gate, not a timed sample, and it does not claim power-loss
 durability. The optional marker-instrumented build described in
 [`local-manifest.md`](local-manifest.md) covers additional crash windows.
 
-The version-2 reports use only path tokens in their command templates; they do not embed
+The version-3 reports use only path tokens in their command templates; they do not embed
 checkout, fixture, manifest, executable, or hostname paths. They include the
 source revision observed at run time and exact binary/harness/config hashes,
 the available host LDC version and harness reproduction command,
@@ -89,6 +95,15 @@ binary. The supplied target binary's compiler and build flags are also
 `UNVERIFIED`; `harness_compiler_available_version` identifies only an LDC
 installation available on the benchmark host, while
 `harness_reproduction_command` is a recipe, not an attested build log.
+Before timing, the D runner copies each supplied executable into its own
+mode-restricted UUID scratch directory, makes the copy read-only/executable,
+hashes that snapshot, executes only the snapshot for every sample and restart,
+and checks its hash again before publication. The reported binary hash is the
+*executed snapshot* hash; changes to the caller's original pathname after
+snapshot creation cannot mix binary versions in one report. A source-path
+replacement during the initial copy can at worst produce a snapshot whose
+actual bytes are hashed and tested; source-to-binary provenance remains
+unverified. All snapshots are removed with the benchmark's own scratch tree.
 The filter digest hashes the selected filter string, not the
 manifest's entire effective canonical configuration (which also includes
 output route, binary and other policy bytes).

@@ -60,7 +60,8 @@ durability. The optional marker-instrumented build described in
 The report uses only path tokens in its command templates; it does not embed
 checkout, fixture, manifest, executable, or hostname paths. It includes the
 source revision observed at run time and exact binary/harness/config hashes,
-compiler and build flags, OS/architecture/CPU, per-run status, phase, wall,
+compiler and build flags, OS/architecture/CPU, measured physical RAM and its
+source, per-run status, phase, wall,
 user and system CPU seconds, peak process RSS, fixture input bytes, expected
 output bytes, and raw samples. Fixture and expected-output byte counts are
 calculated from the generated corpus; they are not independently observed I/O
@@ -81,6 +82,14 @@ HEAD does not prove which source commit produced an externally supplied
 binary. The filter digest hashes the selected filter string, not the
 manifest's entire effective canonical configuration (which also includes
 output route, binary and other policy bytes).
+On Linux, the D harness reads `model name`, `Hardware`, or `Processor` from
+`/proc/cpuinfo` and `MemTotal` in `kB` from `/proc/meminfo`. If either cannot
+be parsed, it exits nonzero without publishing a report; it never records a
+placeholder model or `ram_bytes=-1`. The release self-test includes valid and
+invalid Linux metadata plus a cross-host negative for a fabricated capacity
+claim. Every generated report marks >RAM *not attempted* pending a host-specific
+RAM/scratch/time preflight; the Apple capacity finding below belongs only to
+the committed Apple sample and its documentation.
 
 "First" means the first process for a freshly generated tree, not OS-cold
 page cache. "Warm" means another process with its application cache empty;

@@ -51,6 +51,44 @@ private bool expectedDos2unixVersion(string value) {
     return value == "dos2unix 7.5.7 (2026-08-27)";
 }
 
+private string linuxCpuModel(string cpuinfo) {
+    foreach (key; ["model name", "Hardware", "Processor"]) {
+        foreach (line; cpuinfo.splitLines) {
+            auto parts = line.split(":");
+            if (parts.length == 2 && parts[0].strip == key &&
+                parts[1].strip.length) return parts[1].strip;
+        }
+    }
+    throw new Exception("Linux /proc/cpuinfo lacks a CPU model");
+}
+
+private long linuxRamBytes(string meminfo) {
+    long result;
+    size_t matches;
+    foreach (line; meminfo.splitLines) {
+        auto parts = line.split(":");
+        if (parts.length != 2 || parts[0] != "MemTotal") continue;
+        auto fields = parts[1].strip.split();
+        require(fields.length == 2 && fields[1] == "kB",
+            "invalid Linux MemTotal units");
+        auto kib = fields[0].to!long;
+        require(kib > 0 && kib <= long.max / 1024,
+            "invalid Linux MemTotal value");
+        result = kib * 1024;
+        matches++;
+    }
+    require(matches == 1, "Linux /proc/meminfo must have one MemTotal");
+    return result;
+}
+
+private JSONValue unsupportedCases() {
+    return arr(["OS cold cache not controlled",
+        "peak open FDs and GC not instrumented",
+        "actual syscall read/write bytes not observable",
+        "greater-than-RAM case not attempted; verify host RAM, scratch, and time budget before running",
+        "changed-executable timing not included; paired correctness gate covers identity"]);
+}
+
 private double elapsed(string value) {
     double result;
     foreach (field; value.split(":")) result = result * 60 + field.to!double;
@@ -319,6 +357,12 @@ private void validate(JSONValue report) {
     }
     require(report["source_binary_mapping"].str == "UNVERIFIED",
         "unverified source/binary relation must not be claimed verified");
+    require(report["ram_bytes"].integer > 0 &&
+        (report["ram_source"].str == "sysctl hw.memsize" ||
+         report["ram_source"].str == "/proc/meminfo MemTotal"),
+        "RAM metadata was not measured");
+    require(report["unsupported"].toString == unsupportedCases().toString,
+        "unsupported status must be host-neutral and complete");
     require(report["cases"].array.length > 0, "zero cases");
     foreach (item; report["cases"].array) {
         require(item["samples"].array.length == 3, "zero/partial samples");
@@ -341,7 +385,10 @@ private void selfTest() {
         "harness_sha256": JSONValue("0".replicate(64)), "os": JSONValue("x"),
         "cpu": JSONValue("x"), "compiler": JSONValue("x"),
         "build_flags": JSONValue("x"),
-        "source_binary_mapping": JSONValue("UNVERIFIED")]);
+        "source_binary_mapping": JSONValue("UNVERIFIED"),
+        "ram_bytes": JSONValue(1024),
+        "ram_source": JSONValue("/proc/meminfo MemTotal"),
+        "unsupported": unsupportedCases()]);
     JSONValue sample = JSONValue(["exact_output": JSONValue(true),
         "status": JSONValue(0)]);
     report["cases"] = JSONValue([JSONValue(["samples":
@@ -378,6 +425,28 @@ private void selfTest() {
     failed = false;
     try { validate(bad); } catch (Exception) { failed = true; }
     require(failed, "hostile build flags negative did not fail");
+    bad = report;
+    bad["ram_bytes"] = -1;
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "unmeasured Linux RAM negative did not fail");
+    bad = report;
+    bad["unsupported"] = arr(["greater-than-RAM unsafe on measured 16 GiB RAM and 23.75 GiB scratch"]);
+    failed = false;
+    try { validate(bad); } catch (Exception) { failed = true; }
+    require(failed, "cross-host capacity claim negative did not fail");
+    require(linuxCpuModel("processor : 0\nmodel name : Example CPU\n") ==
+        "Example CPU" &&
+        linuxRamBytes("MemTotal: 16384 kB\n") == 16_777_216,
+        "Linux hardware metadata parse positive failed");
+    failed = false;
+    try { linuxRamBytes("MemTotal: unknown MB\n"); }
+    catch (Exception) { failed = true; }
+    require(failed, "invalid Linux RAM negative did not fail");
+    failed = false;
+    try { linuxCpuModel("processor : 0\n"); }
+    catch (Exception) { failed = true; }
+    require(failed, "missing Linux CPU negative did not fail");
     bad = report;
     bad["source_binary_mapping"] = "VERIFIED";
     failed = false;
@@ -564,20 +633,19 @@ int main(string[] args) {
             checked(["uname", "-m"]);
         report["cpu"] = os == "Darwin" ?
             checked(["sysctl", "-n", "machdep.cpu.brand_string"]) :
-            "see /proc/cpuinfo; not captured";
+            linuxCpuModel(readText("/proc/cpuinfo"));
         report["ram_bytes"] = os == "Darwin" ?
-            checked(["sysctl", "-n", "hw.memsize"]).to!long : -1;
+            checked(["sysctl", "-n", "hw.memsize"]).to!long :
+            linuxRamBytes(readText("/proc/meminfo"));
+        report["ram_source"] = os == "Darwin" ?
+            "sysctl hw.memsize" : "/proc/meminfo MemTotal";
         report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
         report["build_flags"] = "dub build --build=release --compiler=ldc2; ldc2 -O3 -release benchmarks/pipeline.d";
         report["cases"] = JSONValue(cases);
         report["manifest_transitions"] = JSONValue(transitions);
         report["restart_probe"] = restartProbe(args[1], root, os == "Darwin");
         validateRestart(report["restart_probe"]);
-        report["unsupported"] = arr(["OS cold cache not controlled",
-            "peak open FDs and GC not instrumented",
-            "actual syscall read/write bytes not observable",
-            "greater-than-RAM unsafe on measured 16 GiB RAM and 23.75 GiB scratch",
-            "changed-executable timing not included; paired correctness gate covers identity"]);
+        report["unsupported"] = unsupportedCases();
         validate(report);
         if (args.length == 3) write(args[2], report.toString ~ "\n");
         else writeln(report.toString);

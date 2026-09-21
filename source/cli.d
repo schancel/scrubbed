@@ -199,11 +199,15 @@ void processOne(string file, string inputRoot, string outputRoot,
 
     string cleaned;
     {
+        if (getSize(file) != reservedBytes)
+            throw new Exception("input changed size after admission: " ~ file);
         // Close the mapping before rename: Windows does not grant delete/
         // rename sharing to MmFile's read handle. Only copy when a no-op (or
         // custom slicing) filter returns storage that aliases the mapping.
-        scope mm = new MmFile(file);
-        if (mm.length != reservedBytes)
+        // A fixed-size map cannot transiently map beyond the byte token if
+        // the file grows after traversal but before this open.
+        scope mm = new MmFile(file, MmFile.Mode.read, reservedBytes, null);
+        if (getSize(file) != reservedBytes)
             throw new Exception("input changed size after admission: " ~ file);
         auto text = cast(string)(cast(ubyte[]) mm[]);
         cleaned = chain.run(text);

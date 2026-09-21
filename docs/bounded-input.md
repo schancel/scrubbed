@@ -13,10 +13,12 @@ The scheduler exposes current and peak counters for each ceiling, and a
 blocking join waits for every submitted task before returning.
 
 A file larger than the byte ceiling is skipped with a diagnostic and makes
-the command exit nonzero. If its mapped length differs from the size reserved
-during traversal, it is likewise skipped rather than exceeding the byte
-budget. A file that is modified *after* mapping may still fail during reading;
-this is not a stable snapshot protocol. Empty files stay supported. The
+the command exit nonzero. For a nonempty file, the CLI checks size before
+opening, maps exactly its reserved byte count (never the grown full length),
+and checks size again before reading. A detected change is skipped rather
+than exceeding the byte budget. A file modified between those checks, or
+*after* mapping, may still fail during reading; this is not a stable snapshot
+protocol. Empty files use a size check on an opened handle. The
 future windowed-input work can replace the single-file rejection policy.
 
 Traversal and processing can now overlap. A symlink found later in a tree

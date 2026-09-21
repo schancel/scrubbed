@@ -48,8 +48,11 @@ final class BoundedInput {
         this.reportFailure = reportFailure;
         mutex = new Mutex;
         changed = new Condition(mutex);
+        // finish(true) enlists its caller as a worker. Keep the total
+        // processing callbacks within --threads even when the descriptor
+        // ceiling is configured higher than the thread count.
         if (threads > 1)
-            pool = new TaskPool(threads);
+            pool = new TaskPool(threads - 1);
     }
 
     /// false means a prior fault or explicit cancellation stopped admission.
@@ -183,7 +186,7 @@ unittest {
     }
 
     auto release = new Semaphore(0);
-    auto held = new BoundedInput(InputLimits(2, 4, 1), 2,
+    auto held = new BoundedInput(InputLimits(2, 4, 1), 3,
         (string path, ulong bytes) { release.wait(); },
         (string path, Throwable error) { assert(0, error.msg); });
     foreach (i; 0 .. 4) assert(held.submit(i.to!string, 1));
@@ -195,6 +198,27 @@ unittest {
     auto drained = held.finish();
     assert(drained.succeeded == 4 && drained.reservedBytes == 0 &&
         drained.queuedDocuments == 0 && drained.workerDescriptors == 0);
+
+    auto entered = new Semaphore(0);
+    auto unblock = new Semaphore(0);
+    auto threadCap = new BoundedInput(InputLimits(3, 3, 3), 2,
+        (string path, ulong bytes) {
+            entered.notify();
+            unblock.wait();
+        },
+        (string path, Throwable error) { assert(0, error.msg); });
+    foreach (i; 0 .. 3) assert(threadCap.submit(i.to!string, 1));
+    InputCounts joined;
+    auto joiner = new Thread({ joined = threadCap.finish(); });
+    joiner.start();
+    entered.wait();
+    entered.wait();
+    Thread.sleep(20.msecs);
+    assert(threadCap.snapshot().peakWorkerDescriptors == 2);
+    foreach (i; 0 .. 3) unblock.notify();
+    joiner.join();
+    assert(joined.succeeded == 3 && joined.workerDescriptors == 0 &&
+        joined.reservedBytes == 0);
 
     shared size_t faults;
     auto failing = new BoundedInput(InputLimits(2, 2, 1), 4,

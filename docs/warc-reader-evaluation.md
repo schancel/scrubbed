@@ -60,6 +60,9 @@ member, truncated/corrupt zstd frame, compressed-input cap, and a highly
 compressible oversized block for each codec. These are code checks via
 exceptions, not D `assert`, so `-release` does not remove them. One-byte input
 chunks and 127-byte output chunks stress progress and boundary handling.
+Plain WARC, gzip WARC, and zstd WARC reject zero-record input; the compressed
+entry checks also reject empty input when the supplied parser already holds
+records from an earlier call.
 Unknown fields are ignored. The probe requires Target-URI for every evaluated
 type except `warcinfo` (forbidden) and `metadata` (optional), consistent with
 the WARC 1.1 field rule. Field names are handled case-insensitively, but

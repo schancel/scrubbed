@@ -133,7 +133,10 @@ class Parser {
             pending = pending[total .. $].dup;
         }
     }
-    void finish() { require(pending.length == 0, "truncated record"); }
+    void finish() {
+        require(pending.length == 0, "truncated record");
+        require(records.length > 0, "empty WARC archive");
+    }
 }
 
 import std.string : endsWith, replace, split, strip, toLower;
@@ -170,6 +173,7 @@ ubyte[] zstdFrame(const(ubyte)[] raw) {
 }
 
 void decodeGzip(const(ubyte)[] archive, Parser parser, size_t step = chunk) {
+    require(archive.length > 0, "empty gzip WARC archive");
     require(archive.length <= maxCompressed, "compressed input cap");
     size_t offset;
     while (offset < archive.length) {
@@ -207,6 +211,7 @@ void decodeGzip(const(ubyte)[] archive, Parser parser, size_t step = chunk) {
 }
 
 void decodeZstd(const(ubyte)[] archive, Parser parser, size_t step = chunk) {
+    require(archive.length > 0, "empty zstd WARC archive");
     require(archive.length <= maxCompressed, "compressed input cap");
     size_t offset;
     while (offset < archive.length) {
@@ -309,10 +314,15 @@ void main(string[] args) {
         require(fdCount() == fdBefore, "fixture descriptor close");
     }
     auto plain = new Parser("archive-key");
+    rejects({ auto empty = new Parser("k"); empty.finish(); }, "empty plain WARC");
     foreach (b; raw) plain.feed((&b)[0 .. 1]);
     plain.finish();
     auto g = new Parser("archive-key"); decodeGzip(gz, g, 1);
     auto z = new Parser("archive-key"); decodeZstd(zs, z, 1);
+    rejects({ auto empty = new Parser("k"); decodeGzip([], empty); }, "empty gzip WARC");
+    rejects({ decodeGzip([], g); }, "empty gzip with prepopulated parser");
+    rejects({ auto empty = new Parser("k"); decodeZstd([], empty); }, "empty zstd WARC");
+    rejects({ decodeZstd([], z); }, "empty zstd with prepopulated parser");
     require(g.records.length == 2 && z.records.length == 2, "record count");
     require(plain.records[0].id == "<urn:uuid:00000000-0000-0000-0000-000000000001>" &&
         plain.records[1].id == "<urn:uuid:00000000-0000-0000-0000-000000000002>" &&
@@ -409,5 +419,5 @@ void main(string[] args) {
         " max_rss_after=", maxRss(), " gc_used_before=", gcBefore,
         " gc_used_after_collect=", GC.stats.usedSize,
         " fd_before=", fdBefore, " fd_after=", fdAfter);
-    writeln("PASS: 2 main records, warcinfo/metadata fixtures, gzip members, zstd frames, 19 release-active negatives");
+    writeln("PASS: 2 main records, warcinfo/metadata fixtures, gzip members, zstd frames, 24 release-active negatives");
 }

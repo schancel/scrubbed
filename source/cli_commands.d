@@ -2,7 +2,7 @@
 module cli_commands;
 
 import argparse;
-import cli : runApp;
+import cli : runApp, runExtract;
 import std.conv : to;
 import std.stdio : stderr;
 import std.string : startsWith;
@@ -58,11 +58,13 @@ struct Repair {
     mixin ProcessingOptions;
 }
 
-@(Command("extract", "x").Description("Extract text before filtering (not yet available)."))
+@(Command("extract", "x").Description("Export a bounded selected HTML parse tree."))
 struct Extract {
     @(NamedArgument("input", "i").Description("Input path")) string input;
     @(NamedArgument("output", "o").Description("Output path")) string output;
     @(NamedArgument("format", "f").Description("Extraction format")) string format;
+    @(NamedArgument("charset").Description("Declared UTF-8/UTF-16LE/UTF-16BE charset"))
+    string charset;
 }
 
 @(Command("completion").Description("Generate shell setup or command/option-name candidates; use completion init --bash, --zsh or --fish."))
@@ -140,8 +142,11 @@ int runCommands(string[] argv) {
     if (!result) return result.exitCode;
     return commands.command.matchCmd!((cmd) {
         static if (is(typeof(cmd) == Extract)) {
-            stderr.writeln("scrubbed: extract is not yet available");
-            return 2;
+            if (cmd.format != "tree-json" || !cmd.input.length || !cmd.output.length) {
+                stderr.writeln("scrubbed: extract requires --input, --output and --format=tree-json");
+                return 2;
+            }
+            return runExtract(cmd.input, cmd.output, cmd.charset);
         } else static if (is(typeof(cmd) == Completion)) {
             stderr.writeln("scrubbed: use completion init or completion complete");
             return 2;

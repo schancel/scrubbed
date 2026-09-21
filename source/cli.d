@@ -12,7 +12,11 @@ import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
 import effects.failure_policy : recordDocumentFailure;
 import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
-import domain.document : DocumentId, SourceLocator;
+import domain.document : Document, DocumentId, OutputName, SourceLocator;
+import effects.html_tree : maxRawBytes;
+import effects.html_tree_json_stage : htmlTreeJsonPlan;
+import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
+    StageDocument, runStage;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
@@ -234,6 +238,108 @@ private FilterSpec[] loadFilterConfig(string path) {
 private string destinationFor(string file, string inputRoot, string outputRoot,
                               bool inputIsDir) {
     return inputIsDir ? buildPath(outputRoot, relativePath(file, inputRoot)) : outputRoot;
+}
+
+/// Opt-in local selected-tree export. It does not use the filter/manifest route.
+int runExtract(string requestedInput, string requestedOutput,
+    string declaredCharset = null) {
+    if (!exists(requestedInput) || isSymlink(requestedInput))
+        throw new Exception("extract input must be an existing plain path");
+    if (exists(requestedOutput) && isSymlink(requestedOutput))
+        throw new Exception("extract output must not be a symlink");
+    rejectUnresolvableAncestorLinks(requestedInput);
+    rejectUnresolvableAncestorLinks(requestedOutput);
+    auto input = resolveExistingPrefix(requestedInput);
+    auto output = resolveExistingPrefix(requestedOutput);
+    const isTree = isDir(input);
+    if (!isTree && !isFile(input))
+        throw new Exception("extract input is not a regular file or directory");
+    if (isTree && pathIsWithin(output, input))
+        throw new Exception("extract output must not be inside input tree");
+    preflightOutput(output, isTree);
+    auto sourceRoot = isTree ? input : dirName(input);
+    auto outputRoot = isTree ? output : dirName(output);
+    auto plan = htmlTreeJsonPlan(declaredCharset);
+    auto specification = plan.stages[0].declaration;
+    auto stage = StageDeclaration(specification.key.idup, specification.passMode,
+        ResourceDeclaration(specification.resources.cpuSlots,
+            specification.resources.memoryBytes));
+    size_t quarantined, published;
+    auto scheduler = new BoundedInput(InputLimits(1, maxRawBytes + 1, 1), 1,
+        (string file, ulong reservedBytes) {
+            if (isSymlink(file) || !isFile(file))
+                throw new Exception("extract input changed to non-regular file: " ~ file);
+            auto recordKey = relativePath(file, sourceRoot);
+            auto name = recordKey ~ ".tree.json";
+            auto destination = isTree ? buildPath(output, name) : output;
+            preflightDestination(destination, outputRoot);
+            stat_t inputStat, outputStat;
+            if (stat(file.toStringz, &inputStat) != 0)
+                throw new Exception("cannot stat extract input: " ~ file);
+            if (exists(destination) && stat(destination.toStringz, &outputStat) == 0 &&
+                inputStat.st_dev == outputStat.st_dev && inputStat.st_ino == outputStat.st_ino)
+                throw new Exception("extract output aliases input: " ~ destination);
+            auto document = Document(SourceLocator("local-html:v1", sourceRoot,
+                recordKey), OutputName(name));
+            if (reservedBytes > maxRawBytes) {
+                stderr.writefln("SKIP %s DocumentId %s: rawLimit", file, document.id.text);
+                ++quarantined;
+                return;
+            }
+            ubyte[] raw = new ubyte[cast(size_t)reservedBytes];
+            {
+                scope source = File(file, "rb");
+                if (source.size != reservedBytes)
+                    throw new Exception("extract input changed size after admission: " ~ file);
+                if (source.rawRead(raw).length != raw.length || source.size != reservedBytes)
+                    throw new Exception("extract input changed while reading: " ~ file);
+            }
+            auto content = new Content([ContentPiece.own(raw)]);
+            auto result = runStage([StageDocument(document, content)], stage,
+                plan.stages[0].transform);
+            if (result.events.length != 1)
+                throw new Exception("extract stage produced unexpected decision count");
+            auto event = result.events[0];
+            if (event.kind == EventKind.quarantined || event.kind == EventKind.rejected) {
+                stderr.writefln("SKIP %s DocumentId %s: %s", file,
+                    document.id.text, event.reason);
+                ++quarantined;
+                return;
+            }
+            if (event.kind != EventKind.emitted || event.payload.document.id != document.id)
+                throw new Exception("extract stage changed document identity");
+            ensurePlainDirectory(outputRoot, dirName(destination));
+            writeAtomicPieces(destination, event.payload.content.pieces());
+            ++published;
+        }, (string file, Throwable error) {
+            stderr.writefln("FATAL %s: %s", file, error.msg);
+        }, (Throwable error) { return true; });
+    try {
+        if (isTree) {
+            foreach (entry; dirEntries(input, SpanMode.depth, false)) {
+                if (entry.isSymlink)
+                    throw new Exception("refusing symlink in extract input tree: " ~ entry.name);
+                if (!entry.isFile) continue;
+                auto size = getSize(entry.name);
+                if (!scheduler.submit(entry.name, size > maxRawBytes ? maxRawBytes + 1 : size))
+                    throw new Exception("extract admission canceled");
+            }
+        } else {
+            auto size = getSize(input);
+            if (!scheduler.submit(input, size > maxRawBytes ? maxRawBytes + 1 : size))
+                throw new Exception("extract admission canceled");
+        }
+    } catch (Exception error) {
+        scheduler.cancel();
+        scheduler.finish();
+        throw error;
+    }
+    scheduler.finish();
+    if (scheduler.fatal() !is null)
+        throw new Exception("fatal extract processing failure: " ~ scheduler.fatal().msg);
+    stderr.writefln("extract done: %s published, %s quarantined", published,
+        quarantined);
+    return quarantined ? 1 : 0;
 }
 
 /// Returns whether the filter chain changed the document. In dry-run mode the

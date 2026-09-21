@@ -3,7 +3,7 @@ module pipeline;
 
 import core.sys.posix.signal : kill, SIGKILL;
 import core.thread : Thread;
-import std.algorithm.searching : canFind, startsWith;
+import std.algorithm.searching : canFind, endsWith, startsWith;
 import std.algorithm.sorting : sort;
 import std.array : replicate;
 import std.ascii : isHexDigit;
@@ -100,7 +100,50 @@ private bool allSkipped(string output, size_t expected) {
         output.split("status=skipped").length - 1 == expected;
 }
 
-private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0) {
+private JSONValue treeStatuses(string output, size_t files) {
+    JSONValue[string] byFile;
+    foreach (line; output.splitLines) {
+        if (!line.startsWith("EXPLAIN\tinput=")) continue;
+        auto fields = line.split("\t");
+        require(fields.length >= 3, "malformed EXPLAIN record");
+        string filename;
+        foreach (i; 0 .. files) {
+            auto candidate = "doc-" ~ i.to!string ~ ".txt";
+            if (fields[1].endsWith(candidate ~ "\"")) {
+                require(filename.length == 0, "ambiguous EXPLAIN input");
+                filename = candidate;
+            }
+        }
+        require(filename.length && (filename in byFile) is null,
+            "unknown or duplicate EXPLAIN input");
+        string status;
+        foreach (field; fields) {
+            if (field.startsWith("status=")) {
+                require(status.length == 0, "duplicate EXPLAIN status");
+                status = field[7 .. $];
+            }
+        }
+        require(status.length != 0, "missing EXPLAIN status");
+        byFile[filename] = JSONValue(status);
+    }
+    require(byFile.length == files, "missing EXPLAIN input status");
+    return JSONValue(byFile);
+}
+
+private void requireTreeStatus(JSONValue sample, size_t files,
+                               string first, string other) {
+    auto byFile = sample["status_by_file"];
+    require(byFile.object.length == files, "status map size differs");
+    foreach (i; 0 .. files) {
+        auto name = "doc-" ~ i.to!string ~ ".txt";
+        require((name in byFile.object) !is null &&
+            byFile[name].str == (i == 0 ? first : other),
+            "wrong EXPLAIN status for " ~ name);
+    }
+}
+
+private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0,
+                        size_t treeFiles = 0) {
     auto result = execute((mac ? ["/usr/bin/time", "-l", "-p"] :
         ["/usr/bin/time", "-v"]) ~ command);
     require(result.status == 0, "timed command failed: " ~ result.output);
@@ -119,6 +162,7 @@ private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0) {
     sample["retry"] = cast(long) retryCount;
     sample["changed"] = cast(long) changedCount;
     sample["unchanged"] = cast(long) unchangedCount;
+    if (treeFiles) sample["status_by_file"] = treeStatuses(result.output, treeFiles);
     foreach (line; result.output.splitLines) {
         auto s = line.strip;
         if (mac) {
@@ -159,7 +203,7 @@ private void fixture(string root, size_t files, size_t records) {
 }
 
 private JSONValue verifyTree(string input, string output, size_t files,
-                             size_t records) {
+                             size_t records, bool firstChanged = false) {
     require(exists(output), "missing output tree");
     string[] found;
     foreach (entry; dirEntries(output, SpanMode.depth, false)) {
@@ -174,7 +218,13 @@ private JSONValue verifyTree(string input, string output, size_t files,
         auto name = "doc-" ~ i.to!string ~ ".txt";
         require(found.canFind(name), "missing expected output file");
         auto outPath = buildPath(output, name);
-        require(readText(outPath) == canonical, "wrong output bytes");
+        string expected = canonical;
+        if (firstChanged && i == 0) {
+            auto edited = canonical.dup;
+            edited[0] = 'A';
+            expected = cast(string) edited;
+        }
+        require(readText(outPath) == expected, "wrong output bytes in " ~ name);
         identities ~= JSONValue(["path": JSONValue(name),
             "input_sha256": JSONValue(hashFile(buildPath(input, name))),
             "output_sha256": JSONValue(hashFile(outPath))]);
@@ -191,7 +241,11 @@ private JSONValue caseRun(string name, string[] command, string input,
         if (!manifest || run == 0) {
             if (exists(output)) rmdirRecurse(output);
         }
-        auto sample = timed(command, mac, manifest && run > 0 ? files : 0);
+        auto sample = timed(command, mac, manifest && run > 0 ? files : 0,
+            manifest ? files : 0);
+        if (manifest) requireTreeStatus(sample, files,
+            run == 0 ? "changed" : "skipped",
+            run == 0 ? "changed" : "skipped");
         identities = verifyTree(input, output, files, records);
         sample["exact_output"] = true;
         long observedInputBytes, observedOutputBytes;
@@ -230,39 +284,39 @@ private JSONValue manifestTransitions(string[] command, string input,
     JSONValue[] steps;
     auto firstFile = buildPath(input, "doc-0.txt");
     auto bytes = cast(ubyte[]) read(firstFile);
-    bool altered;
-    foreach (ref byteValue; bytes) {
-        if (byteValue == 1) { byteValue = 2; altered = true; break; }
-    }
-    require(altered, "fixture lacks control byte for mutation");
+    require(bytes.length && bytes[0] == 'a', "fixture lacks visible mutation site");
+    bytes[0] = 'A';
     write(firstFile, bytes);
-    auto changedInput = timed(command ~ ["--manifest-retry"], mac);
+    auto changedInput = timed(command ~ ["--manifest-retry"], mac, 0, files);
     require(changedInput["decisions"].integer == files &&
         changedInput["retry"].integer == 1 &&
         changedInput["skipped"].integer == files - 1,
         "changed input did not retry exactly one file");
-    verifyTree(input, output, files, records);
+    requireTreeStatus(changedInput, files, "retry", "skipped");
+    verifyTree(input, output, files, records, true);
     changedInput["phase"] = "changed-input-explicit-retry";
     steps ~= changedInput;
 
     auto changedConfig = command.dup;
     changedConfig[6] = "strip-control,normalize-line-endings";
-    auto configSample = timed(changedConfig ~ ["--manifest-retry"], mac);
+    auto configSample = timed(changedConfig ~ ["--manifest-retry"], mac, 0, files);
     require(configSample["decisions"].integer == files &&
         configSample["retry"].integer == files,
         "changed config did not retry every file");
-    verifyTree(input, output, files, records);
+    requireTreeStatus(configSample, files, "retry", "retry");
+    verifyTree(input, output, files, records, true);
     configSample["phase"] = "changed-filter-selection-explicit-retry";
     steps ~= configSample;
 
     auto newRoute = changedConfig.dup;
     auto alternate = output ~ "-alternate";
     newRoute[4] = alternate;
-    auto routeSample = timed(newRoute, mac);
+    auto routeSample = timed(newRoute, mac, 0, files);
     require(routeSample["decisions"].integer == files &&
         routeSample["changed"].integer == files,
         "changed output route did not publish every file");
-    verifyTree(input, alternate, files, records);
+    requireTreeStatus(routeSample, files, "changed", "changed");
+    verifyTree(input, alternate, files, records, true);
     routeSample["phase"] = "changed-output-route-first";
     steps ~= routeSample;
     return JSONValue(steps);
@@ -478,6 +532,14 @@ private void selfTest() {
     auto outFile = buildPath(output, "doc-0.txt");
     write(outFile, expectedBytes(1));
     verifyTree(input, output, 1, 1);
+    failed = false;
+    try { verifyTree(input, output, 1, 1, true); }
+    catch (Exception) { failed = true; }
+    require(failed, "visible changed-input output negative did not fail");
+    auto changedExpected = expectedBytes(1).dup;
+    changedExpected[0] = 'A';
+    write(outFile, changedExpected);
+    verifyTree(input, output, 1, 1, true);
     write(outFile, "wrong");
     failed = false;
     try { verifyTree(input, output, 1, 1); } catch (Exception) { failed = true; }
@@ -494,6 +556,17 @@ private void selfTest() {
     skipRows = "";
     foreach (_; 0 .. 32) skipRows ~= "EXPLAIN\tinput=a\tstatus=skipped\n";
     require(allSkipped(skipRows, 32), "32/32 skip positive did not pass");
+    auto keyed = JSONValue(["status_by_file": treeStatuses(
+        "EXPLAIN\tinput=\"/tmp/doc-0.txt\"\tstatus=retry\n" ~
+        "EXPLAIN\tinput=\"/tmp/doc-1.txt\"\tstatus=skipped\n", 2)]);
+    requireTreeStatus(keyed, 2, "retry", "skipped");
+    keyed["status_by_file"] = treeStatuses(
+        "EXPLAIN\tinput=\"/tmp/doc-0.txt\"\tstatus=skipped\n" ~
+        "EXPLAIN\tinput=\"/tmp/doc-1.txt\"\tstatus=retry\n", 2);
+    failed = false;
+    try { requireTreeStatus(keyed, 2, "retry", "skipped"); }
+    catch (Exception) { failed = true; }
+    require(failed, "swapped per-file retry/skip negative did not fail");
     JSONValue replaySample = JSONValue(["status": JSONValue(0),
         "decisions": JSONValue(1)]);
     JSONValue skipSample = JSONValue(["status": JSONValue(0),

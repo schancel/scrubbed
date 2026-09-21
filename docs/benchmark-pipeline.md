@@ -8,8 +8,12 @@ output tree. The manifest variant times a first run followed by two verified
 skips, each with independent rehashing of the outputs. All three samples and
 per-file input/output SHA-256 values are retained in JSON. After the skip
 samples, it separately times an explicit changed-input retry, a changed
-filter-selection retry, and a new output route; all reported per-file
-statuses and exact output trees are gated. A 64 MiB single-file restart probe
+filter-selection retry, and a new output route. The changed-input fixture
+changes the first file's visible `alpha` to `Alpha`; the output gate requires
+that change in `doc-0.txt` and unchanged bytes in every other file. Each
+`EXPLAIN` status is keyed to its unique input filename, so one retry on the
+wrong file cannot pass the aggregate count. All per-file statuses and exact
+output trees are gated. A 64 MiB single-file restart probe
 observes a durable `planned` row through the local `sqlite3` CLI, kills only
 the recorded child PID, then times replay/reconciliation and a verified skip.
 The replay is checked against exact input/output hashes. Incorrect bytes,
@@ -32,7 +36,8 @@ ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
 The self-test runs in release mode. It rejects missing required metadata,
 partial or zero samples, a false quality claim, a temporary path in the
 report, incorrect output bytes, an extra output file, an unproven restart,
-and a false post-restart skip. The checked-in
+a false post-restart skip, and swapped retry/skip statuses between two files.
+The checked-in
 `cli_baseline.d --self-test` separately rejects prefix-collision ftfy and
 wcwidth versions. `experiments/content/bench.d` now checks equality with a
 runtime throw, even when assertions are disabled by `-release`.

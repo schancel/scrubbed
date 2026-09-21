@@ -50,6 +50,32 @@ string[] decode(const(ubyte)[] bytes, size_t step) {
 }
 
 void main() {
+    auto boundaryKeyBytes = new char[4096];
+    boundaryKeyBytes[] = 'k';
+    auto boundaryKey = cast(string) boundaryKeyBytes;
+    size_t keyBoundaryRecords;
+    auto boundaryReader = new WarcReader(boundaryKey, (WarcRecord r) {
+        need(r.sourceKey == boundaryKey, "boundary source key preserved");
+        ++keyBoundaryRecords; return true;
+    });
+    boundaryReader.feed(record("boundary", "response", new ubyte[65536]));
+    boundaryReader.finish();
+    need(keyBoundaryRecords == 1, "source-key boundary rejected");
+    rejects({ new WarcReader(boundaryKey ~ "x", (WarcRecord r) => true); },
+        "source key one byte over cap");
+    {
+        auto hugeKeyBytes = new char[1024 * 1024];
+        hugeKeyBytes[] = 'k';
+        auto hugeKey = cast(string) hugeKeyBytes;
+        GC.collect();
+        GC.disable();
+        scope(exit) GC.enable();
+        auto beforeHugeKey = GC.stats.usedSize;
+        rejects({ new WarcReader(hugeKey, (WarcRecord r) => true); },
+            "one MiB source key");
+        auto hugeKeyDelta = GC.stats.usedSize - beforeHugeKey;
+        need(hugeKeyDelta < 8192, "oversized source key copied before rejection");
+    }
     auto a = record("one", "conversion", cast(const(ubyte)[]) "caf\xc3\xa9\n" ~
         new ubyte[65400], "Content-Type: text/plain\r\nX-Unknown: retained\r\n");
     auto b = record("two", "response", new ubyte[65400],
@@ -99,6 +125,20 @@ void main() {
     queryReader.finish();
     need(queryRecord.targetUri == "https://example.org/?q=?value",
         "literal =? in target URI");
+    auto encodedShapeUri = "https://example.org/?q==?utf-8?B?QQ==?=";
+    WarcRecord structuredUri;
+    auto uriReader = new WarcReader("key", (WarcRecord r) {
+        structuredUri = r; return true;
+    });
+    uriReader.feed(record("uri", "revisit", [],
+        "WARC-Refers-To-Target-URI: " ~ encodedShapeUri ~ "\r\n" ~
+        "WARC-Profile: " ~ encodedShapeUri ~ "\r\n",
+        encodedShapeUri));
+    uriReader.finish();
+    need(structuredUri.targetUri == encodedShapeUri &&
+        structuredUri.fields[4].value == " " ~ encodedShapeUri &&
+        structuredUri.fields[5].value == " " ~ encodedShapeUri,
+        "encoded-word-shaped bytes in structured URI fields");
     need(decode(record("zero", "response", []), 1).length == 1,
         "zero-length block");
     WarcRecord tokenField;
@@ -185,6 +225,11 @@ void main() {
     rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
         p.feed(cast(const(ubyte)[]) ("WARC/1.1\r\nX: " ~ new char[4096]));
         }, "header cap");
+    string manyFields;
+    foreach (_; 0 .. 129) manyFields ~= "X: a\r\n";
+    rejects({ auto p = new WarcReader("k", (WarcRecord r) => true);
+        p.feed(record("bad", "response", [], manyFields));
+        }, "header field cap");
     size_t earlier;
     auto late = new WarcReader("k", (WarcRecord r) { ++earlier; return true; });
     late.feed(record("good", "response", []));

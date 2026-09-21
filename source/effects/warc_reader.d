@@ -7,6 +7,8 @@ import std.utf : validate;
 enum size_t warcHeaderLimit = 4096;
 enum size_t warcBlockLimit = 65536;
 enum size_t warcRecordLimit = 131072;
+enum size_t warcSourceKeyLimit = 4096;
+enum size_t warcFieldLimit = 128;
 
 final class WarcError : Exception {
     this(string reason) { super(reason); }
@@ -65,8 +67,9 @@ final class WarcReader {
     private WarcVisit visit;
 
     this(string sourceKey, WarcVisit onRecord) {
-        if (sourceKey.length == 0 || onRecord is null)
-            throw new WarcError("source key and callback required");
+        if (sourceKey.length == 0 || sourceKey.length > warcSourceKeyLimit ||
+            onRecord is null)
+            throw new WarcError("source key byte cap and callback required");
         try validate(sourceKey);
         catch (Exception) { throw new WarcError("invalid UTF-8 source key"); }
         foreach (c; sourceKey)
@@ -138,7 +141,7 @@ final class WarcReader {
     }
 
     private void parseHeader() {
-        if (header.length + 4 > warcRecordLimit) fail("record cap");
+        if (key.length + header.length + 4 > warcRecordLimit) fail("record cap");
         auto text = cast(string) header;
         if (text.length < 14 || text[0 .. 10] != "WARC/1.1\r\n")
             fail("unsupported WARC version or line ending");
@@ -162,11 +165,13 @@ final class WarcReader {
                 if ((c < 32 && c != '\t') || c == 127)
                     fail("control character in header value");
             auto value = trimSpace(raw);
-            if (containsEncodedWord(value)) fail("encoded-word fields unsupported");
+            auto lower = asciiLower(name);
+            if (!uriStructuredField(lower) && containsEncodedWord(value))
+                fail("encoded-word fields unsupported");
             try validate(value);
             catch (Exception) { fail("invalid UTF-8 header value"); }
-            auto lower = asciiLower(name);
             // Own strings: no emitted field aliases the mutable header buffer.
+            if (current.fields.length >= warcFieldLimit) fail("header field cap");
             current.fields ~= WarcField(name.idup, raw.idup);
             switch (lower) {
                 case "warc-record-id":
@@ -208,7 +213,8 @@ final class WarcReader {
             fail("target URI required");
         }
         if (current.type == "continuation") fail("segmented records unsupported");
-        if (header.length + declared + 4 > warcRecordLimit) fail("record cap");
+        if (key.length + header.length + declared + 4 > warcRecordLimit)
+            fail("record cap");
         current.block.reserve(declared);
     }
 
@@ -252,6 +258,22 @@ final class WarcReader {
     private static bool rfc2047Token(char c) {
         return c >= '!' && c <= '~' &&
             ("()<>@,;:/[]?.= " ~ "\x22\x5c").indexOf(c) < 0;
+    }
+
+    private static bool uriStructuredField(string name) {
+        switch (name) {
+            case "warc-record-id":
+            case "warc-target-uri":
+            case "warc-concurrent-to":
+            case "warc-refers-to":
+            case "warc-refers-to-target-uri":
+            case "warc-warcinfo-id":
+            case "warc-profile":
+            case "warc-segment-origin-id":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static bool uriShape(string value, bool bracketed) {

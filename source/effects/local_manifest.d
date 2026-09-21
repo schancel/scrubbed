@@ -211,7 +211,7 @@ final class LocalManifest {
             auto application = scalar("PRAGMA application_id");
             auto schemaVersion = scalar("PRAGMA user_version");
             if (application == 0 && schemaVersion == 0) {
-                require(scalar("SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'") == 0,
+                require(scalar("SELECT count(*) FROM sqlite_master WHERE name NOT GLOB 'sqlite_*'") == 0,
                     "foreign unversioned database");
                 exec("PRAGMA journal_mode=WAL");
                 exec("PRAGMA synchronous=FULL");

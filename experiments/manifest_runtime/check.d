@@ -23,6 +23,15 @@ void require(bool condition, string message) {
     if (!condition) throw new Exception(message);
 }
 
+long scalar(sqlite3* db, string sql) {
+    sqlite3_stmt* query;
+    require(sqlite3_prepare_v2(db, sql.toStringz, -1, &query, null) == SQLITE_OK,
+        "prepare scalar");
+    scope(exit) sqlite3_finalize(query);
+    require(sqlite3_step(query) == SQLITE_ROW, "read scalar");
+    return sqlite3_column_int64(query, 0);
+}
+
 void expectThrow(T)(lazy T operation) {
     bool caught;
     try { operation; }
@@ -197,10 +206,20 @@ void checkMatrix(string root) {
     require(sqlite3_open_v2(foreign.toStringz, &raw,
         SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, null) == SQLITE_OK,
         "open foreign version test");
-    require(sqlite3_exec(raw, "CREATE TABLE unrelated(value TEXT)", null, null, null) == SQLITE_OK,
+    require(sqlite3_exec(raw,
+        "CREATE TABLE sqliteXforeign(value INTEGER); INSERT INTO sqliteXforeign VALUES(7)",
+        null, null, null) == SQLITE_OK,
         "create foreign table");
     require(sqlite3_close(raw) == SQLITE_OK, "foreign close");
     expectThrow(new LocalManifest(foreign));
+    require(sqlite3_open_v2(foreign.toStringz, &raw, SQLITE_OPEN_READWRITE,
+        null) == SQLITE_OK, "reopen refused foreign DB");
+    require(scalar(raw, "PRAGMA application_id") == 0 &&
+        scalar(raw, "PRAGMA user_version") == 0 &&
+        scalar(raw, "SELECT count(*) FROM sqliteXforeign WHERE value=7") == 1 &&
+        scalar(raw, "SELECT count(*) FROM sqlite_master WHERE name='sink_state'") == 0,
+        "foreign DB was modified despite refusal");
+    require(sqlite3_close(raw) == SQLITE_OK, "foreign verification close");
     writeln("rows=10102 page=127 gc_delta=", after - before,
         " peak_rss_bytes=", peakRssBytes, " checkpoint_frames=",
         checkpoint.logFrames, "/", checkpoint.checkpointedFrames,

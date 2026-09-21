@@ -15,6 +15,7 @@ filters.entities -> filters.mojibake (CP1252 character mapping)
 domain.document (standalone typed identity/view facade; no current CLI caller)
 content.pieces -> domain.document (checked borrowed content; no current CLI caller)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
+stages.config -> stages.registry -> stages.contract (unwired v2 config API)
 effects.runner -> stages.contract, content.pieces, domain.document (standalone effect composition)
 ```
 
@@ -94,6 +95,19 @@ mode creates a checkpoint, reserves resources, or rolls back an external sink.
 Resource needs (CPU slots, memory bytes, exclusive names) are validated and
 descriptive. This module has no CLI or filter import, and no scheduler, join,
 global dedup or persistence implementation.
+
+`stages.registry` records each concrete stage's declaration, typed option
+schema, factory and relative `before`/`after` constraints. Stage modules
+self-register when imported; the registry does not import their names.
+`stages.config.buildConfigV2` accepts only a nested version-2 object with an
+ordered `stages` array. It rejects unknown keys/names, duplicate stage names,
+missing required options, incorrect JSON option types and relative-order
+violations before any document is run. A test-only fixture self-registers from
+its own module. This builds typed transforms but is not an executable v2 CLI
+path; the existing v1 `--config` format and `max-passes` semantics are unchanged.
+There is no plugin loading or resource scheduler here. F04's ordered-list
+high-edit scaling and event materialization still require production
+backpressure/representation measurement.
 
 The [wired D stage experiment](../experiments/stages/README.md) measures the
 actual ordered-list `Content.replace` path through `runStage`; it does not

@@ -159,6 +159,28 @@ int main(string[] args) {
         state(policyDb) == "uncertain" && isSymlink(policyOutput) &&
         readText(policyInput) == "original", "post-preflight policy swap fatal");
     writeln("ok: post-preflight policy swap fatal");
+    foreach (phase; ["policy", "content-own"]) {
+        auto plannedFolder = buildPath(root, "pre-sink-" ~ phase);
+        mkdir(plannedFolder);
+        auto plannedInput = buildPath(plannedFolder, "input.txt");
+        auto plannedOutput = buildPath(plannedFolder, "output.txt");
+        auto plannedDb = buildPath(plannedFolder, "state.db");
+        write(plannedInput, "original");
+        write(plannedDb ~ ".fault-" ~ phase, "");
+        result = execute([args[1], "run", "--input", plannedInput,
+            "--output", plannedOutput, "--manifest", plannedDb,
+            "--filters", "normalize-line-endings", "--explain"]);
+        auto plannedId = firstDocumentId(plannedDb);
+        need(result.status == 2 && result.output.canFind("FATAL") &&
+            result.output.canFind("status=unacknowledged") &&
+            result.output.canFind("manifest-state=planned") &&
+            result.output.canFind("document_id=\"" ~ plannedId ~ "\"") &&
+            result.output.canFind("sink_key=\"local-primary:v1\"") &&
+            result.output.split("EXPLAIN\tinput=").length == 2 &&
+            state(plannedDb) == "planned" && !exists(plannedOutput),
+            "post-plan pre-sink " ~ phase ~ " fault remains planned with exact key");
+        writeln("ok: post-plan pre-sink ", phase, " identity");
+    }
     foreach (spec; ["open-ENFILE", "write-ENOSPC", "fsync-EDQUOT",
             "close-EMFILE", "write-EACCES", "fsync-EIO",
             "setattrs-ENOSPC", "rename-EDQUOT",

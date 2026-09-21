@@ -106,8 +106,8 @@ int main(string[] args) {
     write(invalid, [cast(ubyte) 0xFF]);
     auto failedFile = execute([exe, "run", "--input", invalid,
         "--output", invalidOutput, "--threads", "1"]);
-    check(failedFile.status == 1 && failedFile.output.canFind("1 failed.") &&
-        !exists(invalidOutput), "per-file failure exit 1");
+    check(failedFile.status == 2 && failedFile.output.canFind("FATAL") &&
+        !exists(invalidOutput), "no-manifest worker failure exits fatal 2");
     auto dryOutput = buildPath(root, "dry", "output.txt");
     auto dry = execute([exe, "repair", "--input", input, "--output", dryOutput,
         "--dry-run", "--explain", "--threads", "1"]);

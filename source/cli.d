@@ -473,6 +473,14 @@ private class FatalManifestInspection : Exception {
     }
 }
 
+private class FatalPlannedFailure : Exception {
+    SinkKey key;
+    this(SinkKey key, Exception cause) {
+        super("fatal pre-sink failure: " ~ cause.msg);
+        this.key = key;
+    }
+}
+
 private class DocumentFailure : Exception {
     FailureRecord record;
     this(FailureRecord record) {
@@ -569,8 +577,10 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
         version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
         // The F08 sink owns its buffer and fsync-before-rename publication.
         phase = FailurePhase.policy;
+        version (FailurePolicyHarness) failureAt(databasePath, "policy", file);
         ensurePlainDirectory(inputIsDir ? outputRoot : dirName(outputRoot),
             dirName(destination));
+        version (FailurePolicyHarness) failureAt(databasePath, "content-own", file);
         auto content = new Content([ContentPiece.own(cast(const(ubyte)[])cleaned)]);
         // A no-op filter may return the mapped input. Keep its owner live
         // until ContentPiece.own has copied those bytes.
@@ -597,7 +607,7 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
     } catch (Exception failure) {
         if (dryRun) throw failure;
         if (phase == FailurePhase.policy || phase == FailurePhase.scheduler)
-            throw failure;
+            throw new FatalPlannedFailure(key, failure);
         if (cast(OutputPolicyViolation)failure !is null)
             phase = FailurePhase.policy;
         if (cast(ResourceExhaustion)failure !is null)
@@ -828,6 +838,7 @@ int runApp(string[] args) {
             auto fatalDocumentFailure = cast(FatalDocumentFailure)error;
             auto manifestDecision = cast(ManifestDecisionFailure)error;
             auto fatalInspection = cast(FatalManifestInspection)error;
+            auto fatalPlanned = cast(FatalPlannedFailure)error;
             stderr.writefln("%s %s: %s",
                 documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
                 file, error.msg);
@@ -853,6 +864,11 @@ int runApp(string[] args) {
                 } else if (fatalInspection !is null) {
                     documentId = fatalInspection.key.document.text;
                     sinkKey = fatalInspection.key.sink;
+                } else if (fatalPlanned !is null) {
+                    status = "unacknowledged";
+                    detail = "manifest-state=planned";
+                    documentId = fatalPlanned.key.document.text;
+                    sinkKey = fatalPlanned.key.sink;
                 }
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, status, error.msg, detail, documentId, sinkKey);

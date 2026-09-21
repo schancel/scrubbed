@@ -41,8 +41,8 @@ check is a conservative syntax screen, not full RFC 3986 validation; date values
 retained, not normalized.
 Extension field names use the IIPC ASCII `token` grammar, and header values
 reject control characters other than horizontal tab used as linear whitespace.
-It does not support WARC/1.0, compression, recovery/resynchronization, HTTP
-payload extraction, or full WARC conformance.
+This plain reader does not itself support WARC/1.0, compression,
+recovery/resynchronization, HTTP payload extraction, or full WARC conformance.
 
 `conversionText()` is available only for a `conversion` record with exactly
 `Content-Type: text/plain` and valid UTF-8 block bytes. This is a WET-style
@@ -119,8 +119,9 @@ mismatch` is required. On one macOS arm64 run of 400 sequential decoders,
 process high-water RSS was 8,617,984 bytes, GC used bytes after collection
 were 1,058,096 before and 5,952 after, and `/dev/fd` entries were 4
 before/after.
-Those are process-level observations, not per-record or real-file bounds; no
-file adapter is included in this slice.
+Those are process-level observations of the compression adapter, not
+per-record or real-file bounds. The separate local-file transport below adds
+on-disk tests; it does not establish a corpus-wide resource bound.
 
 The supported native build is macOS arm64. zstd is the separately pinned
 static v1.5.7 decompressor. Gzip explicitly opens macOS system

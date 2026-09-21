@@ -264,12 +264,13 @@ is useful, but it is not sufficient on its own.
       (`docs/warc-reader-evaluation.md`). A separate bounded production
       uncompressed WARC/1.1 reader now proves arbitrary feed-chunk invariance,
       record ownership/identity, and WET-style UTF-8 conversion on authored
-      fixtures (`docs/warc-reader.md`). Real archive/file/CLI integration,
-      Common Crawl WARC 1.0 compatibility, and full format conformance remain
-      open. Pinned zstd v1.5.7 source and a
+      fixtures (`docs/warc-reader.md`). Pinned zstd v1.5.7 source and a
       static archive now support bounded gzip/zstd adapters with checksum-before-
-      callback and genuine compressed-block D tests. The shipping CLI still
-      has no compressed-WARC source; real archives and TB throughput are unproved.
+      callback and genuine compressed-block D tests. A local-file API now
+      streams regular files in fixed-size chunks through plain/gzip/zstd readers
+      with no-follow path checks and release-active D on-disk tests. File
+      discovery, CLI/S3 wiring, Common Crawl WARC 1.0 compatibility, full format
+      conformance, real-corpus parity, and TB throughput remain open.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

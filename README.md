@@ -192,12 +192,13 @@ An [evidence-only WARC/WET compression probe](docs/warc-reader-evaluation.md)
 tests authored WARC 1.1 records in independent gzip members and proposed
 zstd-WARC frames with bounded D/native decoding. A separate
 [production uncompressed WARC/1.1 reader](docs/warc-reader.md) now handles
-bounded, chunk-invariant records and a validated WET-style text view. Neither
-is wired to file/CLI input. Pinned zstd v1.5.7 source and static decompression
-archive now back [bounded gzip/zstd WARC adapters](docs/warc-reader.md) with
-checksum-before-callback and genuine compressed-block tests. The shipping CLI
-still has no compressed-WARC source. Common Crawl WARC 1.0 compatibility,
-real archive files, and real-corpus coverage remain open.
+bounded, chunk-invariant records and a validated WET-style text view. Pinned
+zstd v1.5.7 source and a static decompression archive now back
+[bounded gzip/zstd WARC adapters](docs/warc-reader.md) with
+checksum-before-callback and genuine compressed-block tests. A local-file API
+now streams regular files through those readers in fixed-size chunks with
+no-follow path checks; it is not wired into the shipping CLI. Common Crawl
+WARC 1.0 compatibility, real-corpus coverage, and throughput claims remain open.
 A [macOS arm64 text-core packaging probe](docs/package-core-evaluation.md)
 checks an isolated binary, license/notice inventory, and clean-`PATH` execution.
 It is not a release or proof of Linux/Windows support, HTML packaging, a fully

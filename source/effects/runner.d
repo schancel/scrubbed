@@ -34,7 +34,7 @@ interface Sink {
     void accept(StageEvent event);
 }
 
-enum EffectPhase { source, parser, stage, sink }
+enum EffectPhase { source, parser, stage, sink, release }
 
 /// `completed` counts whole input decisions accepted by the sink. On a sink
 /// failure, earlier event writes (including within this decision) may persist.
@@ -232,12 +232,66 @@ unittest {
             !fault.partialWritePossible);
     }
     assertThrown(stageSource.records[0].owner.view(0, 0));
+
+    SourceRecord releasingRecord() {
+        auto bytes = [cast(ubyte) 'a'];
+        return SourceRecord(records[0].document,
+            new DocumentViewOwner(cast(const(ubyte)[]) bytes,
+                () { throw new Exception("release fault"); }));
+    }
+    auto releasedSource = new MemorySource;
+    releasedSource.records = [releasingRecord()];
+    auto releasedSink = new MemorySink;
+    try {
+        runEffects(releasedSource, new MemoryParser, releasedSink, stage, &decide);
+        assert(0, "throwing release reported as success");
+    } catch (EffectFailure fault) {
+        assert(fault.phase == EffectPhase.release && fault.completed == 1 &&
+            fault.documentId == records[0].document.id &&
+            fault.partialWritePossible && fault.original.msg == "release fault");
+        assert(releasedSink.events.length == 1);
+    }
+    assertThrown(releasedSource.records[0].owner.view(0, 0));
+
+    foreach (phase; [EffectPhase.parser, EffectPhase.sink]) {
+        auto failingSource = new MemorySource;
+        failingSource.records = [releasingRecord()];
+        auto failingParser = new MemoryParser;
+        auto failingSink = new MemorySink;
+        if (phase == EffectPhase.parser) failingParser.failAt = 0;
+        if (phase == EffectPhase.sink) failingSink.failAt = 0;
+        try {
+            runEffects(failingSource, failingParser, failingSink, stage, &decide);
+            assert(0, "primary fault reported as success");
+        } catch (EffectFailure fault) {
+            assert(fault.phase == phase && fault.completed == 0 &&
+                fault.documentId == records[0].document.id &&
+                fault.original.msg == (phase == EffectPhase.parser ?
+                    "parser fault" : "sink fault"));
+            assert(fault.next !is null && fault.next.msg == "release fault");
+        }
+        assertThrown(failingSource.records[0].owner.view(0, 0));
+    }
 }
 
 struct RunResult {
     size_t completed;
     size_t eventsAccepted;
     bool cancelled;
+}
+
+private void closeRecord(DocumentViewOwner owner, bool primaryFailed,
+    size_t completed, DocumentId id, bool sinkTouched) {
+    if (primaryFailed) {
+        owner.close(); // D chains this behind the primary effect failure.
+        return;
+    }
+    try {
+        owner.close();
+    } catch (Exception error) {
+        throw new EffectFailure(EffectPhase.release, completed, 0,
+            id, sinkTouched, error);
+    }
 }
 
 /// One input decision is fully delivered before fetching another. This is not
@@ -261,24 +315,31 @@ RunResult runEffects(Source source, Parser parser, Sink sink,
             throw new EffectFailure(EffectPhase.source, result.completed, 0,
                 DocumentId.init, false, error);
         if (!available) return result;
-        scope(exit) if (record.owner !is null) record.owner.close();
         DocumentId id;
+        bool sinkTouched;
+        bool primaryFailed;
+        scope(exit) if (record.owner !is null)
+            closeRecord(record.owner, primaryFailed, result.completed, id, sinkTouched);
         try {
             enforce(record.owner !is null, "source record owner is required");
             id = record.document.id;
         }
-        catch (Exception error)
+        catch (Exception error) {
+            primaryFailed = true;
             throw new EffectFailure(EffectPhase.source, result.completed, 0,
                 DocumentId.init, false, error);
+        }
         if (isCancelled !is null && isCancelled()) {
             result.cancelled = true;
             return result;
         }
         Content content;
         try content = parser.parse(record);
-        catch (Exception error)
+        catch (Exception error) {
+            primaryFailed = true;
             throw new EffectFailure(EffectPhase.parser, result.completed, 0,
                 id, false, error);
+        }
         if (isCancelled !is null && isCancelled()) {
             result.cancelled = true;
             return result;
@@ -286,14 +347,19 @@ RunResult runEffects(Source source, Parser parser, Sink sink,
         import stages.contract : StageResult;
         StageResult decision;
         try decision = runStage([StageDocument(record.document, content)], stage, transform);
-        catch (Exception error)
+        catch (Exception error) {
+            primaryFailed = true;
             throw new EffectFailure(EffectPhase.stage, result.completed, 0,
                 id, false, error);
+        }
         foreach (ordinal, event; decision.events) {
+            sinkTouched = true;
             try sink.accept(event);
-            catch (Exception error)
+            catch (Exception error) {
+                primaryFailed = true;
                 throw new EffectFailure(EffectPhase.sink, result.completed, ordinal,
                     id, true, error);
+            }
             ++result.eventsAccepted;
         }
         ++result.completed;

@@ -28,9 +28,12 @@ selected text have distinct error categories. Processing stops on the first
 failed record (exit 1), reporting its line, DocumentId, and number of fully
 flushed prior records. A stdin read fault is also a record-aware processing
 failure at the next physical line, not an invocation error. A broken stdout
-writer may have emitted part of the
-current record; the current record is never reported as completed. There is
-no atomic rollback or quarantine. Invalid invocation/config exits 2.
+writer may have emitted part of the current record; the current record is
+never reported as completed. There is no atomic rollback or quarantine.
+Invalid invocation/config exits 2.
+There is no CLI cancel flag in this mode. OS termination may leave a partial
+current stdout record and does not promise a graceful error log, checkpoint,
+or resumable position; cancellation semantics are deferred to F12/#17.
 
 The stream is synchronous: no subsequent read callback occurs while stdout
 blocks on a record. On POSIX stdin, one read returns available bytes rather

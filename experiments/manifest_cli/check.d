@@ -277,10 +277,10 @@ int main(string[] args) {
     symlink(treeFile, inputLink);
     expect("symlink tree input rejected", treeCommand, 2, "refusing symlink");
     remove(inputLink);
-    expect("input byte cap preserved", [executable, "run", "--input", input,
+    expect("input byte cap breach is fatal", [executable, "run", "--input", input,
         "--output", buildPath(root, "cap-output"), "--manifest",
         buildPath(root, "cap.db"), "--max-input-bytes", "1"],
-        1, "exceeds --max-input-bytes");
+        2, "exceeds --max-input-bytes");
     expect("manifest JSONL rejected", [executable, "run", "--input", "-", "--output",
         "-", "--manifest", db], 2, "unavailable in JSONL");
     expect("empty manifest path rejected", [executable, "run", "--input", input,

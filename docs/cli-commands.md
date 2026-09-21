@@ -2,9 +2,10 @@
 
 `scrubbed run` (alias `clean`) and `scrubbed repair` (alias `fix`) execute the
 existing bounded filter pipeline. Running without a verb remains supported:
-all prior long options, defaults, `--list-filters`, `--validate`, `--dry-run`
-and `--explain` retain their processing and exit behavior. Use `scrubbed
---help` or `<verb> --help` for argparse-generated help and option names.
+prior long options and defaults remain available, including `--list-filters`,
+`--validate`, `--dry-run` and `--explain`. Failure exits follow the policy below.
+Use `scrubbed --help` or `<verb> --help` for argparse-generated help and option
+names.
 
 ```sh
 scrubbed --input input.txt --output clean.txt
@@ -36,10 +37,13 @@ and `scrubbed --fish -- repair --th` emits `--threads`. Zsh uses Bash
 completion through `bashcompinit`; no native Zsh candidate generator is
 claimed.
 
-Exit 0 means help, list, validation or processing success; exit 1 means one
-or more input files failed; exit 2 means an invocation, config, preflight or
-traversal error (including a late symlink). Existing path, resource-limit and
-config/filter exclusivity checks remain in the processing boundary.
+Exit 0 means help, list, validation or processing success. Exit 1 means an
+acknowledged per-document failure or unresolved retry decision in opt-in
+manifest mode. Exit 2 means a run-fatal invocation, config, output-policy,
+resource/admission, traversal, lost-acknowledgment, or unrecorded worker error
+(including a late symlink or a no-manifest worker failure). Existing path,
+resource-limit and config/filter exclusivity checks remain in the processing
+boundary.
 
 To reproduce the release-active checks after building in release mode:
 

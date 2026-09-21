@@ -12,10 +12,10 @@ for a descriptor still owns its byte reservation, but is no longer queued.
 The scheduler exposes current and peak counters for each ceiling, and a
 blocking join waits for every submitted task before returning.
 
-A file larger than the byte ceiling is skipped with a diagnostic and makes
-the command exit nonzero. For a nonempty file, the CLI checks size before
+A file larger than the byte ceiling is a run-fatal resource/admission error
+(exit 2), not an acknowledged per-document skip. For a nonempty file, the CLI checks size before
 opening, maps exactly its reserved byte count (never the grown full length),
-and checks size again before reading. A detected change is skipped rather
+and checks size again before reading. A detected change fails closed rather
 than exceeding the byte budget. A file modified between those checks, or
 *after* mapping, may still fail during reading; this is not a stable snapshot
 protocol. Empty files use a size check on an opened handle. The
@@ -24,8 +24,11 @@ future windowed-input work can replace the single-file rejection policy.
 Traversal and processing can now overlap. A symlink found later in a tree
 still aborts the command, but earlier successfully written outputs can remain.
 Cancellation stops new admissions, drains already submitted work and releases
-all reservations. Ordinary per-file failures are reported as `SKIP` and do not
-cancel unrelated files. This queue is local and ephemeral: it is not a resume
+all reservations. Only manifest-backed, durably acknowledged per-file failures
+are reported as `SKIP` and may continue; an unrecorded worker failure reports
+`FATAL` and exits 2. A discovered path rejected after worker-fatal cancellation
+gets one `status=canceled` EXPLAIN record; traversal-error cancellation remains
+distinct. This queue is local and ephemeral: it is not a resume
 manifest or a distributed scheduler. The per-document pipeline still
 materializes whole-document text and may expand it substantially, so the
 input-byte ceiling is not a bound on process memory or output size.

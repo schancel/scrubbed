@@ -4,12 +4,16 @@ module effects.local_manifest;
 import domain.document : DocumentId;
 import effects.sqlite_ffi;
 import std.datetime.systime : Clock;
+import std.conv : to;
 import std.digest.sha : sha256Of, SHA256;
 import std.digest : LetterCase, toHexString;
 import core.stdc.stdlib : free;
-import core.stdc.errno : errno, EINTR;
+import core.stdc.errno : errno, EINTR, ENOENT, EIO, EACCES, EPERM, ELOOP,
+    ENOSPC, EDQUOT, EMFILE, ENFILE;
+import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
-import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
+import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t,
+    S_ISDIR, S_ISLNK, S_ISREG;
 import core.sys.posix.unistd : close, read;
 import std.file : FileException, exists, isFile, isSymlink;
 import std.path : absolutePath, baseName, buildPath, dirName;
@@ -150,14 +154,21 @@ private string resolvedName(string path) {
 
 private extern(C) char* realpath(const(char)*, char*);
 
-private void safeRegularOrAbsent(string path) {
+private void safeRegularOrAbsent(string path, bool outputDestination = false) {
     bool link;
     try link = isSymlink(path);
     catch (FileException failure) {
         if (exists(path)) throw failure;
     }
+    if (outputDestination && link)
+        throw new OutputPolicyViolation("local manifest: symlink path refused: " ~ path);
     require(!link, "symlink path refused: " ~ path);
-    if (exists(path)) require(isFile(path), "non-regular path refused: " ~ path);
+    if (exists(path)) {
+        const regular = isFile(path);
+        if (outputDestination && !regular)
+            throw new OutputPolicyViolation("local manifest: non-regular path refused: " ~ path);
+        require(regular, "non-regular path refused: " ~ path);
+    }
 }
 
 private bool sameInode(string left, string right) {
@@ -168,18 +179,120 @@ private bool sameInode(string left, string right) {
     return a.st_dev == b.st_dev && a.st_ino == b.st_ino;
 }
 
+private void failRehashResource(string message, int errorCode) {
+    if (errorCode == ENOSPC || errorCode == EDQUOT ||
+        errorCode == EMFILE || errorCode == ENFILE)
+        throw new ResourceExhaustion("local manifest: " ~ message, errorCode);
+}
+
+/// A non-resource output rehash syscall failure is not evidence of changed output.
+class OutputRehashIoFailure : Exception {
+    int errorCode;
+    this(string message, int errorCode) {
+        super("local manifest: " ~ message ~ " (errno=" ~ errorCode.to!string ~ ")");
+        this.errorCode = errorCode;
+    }
+}
+
+private void failRehashIo(string message, int errorCode) {
+    failRehashResource(message, errorCode);
+    throw new OutputRehashIoFailure(message, errorCode);
+}
+
+private string resolvedNameAllowMissingParent(string path) {
+    require(path.length != 0 && path.indexOf('\0') < 0, "invalid path");
+    auto absolute = absolutePath(path);
+    auto cursor = dirName(absolute);
+    string[] missing;
+    while (true) {
+        stat_t info;
+        if (lstat(cursor.toStringz, &info) == 0) {
+            if (S_ISLNK(info.st_mode)) {
+                stat_t target;
+                if (stat(cursor.toStringz, &target) != 0) {
+                    const savedErrno = errno;
+                    if (savedErrno == ENOENT)
+                        throw new OutputPolicyViolation(
+                            "local manifest: dangling output parent symlink: " ~ cursor);
+                    failRehashIo("cannot stat output parent symlink target", savedErrno);
+                }
+                if (!S_ISDIR(target.st_mode))
+                    throw new OutputPolicyViolation(
+                        "local manifest: output parent is not a directory: " ~ cursor);
+            } else if (!S_ISDIR(info.st_mode))
+                throw new OutputPolicyViolation(
+                    "local manifest: output parent is not a directory: " ~ cursor);
+            auto resolved = realpath(cursor.toStringz, null);
+            if (resolved is null) {
+                const savedErrno = errno;
+                failRehashIo("cannot resolve observed output parent", savedErrno);
+            }
+            scope(exit) free(resolved);
+            auto parent = resolved.fromStringz.idup;
+            foreach_reverse (part; missing) parent = buildPath(parent, part);
+            return buildPath(parent, baseName(absolute));
+        }
+        const savedErrno = errno;
+        if (savedErrno != ENOENT)
+            failRehashIo("cannot stat observed output parent", savedErrno);
+        missing ~= baseName(cursor);
+        auto parent = dirName(cursor);
+        require(parent != cursor, "cannot resolve missing output parent");
+        cursor = parent;
+    }
+}
+
+private bool observedPathExists(string path, string message) {
+    stat_t info;
+    if (stat(path.toStringz, &info) == 0) return true;
+    const savedErrno = errno;
+    if (savedErrno == ENOENT) return false;
+    failRehashIo(message, savedErrno);
+    assert(0);
+}
+
+version (FailurePolicyHarness) {
+    private void injectedRehashFault(string path, string phase) {
+        struct Fault { string name; int code; }
+        foreach (spec; [Fault("EMFILE", EMFILE), Fault("ENFILE", ENFILE),
+                Fault("ENOSPC", ENOSPC), Fault("EDQUOT", EDQUOT),
+                Fault("EIO", EIO), Fault("EACCES", EACCES),
+                Fault("EPERM", EPERM), Fault("ELOOP", ELOOP)]) {
+            if (exists(path ~ ".fault-rehash-" ~ phase ~ "-" ~ spec.name)) {
+                failRehashIo("injected output rehash " ~ phase ~ " failure", spec.code);
+                throw new Exception("local manifest: injected output rehash " ~ phase ~ " failure");
+            }
+        }
+    }
+}
+
 private ubyte[32] hashFile(string path) {
+    version (FailurePolicyHarness) injectedRehashFault(path, "open");
     auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) {
+        const savedErrno = errno;
+        failRehashIo("cannot open observed output", savedErrno);
+    }
     require(fd >= 0, "cannot open observed output without following symlink");
     scope(exit) close(fd);
     stat_t info;
-    require(fstat(fd, &info) == 0 && S_ISREG(info.st_mode),
-        "observed output is not regular");
+    version (FailurePolicyHarness) injectedRehashFault(path, "fstat");
+    const statResult = fstat(fd, &info);
+    if (statResult != 0) {
+        const savedErrno = errno;
+        failRehashIo("cannot stat observed output", savedErrno);
+    }
+    require(statResult == 0 && S_ISREG(info.st_mode), "observed output is not regular");
     SHA256 digest;
     ubyte[64 * 1024] buffer;
     while (true) {
+        version (FailurePolicyHarness) injectedRehashFault(path, "read");
         auto amount = read(fd, buffer.ptr, buffer.length);
-        if (amount < 0 && errno == EINTR) continue;
+        if (amount < 0) {
+            const savedErrno = errno;
+            if (savedErrno == EINTR) continue;
+            failRehashIo("observed output read failed", savedErrno);
+        }
         require(amount >= 0, "observed output read failed");
         if (amount == 0) break;
         digest.put(buffer[0 .. cast(size_t)amount]);
@@ -286,13 +399,14 @@ final class LocalManifest {
     }
     private void safeDestination(string destination) {
         auto resolved = resolvedName(destination);
-        safeRegularOrAbsent(resolved);
-        require(resolved != databasePath && resolved != databasePath ~ "-wal" &&
-            resolved != databasePath ~ "-shm", "destination aliases manifest file");
-        require(!sameInode(resolved, databasePath) &&
-            !sameInode(resolved, databasePath ~ "-wal") &&
-            !sameInode(resolved, databasePath ~ "-shm"),
-            "destination hard-links manifest file");
+        safeRegularOrAbsent(resolved, true);
+        if (resolved == databasePath || resolved == databasePath ~ "-wal" ||
+            resolved == databasePath ~ "-shm")
+            throw new OutputPolicyViolation("local manifest: destination aliases manifest file");
+        if (sameInode(resolved, databasePath) ||
+            sameInode(resolved, databasePath ~ "-wal") ||
+            sameInode(resolved, databasePath ~ "-shm"))
+            throw new OutputPolicyViolation("local manifest: destination hard-links manifest file");
     }
 
     /// Planning never upgrades an existing failed, uncertain or committed row.
@@ -341,17 +455,31 @@ final class LocalManifest {
 
     /// Hashes observed destination independently. A previously committed row
     /// is invalidated on deletion, path hazard, or mismatched bytes.
-    Inspection inspect(SinkKey key) {
+    Inspection inspect(SinkKey key, string intendedDestination = "") {
         auto prior = lookup(key);
         if (prior.isNull) return Inspection.absent;
         auto row = prior.get;
         if (row.state != SinkState.committed) return Inspection.retryRequired;
-        try {
-            safeDestination(row.destination);
-            if (exists(row.destination) && row.hasOutput &&
-                hashFile(row.destination) == row.outputSha256)
+        if (!observedPathExists(dirName(row.destination),
+                "cannot stat observed output parent")) {
+            auto storedRoute = resolvedNameAllowMissingParent(row.destination);
+            if (intendedDestination.length &&
+                storedRoute != resolvedNameAllowMissingParent(intendedDestination))
+                throw new OutputPolicyViolation(
+                    "local manifest: committed destination differs from selected output");
+            transition(key, SinkState.uncertain, false, row.outputSha256);
+            return Inspection.retryRequired;
+        }
+        safeDestination(row.destination);
+        if (intendedDestination.length &&
+            row.destination != resolvedName(intendedDestination))
+            throw new OutputPolicyViolation(
+                "local manifest: committed destination differs from selected output");
+        if (observedPathExists(row.destination, "cannot stat observed output")) {
+            require(row.hasOutput, "committed row is missing output digest");
+            if (hashFile(row.destination) == row.outputSha256)
                 return Inspection.verifiedCommitted;
-        } catch (Exception) { }
+        }
         transition(key, SinkState.uncertain, false, row.outputSha256);
         return Inspection.retryRequired;
     }

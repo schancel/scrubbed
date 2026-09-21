@@ -2,6 +2,7 @@
 module cli_baseline;
 
 import std.algorithm.searching : canFind, endsWith, startsWith;
+import std.algorithm.sorting : sort;
 import std.array : replicate;
 import std.conv : to;
 import std.digest.sha : sha256Of;
@@ -31,6 +32,76 @@ private JSONValue strings(string[] values) {
     JSONValue[] result;
     foreach (value; values) result ~= JSONValue(value);
     return JSONValue(result);
+}
+
+private string[string] parseFreeze(string output) {
+    string[string] versions;
+    foreach (line; output.splitLines) {
+        auto row = line.strip;
+        if (row.startsWith("Using Python ")) continue; // uv environment notice
+        auto fields = row.split("==");
+        if (fields.length != 2 || fields[0].length == 0 || fields[1].length == 0 ||
+            fields[0] in versions)
+            throw new Exception("unparseable or duplicate uv freeze row: " ~ row);
+        versions[fields[0]] = fields[1];
+    }
+    return versions;
+}
+
+private JSONValue pinnedPackages(string output) {
+    auto versions = parseFreeze(output);
+    auto ftfy = "ftfy" in versions;
+    auto wcwidth = "wcwidth" in versions;
+    if (ftfy is null || wcwidth is null || *ftfy != "6.3.1" || *wcwidth != "0.8.4")
+        throw new Exception("expected ftfy==6.3.1 and wcwidth==0.8.4 exactly");
+    string[] observed;
+    foreach (name, packageVersion; versions)
+        observed ~= name ~ "==" ~ packageVersion;
+    observed.sort();
+    return strings(observed);
+}
+
+private string cpuModelFromProc(string cpuinfo) {
+    foreach (key; ["model name", "Hardware", "Processor"]) {
+        foreach (line; cpuinfo.splitLines) {
+            auto fields = line.split(":");
+            if (fields.length >= 2 && fields[0].strip == key && fields[1].strip.length)
+                return fields[1].strip;
+        }
+    }
+    return "unavailable (/proc/cpuinfo has no CPU model field)";
+}
+
+private string cpuModel(bool darwin) {
+    if (darwin) {
+        auto result = execute(["sysctl", "-n", "machdep.cpu.brand_string"]);
+        return result.status == 0 && result.output.strip.length
+            ? result.output.strip
+            : "unavailable (machdep.cpu.brand_string not reported)";
+    }
+    try {
+        return cpuModelFromProc(readText("/proc/cpuinfo"));
+    } catch (Exception) {
+        return "unavailable (/proc/cpuinfo unreadable)";
+    }
+}
+
+private void selfTest() {
+    auto valid = pinnedPackages("Using Python 3 at: /tmp/example\nftfy==6.3.1\nwcwidth==0.8.4\n");
+    if (valid.array.length != 2 || valid.array[0].str != "ftfy==6.3.1" ||
+        valid.array[1].str != "wcwidth==0.8.4")
+        throw new Exception("exact package parse regression");
+    foreach (bad; ["ftfy==6.3.10\nwcwidth==0.8.4",
+                   "ftfy==6.3.1\nwcwidth==0.8.40",
+                   "ftfy==6.3.1\nftfy==6.3.10\nwcwidth==0.8.4"]) {
+        bool rejected;
+        try { pinnedPackages(bad); } catch (Exception) { rejected = true; }
+        if (!rejected) throw new Exception("version prefix or duplicate accepted");
+    }
+    if (cpuModelFromProc("model name : Example CPU\n") != "Example CPU" ||
+        cpuModelFromProc("Hardware : Example SoC\n") != "Example SoC" ||
+        !cpuModelFromProc("processor : 0\n").startsWith("unavailable"))
+        throw new Exception("Linux CPU model parse regression");
 }
 
 // Commands in a shareable report must be reproducible without publishing the
@@ -180,6 +251,11 @@ private JSONValue runTree(string binary, string root, bool darwin) {
 
 int main(string[] args) {
     try {
+        if (args.length == 2 && args[1] == "--self-test") {
+            selfTest();
+            writeln("version and CPU-model parsers passed");
+            return 0;
+        }
         if (args.length != 3)
             throw new Exception("usage: cli_baseline SCRUBBED_BINARY FTFY_BINARY");
         auto os = checked(["uname", "-s"]);
@@ -219,16 +295,6 @@ int main(string[] args) {
             normalization, "--output", outputPath, "--filters",
             "normalize-line-endings,strip-control", "--threads", "1"],
             normalization, outputPath, normalized, darwin, 5);
-        // Ad-hoc Perl reference, not an independently sourced comparator.
-        // The fixture contains ASCII controls only; it proves no Unicode parity.
-        const perlProgram = `local $/; open my $in, '<:raw', $ARGV[0] or die $!;
-            my $s = <$in>; $s =~ s/\r\n?/\n/g;
-            $s =~ s/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g;
-            open my $out, '>:raw', $ARGV[1] or die $!; print $out $s;`;
-        cases ~= runCase("normalization/perl", ["/usr/bin/perl", "-e",
-            perlProgram, normalization, outputPath], normalization, outputPath,
-            normalized, darwin, 5);
-        cases[$-1]["reference_origin"] = "benchmark-authored ad-hoc Perl program";
         cases ~= runTree(args[1], root, darwin);
 
         foreach (ref result; cases) {
@@ -244,8 +310,8 @@ int main(string[] args) {
             "name": JSONValue(os),
             "release": JSONValue(checked(["uname", "-r"])),
             "architecture": JSONValue(checked(["uname", "-m"]))]);
-        report["hardware"] = darwin ? checked(["sysctl", "-n", "hw.model"]) :
-            checked(["uname", "-m"]);
+        report["cpu_model"] = cpuModel(darwin);
+        if (darwin) report["hardware_model"] = checked(["sysctl", "-n", "hw.model"]);
         report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
         foreach (line; checked([args[2], "--help"]).splitLines)
             if (line.startsWith("ftfy (fixes text for you)"))
@@ -260,18 +326,12 @@ int main(string[] args) {
             "ldc2 -O -release benchmarks/cli_baseline.d -of=<path>";
         auto python = buildPath(dirName(args[2]), "python");
         report["python_version"] = checked([python, "--version"]);
-        auto packages = checked(["uv", "pip", "list", "--python", python]);
-        if (!packages.canFind("ftfy    6.3.1") ||
-            !packages.canFind("wcwidth 0.8.4"))
-            throw new Exception("expected ftfy==6.3.1 and wcwidth==0.8.4");
-        report["python_packages"] = strings(["ftfy==6.3.1", "wcwidth==0.8.4"]);
-        report["perl_version"] = checked(["/usr/bin/perl", "-v"]);
-        report["perl_capability"] =
-            "ASCII CRLF/CR and C0/DEL controls only on generated fixture; not Unicode C1 parity";
+        report["python_packages"] = pinnedPackages(
+            checked(["uv", "pip", "freeze", "--python", python]));
         report["unsupported"] = strings([
             "ftfy CLI has no recursive tree input/output mode; no process-equivalent tree baseline",
             "trafilatura HTML extraction: scrubbed html2md is unimplemented; #59 owns future pipeline comparison",
-            "no independently sourced executable matches current normalize-line-endings plus strip-control semantics; Perl case is an ad-hoc reference only",
+            "no independently sourced executable matches current normalize-line-endings plus strip-control semantics",
             "no independently verified quality-matched executable for current quote/entity semantics",
             "no independently verified additional mojibake repair executable beyond ftfy"]);
         report["time_variant"] = darwin ? "BSD time -l -p; RSS bytes" :

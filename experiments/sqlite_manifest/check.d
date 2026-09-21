@@ -134,9 +134,13 @@ struct Db {
     }
     void checkpoint() {
         int logFrames, checkpointed;
-        require(sqlite3_wal_checkpoint_v2(raw, null, 3, &logFrames, &checkpointed) == SQLITE_OK,
+        // NULL means all attached databases and leaves these counters undefined.
+        // Name main so a successful TRUNCATE has defined 0/0 counters.
+        require(sqlite3_wal_checkpoint_v2(raw, "main".toStringz, 3,
+            &logFrames, &checkpointed) == SQLITE_OK,
             "truncate checkpoint: " ~ error);
-        require(logFrames == checkpointed, "checkpoint left frames");
+        require(logFrames == 0 && checkpointed == 0,
+            "successful truncate checkpoint did not report empty WAL");
     }
 }
 

@@ -22,7 +22,10 @@ key supports exact lookup; the state/key index plus `LIMIT 16` supports bounded
 replay. `PRAGMA user_version=1` is the prototype version marker. One local
 writer is assumed. The harness checks WAL and `synchronous=FULL`, rejects an
 invalid state in release mode, demonstrates a competing writer cannot begin,
-and runs a truncate checkpoint. It inserts 10,002 rows, then checks exact
+and runs a TRUNCATE checkpoint on named `main`, asserting its defined 0/0
+frame counters. [SQLite's checkpoint API](https://www.sqlite.org/c3ref/wal_checkpoint_v2.html)
+leaves those counters undefined if the database name is null, even when the
+call succeeds. It inserts 10,002 rows, then checks exact
 lookup of a late row and a 16-row replay bound. This does not yet define
 production migrations, digest algorithms, DocumentId encoding, or retention.
 

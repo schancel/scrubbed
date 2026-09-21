@@ -8,7 +8,8 @@ import std.array : split;
 import std.conv : to;
 import std.digest.sha : sha256Of;
 import std.file : SpanMode, dirEntries, exists, getAttributes, isSymlink,
-    mkdir, readText, remove, rmdirRecurse, setAttributes, tempDir, write;
+    mkdir, readText, remove, rmdir, rmdirRecurse, setAttributes, symlink,
+    tempDir, write;
 import std.path : baseName, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
 import std.stdio : writeln;
@@ -410,6 +411,48 @@ int main(string[] args) {
         readText(alternateOutput) == "one\n",
         "same-byte alternate stored route cannot falsely skip intended output");
     writeln("ok: stored destination route mismatch fatal");
+    auto nestedFolder = buildPath(root, "nested-parent-inspection");
+    mkdir(nestedFolder);
+    auto nestedInput = buildPath(nestedFolder, "input");
+    auto nestedOutput = buildPath(nestedFolder, "output");
+    auto nestedDb = buildPath(nestedFolder, "state.db");
+    mkdir(nestedInput);
+    mkdir(nestedOutput);
+    auto nestedInputParent = buildPath(nestedInput, "sub");
+    auto nestedOutputParent = buildPath(nestedOutput, "sub");
+    mkdir(nestedInputParent);
+    mkdir(nestedOutputParent);
+    auto nestedInputFile = buildPath(nestedInputParent, "document.txt");
+    auto nestedOutputFile = buildPath(nestedOutputParent, "document.txt");
+    write(nestedInputFile, "one\r\n");
+    auto nestedCommand = [args[1], "run", "--input", nestedInput,
+        "--output", nestedOutput, "--manifest", nestedDb,
+        "--filters", "normalize-line-endings", "--explain"];
+    result = execute(nestedCommand);
+    need(result.status == 0 && state(nestedDb) == "committed" &&
+        readText(nestedOutputFile) == "one\n", "nested parent setup committed");
+    auto nestedId = firstDocumentId(nestedDb);
+    remove(nestedOutputFile);
+    rmdir(nestedOutputParent);
+    symlink(buildPath(nestedFolder, "missing-target"), nestedOutputParent);
+    result = execute(nestedCommand);
+    need(result.status == 2 && result.output.canFind("FATAL") &&
+        result.output.canFind("status=failure") &&
+        result.output.canFind("output path component is not a plain directory") &&
+        result.output.canFind("document_id=\"" ~ nestedId ~ "\"") &&
+        result.output.canFind("sink_key=\"local-primary:v1\"") &&
+        result.output.split("EXPLAIN\tinput=").length == 2 &&
+        state(nestedDb) == "committed" && !exists(nestedOutputFile),
+        "dangling nested output parent remains keyed fatal: " ~ result.output);
+    remove(nestedOutputParent);
+    result = execute(nestedCommand);
+    need(result.status == 1 && result.output.canFind("status=uncertain") &&
+        result.output.canFind("document_id=\"" ~ nestedId ~ "\"") &&
+        result.output.canFind("sink_key=\"local-primary:v1\"") &&
+        result.output.split("EXPLAIN\tinput=").length == 2 &&
+        state(nestedDb) == "uncertain" && !exists(nestedOutputParent),
+        "genuinely missing nested parent becomes uncertain retry");
+    writeln("ok: nested parent absence versus dangling symlink");
     foreach (kind; ["changed", "unchanged"]) {
         auto positiveFolder = buildPath(root, "positive-" ~ kind);
         mkdir(positiveFolder);

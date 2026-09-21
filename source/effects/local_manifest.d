@@ -12,7 +12,8 @@ import core.stdc.errno : errno, EINTR, ENOENT, EIO, EACCES, EPERM, ELOOP,
     ENOSPC, EDQUOT, EMFILE, ENFILE;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
-import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
+import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t,
+    S_ISDIR, S_ISLNK, S_ISREG;
 import core.sys.posix.unistd : close, read;
 import std.file : FileException, exists, isFile, isSymlink;
 import std.path : absolutePath, baseName, buildPath, dirName;
@@ -196,6 +197,49 @@ class OutputRehashIoFailure : Exception {
 private void failRehashIo(string message, int errorCode) {
     failRehashResource(message, errorCode);
     throw new OutputRehashIoFailure(message, errorCode);
+}
+
+private string resolvedNameAllowMissingParent(string path) {
+    require(path.length != 0 && path.indexOf('\0') < 0, "invalid path");
+    auto absolute = absolutePath(path);
+    auto cursor = dirName(absolute);
+    string[] missing;
+    while (true) {
+        stat_t info;
+        if (lstat(cursor.toStringz, &info) == 0) {
+            if (S_ISLNK(info.st_mode)) {
+                stat_t target;
+                if (stat(cursor.toStringz, &target) != 0) {
+                    const savedErrno = errno;
+                    if (savedErrno == ENOENT)
+                        throw new OutputPolicyViolation(
+                            "local manifest: dangling output parent symlink: " ~ cursor);
+                    failRehashIo("cannot stat output parent symlink target", savedErrno);
+                }
+                if (!S_ISDIR(target.st_mode))
+                    throw new OutputPolicyViolation(
+                        "local manifest: output parent is not a directory: " ~ cursor);
+            } else if (!S_ISDIR(info.st_mode))
+                throw new OutputPolicyViolation(
+                    "local manifest: output parent is not a directory: " ~ cursor);
+            auto resolved = realpath(cursor.toStringz, null);
+            if (resolved is null) {
+                const savedErrno = errno;
+                failRehashIo("cannot resolve observed output parent", savedErrno);
+            }
+            scope(exit) free(resolved);
+            auto parent = resolved.fromStringz.idup;
+            foreach_reverse (part; missing) parent = buildPath(parent, part);
+            return buildPath(parent, baseName(absolute));
+        }
+        const savedErrno = errno;
+        if (savedErrno != ENOENT)
+            failRehashIo("cannot stat observed output parent", savedErrno);
+        missing ~= baseName(cursor);
+        auto parent = dirName(cursor);
+        require(parent != cursor, "cannot resolve missing output parent");
+        cursor = parent;
+    }
 }
 
 private bool observedPathExists(string path, string message) {
@@ -418,8 +462,9 @@ final class LocalManifest {
         if (row.state != SinkState.committed) return Inspection.retryRequired;
         if (!observedPathExists(dirName(row.destination),
                 "cannot stat observed output parent")) {
+            auto storedRoute = resolvedNameAllowMissingParent(row.destination);
             if (intendedDestination.length &&
-                row.destination != resolvedName(intendedDestination))
+                storedRoute != resolvedNameAllowMissingParent(intendedDestination))
                 throw new OutputPolicyViolation(
                     "local manifest: committed destination differs from selected output");
             transition(key, SinkState.uncertain, false, row.outputSha256);

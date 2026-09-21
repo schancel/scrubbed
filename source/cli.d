@@ -515,7 +515,6 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
         size_t completedPrefix) {
     if (isSymlink(file)) throw new Exception("refusing symlink input: " ~ file);
     auto destination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
-    preflightDestination(destination, inputIsDir ? outputRoot : dirName(outputRoot));
     if (getSize(file) != reservedBytes)
         throw new Exception("input changed size after admission: " ~ file);
     scope mm = reservedBytes ? new MmFile(file, MmFile.Mode.read, reservedBytes, null) : null;
@@ -529,6 +528,11 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
     SinkKey key = SinkKey(id, firstHash, configHash, "local-primary:v1");
+    try {
+        preflightDestination(destination, inputIsDir ? outputRoot : dirName(outputRoot));
+    } catch (Exception failure) {
+        throw new FatalManifestPreFilter(key, failure);
+    }
     bool replacing;
     if (!dryRun) {
         try {

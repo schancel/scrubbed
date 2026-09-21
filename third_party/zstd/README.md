@@ -20,9 +20,10 @@ upstream NOTICE for this `lib/` subset. Project distribution notices are in
 units to `.dub/zstd/libzstd_decompress.a`; it excludes the compressor,
 dictionary builder, legacy decoder, multithreading and x86 assembly. It does
 not create or link a shared libzstd, invoke a package manager, or fetch from
-the network. The explicit support guard is macOS arm64 only. `dub.json` links
-the archive into the D unit-test binary; production use is deferred to the
-second, separately reviewed adapter PR. The D ABI declarations and a live
+the network. The explicit support guard is macOS arm64 only. `dub.json` makes
+the archive available to D builds; `effects.warc_compressed` uses it for the
+bounded in-process WARC/1.1 adapter. This does not claim a CLI, real-file
+source, or other-platform integration. The D ABI declarations and a live
 header/stream decode test are in `source/effects/zstd_ffi.d`.
 
 To verify provenance, download the release URL above, check its SHA-256, and

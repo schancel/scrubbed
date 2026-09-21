@@ -103,6 +103,16 @@ plain WARC for response and WET-style conversion records under 1-byte,
 127-byte, 16-KiB and whole-feed chunks. It also exercises late corruption,
 truncation, unsupported metadata, byte/window/ratio/record caps, cancellation,
 reentrancy, and process-level GC/RSS/FD observations.
+Both response and WET parity additionally run through pinned, genuinely
+compressed zstd-block goldens (block type 2, not raw blocks), whose frame
+SHA-256, content size, checksum flag and first-block type are checked under
+`-release`. They were produced by the official zstd v1.5.7 CLI built from the
+release tarball with SHA-256
+`eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3`.
+The D harness authors the WARC bytes and offers
+`<binary> --emit-zstd-golden <pinned-upstream>/programs/zstd` to reproduce the
+Base64 and frame hashes after building upstream's `zstd` target. Normal
+release checks use embedded goldens and do not invoke a compressor or network.
 Run `<binary> --negative-control` to force an uncaught late gzip checksum
 error under `-release`; a nonzero exit with `gzip footer checksum or size
 mismatch` is required. On one macOS arm64 run of 400 sequential decoders,

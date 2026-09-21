@@ -1,15 +1,20 @@
 // Release-active production-boundary checks; all fixture bytes are made in D.
 import effects.warc_compressed;
 import effects.warc_reader;
+import effects.zstd_ffi : ZstdFrameHeader, ZSTD_getFrameHeader, ZSTD_isError;
 import core.memory : GC;
 import core.sys.posix.dlfcn : dlopen, dlsym, dlclose, RTLD_NOW, RTLD_FIRST;
 import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 import etc.c.zlib : z_stream,
     Z_OK, Z_STREAM_END, Z_FINISH, Z_DEFLATED, Z_DEFAULT_STRATEGY;
 import std.conv : to;
+import std.algorithm.searching : canFind;
+import std.base64 : Base64;
 import std.digest.sha : sha256Of, toHexString;
-import std.file : dirEntries, SpanMode;
+import std.file : dirEntries, SpanMode, tempDir, write, remove;
+import std.process : execute;
 import std.stdio : writeln;
+import std.uuid : randomUUID;
 
 extern(C) @nogc nothrow ulong ZSTD_XXH64(const(void)* data, size_t length, ulong seed);
 
@@ -81,6 +86,53 @@ ubyte[] zstdFrame(const(ubyte)[] plain) {
     auto checksum = cast(uint) ZSTD_XXH64(plain.ptr, plain.length, 0);
     foreach (shift; [0, 8, 16, 24]) result ~= cast(ubyte)(checksum >> shift);
     return result;
+}
+
+// Rebuild a golden with the official CLI compiled from the pinned v1.5.7
+// release tarball (SHA-256 eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3).
+// The D harness authors the WARC input and temp file; upstream C performs
+// only the specified compression. Ordinary checks use embedded golden bytes.
+void emitOfficialGolden(string cli, const(ubyte)[] plain, string label,
+    string expectedHash) {
+    auto versionOutput = execute([cli, "--version"]);
+    need(versionOutput.status == 0 && versionOutput.output.canFind("v1.5.7"),
+        "golden compressor is not official zstd v1.5.7");
+    auto path = tempDir() ~ "/scrubbed-zstd-golden-" ~ randomUUID().toString();
+    write(path, plain);
+    scope(exit) remove(path);
+    auto result = execute([cli, "-q", "--check", "--content-size", "-c", path]);
+    need(result.status == 0, "official zstd golden compression failed");
+    auto bytes = cast(const(ubyte)[]) result.output;
+    verifyCompressedGolden(bytes, plain.length, expectedHash);
+    writeln(label, " SHA256=", toHexString(sha256Of(bytes)),
+        " BASE64=", Base64.encode(bytes));
+}
+
+// Exact outputs of official zstd v1.5.7 CLI, level 3, --check --content-size.
+// The WARC input bytes are assembled by record() above. Unlike zstdFrame(),
+// these goldens use a genuinely compressed first block (blockType 2).
+enum responseCompressedGolden =
+    "KLUv/STXFQUAMgoiHWCJHqiWttu9RM/Pt2H3q1HL39VQ16nSNeOy2EEOaqlVocKBvRcZPKBDzElQSy0YWUP/WDc4e+vTpkYY07f+9iZqKfq9CWMLvAaIL7L2pwp1T76HR3hBGe5cS/gfYr3IRHt/Mh24ve3UaWqbJwFrZWlOvo1Ll+zFkmfWjhuzJRJh1IIHdIlEmAgA2Qw+dEEVNhFMIrrGsJR7YfVG6M48V+TNaw==";
+enum wetCompressedGolden =
+    "KLUv/STD7QQAcgkiJJAlbv/ru7tuyAJZCuwdNbb2Mee0mGCDvpz//QOlFmlx1nqMCsuWLUFBQj7LliGNpY+8DT5Jir6/+t/7fSrLEAxhYxxuAB1ywKNxv1zki+osmqIA8ur3uKL/UmMmHtx3VGVhCjxDk2WxV4vQeGEcVOfT0edU1Q7w+TRuOtA4JSbOMqMwnhITJwYAPRsZXiK6xrCUe2n1xurOPD3tlpk=";
+enum responseCompressedHash =
+    "0FA0F02791937874DD03060F382221E2B192BD96DAF8B3BEE3D00E8A4BD63741";
+enum wetCompressedHash =
+    "803E9B08046996BD140285A92A1E929E83CF4DBC132F0321F7FA51FAC5D33C4F";
+
+void verifyCompressedGolden(const(ubyte)[] frame, size_t plainLength, string hash) {
+    need(toHexString(sha256Of(frame)) == hash, "official zstd golden bytes changed");
+    ZstdFrameHeader header;
+    auto result = ZSTD_getFrameHeader(&header, frame.ptr, frame.length);
+    need(!ZSTD_isError(result) && result == 0 && header.frameType == 0 &&
+        header.frameContentSize == plainLength && header.checksumFlag == 1 &&
+        header.dictID == 0 && header.windowSize <= zstdWindowLimit,
+        "official zstd frame metadata changed");
+    need(header.headerSize + 3 <= frame.length, "official zstd frame lacks block header");
+    auto at = header.headerSize;
+    auto blockHeader = cast(uint) frame[at] | (cast(uint) frame[at + 1] << 8) |
+        (cast(uint) frame[at + 2] << 16);
+    need(((blockHeader >> 1) & 3) == 2, "official zstd golden is not compressed-block path");
 }
 
 string fingerprint(WarcRecord value) {
@@ -163,8 +215,24 @@ void main(string[] args) {
     }
     auto wet = record("two", "conversion", cast(const(ubyte)[]) "caf\xc3\xa9\n",
         "Content-Type: text/plain\r\n");
+    if (args.length == 3 && args[1] == "--emit-zstd-golden") {
+        emitOfficialGolden(args[2], response, "response", responseCompressedHash);
+        emitOfficialGolden(args[2], wet, "WET", wetCompressedHash);
+        return;
+    }
     auto plain = response ~ wet;
     auto expected = plainOutput(plain);
+    auto officialResponse = Base64.decode(responseCompressedGolden);
+    auto officialWet = Base64.decode(wetCompressedGolden);
+    verifyCompressedGolden(officialResponse, response.length, responseCompressedHash);
+    verifyCompressedGolden(officialWet, wet.length, wetCompressedHash);
+    auto officialArchive = officialResponse ~ officialWet;
+    foreach (chunk; [cast(size_t) 1, 127, 16_384, officialArchive.length])
+        need(compressedOutput(Compression.zstd, officialArchive, chunk) == expected,
+            "official compressed-block zstd identity/hash parity");
+    auto officialCorrupt = officialArchive.dup;
+    officialCorrupt[$ - 1] ^= 1;
+    rejects(Compression.zstd, officialCorrupt, CompressedReason.checksum, 1);
     foreach (format; [Compression.gzip, Compression.zstd]) {
         auto first = format == Compression.gzip ? gzipFrame(response) : zstdFrame(response);
         auto second = format == Compression.gzip ? gzipFrame(wet) : zstdFrame(wet);

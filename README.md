@@ -141,6 +141,12 @@ durability, concurrent input snapshots, or bounded output materialization. The e
 [SQLite experiment](docs/sqlite-manifest-evaluation.md) remains as prerequisite
 evidence. SQLite stores the local run ledger, not the corpus or a distributed
 coordinator.
+The opt-in manifest path now applies a [typed file-failure policy](docs/failure-policy.md):
+an isolated document failure may continue only after durable failed/uncertain
+state and an injected acknowledgment; run-fatal policy, resource, and lost-ledger
+errors stop with exit 2. Exit 1 means acknowledged failures or unresolved
+retry decisions. Keyed `--explain` records distinguish these outcomes. The
+concrete structured error-log file and replay format are still unimplemented.
 
 ## Status
 

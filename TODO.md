@@ -254,6 +254,14 @@ is useful, but it is not sufficient on its own.
       crash/restart tests. JSONL and unflagged runs have no resume. This is a
       serial local path, not power-loss durability, a concurrent input snapshot,
       or bounded output materialization.
+- [x] Classify opt-in local-manifest file failures (F12/#17). Typed per-document
+      failures continue only after durable failed/uncertain ledger state and
+      injected acknowledgment; run-fatal policy, observation, resource, and
+      lost-ledger failures stop with exit 2. Keyed `--explain` and release-active
+      actual-binary fault tests cover verified skips, unsafe routes, canceled
+      later files, and missing-vs-unsafe output parents (`docs/failure-policy.md`).
+      This does not implement a concrete JSONL error log or replay (#18/#19),
+      or extend the policy to JSONL stdin/stdout.
 - [~] Store immutable source documents and keyed analyzer overlays. A
       standalone binary-v1 artifact API now has bounded integrity-checked
       frames, version/revision-checked streaming joins, create-only source
@@ -267,8 +275,8 @@ is useful, but it is not sufficient on its own.
       and distinguish malformed JSON, invalid selected text and reader/writer
       failures in release-active live-pipe tests (`docs/jsonl-stream.md`). Raw
       formatting/key order is not preserved. No graceful signal cancellation,
-      checkpoint or resumability is promised; F12/#17 is scoped to failure
-      and cancellation policy for later work.
+      checkpoint or resumability is promised; F12's file/manifest failure
+      policy does not cover JSONL stdin/stdout.
 - [~] Evaluate compressed WARC/WET input. A D-only evidence probe covers
       authored WARC 1.1 records in independent gzip members and proposed
       zstd-WARC frames with explicit byte/ratio caps and negative fixtures
@@ -289,9 +297,12 @@ is useful, but it is not sufficient on its own.
       compiler in one emulated container; Windows and HTML packaging remain
       untested. This is not a public release, fully static binary, or proof of
       bit-for-bit reproducible builds.
-- [ ] Stress interruption, disk-full, invalid UTF-8, permission failures,
-      changing inputs, and process restart. Never report success for skipped or
-      partially written data; emit a machine-readable failure manifest.
+- [~] Stress interruption, disk-full, invalid UTF-8, permission failures,
+      changing inputs, and process restart. F12's local-manifest release-active
+      faults and earlier process-kill probes cover bounded subsets without a
+      false success, but no broad stress/corpus proof exists. Add a concrete
+      machine-readable error log and replay (#18/#19); the current SQLite
+      ledger and `--explain` output are not that final format.
 - [ ] Benchmark representative many-small-file and few-huge-file corpora at
       10 GiB, >RAM, and 1 TiB scales before calling the tool terabyte-ready.
       Publish hardware/filesystem details and retain comparable Python-tool

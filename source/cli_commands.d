@@ -32,6 +32,16 @@ mixin template ProcessingOptions() {
     bool dryRun;
     @(NamedArgument.Description("Print one decision record per input file"))
     bool explain;
+    @(NamedArgument("jsonl-fields").Description("Comma-separated top-level JSON text fields for stdin/stdout JSONL"))
+    string jsonlFields;
+    @(NamedArgument("dataset-namespace").Description("Stable JSONL dataset namespace"))
+    string datasetNamespace;
+    @(NamedArgument("source-key").Description("Stable JSONL source key"))
+    string sourceKey;
+    @(NamedArgument("max-jsonl-line-bytes").Description("Maximum JSONL input record bytes"))
+    size_t maxJsonlLineBytes;
+    @(NamedArgument("max-jsonl-output-bytes").Description("Maximum JSONL output record bytes including LF"))
+    size_t maxJsonlOutputBytes;
 }
 
 @(Command("run", "clean").Description("Run the bounded filter pipeline (also the no-verb default)."))
@@ -69,9 +79,11 @@ private bool present(const string[] args, string name) {
 
 private int process(T)(ref T options, const string[] original) {
     string[] forwarded = ["scrubbed", "--input", options.input,
-        "--output", options.output,
-        "--max-queued-docs", options.maxQueuedDocs.to!string,
-        "--max-input-bytes", options.maxInputBytes.to!string];
+        "--output", options.output];
+    if (present(original, "--max-queued-docs") || !present(original, "--jsonl-fields"))
+        forwarded ~= ["--max-queued-docs", options.maxQueuedDocs.to!string];
+    if (present(original, "--max-input-bytes") || !present(original, "--jsonl-fields"))
+        forwarded ~= ["--max-input-bytes", options.maxInputBytes.to!string];
     if (present(original, "--threads"))
         forwarded ~= ["--threads", options.threads.to!string];
     if (present(original, "--filters")) forwarded ~= ["--filters", options.filters];
@@ -82,6 +94,16 @@ private int process(T)(ref T options, const string[] original) {
     if (options.validate) forwarded ~= "--validate";
     if (options.dryRun) forwarded ~= "--dry-run";
     if (options.explain) forwarded ~= "--explain";
+    if (present(original, "--jsonl-fields"))
+        forwarded ~= ["--jsonl-fields", options.jsonlFields];
+    if (present(original, "--dataset-namespace"))
+        forwarded ~= ["--dataset-namespace", options.datasetNamespace];
+    if (present(original, "--source-key"))
+        forwarded ~= ["--source-key", options.sourceKey];
+    if (present(original, "--max-jsonl-line-bytes"))
+        forwarded ~= ["--max-jsonl-line-bytes", options.maxJsonlLineBytes.to!string];
+    if (present(original, "--max-jsonl-output-bytes"))
+        forwarded ~= ["--max-jsonl-output-bytes", options.maxJsonlOutputBytes.to!string];
     return runApp(forwarded);
 }
 
@@ -107,6 +129,7 @@ int runCommands(string[] argv) {
         return CLI!(parserConfig, Commands).complete(argv[2 .. $]);
     }
     Commands commands;
+    const original = argv[1 .. $].dup;
     auto result = CLI!(parserConfig, Commands).parseArgs(commands, argv[1 .. $]);
     if (!result) return result.exitCode;
     return commands.command.matchCmd!((cmd) {
@@ -117,7 +140,7 @@ int runCommands(string[] argv) {
             stderr.writeln("scrubbed: use completion init or completion complete");
             return 2;
         } else {
-            return process(cmd, argv[1 .. $]);
+            return process(cmd, original);
         }
     });
 }

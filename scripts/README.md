@@ -18,4 +18,6 @@ may compose the pipeline and filters; `pipeline` does not import CLI or
 filters; domain stays independent; filters do not import app/cli and cross-
 filter imports are limited to `filters.entities` using `entities_data` and
 `mojibake`; content may use domain but not app/cli. New boundary policy needs
-a documented decision before changing these rules.
+a documented decision before changing these rules. Selective-import symbols
+after `:` are not module dependencies; imports of a forbidden layer's dotted
+child modules are forbidden too.

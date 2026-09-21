@@ -29,6 +29,7 @@ void main(string[] args) {
     auto valid = execute([args[1], "tests/module_check/valid"]);
     assert(valid.status == 0, "valid fixture checker must succeed");
     expectFailure(args[1], "tests/module_check/forbidden_import", "content.extract", "content may import domain, but not app or cli");
+    expectFailure(args[1], "tests/module_check/forbidden_child", "content.extract", "content may import domain, but not app or cli");
     expectFailure(args[1], "tests/module_check/missing_doc", "domain.document", "missing module doc");
-    writeln("module check fixtures: ok (valid, forbidden import, missing doc)");
+    writeln("module check fixtures: ok (valid selective import, forbidden exact/child imports, missing doc)");
 }

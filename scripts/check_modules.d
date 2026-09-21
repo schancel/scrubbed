@@ -15,6 +15,10 @@ private bool projectModule(string name) {
     return false;
 }
 
+private bool inLayer(string name, string layer) {
+    return name == layer || name.startsWith(layer ~ ".");
+}
+
 private string modulePath(string root, string path) {
     auto prefix = root ~ "/";
     return (path.startsWith(prefix) ? path[prefix.length .. $] : path).replace("\\", "/");
@@ -25,18 +29,18 @@ private string importRule(string owner, string dependency) {
     if (owner == "app" && dependency != "cli")
         return "app may import only cli among project modules";
     if (owner == "cli") return null;
-    if (owner == "pipeline" && (dependency == "app" || dependency == "cli" || dependency == "filters" || dependency.startsWith("filters.")))
+    if (owner == "pipeline" && (inLayer(dependency, "app") || inLayer(dependency, "cli") || inLayer(dependency, "filters")))
         return "pipeline must not import app, cli, or concrete filters";
     if (owner == "domain" || owner.startsWith("domain.")) {
         if (dependency != "domain" && !dependency.startsWith("domain."))
             return "domain modules must remain independent of other project layers";
     }
     if (owner == "content" || owner.startsWith("content.")) {
-        if (dependency == "app" || dependency == "cli")
+        if (inLayer(dependency, "app") || inLayer(dependency, "cli"))
             return "content may import domain, but not app or cli";
     }
     if (owner == "filters" || owner.startsWith("filters.")) {
-        if (dependency == "app" || dependency == "cli")
+        if (inLayer(dependency, "app") || inLayer(dependency, "cli"))
             return "filters must not import app or cli";
         if (dependency == "filters" || dependency.startsWith("filters.")) {
             if (owner == "filters.entities" && (dependency == "filters.entities_data" || dependency == "filters.mojibake"))
@@ -80,8 +84,10 @@ string[] checkTree(string root) {
         if (!hasModuleDoc(root, path, source, name))
             failures ~= relative ~ ": module " ~ name ~ ": missing module doc (/// header or README entry)";
         foreach (statement; matchAll(source, regex(`(?m)^\s*(?:(?:public|private|static|protected|package)\s+)*import\s+([^;]+);`))) {
-            foreach (part; statement.captures[1].split(",")) {
-                auto aliases = part.split(":")[0].split("=");
+            // A colon starts selective symbols; commas after it do not name modules.
+            auto modules = statement.captures[1].split(":")[0];
+            foreach (part; modules.split(",")) {
+                auto aliases = part.split("=");
                 auto dependency = aliases[$ - 1].strip;
                 auto rule = importRule(name, dependency);
                 if (rule.length)

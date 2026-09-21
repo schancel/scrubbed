@@ -109,3 +109,6 @@ file/tree CLI wires it only in opt-in `--manifest PATH` mode; see
 For mapping and output-commit details, see the [architecture map](../docs/architecture.md).
 For filter work, start with the [filter guide](filters/README.md), then run
 `dub test` and `dub build --build=release` from the repository root.
+
+Local-manifest file failures and fatal exits are described in
+[`docs/failure-policy.md`](../docs/failure-policy.md).

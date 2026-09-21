@@ -8,6 +8,8 @@ import effects.stdio_stream : processStandardJsonl;
 import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
     configDigest, inputDigest, outputDigest;
 import effects.atomic_piece_sink : writeAtomicPieces;
+import effects.failure_policy : recordDocumentFailure;
+import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
 import domain.document : DocumentId, SourceLocator;
 import filters.entities;
@@ -29,7 +31,7 @@ import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
 import std.string : join;
-import std.utf : validate;
+import std.utf : UTFException, validate;
 import std.uuid : randomUUID;
 import std.digest.sha : SHA256;
 import core.stdc.errno : errno, EINTR;
@@ -446,10 +448,36 @@ private class ManifestDecisionFailure : Exception {
     }
 }
 
+private class DocumentFailure : Exception {
+    FailureRecord record;
+    this(FailureRecord record) {
+        super(record.reason);
+        this.record = record;
+    }
+}
+
+private class FatalDocumentFailure : Exception {
+    FailureRecord record;
+    this(FailureRecord record, Exception cause) {
+        super("fatal document failure: " ~ cause.msg);
+        this.record = record;
+    }
+}
+
+version (FailurePolicyHarness) {
+    private void failureAt(string databasePath, string phase, string file) {
+        auto marker = databasePath ~ ".fault-" ~ phase;
+        if (exists(marker) && (readText(marker).length == 0 ||
+            readText(marker) == baseName(file)))
+            throw new Exception("injected " ~ phase ~ " fault");
+    }
+}
+
 private ManifestOutcome processManifestOne(LocalManifest manifest, string databasePath,
         string file, string inputRoot,
         string outputRoot, bool inputIsDir, const ref Pipeline chain,
-        ulong reservedBytes, ubyte[32] configHash, bool retry, bool dryRun) {
+        ulong reservedBytes, ubyte[32] configHash, bool retry, bool dryRun,
+        size_t completedPrefix) {
     if (isSymlink(file)) throw new Exception("refusing symlink input: " ~ file);
     auto destination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
     preflightDestination(destination, inputIsDir ? outputRoot : dirName(outputRoot));
@@ -485,9 +513,19 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
             manifest.retry(key);
         version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
     }
-    bool published;
+    bool sinkTouched;
+    FailurePhase phase = FailurePhase.filter;
     try {
+        version (FailurePolicyHarness) {
+            phase = FailurePhase.read;
+            failureAt(databasePath, "read", file);
+            phase = FailurePhase.decode;
+            failureAt(databasePath, "decode", file);
+            phase = FailurePhase.filter;
+            failureAt(databasePath, "filter", file);
+        }
         auto cleaned = chain.run(text);
+        phase = FailurePhase.scheduler;
         if (getSize(file) != reservedBytes ||
             inputDigest(mm is null ? cast(const(ubyte)[])"" :
                 cast(const(ubyte)[])mm[]) != firstHash)
@@ -497,6 +535,7 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
             "dry-run-unchanged", "");
         version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
         // The F08 sink owns its buffer and fsync-before-rename publication.
+        phase = FailurePhase.policy;
         ensurePlainDirectory(inputIsDir ? outputRoot : dirName(outputRoot),
             dirName(destination));
         auto content = new Content([ContentPiece.own(cast(const(ubyte)[])cleaned)]);
@@ -504,23 +543,39 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
         // until ContentPiece.own has copied those bytes.
         if (mm !is null && mm[].length != reservedBytes)
             throw new Exception("mapped input length changed");
+        phase = FailurePhase.sink;
+        sinkTouched = true;
+        version (FailurePolicyHarness) failureAt(databasePath, "sink", file);
         writeAtomicPieces(destination, content.pieces());
-        published = true;
         version (ManifestCliHarness) manifestKillAt(databasePath, "after-publish");
+        phase = FailurePhase.manifest;
         manifest.commitPublished(key, destination,
             outputDigest(cast(const(ubyte)[])cleaned));
         version (ManifestCliHarness) manifestKillAt(databasePath, "after-commit");
         return ManifestOutcome(replacing ? "retry" :
             (changed ? "changed" : "unchanged"),
             replacing ? (changed ? "changed" : "unchanged") : "");
-    } catch (Throwable failure) {
-        if (!dryRun) {
-            try {
-                if (published) manifest.markUncertain(key);
-                else manifest.markFailed(key);
-            } catch (Throwable) { }
+    } catch (Exception failure) {
+        if (dryRun) throw failure;
+        if (phase == FailurePhase.policy || phase == FailurePhase.scheduler)
+            throw failure;
+        if (phase == FailurePhase.filter && cast(UTFException)failure !is null)
+            phase = FailurePhase.decode;
+        auto record = FailureRecord(id, key.sink, phase,
+            FailureClass.document, sinkTouched, completedPrefix, failure.msg, failure);
+        // A manifest write or acknowledgment failure is fatal; it must never
+        // be mistaken for a quarantined document.
+        try {
+            version (FailurePolicyHarness) {
+                recordDocumentFailure(manifest, key, record,
+                    (in FailureRecord logged) { failureAt(databasePath, "log-ack", file); });
+            } else recordDocumentFailure(manifest, key, record);
+        } catch (Exception acknowledgmentFailure) {
+            throw new FatalDocumentFailure(record, acknowledgmentFailure);
         }
-        throw failure;
+        if (phase == FailurePhase.manifest)
+            throw new FatalDocumentFailure(record, failure);
+        throw new DocumentFailure(record);
     }
 }
 
@@ -699,6 +754,7 @@ int runApp(string[] args) {
             inputIsDir ? outputPath : dirName(outputPath));
     const chainLabel = chain.names.join(" -> ");
     auto pending = explain ? new PendingExplanations : null;
+    size_t manifestCompletedPrefix;
     auto scheduler = new BoundedInput(
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs),
         manifestPath.length ? 1 : nThreads,
@@ -706,7 +762,8 @@ int runApp(string[] args) {
             ManifestOutcome decision;
             if (manifestPath.length)
                 decision = processManifestOne(manifest, manifestPath, file, inputPath, outputPath,
-                    inputIsDir, chain, bytes, configHash, manifestRetry, dryRun);
+                    inputIsDir, chain, bytes, configHash, manifestRetry, dryRun,
+                    manifestCompletedPrefix);
             else
                 decision.status = processOne(file, inputPath, outputPath, inputIsDir,
                     chain, bytes, dryRun) ? "changed" : "unchanged";
@@ -714,18 +771,32 @@ int runApp(string[] args) {
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, decision.status, "", decision.detail);
             if (explain) pending.remove(file);
+            if (manifestPath.length) ++manifestCompletedPrefix;
         },
         (string file, Throwable error) {
-            stderr.writefln("SKIP %s: %s", file, error.msg);
+            auto documentFailure = cast(DocumentFailure)error;
+            auto fatalDocumentFailure = cast(FatalDocumentFailure)error;
+            auto manifestDecision = cast(ManifestDecisionFailure)error;
+            stderr.writefln("%s %s: %s",
+                documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
+                file, error.msg);
             if (explain) {
-                auto manifestDecision = cast(ManifestDecisionFailure)error;
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, manifestDecision is null ? "failure" :
-                        manifestDecision.status, error.msg);
+                    chainLabel, documentFailure is null ?
+                        (manifestDecision is null ? "failure" : manifestDecision.status) :
+                        (documentFailure.record.sinkTouched ? "uncertain" : "failed"),
+                    error.msg, documentFailure !is null ?
+                        ("id=" ~ documentFailure.record.documentId.text ~
+                        " sink=" ~ documentFailure.record.sinkKey) :
+                        (fatalDocumentFailure !is null ?
+                            ("id=" ~ fatalDocumentFailure.record.documentId.text ~
+                            " sink=" ~ fatalDocumentFailure.record.sinkKey) : ""));
             }
             if (explain) pending.remove(file);
+        }, (Throwable error) {
+            return cast(DocumentFailure)error is null &&
+                cast(ManifestDecisionFailure)error is null;
         });
-    size_t rejected;
     try {
         if (inputIsDir) {
             foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
@@ -747,11 +818,7 @@ int runApp(string[] args) {
                 }
                 catch (Exception error) {
                     if (explain) pending.remove(entry.name);
-                    stderr.writefln("SKIP %s: %s", entry.name, error.msg);
-                    if (explain)
-                        explainOne(entry.name, destinationFor(entry.name, inputPath,
-                            outputPath, inputIsDir), chainLabel, "failure", error.msg);
-                    ++rejected;
+                    throw error;
                 }
             }
         } else {
@@ -765,10 +832,7 @@ int runApp(string[] args) {
             }
             catch (Exception error) {
                 if (explain) pending.remove(inputPath);
-                stderr.writefln("SKIP %s: %s", inputPath, error.msg);
-                if (explain)
-                    explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
-                ++rejected;
+                throw error;
             }
         }
     } catch (Exception error) {
@@ -781,8 +845,15 @@ int runApp(string[] args) {
         throw error;
     }
     const counts = scheduler.finish();
+    if (scheduler.fatal() !is null) {
+        if (explain)
+            foreach (file; pending.drain())
+                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
+                    chainLabel, "canceled", "fatal processing failure");
+        throw new Exception("fatal file processing failure: " ~ scheduler.fatal().msg);
+    }
     if (manifest !is null) manifest.checkpoint();
-    const failures = counts.failed + rejected;
+    const failures = counts.failed;
     writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");
     return failures == 0 ? 0 : 1;
 }
@@ -856,9 +927,9 @@ unittest {
 
     auto invalidUtf8 = buildPath(root, "invalid-utf8.bin");
     write(invalidUtf8, [cast(ubyte) 0xFF]);
-    assert(runApp(["scrubbed", "--input", invalidUtf8,
+    assertThrown(runApp(["scrubbed", "--input", invalidUtf8,
         "--output", buildPath(root, "invalid-output.txt"),
-        "--threads", "1"]) == 1);
+        "--threads", "1"]));
 
     auto sharedInput = buildPath(root, "shared-input", "nested");
     mkdirRecurse(sharedInput);
@@ -876,9 +947,9 @@ unittest {
     auto oversized = buildPath(root, "oversized.txt");
     write(oversized, "too large");
     auto oversizedOutput = buildPath(root, "oversized-output.txt");
-    assert(runApp(["scrubbed", "--input", oversized,
+    assertThrown(runApp(["scrubbed", "--input", oversized,
         "--output", oversizedOutput, "--threads", "1",
-        "--max-input-bytes", "2"]) == 1);
+        "--max-input-bytes", "2"]));
     assert(!exists(oversizedOutput));
 
     auto changed = buildPath(root, "changed.txt");
@@ -921,6 +992,7 @@ private void requireCli(bool condition, string message) {
 
 unittest {
     import std.file : rmdirRecurse, tempDir;
+    import std.exception : assertThrown;
 
     auto root = buildPath(tempDir, "scrubbed-inspection-" ~ randomUUID.toString);
     scope(exit) if (exists(root)) rmdirRecurse(root);
@@ -957,9 +1029,9 @@ unittest {
     write(buildPath(inputTree, "unchanged.txt"), "clean");
     write(buildPath(inputTree, "bad.bin"), [cast(ubyte) 0xFF]);
     auto treeOutput = buildPath(root, "tree-output");
-    requireCli(runApp(["scrubbed", "--input", inputTree, "--output", treeOutput,
+    assertThrown(runApp(["scrubbed", "--input", inputTree, "--output", treeOutput,
         "--dry-run", "--explain", "--threads", "4", "--max-queued-docs", "1",
-        "--max-open-inputs", "1"]) == 1, "multi-thread failure exit");
+        "--max-open-inputs", "1"]));
     requireCli(!exists(treeOutput), "multi-thread dry-run created output tree");
     version (Posix) {
         import std.file : symlink;
@@ -967,9 +1039,8 @@ unittest {
         mkdir(unsafeOutput);
         auto linkedFile = buildPath(unsafeOutput, "changed.txt");
         symlink(input, linkedFile);
-        requireCli(runApp(["scrubbed", "--input", inputTree,
-            "--output", unsafeOutput, "--dry-run", "--threads", "1"]) == 1,
-            "dry-run must reject unsafe destination");
+        assertThrown(runApp(["scrubbed", "--input", inputTree,
+            "--output", unsafeOutput, "--dry-run", "--threads", "1"]));
         requireCli(readText(input) == "line\r\n", "unsafe dry-run followed output link");
     }
     requireCli(explanationRecord("in\n", "out", "strip-control", "changed") ==

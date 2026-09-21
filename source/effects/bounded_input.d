@@ -34,18 +34,22 @@ final class BoundedInput {
     private InputLimits limits;
     private InputCounts counts;
     private bool cancelled;
+    private Throwable fatalFailure;
     private void delegate(string, ulong) process;
     private void delegate(string, Throwable) reportFailure;
+    private bool delegate(Throwable) isFatal;
 
     this(InputLimits limits, size_t threads,
          void delegate(string, ulong) process,
-         void delegate(string, Throwable) reportFailure) {
+         void delegate(string, Throwable) reportFailure,
+         bool delegate(Throwable) isFatal = null) {
         if (!limits.queuedDocuments || !limits.reservedBytes ||
             !limits.workerDescriptors || !threads)
             throw new Exception("input limits and threads must be positive");
         this.limits = limits;
         this.process = process;
         this.reportFailure = reportFailure;
+        this.isFatal = isFatal;
         mutex = new Mutex;
         changed = new Condition(mutex);
         // finish(true) enlists its caller as a worker. Keep the total
@@ -122,8 +126,14 @@ final class BoundedInput {
             process(path, bytes);
             success = true;
         } catch (Throwable error) {
-            // Report while this task still owns its descriptor and byte token.
-            reportFailure(path, error);
+            bool fatal = isFatal !is null && isFatal(error);
+            if (fatal) stopFor(error);
+            try {
+                // Report while this task still owns its descriptor and byte token.
+                reportFailure(path, error);
+            } catch (Throwable reportError) {
+                stopFor(reportError);
+            }
         } finally {
             mutex.lock();
             --counts.workerDescriptors;
@@ -140,6 +150,21 @@ final class BoundedInput {
         cancelled = true;
         changed.notifyAll();
         mutex.unlock();
+    }
+
+    private void stopFor(Throwable error) {
+        mutex.lock();
+        if (fatalFailure is null) fatalFailure = error;
+        cancelled = true;
+        changed.notifyAll();
+        mutex.unlock();
+    }
+
+    Throwable fatal() {
+        mutex.lock();
+        auto result = fatalFailure;
+        mutex.unlock();
+        return result;
     }
 
     InputCounts finish() {
@@ -229,6 +254,29 @@ unittest {
     assert(faults.atomicLoad == 32 && failure.failed == 32);
     assert(failure.reservedBytes == 0 && failure.workerDescriptors == 0 &&
         failure.queuedDocuments == 0);
+
+    size_t fatalReports;
+    auto fatal = new BoundedInput(InputLimits(2, 2, 1), 1,
+        (string path, ulong bytes) { throw new Exception("fatal worker fault"); },
+        (string path, Throwable error) { ++fatalReports; },
+        (Throwable error) { return true; });
+    assert(fatal.submit("first", 1));
+    assert(!fatal.submit("second", 1));
+    auto fatalCounts = fatal.finish();
+    assert(fatal.fatal() !is null && fatalReports == 1 &&
+        fatalCounts.failed == 1 && fatalCounts.succeeded == 0 &&
+        fatalCounts.reservedBytes == 0 && fatalCounts.workerDescriptors == 0 &&
+        fatalCounts.queuedDocuments == 0);
+
+    auto reportFault = new BoundedInput(InputLimits(1, 1, 1), 1,
+        (string path, ulong bytes) { throw new Exception("document fault"); },
+        (string path, Throwable error) { throw new Exception("log ack fault"); },
+        (Throwable error) { return false; });
+    assert(reportFault.submit("first", 1));
+    assert(!reportFault.submit("second", 1));
+    assert(reportFault.fatal() !is null &&
+        reportFault.fatal().msg == "log ack fault" &&
+        reportFault.finish().reservedBytes == 0);
 
     auto cancelled = new BoundedInput(InputLimits(2, 2, 1), 4,
         (string path, ulong bytes) {},

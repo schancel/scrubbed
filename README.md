@@ -1,7 +1,7 @@
 # scrubbed
 
 A text-sanitization CLI in D: mojibake/encoding repair, normalization, and
-(eventually in the CLI) HTML->Markdown conversion, composed as a pluggable filter
+opt-in mechanical HTML->Markdown conversion, composed as a pluggable filter
 pipeline and run in parallel across an input document tree.
 
 ## Why this exists, honestly

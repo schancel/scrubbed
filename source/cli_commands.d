@@ -3,6 +3,7 @@ module cli_commands;
 
 import argparse;
 import cli : runApp, runExtract;
+import effects.error_cli : runErrorCommand;
 import std.conv : to;
 import std.stdio : stderr;
 import std.string : startsWith;
@@ -70,9 +71,36 @@ struct Extract {
 @(Command("completion").Description("Generate shell setup or command/option-name candidates; use completion init --bash, --zsh or --fish."))
 struct Completion {}
 
+@(Command("errors-init").Description("Create a new opt-in v2 error journal."))
+struct ErrorsInit {
+    @(NamedArgument("journal").Description("New v2 journal path")) string journal;
+}
+
+@(Command("errors-copy").Description("Copy an existing v1 journal to a new v2 journal."))
+struct ErrorsCopy {
+    @(NamedArgument("from-v1").Description("Existing v1 journal path")) string fromV1;
+    @(NamedArgument("journal").Description("New v2 journal path")) string journal;
+}
+
+@(Command("errors-export").Description("Export a bounded v2 journal snapshot."))
+struct ErrorsExport {
+    @(NamedArgument("journal").Description("Existing v2 journal path")) string journal;
+    @(NamedArgument("errors-jsonl").Description("History JSONL destination")) string errorsJsonl;
+    @(NamedArgument("outstanding-jsonl").Description("Outstanding JSONL destination"))
+    string outstandingJsonl;
+}
+
+@(Command("errors-verify").Description("Verify exported JSONL and digest sidecars."))
+struct ErrorsVerify {
+    @(NamedArgument("errors-jsonl").Description("History JSONL path")) string errorsJsonl;
+    @(NamedArgument("outstanding-jsonl").Description("Outstanding JSONL path"))
+    string outstandingJsonl;
+}
+
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
-    SubCommand!(Repair, Extract, Completion, Default!Run) command;
+    SubCommand!(Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
+        ErrorsExport, ErrorsVerify, Default!Run) command;
 }
 
 enum Config parserConfig = { errorExitCode: 2 };
@@ -117,6 +145,16 @@ private int process(T)(ref T options, const string[] original) {
 
 /// Dispatch from the shipping executable; argparse owns parsing, help and completion.
 int runCommands(string[] argv) {
+    if (argv.length > 1 && (argv[1] == "errors-init" ||
+        argv[1] == "errors-copy" || argv[1] == "errors-export" ||
+        argv[1] == "errors-verify")) {
+        if (argv.length == 3 && (argv[2] == "--help" || argv[2] == "-h")) {
+            Commands help;
+            auto result = CLI!(parserConfig, Commands).parseArgs(help, argv[1 .. $]);
+            return result.exitCode;
+        }
+        return runErrorCommand(argv[1], argv[2 .. $]);
+    }
     // Generated setup scripts invoke the executable directly with --bash or
     // --fish, so these entry points must use the same argparse completer.
     if (argv.length > 1 && (argv[1] == "--bash" || argv[1] == "--fish" ||
@@ -150,6 +188,11 @@ int runCommands(string[] argv) {
             return runExtract(cmd.input, cmd.output, cmd.charset, cmd.format);
         } else static if (is(typeof(cmd) == Completion)) {
             stderr.writeln("scrubbed: use completion init or completion complete");
+            return 2;
+        } else static if (is(typeof(cmd) == ErrorsInit) ||
+            is(typeof(cmd) == ErrorsCopy) || is(typeof(cmd) == ErrorsExport) ||
+            is(typeof(cmd) == ErrorsVerify)) {
+            assert(0, "management verbs dispatched before argparse");
             return 2;
         } else {
             return process(cmd, original);

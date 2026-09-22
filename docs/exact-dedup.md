@@ -11,7 +11,10 @@ destinations must be in one trusted, exclusively controlled output directory.
 Before any write, the adapter rejects duplicate destination paths and any
 destination path or existing inode that aliases any source shard. It also
 rejects nonregular, symlink, or hardlinked existing targets. The same check
-runs before each publication and after each fault callback. The underlying
+is repeated for the active target before its publication and after each fault
+callback; every target is rechecked once after staging. Source path/inode and
+destination uniqueness sets are built once, so path inspections grow linearly
+with shard count even across publication hooks. The underlying
 C01 writer publishes each overlay with a same-directory temporary and atomic
 rename; this is **not** a multi-shard transaction. After a partial publication,
 re-running with the same shards converges to byte-identical overlays. A
@@ -51,7 +54,8 @@ unrelated-overlay immutability, destination/source aliases, duplicate IDs,
 and all three prepublication fault points:
 
 ```sh
-ldc2 -O3 -release -i -I=source experiments/exact_dedup/overlay_check.d \
+ldc2 -O3 -release -d-version=ExactDedupOverlayCheck -i -I=source \
+    experiments/exact_dedup/overlay_check.d \
     -of=.dub/exact-dedup-overlay-check
 .dub/exact-dedup-overlay-check
 ```

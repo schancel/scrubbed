@@ -23,6 +23,14 @@ private enum runRecords = 32;
 private enum fanIn = 8;
 private enum maxScratchFrame = 2 * 1024 * 1024;
 
+// Release-checker-only observation of filesystem inspections. This does not
+// participate in production decisions or add a public runtime hook.
+version (ExactDedupOverlayCheck) {
+    private __gshared size_t preflightInspections;
+    size_t dedupPreflightInspections() { return preflightInspections; }
+    void resetDedupPreflightInspections() { preflightInspections = 0; }
+}
+
 struct DedupShard {
     string source;
     string destination;
@@ -35,7 +43,7 @@ void writeExactDedupOverlays(const(DedupShard)[] inputs,
     if (indexHash is null) indexHash = &shaIndex;
     auto shards = inputs.dup;
     shards.sort!((a, b) => a.source < b.source);
-    preflight(shards);
+    auto plan = PreflightPlan(shards);
     if (!shards.length) return;
 
     auto scratch = buildPath(dirName(shards[0].destination),
@@ -146,17 +154,19 @@ void writeExactDedupOverlays(const(DedupShard)[] inputs,
     if (links.length) flushLinks(links, orderedRuns, &fresh, &sourceLess);
     auto ordered = mergeRuns!Link(orderedRuns, &sourceLess, &fresh);
 
-    // Every destination is validated against every source and destination
-    // before publication. The callback wrapper repeats that check after a
-    // caller fault hook, including C01's final prepublish hook.
-    preflight(shards);
+    // The one-time plan rejects every destination against all source paths,
+    // inodes and other destinations. Recheck all targets after staging, then
+    // only the active target after each fault hook: future targets are checked
+    // when their turn arrives, without rescanning every pair per publication.
+    plan.validateAllDestinations();
     File sortedLinks;
     if (ordered.count) sortedLinks = File(ordered.firstPath(), "rb");
     scope(exit) if (ordered.count) sortedLinks.close();
     Link head;
     bool hasHead = ordered.count && readRecord(sortedLinks, head);
     foreach (sourceIndex, shard; shards) {
-        preflight(shards);
+        plan.validateSource(sourceIndex);
+        plan.validateDestination(sourceIndex);
         auto writer = new OverlayWriter(shard.destination, shard.source,
             dedupAnalyzerKey, dedupAnalyzerVersion);
         scope(failure) writer.abort();
@@ -166,7 +176,8 @@ void writeExactDedupOverlays(const(DedupShard)[] inputs,
         }
         PublishFault checkedFault = (PublishStep step) {
             if (fault !is null) fault(step);
-            preflight(shards);
+            plan.validateSource(sourceIndex);
+            plan.validateDestination(sourceIndex);
         };
         writer.publish(checkedFault);
     }
@@ -175,43 +186,76 @@ void writeExactDedupOverlays(const(DedupShard)[] inputs,
 
 private ubyte[32] shaIndex(const(ubyte)[] bytes) { return sha256Of(bytes); }
 
-private void preflight(const(DedupShard)[] shards) {
-    string parent;
-    stat_t[] sources;
+private int inspect(string path, out stat_t info) {
+    version (ExactDedupOverlayCheck) ++preflightInspections;
+    return lstat(path.toStringz, &info);
+}
+
+private string identity(stat_t info) {
+    return info.st_dev.to!string ~ ":" ~ info.st_ino.to!string;
+}
+
+private struct PreflightPlan {
+    string directory;
+    string[] sources;
     string[] destinations;
-    foreach (shard; shards) {
-        auto source = buildNormalizedPath(absolutePath(shard.source));
-        auto destination = buildNormalizedPath(absolutePath(shard.destination));
-        enforce(source != destination, "dedup destination is a source shard");
-        auto directory = dirName(destination);
-        enforce(isDir(directory) && !isSymlink(directory),
-            "dedup output directory is unsafe");
-        if (parent.length) enforce(parent == directory,
-            "dedup destinations must share a trusted output directory");
-        parent = directory;
-        stat_t info;
-        enforce(lstat(source.toStringz, &info) == 0 && S_ISREG(info.st_mode),
-            "dedup source is not a regular shard");
-        sources ~= info;
-        destinations ~= destination;
-    }
-    foreach (i, destination; destinations) {
-        foreach (j, other; destinations)
-            if (i != j) enforce(destination != other,
+    string[] sourceIdentities;
+    bool[string] sourcePaths;
+    bool[string] sourceInodes;
+    bool[string] destinationPaths;
+
+    this(const(DedupShard)[] shards) {
+        foreach (shard; shards) {
+            auto source = buildNormalizedPath(absolutePath(shard.source));
+            auto destination = buildNormalizedPath(absolutePath(shard.destination));
+            auto parent = dirName(destination);
+            enforce(isDir(parent) && !isSymlink(parent),
+                "dedup output directory is unsafe");
+            if (directory.length) enforce(directory == parent,
+                "dedup destinations must share a trusted output directory");
+            directory = parent;
+            enforce((destination in destinationPaths) is null,
                 "duplicate dedup destination");
-        foreach (shard; shards)
-            enforce(destination != buildNormalizedPath(absolutePath(shard.source)),
+            destinationPaths[destination] = true;
+            stat_t info;
+            enforce(inspect(source, info) == 0 && S_ISREG(info.st_mode),
+                "dedup source is not a regular shard");
+            sources ~= source;
+            destinations ~= destination;
+            sourceIdentities ~= identity(info);
+            sourcePaths[source] = true;
+            sourceInodes[sourceIdentities[$ - 1]] = true;
+        }
+        foreach (i, destination; destinations) {
+            enforce((destination in sourcePaths) is null,
                 "dedup destination aliases source path");
+            validateDestination(i);
+        }
+    }
+
+    void validateSource(size_t i) {
+        stat_t info;
+        enforce(inspect(sources[i], info) == 0 && S_ISREG(info.st_mode) &&
+            identity(info) == sourceIdentities[i],
+            "dedup source changed during publication");
+    }
+
+    void validateAllDestinations() {
+        foreach (i; 0 .. destinations.length) validateDestination(i);
+    }
+
+    void validateDestination(size_t i) {
+        enforce(isDir(directory) && !isSymlink(directory),
+            "dedup output directory changed");
         stat_t target;
-        if (lstat(destination.toStringz, &target) != 0) {
+        if (inspect(destinations[i], target) != 0) {
             enforce(errno == ENOENT, "cannot inspect dedup destination");
-            continue;
+            return;
         }
         enforce(S_ISREG(target.st_mode) && target.st_nlink == 1,
             "dedup destination is nonregular or hardlinked");
-        foreach (source; sources)
-            enforce(target.st_dev != source.st_dev || target.st_ino != source.st_ino,
-                "dedup destination aliases source inode");
+        enforce((identity(target) in sourceInodes) is null,
+            "dedup destination aliases source inode");
     }
 }
 

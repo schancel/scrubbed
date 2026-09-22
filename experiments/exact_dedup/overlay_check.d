@@ -8,7 +8,8 @@ import domain.shard_format : AnnotationRecord, ShardDocument, encodeAnnotation;
 import effects.document_shards : DocumentShardWriter, OverlayReader, PublishStep,
     JoinedOverlay, joinShards;
 import effects.exact_dedup_overlay : DedupShard, dedupAnalyzerKey,
-    dedupAnalyzerVersion, writeExactDedupOverlays;
+    dedupAnalyzerVersion, dedupPreflightInspections,
+    resetDedupPreflightInspections, writeExactDedupOverlays;
 import std.algorithm.sorting : sort;
 import std.algorithm.searching : canFind;
 import std.conv : to;
@@ -237,6 +238,19 @@ void main() {
             read(shard.destination) == baseline[i], "source or overlay mutated");
     need(read(unrelated) == unrelatedBytes && inode(unrelated) == unrelatedInode,
         "unrelated overlay changed");
+    // 48 empty shards isolate metadata/preflight work from document sorting.
+    // A pairwise scan on every callback grows cubically and fails this bound.
+    DedupShard[] many;
+    foreach (i; 0 .. 48) {
+        auto source = buildPath(root, "scale-source-" ~ i.to!string ~ ".shard");
+        auto destination = buildPath(output, "scale-" ~ i.to!string ~ ".overlay");
+        sourceFile(source, []);
+        many ~= DedupShard(source, destination);
+    }
+    resetDedupPreflightInspections();
+    writeExactDedupOverlays(many);
+    need(dedupPreflightInspections() <= 15 * many.length,
+        "preflight path inspections grew beyond linear per publication");
     noScratch(output);
     writeln("exact-dedup overlays: external group, forced collision, restart, faults, aliases: ok");
 }

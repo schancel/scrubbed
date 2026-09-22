@@ -3,12 +3,13 @@ module experiments.errors.live_cli_check;
 
 import std.algorithm.searching : canFind;
 import std.conv : to;
-import std.file : exists, mkdir, readText, remove, rmdirRecurse, tempDir, write;
+import std.file : exists, getSize, mkdir, read, readText, remove,
+    rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.process : execute, spawnProcess, tryWait, wait;
 import std.string : splitLines, toStringz;
 import std.uuid : randomUUID;
-import core.sys.posix.unistd : link, symlink;
+import core.sys.posix.unistd : getpid, link, symlink;
 
 version (OSX) {
     // libproc reports this child's resident bytes and live descriptor list.
@@ -34,13 +35,19 @@ private void checkMeasuredTree(string binary, string root, string db) {
     import std.stdio : File, stdin;
     auto input = buildPath(root, "measured-tree");
     auto output = buildPath(root, "measured-out");
+    enum files = 384;
+    enum bytesPerFile = 256 * 1024;
+    enum residentCap = 64UL * 1024 * 1024;
     mkdir(input);
-    foreach (index; 0 .. 1024)
-        write(buildPath(input, index.to!string ~ ".txt"), "payload");
+    ubyte[] payload = new ubyte[bytesPerFile];
+    foreach (index; 0 .. files) {
+        payload[] = cast(ubyte)(32 + index % 95);
+        write(buildPath(input, index.to!string ~ ".txt"), payload);
+    }
     scope silent = File("/dev/null", "w");
     auto child = spawnProcess([binary, "run", "--input", input,
         "--output", output, "--error-journal", db, "--threads", "4",
-        "--max-queued-docs", "1", "--max-input-bytes", "7",
+        "--max-queued-docs", "1", "--max-input-bytes", bytesPerFile.to!string,
         "--max-open-inputs", "1"], stdin, silent, silent);
     scope(exit) if (child.processID > 0) wait(child);
     ulong maxResident;
@@ -68,10 +75,9 @@ private void checkMeasuredTree(string binary, string root, string db) {
     need(status == 0, "measured tree exited " ~ status.to!string);
     version (OSX) {
         need(samples >= 5, "insufficient live resource samples");
-        // A 1024-file tree exceeds the queued/file-token limits many times;
-        // these deliberately generous caps detect whole-corpus buffering or
-        // leaked descriptors without depending on one allocator version.
-        need(maxResident > 0 && maxResident <= 192UL * 1024 * 1024,
+        // The 96 MiB corpus is larger than this bound; holding all input
+        // buffers would fail while one-token scheduling stays below it.
+        need(maxResident > 0 && maxResident <= residentCap,
             "resident bound " ~ maxResident.to!string);
         need(maxDescriptors > 0 && maxDescriptors <= 64,
             "descriptor bound " ~ maxDescriptors.to!string);
@@ -79,8 +85,36 @@ private void checkMeasuredTree(string binary, string root, string db) {
         writeln("live v2 resources: ", samples, " samples, peak observed RSS ",
             maxResident, " bytes, peak observed FDs ", maxDescriptors);
     }
-    need(readText(buildPath(output, "1023.txt")) == "payload",
-        "measured tree completed");
+    version (OSX) {
+        RusageV0 before, after;
+        need(proc_pid_rusage(getpid(), 0, &before) == 0,
+            "buffer control baseline");
+        ubyte[][] retained;
+        retained.length = files;
+        foreach (index; 0 .. files)
+            retained[index] = cast(ubyte[])read(
+                buildPath(input, index.to!string ~ ".txt"));
+        need(proc_pid_rusage(getpid(), 0, &after) == 0,
+            "buffer control sample");
+        need(retained[$ - 1][$ - 1] == cast(ubyte)(32 + (files - 1) % 95),
+            "buffer control retained bytes");
+        need(after.residentSize >= before.residentSize + residentCap,
+            "buffer control did not breach child RSS cap");
+        import std.stdio : writeln;
+        writeln("live v2 buffering control: retained ", files * bytesPerFile,
+            " bytes; RSS delta ", after.residentSize - before.residentSize,
+            " bytes");
+    }
+    foreach (index; 0 .. files) {
+        auto path = buildPath(output, index.to!string ~ ".txt");
+        need(exists(path) && getSize(path) == bytesPerFile,
+            "measured tree output length");
+        auto bytes = cast(ubyte[])read(path);
+        need(bytes.length == bytesPerFile, "measured tree output bytes");
+        foreach (value; bytes)
+            if (value != cast(ubyte)(32 + index % 95))
+                throw new Exception("live v2 check: measured tree output mismatch");
+    }
 }
 
 void main(string[] args) {

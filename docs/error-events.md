@@ -67,12 +67,13 @@ experiments/errors/live_cli_check.d` and run `.dub/live-v2-cli-check
 process-crash and acknowledgment-fault markers; that instrumentation is
 absent from the shipping binary. The checker accepts its path plus
 `--harness` and verifies restart and fail-stop behavior.
-On macOS, the shipping-binary checker additionally streams 1,024 seven-byte
-files through a one-document/one-descriptor scheduler cap and samples the
-child with `proc_pid_rusage` and `proc_pidinfo` until exit. It requires at
-least five live samples, no more than 192 MiB observed resident memory, and
-no more than 64 observed file descriptors; these are regression bounds, not
-promises about every host or instantaneous unsampled peaks.
+On macOS, the shipping-binary checker additionally streams 384 256-KiB files
+(96 MiB total) through a one-document/one-descriptor scheduler cap and samples
+the child with `proc_pid_rusage` and `proc_pidinfo` until exit. It requires at
+least five live samples, no more than 64 MiB observed resident memory, and no
+more than 64 observed file descriptors. A D negative control retains all
+96 MiB of input buffers and must measurably exceed the child RSS cap. These
+are regression bounds, not promises about every host or unsampled peaks.
 
 ## Stage 3a export boundary
 

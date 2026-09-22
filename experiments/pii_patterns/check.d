@@ -23,12 +23,12 @@ private void rejects(string message, scope void delegate() action) {
 }
 
 private void golden() {
-    auto us = scan("é a.b+tag@example.co +1-202-555-0142 4111 1111 1111 1111 192.0.2.1");
+    auto us = scan("é a.b+tag@example.co +1-202-555-0142 4111 1111 1111 1111; 192.0.2.1");
     check(us.length == 4, "US finding count");
     check(us[0] == PiiFinding(3, 21, PiiCategory.email, "email.ascii-domain.v1", "US", PiiConfidence.high), "email byte span");
     check(us[1] == PiiFinding(22, 37, PiiCategory.phone, "phone.international.v1", "US", PiiConfidence.high), "US phone span");
     check(us[2] == PiiFinding(38, 57, PiiCategory.card, "card.luhn.ambiguous.v1", "US", PiiConfidence.ambiguous), "card span");
-    check(us[3] == PiiFinding(58, 67, PiiCategory.ip, "ip.v4.v1", "US", PiiConfidence.high), "IP span");
+    check(us[3] == PiiFinding(59, 68, PiiCategory.ip, "ip.v4.v1", "US", PiiConfidence.high), "IP span");
     auto gb = scan("+44 20 7946 0958 | 020 7946 0958", "GB");
     check(gb.length == 2 && gb[0].start == 0 && gb[0].end == 16 &&
         gb[0].confidence == PiiConfidence.high && gb[1].start == 19 && gb[1].end == 32 &&
@@ -80,10 +80,20 @@ private void punctuationBoundaries() {
         scan("202-555-0142.9").length == 0 &&
         scan("4111 1111 1111 1111.9").length == 0,
         "malformed numeric extensions rejected");
-    check(scan("4111 1111 1111 1111 1234").length == 0,
-        "fifth same-separated card group rejected");
+    foreach (length; 1 .. 6) {
+        check(scan("4111 1111 1111 1111 " ~ "12345"[0 .. length]).length == 0,
+            "space-separated numeric card extension rejected");
+        check(scan("4111-1111-1111-1111-" ~ "12345"[0 .. length]).length == 0,
+            "hyphen-separated numeric card extension rejected");
+    }
+    check(scan("4111 1111 1111 1111").length == 1,
+        "standalone grouped card retained");
     check(scan("4111 1111 1111 1111 is a fixture").length == 1,
         "card followed by prose retained");
+    auto adjacentIp = scan("4111 1111 1111 1111 192.0.2.1");
+    check(adjacentIp.length == 1 && adjacentIp[0].category == PiiCategory.ip &&
+        adjacentIp[0].start == 20 && adjacentIp[0].end == 29,
+        "ambiguous card extension withheld; independent IP retained");
 }
 
 private void boundsAndSafety() {

@@ -127,11 +127,8 @@ private size_t cardEnd(const(ubyte)[] b, size_t i) {
     if (count < 13 || count > 19 || (separator != 0 && (count != 16 || group != 4)) ||
         !rightClear(b, p) ||
         (p < b.length && (digit(b[p]) || (b[p] == '.' && !terminalDot(b, p)) || b[p] == '-')) ||
+        (separator != 0 && p + 1 < b.length && b[p] == separator && digit(b[p + 1])) ||
         !plausibleCardPrefix(b, i, count) || !luhn(b, i, p)) return i;
-    // A fifth same-separated four-digit group is a malformed extension,
-    // whereas a following prose word is a legitimate delimiter.
-    if (separator != 0 && p + 5 <= b.length && b[p] == separator &&
-        digit(b[p + 1]) && digit(b[p + 2]) && digit(b[p + 3]) && digit(b[p + 4])) return i;
     return p;
 }
 

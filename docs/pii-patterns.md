@@ -8,6 +8,10 @@ retained for the later policy layer; callers must not assume findings are a
 redaction decision.
 An ordinary terminal period delimits a finding and is excluded from its span;
 malformed numeric extensions and chained `@` addresses are rejected.
+For grouped cards, a following same separator and digit is conservatively
+treated as a possible extra group: no card candidate is emitted, even when
+the following token independently matches an IP address. That IP finding is
+still emitted. A punctuation delimiter such as `;` preserves both findings.
 
 The first slice recognizes conservative ASCII email domains, US/GB telephone
 formats, issuer-prefix and Luhn-valid 13–19 digit card candidates, and canonical dotted IPv4.

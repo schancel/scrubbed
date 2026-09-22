@@ -319,6 +319,26 @@ private void overlayGoldens() {
             throw new Exception("injected prepublish failure"); }); });
     check(cast(ubyte[])read(decisionPath) == prior,
         "prepublish fault replaced prior overlay");
+    // A decision target must never consume and replace its feature source.
+    import core.sys.posix.unistd : link, symlink;
+    rejects({ publishDecisions(shardPath, featurePath, featurePath, selective); });
+    rejects({ publishDecisions(shardPath, featurePath,
+        root ~ "/./features.overlay", selective); });
+    auto hardlinkPath = buildPath(root, "features-hardlink.overlay");
+    check(link(featurePath.toStringz, hardlinkPath.toStringz) == 0,
+        "cannot create hardlink alias fixture");
+    rejects({ publishDecisions(shardPath, featurePath, hardlinkPath, selective); });
+    auto symlinkPath = buildPath(root, "features-symlink.overlay");
+    check(symlink(featurePath.toStringz, symlinkPath.toStringz) == 0,
+        "cannot create symlink alias fixture");
+    rejects({ publishDecisions(shardPath, featurePath, symlinkPath, selective); });
+    check(cast(ubyte[])read(featurePath) == featureBytes &&
+        dryRun(shardPath, featurePath, selective).documents == corpus.length,
+        "alias refusal lost stored measurements");
+    publishDecisions(shardPath, featurePath, decisionPath, permissive);
+    check(cast(ubyte[])read(featurePath) == featureBytes &&
+        cast(ubyte[])read(decisionPath) != prior,
+        "alias refusal prevented subsequent two-policy replay");
     auto missing = new OverlayWriter(missingPath, shardPath, featureAnalyzerKey,
         featureAnalyzerVersion());
     missing.publish();

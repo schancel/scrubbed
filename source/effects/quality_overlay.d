@@ -5,8 +5,12 @@ import domain.quality_features;
 import domain.shard_format : AnnotationField, AnnotationRecord, ShardDocument;
 import effects.document_shards : DocumentShardReader, JoinedOverlay, OverlayWriter,
     PublishFault, joinShards;
+import core.stdc.errno : errno, ENOENT;
+import core.sys.posix.sys.stat : stat, stat_t;
 import std.digest : LetterCase, toHexString;
 import std.exception : enforce;
+import std.path : absolutePath, buildNormalizedPath;
+import std.string : toStringz;
 
 enum featureAnalyzerKey = "quality.features";
 enum decisionAnalyzerKey = "quality.decisions";
@@ -203,6 +207,24 @@ QualityDecision decodeDecisionValue(const(ubyte)[] bytes, ShardDocument source,
 /// Replaces only the named decision overlay after all records validate.
 void publishDecisions(string shardPath, string featureOverlayPath,
         string decisionOverlayPath, QualityPolicy policy, PublishFault fault = null) {
+    // C01 guards source-shard aliases; this facade must also guard its own
+    // replay input. Reject lexical aliases and existing inode aliases before
+    // opening the destination writer. C01 still owns symlink/hardlink target
+    // safety at publication, and no hostile directory-race guarantee is made.
+    enforce(buildNormalizedPath(absolutePath(featureOverlayPath)) !=
+        buildNormalizedPath(absolutePath(decisionOverlayPath)),
+        "quality overlay: decision target aliases feature overlay");
+    stat_t featureInfo;
+    enforce(stat(featureOverlayPath.toStringz, &featureInfo) == 0,
+        "quality overlay: cannot inspect feature overlay");
+    stat_t targetInfo;
+    if (stat(decisionOverlayPath.toStringz, &targetInfo) == 0) {
+        enforce(featureInfo.st_dev != targetInfo.st_dev ||
+            featureInfo.st_ino != targetInfo.st_ino,
+            "quality overlay: decision target aliases feature overlay");
+    } else {
+        enforce(errno == ENOENT, "quality overlay: cannot inspect decision target");
+    }
     auto writer = new OverlayWriter(decisionOverlayPath, shardPath,
         decisionAnalyzerKey, decisionAnalyzerVersion(policy));
     scope(failure) writer.abort();

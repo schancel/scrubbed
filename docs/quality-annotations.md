@@ -22,7 +22,9 @@ That identity belongs in the value, not the overlay-wide header. A different
 policy changes the decision version and value, while feature overlay bytes stay
 unchanged. Missing, stale, wrong-version, unexpected-field, and malformed
 measurements fail explicitly; publication leaves any prior decision overlay in
-place on failure.
+place on failure. A decision destination that aliases its feature input by
+normalized path or existing inode is refused before publication; C01's own
+target checks still reject unsafe symlink and hardlink cases.
 
 `DryRunReport` counts every document exactly once as KEEP, DROP, or QUARANTINE.
 Reason counts may overlap for DROP and are in `Reason` enum order. All seven

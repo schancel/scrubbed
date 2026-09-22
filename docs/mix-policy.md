@@ -1,10 +1,10 @@
 # Pure annotation-driven mix policy (Stage 1)
 
 `domain.mix_policy` chooses a document ID for inclusion using only caller-supplied,
-validated C02 quality and C04 exact-dedup annotations. The later effects stage
-must join those annotations to C01 source revisions, enforce analyzer versions,
-and stream export; this module does none of those things. It never receives
-source bytes or a source locator.
+validated C02 quality and C04 exact-dedup annotations. The Stage 2a effects
+facade joins those annotations to C01 source revisions and enforces analyzer
+versions; a later stage must stream export. The pure policy itself receives
+neither source bytes nor a source locator.
 
 The first policy admits only quality `keep` and exact-dedup representatives to
 sampling. `drop`, `quarantine`, and duplicates get distinct exclusion reasons.
@@ -39,6 +39,28 @@ each typed reason. Streaming consumers own cross-batch/cross-shard uniqueness.
 The decision's canonical bytes include only ID, include flag, reason, and
 bucket. They do not contain private source bytes or locators.
 
-The stage is opt-in and has no persistence or CLI migration. Rollback is removal
-of this module. A C01 overlay join and versioned export are separate Stage 2
-work; the parent outcome is not complete until that integration is reviewed.
+The pure policy remains opt-in and has no persistence or CLI migration.
+Stage 2a rollback removes the read-only facade, C04 decoder, and canonical-ID
+parser while preserving Stage 1. Versioned export is separate work; the parent
+outcome is not complete until that integration is reviewed.
+
+## Stage 2a read-only C01 join
+
+`effects.mix_overlay.visitMixDecisions` joins one immutable document shard with
+one C02 quality-decision overlay and one C04 exact-dedup overlay. It validates
+both analyzer headers even on an empty shard, then delegates source-shard
+digest, content revision, order, and orphan checks to C01's streaming join.
+C02 decision values are replay-decoded against the caller's canonical quality
+policy. C04 links require exactly the five canonical fields, a strict decimal
+cardinality, typed representative ID, and SHA-256 of the joined source content.
+The `DocumentId.fromCanonicalText` seam only parses stored IDs; it does not
+derive new provenance or change their format.
+
+Each source record reaches the pure policy with present or missing evidence.
+The synchronous callback receives its typed decision and ephemeral source
+content; callers must not retain source content or mistake it for committed
+output. The returned report keeps only integer total/reason counts. A late
+malformed record can follow an already delivered callback prefix. This API
+cannot undo that prefix and offers no durable or atomic output; a later export
+must stage privately and validate before publication. Stage 2b versioned
+durable export is separate, and #40 remains open until it lands.

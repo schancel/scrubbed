@@ -3,7 +3,8 @@ module effects.exact_dedup_overlay;
 
 import core.stdc.errno : errno, ENOENT;
 import core.sys.posix.sys.stat : lstat, stat_t, S_ISREG;
-import domain.exact_dedup : IndexHash, exactBytesVersion;
+import domain.document : DocumentId;
+import domain.exact_dedup : ExactDuplicateLink, IndexHash, exactBytesVersion;
 import domain.shard_format : AnnotationField, AnnotationRecord, ShardDocument;
 import effects.document_shards : DocumentShardReader, OverlayWriter, PublishFault,
     PublishStep;
@@ -22,6 +23,47 @@ enum dedupAnalyzerVersion = "exact-bytes:v1";
 private enum runRecords = 32;
 private enum fanIn = 8;
 private enum maxScratchFrame = 2 * 1024 * 1024;
+
+/// Decode exactly the canonical five C04 fields after C01's revision join.
+ExactDuplicateLink decodeCanonicalDedupLink(AnnotationField[] fields,
+        ShardDocument source) {
+    enum bad = "dedup overlay: malformed canonical link";
+    enforce(fields.length == 5 &&
+        fields[0].key == "canonical_version" &&
+        fields[1].key == "digest_sha256" &&
+        fields[2].key == "duplicate" &&
+        fields[3].key == "group_cardinality" &&
+        fields[4].key == "representative_id", bad);
+    enforce(fields[0].value == cast(const(ubyte)[])exactBytesVersion &&
+        fields[1].value.length == 32 &&
+        fields[1].value == sha256Of(source.content)[] &&
+        fields[2].value.length == 1 && fields[2].value[0] <= 1,
+        bad);
+    auto countBytes = fields[3].value;
+    enforce(countBytes.length > 0 && countBytes.length <= 20 &&
+        countBytes[0] >= '1' && countBytes[0] <= '9', bad);
+    ulong cardinality;
+    foreach (digit; countBytes) {
+        enforce(digit >= '0' && digit <= '9' &&
+            cardinality <= (ulong.max - (digit - '0')) / 10, bad);
+        cardinality = cardinality * 10 + (digit - '0');
+    }
+    enforce(cardinality <= size_t.max, bad);
+    auto representative = DocumentId.fromCanonicalText(
+        cast(string)fields[4].value);
+    auto isDuplicate = fields[2].value[0] == 1;
+    enforce(representative.text <= source.id.text &&
+        isDuplicate == (representative != source.id) &&
+        (!isDuplicate || cardinality > 1), bad);
+    ExactDuplicateLink result;
+    result.documentId = source.id;
+    result.representativeId = representative;
+    result.digest[] = fields[1].value[];
+    result.canonicalVersion = exactBytesVersion;
+    result.duplicate = isDuplicate;
+    result.groupCardinality = cast(size_t)cardinality;
+    return result;
+}
 
 // Release-checker-only observation of filesystem inspections. This does not
 // participate in production decisions or add a public runtime hook.

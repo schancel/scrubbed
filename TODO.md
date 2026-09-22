@@ -276,8 +276,9 @@ is useful, but it is not sufficient on its own.
       (`docs/error-events.md`). The shipping CLI still uses v1; v2 CLI
       activation and JSONL export have not shipped. The accepted export
       contract uses a SHA-256 sidecar and fail-closed verification across
-      the non-atomic file pair; Stage 3a export is in progress, with CLI
-      activation a separately reviewed successor.
+      the non-atomic file pair; Stage 3a is blocked on a v2 private-key
+      resource-bound decision before its reviewed exporter can land. CLI
+      activation remains a separately reviewed successor.
 - [~] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity

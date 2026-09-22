@@ -99,9 +99,12 @@ tree without main-content selection. See the [HTML parser guide](docs/html-parse
 [command guide](docs/cli-commands.md).
 The optional existing-v2 `--error-journal` records sanitized local file/tree
 failures and publication intent; add `--error-retry` only when explicitly
-reprocessing unresolved output. The default remains the v1 path. Exported
-error-event JSONL and its SHA-256 sidecar are individually atomically replaced,
-not an atomic pair. See the [error journal guide](docs/error-events.md).
+reprocessing unresolved output. Add `--error-targeted` with both flags to
+retry only outstanding local-primary file/tree targets; changed input or
+configuration is refused before output mutation. Non-seekable sources and
+other sinks are not selected by this mode. The default remains the v1 path.
+Exported error-event JSONL and its SHA-256 sidecar are individually atomically
+replaced, not an atomic pair. See the [error journal guide](docs/error-events.md).
 The explicit paired `--input - --output -` JSONL mode transforms selected
 top-level text fields through the same filter chain. It requires a stable
 dataset namespace, source key, and input/output record byte caps. Untouched

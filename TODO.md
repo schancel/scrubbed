@@ -280,13 +280,17 @@ is useful, but it is not sufficient on its own.
       default `run`/`repair` path still uses v1; explicit `--error-journal`
       and `--error-retry` opt into live local-file/tree v2 processing. V2
       `errors-init`, `errors-copy`, `errors-export`, and `errors-verify`
-      management verbs are available. Automatic targeted retry, S3, and
-      JSONL stdin/stdout journaling are not included.
+      management verbs are available. Opt-in local-primary targeted retry
+      has landed; non-seekable/S3 retry and JSONL stdin/stdout journaling
+      are not included.
 - [~] Retry exact failed records and sinks (F14/#19). A read-only-after-open
       v2 visitor now streams current outstanding full keys in stable order,
       rejecting malformed stored identities and reentrant journal calls
-      (`docs/error-events.md`). It does not select sources, retry outputs, or
-      rescan non-seekable objects; those successors remain open.
+      (`docs/error-events.md`). Opt-in `--error-targeted` selects local
+      file/tree documents before content admission and requires the exact
+      outstanding key after hashing; it retries matching local-primary sinks
+      without rewriting cleared outputs. Safe non-seekable rescan, S3, and
+      wider sink routing remain open.
 - [x] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity

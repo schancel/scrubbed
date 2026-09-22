@@ -11,7 +11,8 @@ import std.array : array;
 import std.conv : to;
 import std.range.primitives : ElementType, empty, front, isInputRange, popFront;
 import std.uni : isControl;
-import pipeline : registerFilter;
+import pipeline : StreamingFilter, StreamingState, maxStreamingExpansion,
+    registerStreamingFilter;
 
 /// Strip control characters (categories Cc) except \n, \t, \r -- real text
 /// shouldn't contain raw NUL, BEL, form-feed, etc.; when it does (as seen
@@ -62,9 +63,50 @@ string normalizeLineEndingsFilter(string text) {
     return text.normalizeLineEndings.to!string;
 }
 
+private size_t stripControlPush(ref StreamingState, dchar input,
+    dchar[maxStreamingExpansion]* output) {
+    if (isControl(input) && input != '\n' && input != '\t' && input != '\r')
+        return 0;
+    (*output)[0] = input;
+    return 1;
+}
+
+private size_t normalizeLineEndingsPush(ref StreamingState state, dchar input,
+    dchar[maxStreamingExpansion]* output) {
+    const hadCR = state.words[0] != 0;
+    state.words[0] = 0;
+    if (hadCR) {
+        (*output)[0] = '\n';
+        if (input == '\n') return 1;
+        if (input == '\r') {
+            state.words[0] = 1;
+            return 1;
+        }
+        (*output)[1] = input;
+        return 2;
+    }
+    if (input == '\r') {
+        state.words[0] = 1;
+        return 0;
+    }
+    (*output)[0] = input;
+    return 1;
+}
+
+private size_t normalizeLineEndingsFinish(ref StreamingState state,
+    dchar[maxStreamingExpansion]* output) {
+    if (state.words[0] == 0) return 0;
+    state.words[0] = 0;
+    (*output)[0] = '\n';
+    return 1;
+}
+
 static this() {
-    registerFilter("strip-control", &stripControlCharsFilter);
-    registerFilter("normalize-line-endings", &normalizeLineEndingsFilter);
+    registerStreamingFilter("strip-control", &stripControlCharsFilter,
+        StreamingFilter(StreamingState.init, &stripControlPush, null));
+    registerStreamingFilter("normalize-line-endings", &normalizeLineEndingsFilter,
+        StreamingFilter(StreamingState.init, &normalizeLineEndingsPush,
+            &normalizeLineEndingsFinish));
 }
 
 unittest {

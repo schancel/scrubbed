@@ -38,6 +38,11 @@ issue. This file remains the status record for implemented work.
       nor document stages are integrated into CLI filters/output; optimized
       wired-list evidence shows high-edit scaling unsuitable for a throughput
       path until representation/backpressure is revisited.
+- [~] Pure structured chunking and canonical JSONL export now provide stable
+      document/revision-bound chunk identities, UTF-8 byte spans, bounded
+      hierarchy depth, and output caps (`docs/structured-chunks.md`; #42
+      Stage 1). Maximum-payload process-isolated RSS evidence, living-status
+      integration, and pipeline/CLI wiring remain before #42 is complete.
 - [~] Standalone document stage contracts now cover ordered map, reject,
       quarantine, split, cancellation and resource declarations, with tagged
       derived-child IDs. Typed stage self-registration and strict nested v2
@@ -259,10 +264,14 @@ is useful, but it is not sufficient on its own.
       CRLF, entity and mojibake candidate split offsets plus a sparse file
       (`docs/windowed-input.md`). The CLI and actual filter algorithms still
       need stateful streaming integration and adversarial huge-file proof.
-- [ ] Define which filters are truly streaming and which require document
-      context. Fuse compatible range stages so the registry boundary does not
-      force a whole-file allocation after every stage; give contextual stages
-      explicit bounded-memory/spill behavior.
+- [~] Define which filters are truly streaming and which require document
+      context. The registry now fuses consecutive `normalize-line-endings`,
+      `strip-control`, and `uncurl-quotes` scalar transducers into one strict
+      UTF-8 traversal with inline caller-owned state and one final
+      materialization. An exact-output 4.06 MiB synthetic `-O3 -release`
+      microbenchmark is about 1.9x faster than the former three-materialization
+      chain. Entity decoding, mojibake, HTML, CLI `Document`/`Content` wiring,
+      huge-input proof, and contextual spill policy remain.
 - [ ] Add backpressure-aware output and configurable concurrency for storage
       topology (local SSD, network filesystem, object-store staging). Verify
       actual OS descriptor and mapping counts stay bounded under low OS limits;
@@ -277,6 +286,11 @@ is useful, but it is not sufficient on its own.
       endpoint/TLS behavior, and publication-safe error labels
       (`docs/s3-capability-evaluation.md`). No production client, AWS SigV4,
       real-service compatibility, or secret-bearing credential path exists yet.
+      Direct S3 support is intentionally off the near-term critical path:
+      prefer optional local staging/manifest wrappers around a specialized
+      parallel transfer tool such as s5cmd. Its multi-object `cat` stream is
+      unframed, so only framed formats (for example WARC) may safely use that
+      route without an explicit manifest/framing adapter.
 - [~] Add a durable run manifest with input identity/checksum, selected filter
       config, per-sink state and safe resume/retry. A statically linked local
       SQLite v1 API is implemented and tested with destination rehash before
@@ -326,7 +340,13 @@ is useful, but it is not sufficient on its own.
       `route-metadata` now uses that stage as its primary metadata source
       (`docs/metadata-route.md`). The opt-in CLI mirrors input-relative
       paths under both output roots; paired input is not required. Direct
-      llama.cpp-backed extraction remains separately scoped (#65).
+      model-backed extraction remains separately scoped (#65). Its accepted
+      backend contract is a primary `llama-server` endpoint for resident-model,
+      parallel/GPU deployments plus an optional in-process llama.cpp backend
+      requiring an explicit local GGUF path for offline single-machine use.
+      Both must implement one metadata port/schema with model/version,
+      provenance, timeout and failure fields; deterministic heuristic metadata
+      remains model-free.
 - [~] Store immutable source documents and keyed analyzer overlays. A
       standalone binary-v1 artifact API now has bounded integrity-checked
       frames, version/revision-checked streaming joins, create-only source

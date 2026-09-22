@@ -136,11 +136,14 @@ physical target. Any processing failure produces a nonzero exit status.
 
 Input is already memory-mapped: the source `string` is a zero-copy view kept
 alive by `MmFile`. Output-producing filters still allocate. The line-ending,
-control-character, and quote transforms use composable lazy range/Voldemort
-types internally. Mojibake candidates compose a lazy legacy-byte Voldemort
-range with Phobos's strict UTF-8 decoder, so rejected candidates are scored
-without allocation and only a winning repair is materialized. The type-erased
-registry still materializes at each `string -> string` stage boundary.
+control-character, and quote transforms register bounded scalar transducers.
+Consecutive transducers are fused by the registry into one caller-owned
+Voldemort range traversal and one final string materialization; contextual
+filters remain explicit materialization barriers. Mojibake candidates compose
+a lazy legacy-byte Voldemort range with Phobos's strict UTF-8 decoder, so rejected candidates are scored
+without allocation and only a winning repair is materialized. This removes
+intermediate whole-string buffers for the three scalar filters, not the final
+output allocation or whole-document requirements of contextual algorithms.
 
 For terabyte-scale corpora, mmap keeps input bytes out of the GC heap and the
 CLI now walks paths incrementally through a bounded local task queue. Separate
@@ -259,6 +262,10 @@ Markdown ([policy and limits](docs/html-markdown.md)).
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.
+Direct object-store credentials and transport are deliberately deferred;
+near-term deployments should stage local files/manifests with a specialized
+parallel transfer tool. Any future adapter must preserve record framing rather
+than treating concatenated multi-object stdout as document boundaries.
 An [evidence-only WARC/WET compression probe](docs/warc-reader-evaluation.md)
 tests authored WARC 1.1 records in independent gzip members and proposed
 zstd-WARC frames with bounded D/native decoding. A separate

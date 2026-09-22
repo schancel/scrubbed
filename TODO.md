@@ -2,18 +2,19 @@
 
 Status key: [x] done and verified, [~] partially done, [ ] not started.
 
-Planning status (2026-09-22): [68 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
-cover the broader corpus-curation roadmap with 136 native dependency edges.
+Planning status (2026-09-22): [70 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
+cover the broader corpus-curation roadmap with 139 native dependency edges.
 Acceptance is not an implementation claim; worker readiness is tracked per
 issue. This file remains the status record for implemented work.
 
 The ordered path to the first public package release is maintained in
 [`docs/release-execution-plan.md`](docs/release-execution-plan.md). Its critical
 path is canonical CLI/JSON composition (#148), complete built-in transform
-wiring, extraction/curation parity, full-pipeline profiling and tuning, then
-clean-machine packages and executable examples. Direct S3/distributed
-execution and wholesale specialist-parser reimplementation are deferred and
-do not gate that release.
+wiring, typed document detection/dispatch (#155), extraction/curation parity,
+full-pipeline profiling and tuning, then clean-machine packages and executable
+examples. Direct S3/distributed execution and wholesale specialist-parser
+reimplementation are deferred and do not gate that release; bounded adapters
+for explicitly supported document formats are tracked separately (#67, #156).
 
 ## Phase 0 — scaffold
 - [x] dub project, MIT license, git repo
@@ -146,6 +147,14 @@ do not gate that release.
       preserves borrowed content for empty chains. The
       shipping CLI and execution engine are not switched yet; v3 flags/config
       must not be advertised as available until that slice lands.
+- [ ] Detect each input's media/container type and dispatch it to exactly one
+      configured extraction subpipeline before common text transforms (#155).
+      Detection must combine bounded byte/container evidence with untrusted
+      MIME/extension hints, preserve the original `Document` identity and
+      output name, and converge accepted routes on one versioned text-document
+      contract. This is finite typed choice, not `StageDecision.split`, a
+      general workflow DAG, or a join. Unknown, ambiguous, encrypted, malformed,
+      and unsupported records must follow an explicit structured policy.
 - [x] Config file using JSON via Phobos `std.json` (no added dependency),
       specifying the filter chain and per-filter options. Implemented with
       ordered string/object entries; mojibake exposes `encodings` and
@@ -419,6 +428,13 @@ is useful, but it is not sufficient on its own.
       with no-follow path checks and release-active D on-disk tests. File
       discovery, CLI/S3 wiring, Common Crawl WARC 1.0 compatibility, full format
       conformance, real-corpus parity, and TB throughput remain open.
+- [ ] Evaluate then adopt bounded document-to-text adapters (#67, #156) for
+      the explicitly supported Office/PDF/image families. Container or binary
+      bytes must be detected and extracted before mojibake/Unicode filters;
+      selected adapters must enforce input/expansion/output/time/concurrency
+      limits and retain extractor/version/provenance. This does not claim
+      wholesale Tika, Docling, Pandoc, or OCR ecosystem parity, and no model or
+      service may be downloaded or contacted implicitly.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls
@@ -464,3 +480,6 @@ conversion.
   Phase 5 gates are complete; it is now explicitly planned as Phase 6.
 - The other ~8 legacy encodings ftfy supports beyond Latin-1/CP1252,
   until their value and false-positive cost are evaluated explicitly.
+- Reimplementing every Office/PDF/image/OCR parser in core D. The detector and
+  dispatch contract (#155) plus evidence-selected bounded adapters (#67, #156)
+  are in scope; unsupported formats remain explicit.

@@ -76,7 +76,11 @@ to one stage with ID `legacy-text` and implementation `text-transform`.
 Legacy scalar JSON types are retained in the v3 model. The predecessor parser
 remains live only until actual-binary equivalence and removal proofs pass.
 
-This format is a linear document pipeline, not a general workflow language.
-It deliberately has no branches, joins, machine scheduling, transport,
-credentials, model downloads, or arbitrary plugin code. Those concerns do not
-belong in the local composition root.
+This format is currently a linear document pipeline, not a general workflow
+language. #155 may add a bounded one-of dispatch declaration: detect the input
+media/container type, choose exactly one named extraction subpipeline, then
+converge on the common text-document contract. That is not
+`StageDecision.split`, fan-out, a join, or a general DAG. The current schema
+does not yet implement or accept it. Machine scheduling, transport,
+credentials, model downloads, and arbitrary plugin code do not belong in the
+local composition root.

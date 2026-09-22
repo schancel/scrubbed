@@ -11,6 +11,9 @@ own scoped contracts and review evidence.
 A user can describe one ordered document pipeline through either CLI flags or
 JSON, run it over local files, directory trees, JSONL, or supported WARC/WET
 inputs, and produce content plus independently routed metadata/annotations.
+For heterogeneous files, a bounded detector may dispatch one input to one
+type-specific extraction subpipeline; accepted routes converge on the same
+text-document contract before shared text filters run.
 The same document bytes should not need to bounce through several Python
 processes and intermediate files for Unicode repair, HTML extraction,
 normalization, metadata, language/quality/PII decisions, deduplication,
@@ -42,11 +45,17 @@ Parent: [#148](https://github.com/schancel/scrubbed/issues/148).
    stage during a documented compatibility window, then remove duplicate
    parsing/orchestration once equivalence and migration tests prove the new
    path. One config fact must have one owner.
+5. **Add bounded typed dispatch.** After #148, #155 extends the composition
+   root with media/container detection and finite route selection. This is a
+   one-of choice before a common text-document boundary, not document splitting,
+   a general branch/join graph, or a parser-specific switch in the CLI.
 
 Gate: actual-binary CLI/JSON equivalence, identity/output routing, invalid
 ordering/options, empty/no-op/same-file inputs, split/reject/quarantine,
 concurrent reuse, restart/error reporting, and an exact-output before/after
-resource benchmark.
+resource benchmark. The heterogeneous-file slice additionally proves bounded
+signature/container inspection, misleading extension/MIME cases, stable source
+identity, explicit unsupported-input policy, and no duplicate whole-input read.
 
 ### R2 — complete the built-in transform path
 
@@ -71,21 +80,26 @@ combined-order tests proving that fusion and barriers preserve exact results.
 
 ### R3 — extraction and curation parity
 
-1. [#26](https://github.com/schancel/scrubbed/issues/26): baseline saved-HTML
+1. [#67](https://github.com/schancel/scrubbed/issues/67) then
+   [#156](https://github.com/schancel/scrubbed/issues/156): evaluate and adopt
+   bounded specialist adapters for the explicitly supported Office/PDF/image
+   routes. Container/binary extraction occurs before Unicode/mojibake repair;
+   unsupported families remain explicit rather than falling through as text.
+2. [#26](https://github.com/schancel/scrubbed/issues/26): baseline saved-HTML
    main-content versus boilerplate extraction with human-reviewed fixtures.
-2. [#27](https://github.com/schancel/scrubbed/issues/27): difficult-page and
+3. [#27](https://github.com/schancel/scrubbed/issues/27): difficult-page and
    fallback modes, benchmarked rather than assumed.
-3. [#28](https://github.com/schancel/scrubbed/issues/28) then
+4. [#28](https://github.com/schancel/scrubbed/issues/28) then
    [#65](https://github.com/schancel/scrubbed/issues/65): deterministic
    metadata first; optional `llama-server` primary and explicit local-GGUF
    backend behind the same schema/provenance contract.
-4. [#34](https://github.com/schancel/scrubbed/issues/34): language with
+5. [#34](https://github.com/schancel/scrubbed/issues/34): language with
    confidence and abstention.
-5. [#36](https://github.com/schancel/scrubbed/issues/36) then
+6. [#36](https://github.com/schancel/scrubbed/issues/36) then
    [#37](https://github.com/schancel/scrubbed/issues/37): disk-backed
    similarity candidates and near-duplicate decisions. Optional embeddings
    and clustering remain a separately measurable backend under #66.
-6. Finish rights, quality/code routing, mixing, JSONL and Parquet/Arrow
+7. Finish rights, quality/code routing, mixing, JSONL and Parquet/Arrow
    interchange under #43, #44, #45, #40 and #41.
 
 Gate: quality-matched comparisons. Unsupported fields/modes are reported as
@@ -135,8 +149,8 @@ These do not block the first public package release:
   staging with specialist transfer tools until a later accepted contract;
 - crawling, JavaScript rendering, robots/politeness, feeds and sitemap
   discovery;
-- wholesale Apache Tika/Office/PDF/OCR format parsing; expose bounded adapters
-  to specialist tools instead;
+- wholesale Apache Tika/Office/PDF/OCR format parsing; #155 provides bounded
+  type dispatch and #156 adopts only evidence-selected specialist adapters;
 - general-purpose DOM programming, complete Pandoc/CommonMark/GFM parity, or
   every Presidio entity/model;
 - operating llama.cpp servers, bundling model weights, or implicit downloads;

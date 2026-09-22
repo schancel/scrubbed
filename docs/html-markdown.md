@@ -2,8 +2,13 @@
 
 `effects.html_markdown.renderMarkdown(const ref HtmlTree)` converts the
 D-owned selected tree from `effects.html_tree.parseHtml` to an owned UTF-8
-string. It does not parse HTML, select main content, publish a file, or wire
-`extract --format=markdown`; that CLI successor is separately reviewed.
+string. It does not parse HTML or select main content. The self-registering
+`effects.html_markdown_stage` consumes the bounded selected tree and exposes
+`extract --format=markdown` through the same per-destination atomic route as
+`tree-json`. Directory outputs append `.md`; explicit single-file paths are
+used as supplied. A quarantined file retains its prior output and exit status
+is 1; path or write failures are fatal exit 2. This is not a directory-wide
+transaction.
 
 The converter preserves selected visible text in document order and emits
 one trailing newline for nonempty output. Whitespace in ordinary text is
@@ -65,6 +70,18 @@ ldc2 -O -release -Isource -of=/tmp/html-markdown-check \
 ```
 
 It checks exact output, repeat determinism, unsafe targets, malformed
-structure, control handling, and output expansion past the cap. A later CLI
-slice must prove atomic no-partial publication and unchanged tree-json behavior
-against the shipping executable before issue #25 closes.
+structure, control handling, and output expansion past the cap. The shipping
+binary is checked separately with `experiments/html_markdown/cli_check.d`:
+
+```sh
+dub build --build=release
+ldc2 -O -release -of=.dub/html-markdown-cli-check experiments/html_markdown/cli_check.d
+.dub/html-markdown-cli-check ./scrubbed
+```
+
+The actual-binary check covers exact Markdown output, malformed/unsafe input,
+file and directory naming, quarantine, aliases, and destination failure. The
+existing HTML parser CLI checker pins unchanged `tree-json` bytes and unknown
+format behavior. The converter's 4 MiB output cap is also caught by the stage
+as `outputLimit`; no admitted CLI fixture currently reaches it under the
+stricter raw/tree observation caps.

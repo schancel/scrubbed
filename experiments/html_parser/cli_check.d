@@ -109,7 +109,7 @@ int main(string[] args) {
         "--format", "tree-json"], 1, "binaryControl@");
     need(readText(output) == escapedOutput, "NUL quarantine replaced prior output");
     expect(executable, ["extract", "--input", input, "--output", output,
-        "--format", "markdown"], 2, "tree-json");
+        "--format", "unknown"], 2, "tree-json");
     need(readText(output) == escapedOutput, "unsupported format changed prior output");
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json", "--manifest", buildPath(root, "state.db")],

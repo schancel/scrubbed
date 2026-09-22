@@ -14,8 +14,10 @@ import core.sys.posix.fcntl : open, O_WRONLY, O_CREAT, O_EXCL;
 import core.sys.posix.unistd : close;
 import core.stdc.errno : errno, EEXIST, ENOENT;
 import std.typecons : Nullable, nullable;
+import std.conv : to;
 
 private enum applicationId = 1396920898;
+private enum v2SinkLabelMaxBytes = 256;
 private enum v2Schema = `
 CREATE TABLE sink_state(
  document_id TEXT NOT NULL,
@@ -87,6 +89,8 @@ private void need(bool okay, string token) {
 
 private final class Database {
     sqlite3* handle;
+    bool owned = true;
+    this(sqlite3* borrowed) { handle = borrowed; owned = false; }
     this(string path, int flags) {
         if (sqlite3_open_v2(path.toStringz, &handle, flags, null) != SQLITE_OK) {
             if (handle !is null) sqlite3_close(handle);
@@ -100,7 +104,7 @@ private final class Database {
         if (handle !is null) {
             auto prior = handle;
             handle = null;
-            need(sqlite3_close(prior) == SQLITE_OK, "close-failed");
+            if (owned) need(sqlite3_close(prior) == SQLITE_OK, "close-failed");
         }
     }
     void exec(string sql) {
@@ -124,6 +128,33 @@ private final class Database {
         scope(exit) sqlite3_finalize(s);
         need(sqlite3_step(s) == SQLITE_ROW, "read-failed");
         return sqlite3_column_text(s, 0).fromStringz.idup;
+    }
+}
+
+/// Validate the same read transaction the exporter will subsequently stream.
+package void validateV2ReadSnapshot(sqlite3* handle) {
+    auto borrowed = new Database(handle);
+    checkV2LabelLengths(borrowed);
+    need(borrowed.scalar("PRAGMA page_size") > 0 &&
+        borrowed.scalar("PRAGMA page_size") <= 65_536, "page-limit");
+    checkVersion(borrowed, 2);
+    checkV2Shape(borrowed);
+    borrowed.close();
+}
+
+private void validV2SinkLabel(string raw) {
+    need(raw.length <= v2SinkLabelMaxBytes, "v2-sink-label-too-long");
+}
+
+// octet_length(table_column) is an SQLite length-only column read: overflow
+// payload need not be materialized just to reject a legacy oversized label.
+private void checkV2LabelLengths(Database db) {
+    foreach (pair; [
+        ["sink_identity", "raw_sink"], ["sink_state", "sink_key"],
+        ["outstanding", "sink_key"], ["publication_intent", "sink_key"]]) {
+        auto sql = "SELECT EXISTS(SELECT 1 FROM " ~ pair[0] ~ " WHERE octet_length(" ~
+            pair[1] ~ ")>" ~ to!string(v2SinkLabelMaxBytes) ~ ")";
+        need(db.scalar(sql) == 0, "v2-sink-label-too-long");
     }
 }
 
@@ -305,8 +336,16 @@ private void checkV2Shape(Database db) {
         ON o.event_id=e.event_id WHERE o.origin='event' AND
         (e.event_id IS NULL OR e.document_id!=o.document_id OR
          e.input_sha256!=o.input_sha256 OR e.config_sha256!=o.config_sha256 OR
-         e.sink_id!=o.sink_id OR e.state!=o.state)`) == 0,
+         e.sink_id!=o.sink_id OR e.state!=o.state OR
+         e.run_id!=o.run_id OR e.time_utc_ms!=o.time_utc_ms)`) == 0,
         "repair-needed");
+    need(db.scalar(`SELECT count(*) FROM error_event e
+        LEFT JOIN error_event p ON e.retry_of=p.event_id
+        WHERE e.retry_of IS NOT NULL AND
+        (p.event_id IS NULL OR e.phase!='retry' OR e.code!='retry-succeeded' OR
+         e.document_id!=p.document_id OR e.input_sha256!=p.input_sha256 OR
+         e.config_sha256!=p.config_sha256 OR e.sink_id!=p.sink_id OR
+         e.sequence<=p.sequence)`) == 0, "repair-needed");
     need(db.scalar(`SELECT count(*) FROM error_event e LEFT JOIN sink_identity i
         ON e.sink_id=i.sink_id WHERE i.raw_sink IS NULL`) == 0,
         "repair-needed");
@@ -319,13 +358,15 @@ private void checkV2Shape(Database db) {
         (document_id,input_sha256,config_sha256,sink_key)
         WHERE s.document_id IS NULL OR s.state!='planned'`) == 0,
         "repair-needed");
-    auto identities = db.prepare("SELECT raw_sink,sink_id FROM sink_identity");
+    // Never pull the private raw key into D; preflight bounds v2 rows before
+    // this cursor and still avoids a redundant copy of sensitive text.
+    auto identities = db.prepare("SELECT sink_id FROM sink_identity");
     scope(exit) sqlite3_finalize(identities);
     int rc;
-    while ((rc = sqlite3_step(identities)) == SQLITE_ROW)
-        need(canonicalUuid4(columnText(identities, 1)) &&
-            columnText(identities, 0) != columnText(identities, 1),
-            "repair-needed");
+    while ((rc = sqlite3_step(identities)) == SQLITE_ROW) {
+        need(sqlite3_column_bytes(identities, 0) == 36, "repair-needed");
+        need(canonicalUuid4(columnText(identities, 0)), "repair-needed");
+    }
     need(rc == SQLITE_DONE, "identity-read-failed");
 }
 
@@ -376,6 +417,7 @@ final class FailureJournal {
         db = new Database(databasePath, SQLITE_OPEN_READWRITE);
         try {
             need(sqlite3_libversion().fromStringz == "3.53.4", "wrong-sqlite-version");
+            checkV2LabelLengths(db);
             checkVersion(db, 2);
             db.exec("PRAGMA foreign_keys=ON");
             checkV2Shape(db);
@@ -415,6 +457,7 @@ final class FailureJournal {
         }
     }
     private string sinkId(string raw) {
+        validV2SinkLabel(raw);
         return ensureSinkId(db, raw);
     }
     private string existingSinkId(string raw) {
@@ -456,6 +499,7 @@ final class FailureJournal {
     }
     void plan(SinkKey key, string destination) {
         live();
+        validV2SinkLabel(key.sink);
         safeDestination(destination);
         auto previous = lookup(key);
         if (!previous.isNull) {
@@ -799,6 +843,8 @@ void copyV1ToV2(string sourcePath, string newPath) {
             if (exists(stage ~ suffix)) remove(stage ~ suffix);
     }
     src = new Database(source, SQLITE_OPEN_READWRITE);
+    need(src.scalar("SELECT EXISTS(SELECT 1 FROM sink_state WHERE octet_length(sink_key)>256)") == 0,
+        "v2-sink-label-too-long");
     checkVersion(src, 1);
     checkSchema(src, v1Schema, "invalid-v1-schema");
     src.exec("PRAGMA journal_mode=WAL");
@@ -830,6 +876,8 @@ void copyV1ToV2(string sourcePath, string newPath) {
                 "invalid-v1-key");
         auto input = columnDigest(rows, 1);
         auto config = columnDigest(rows, 2);
+        need(sqlite3_column_bytes(rows, 3) <= v2SinkLabelMaxBytes,
+            "v2-sink-label-too-long");
         auto raw = columnText(rows, 3);
         need(raw.length && raw.indexOf('\0') < 0, "invalid-v1-key");
         auto destination = columnText(rows, 4);

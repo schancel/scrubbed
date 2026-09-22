@@ -111,10 +111,13 @@ void main() {
     rejects({ decodeChunkJsonl(" " ~ row); }, "noncanonical whitespace");
     rejects({ decodeChunkJsonl(row[0 .. $ - 1]); }, "missing LF");
     rejects({ decodeChunkJsonl(row[0 .. $ - 1] ~ " "); }, "noncanonical terminator");
-    rejects({ decodeChunkJsonl(row[0 .. $ - 1] ~ ",\"extra\":0}\n"); },
+    rejects({ decodeChunkJsonl(row[0 .. $ - 2] ~ ",\"extra\":0}\n"); },
         "unknown field");
     rejects({ decodeChunkJsonl(row.replace(chunks[0].id.text, chunks[1].id.text)); },
         "wrong chunk digest");
+    auto hostileDepth = "[".replicate(8_000) ~ "0" ~ "]".replicate(8_000) ~ "\n";
+    rejects({ decodeChunkJsonl(hostileDepth); },
+        "deeply nested bounded-size JSON must reject without stack exhaustion");
 
     // A material payload is intentionally much larger than one row.
     auto material = "x".replicate(maxChunkBytes * 64);

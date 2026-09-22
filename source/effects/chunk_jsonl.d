@@ -130,7 +130,10 @@ StructuredChunk decodeChunkJsonl(string row) {
     enforce(row.length <= maxChunkJsonlBytes && row.length > 0,
         "chunk JSONL: row too large or empty");
     try {
-        auto value = parseJSON(row);
+        // The deepest canonical value is root -> path array -> ordinal array
+        // -> number. std.json counts the scalar as a level too.
+        // std.json's default (-1) permits attacker-controlled recursion.
+        auto value = parseJSON(row, 3);
         enforce(value.type == JSONType.object &&
             fieldString(value["schema"]) == "structured-chunk:v1" &&
             value["version"].type == JSONType.integer &&

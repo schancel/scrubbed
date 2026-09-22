@@ -58,6 +58,11 @@ offsets, not codepoint indices. No writer, persistence migration, or index is
 part of this adapter. Rollback deletes these opt-in modules and their fixtures;
 existing binary shards and CLI output remain unchanged.
 
+The reader limits JSON parser recursion to depth 3 (root object at depth 0;
+the deepest canonical value is a number in a nested path array). It rejects
+deeper input before recursion can exhaust a small process stack.
+
 The release-active checker is `experiments/structured_chunks/check.d`; it
 contains golden IDs, hierarchy/Unicode/invalid-span fixtures, a JSONL
-round-trip, and a 256-KiB material payload with a bounded per-row assertion.
+round-trip, a deeply nested hostile-row rejection, and a 256-KiB material
+payload with a bounded per-row assertion.

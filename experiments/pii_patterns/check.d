@@ -80,6 +80,10 @@ private void punctuationBoundaries() {
         scan("202-555-0142.9").length == 0 &&
         scan("4111 1111 1111 1111.9").length == 0,
         "malformed numeric extensions rejected");
+    check(scan("4111 1111 1111 1111 1234").length == 0,
+        "fifth same-separated card group rejected");
+    check(scan("4111 1111 1111 1111 is a fixture").length == 1,
+        "card followed by prose retained");
 }
 
 private void boundsAndSafety() {

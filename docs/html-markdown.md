@@ -75,7 +75,7 @@ binary is checked separately with `experiments/html_markdown/cli_check.d`:
 
 ```sh
 dub build --build=release
-ldc2 -O -release -of=.dub/html-markdown-cli-check experiments/html_markdown/cli_check.d
+ldc2 -O3 -release -of=.dub/html-markdown-cli-check experiments/html_markdown/cli_check.d
 .dub/html-markdown-cli-check ./scrubbed
 ```
 

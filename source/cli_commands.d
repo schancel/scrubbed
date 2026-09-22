@@ -73,6 +73,10 @@ struct Extract {
     @(NamedArgument("format", "f").Description("Extraction format")) string format;
     @(NamedArgument("charset").Description("Declared UTF-8/UTF-16LE/UTF-16BE charset"))
     string charset;
+    @(NamedArgument("max-html-bytes").Description("Raw and decoded HTML byte limit (1..8388608; default 1048576)"))
+    ulong maxHtmlBytes;
+    @(NamedArgument("config").Description("JSON v2 config for the selected HTML stage"))
+    string config;
 }
 
 @(Command("completion").Description("Generate shell setup or command/option-name candidates; use completion init --bash, --zsh or --fish."))
@@ -237,7 +241,21 @@ int runCommands(string[] argv) {
                 stderr.writeln("scrubbed: extract requires --input, --output and --format=tree-json|markdown");
                 return 2;
             }
-            return runExtract(cmd.input, cmd.output, cmd.charset, cmd.format);
+            if (present(original, "--max-html-bytes") && cmd.maxHtmlBytes == 0) {
+                stderr.writeln("scrubbed: --max-html-bytes must be between 1 and 8388608");
+                return 2;
+            }
+            if (present(original, "--config") && cmd.config.length == 0) {
+                stderr.writeln("scrubbed: extract --config requires a nonempty path");
+                return 2;
+            }
+            if (present(original, "--config") && (present(original, "--max-html-bytes") ||
+                present(original, "--charset"))) {
+                stderr.writeln("scrubbed: extract --config cannot be combined with --charset or --max-html-bytes");
+                return 2;
+            }
+            return runExtract(cmd.input, cmd.output, cmd.charset, cmd.format,
+                cmd.maxHtmlBytes, cmd.config);
         } else static if (is(typeof(cmd) == Completion)) {
             stderr.writeln("scrubbed: use completion init or completion complete");
             return 2;

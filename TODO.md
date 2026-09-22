@@ -161,6 +161,22 @@ issue. This file remains the status record for implemented work.
       powers `extract --format=markdown` with actual-binary atomic output
       checks and unchanged tree-json behavior; the old `filters/html2md.d`
       stub is not the shipping route.
+- [x] `extract` raw and decoded HTML byte caps are configurable together via
+      `--max-html-bytes` or an equivalent single-stage v2 JSON config, with
+      the same 1..8 MiB validation and a 1 MiB default. The lower-level
+      parser and existing metadata route retain their prior 64 KiB default.
+      A release-active
+      actual-binary check covers default rejection, larger-page success in
+      tree JSON and Markdown, JSON/CLI equivalence, invalid caps, and prior
+      output preservation. This is an admission bound, not a Lexbor heap/RSS
+      bound; other tree/output limits and the lack of main-content extraction
+      remain unchanged.
+- [ ] Add an opt-in Markdown-to-basic-HTML route. Define a bounded Markdown
+      subset and safe output policy first (escape raw text, reject or explicitly
+      handle embedded HTML and unsafe URL schemes); compare a static native
+      Markdown parser against a D implementation for correctness, throughput,
+      and single-binary packaging. Keep this distinct from HTML main-content
+      extraction and do not claim full CommonMark/GFM parity without tests.
 - [ ] Explicitly NOT attempting trafilatura's boilerplate-detection
       problem (nav/ad/footer removal) in this phase — that's a
       substantially harder, separate problem (main-content vs.

@@ -30,7 +30,7 @@ private size_t uncurlQuotesPush(ref StreamingState, dchar input,
 }
 
 static this() {
-    registerStreamingFilter("uncurl-quotes", &uncurlQuotesFilter,
+    registerStreamingFilter("uncurl-quotes",
         StreamingFilter(StreamingState.init, &uncurlQuotesPush, null));
 }
 

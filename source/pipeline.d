@@ -74,22 +74,20 @@ void registerFilterFactory(string name, FilterFactory factory) {
     registry[name] = FilterRegistration(null, factory, StreamingFilter.init, null);
 }
 
-/// Register a no-option filter with both its compatibility materializer and
-/// its bounded streaming implementation.
-void registerStreamingFilter(string name, Filter fallback, StreamingFilter streaming) {
-    enforce(fallback !is null && streaming.push !is null,
-        "streaming filter requires fallback and push implementations");
-    registry[name] = FilterRegistration(fallback, null, streaming, null);
+/// Register a no-option bounded streaming implementation.
+void registerStreamingFilter(string name, StreamingFilter streaming) {
+    enforce(streaming.push !is null,
+        "streaming filter requires a push implementation");
+    registry[name] = FilterRegistration(null, null, streaming, null);
 }
 
-/// Option-aware equivalent. The streaming factory validates and parses the
-/// immutable options used by Pipeline; the fallback remains available to
-/// compatibility callers that require a materialized string transform.
-void registerStreamingFilterFactory(string name, FilterFactory fallback,
+/// Option-aware equivalent. The factory validates and parses immutable
+/// options once while Pipeline is built.
+void registerStreamingFilterFactory(string name,
     StreamingFilterFactory streamingFactory) {
-    enforce(fallback !is null && streamingFactory !is null,
-        "streaming filter requires both factories");
-    registry[name] = FilterRegistration(null, fallback, StreamingFilter.init,
+    enforce(streamingFactory !is null,
+        "streaming filter requires a factory");
+    registry[name] = FilterRegistration(null, null, StreamingFilter.init,
         streamingFactory);
 }
 
@@ -122,15 +120,13 @@ struct Pipeline {
             if (registration is null)
                 throw new Exception("unknown filter: " ~ spec.name ~
                     " (available: " ~ availableFilters.idup.to!string ~ ")");
-            if (registration.factory !is null) {
-                if (registration.streamingFactory !is null) {
-                    auto streaming = registration.streamingFactory(spec.options);
-                    enforce(streaming.push !is null,
-                        "streaming filter factory returned no push implementation");
-                    p.stages ~= Stage(null, null, streaming);
-                } else {
-                    p.stages ~= Stage(null, registration.factory(spec.options));
-                }
+            if (registration.streamingFactory !is null) {
+                auto streaming = registration.streamingFactory(spec.options);
+                enforce(streaming.push !is null,
+                    "streaming filter factory returned no push implementation");
+                p.stages ~= Stage(null, null, streaming);
+            } else if (registration.factory !is null) {
+                p.stages ~= Stage(null, registration.factory(spec.options));
             } else {
                 if (spec.options.length)
                     throw new Exception("filter '" ~ spec.name ~ "' accepts no options");
@@ -317,13 +313,6 @@ private size_t delayedStreamingFinishTest(ref StreamingState state,
     return 1;
 }
 
-private ConfiguredFilter streamingFallbackFactoryTest(
-    const ref FilterOptions options) {
-    enforce(options.length == 1 && options.get("mode", "") == "identity",
-        "expected mode=identity");
-    return delegate string(string text) { return text; };
-}
-
 private StreamingFilter streamingFactoryTest(const ref FilterOptions options) {
     enforce(options.length == 1 && options.get("mode", "") == "identity",
         "expected mode=identity");
@@ -340,15 +329,14 @@ unittest {
     assert(Pipeline.build([]).names.length == 0);
     assert(Pipeline.build(null).names.length == 0);
 
-    registerStreamingFilter("__stream-duplicate-test", typedLegacy,
+    registerStreamingFilter("__stream-duplicate-test",
         StreamingFilter(StreamingState.init, &duplicateStreamingTest, null));
-    registerStreamingFilter("__stream-identity-test", typedLegacy,
+    registerStreamingFilter("__stream-identity-test",
         StreamingFilter(StreamingState.init, &identityStreamingTest, null));
-    registerStreamingFilter("__stream-delayed-test", typedLegacy,
+    registerStreamingFilter("__stream-delayed-test",
         StreamingFilter(StreamingState.init, &delayedStreamingTest,
             &delayedStreamingFinishTest));
-    registerStreamingFilterFactory("__stream-factory-test",
-        &streamingFallbackFactoryTest, &streamingFactoryTest);
+    registerStreamingFilterFactory("__stream-factory-test", &streamingFactoryTest);
     assert(Pipeline.build(["__stream-duplicate-test", "__stream-delayed-test"])
         .run("ab") == "aabb");
     // A whole-buffer stage is a materialization barrier, and execution order

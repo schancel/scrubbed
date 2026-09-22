@@ -6,6 +6,7 @@ import effects.local_manifest : LocalManifest, SinkKey, SinkState, Inspection,
     inputDigest, configDigest, outputDigest;
 import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
+import std.array : split;
 import std.file : exists, mkdir, rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.process : execute;
@@ -44,17 +45,21 @@ private void checkV1Sinks(string root) {
         manifest.lookup(b).get.state == SinkState.uncertain, "two independent failure states");
     need(manifest.inspect(a) == Inspection.retryRequired &&
         manifest.inspect(b) == Inspection.retryRequired, "neither failure can skip");
-    manifest.retry(a);
     write(outputA, "recovered");
+    write(outputB, "possibly-published");
+    expectRefusal(manifest.commitPublished(a, outputA,
+        outputDigest(cast(const(ubyte)[]) "recovered")),
+        "failed sink committed without explicit retry");
+    expectRefusal(manifest.commitPublished(b, outputB,
+        outputDigest(cast(const(ubyte)[]) "possibly-published")),
+        "uncertain sink committed without explicit retry");
+    manifest.retry(a);
     manifest.commitPublished(a, outputA,
         outputDigest(cast(const(ubyte)[]) "recovered"));
     need(manifest.inspect(a) == Inspection.verifiedCommitted &&
         manifest.lookup(b).get.state == SinkState.uncertain &&
         manifest.inspect(b) == Inspection.retryRequired,
         "retry success must affect only the exact sink key");
-    expectRefusal(manifest.commitPublished(b, outputB,
-        outputDigest(cast(const(ubyte)[]) "absent")),
-        "uncertain sink committed without explicit retry");
     manifest.close();
     auto reopened = new LocalManifest(path);
     need(reopened.inspect(a) == Inspection.verifiedCommitted &&
@@ -80,14 +85,16 @@ private void checkAcknowledgment(string executable, string root) {
     mkdir(input);
     write(buildPath(input, "a.txt"), "a\r\n");
     write(buildPath(input, "b.txt"), "b\r\n");
-    write(db ~ ".fault-filter", "a.txt");
+    write(db ~ ".fault-filter", "");
     write(db ~ ".fault-log-ack", "");
     auto result = execute([executable, "run", "--input", input, "--output", output,
         "--manifest", db, "--filters", "normalize-line-endings", "--explain"]);
     need(result.status == 2 && result.output.canFind("FATAL") &&
-        result.output.canFind("status=unacknowledged"),
+        result.output.split("status=unacknowledged").length == 2,
         "lost acknowledgment did not fail-stop truthfully");
-    // Already admitted work may drain after a fatal acknowledgment fault.
+    need(!exists(buildPath(output, "a.txt")) &&
+        !exists(buildPath(output, "b.txt")),
+        "post-ack-fault processing published an output");
     auto manifest = new LocalManifest(db);
     auto page = manifest.replay(SinkState.failed, 10);
     need(page.rows.length == 1 && page.rows[0].sink == "local-primary:v1",

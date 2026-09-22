@@ -47,6 +47,26 @@ private size_t descriptors() {
     foreach (_; dirEntries("/dev/fd", SpanMode.shallow)) ++n;
     return n;
 }
+private void valueGoldens() {
+    auto plain = applyPiiPolicy(cast(ubyte[])"plain text",
+        [], PiiPolicy.report);
+    check(toHexString!(LetterCase.lower)(
+        encodePiiPolicyValue(plain, "US")).idup ==
+        "504950310101c9ecf5e54c7b3f2640ecca21f96d4c3625a2b7935104f41c5ede29935a9e52c90000",
+        "empty-audit byte golden");
+    auto source = cast(ubyte[])"secret@example.net";
+    auto finding = PiiFinding(0, source.length, PiiCategory.email,
+        "email.ascii-domain.v1", "US", PiiConfidence.high);
+    auto result = applyPiiPolicy(source, [finding], PiiPolicy.report);
+    auto encoded = encodePiiPolicyValue(result, "US");
+    check(toHexString!(LetterCase.lower)(encoded).idup ==
+        "504950310101bf36acee076710ea5e88bc7f3dbd5121e5a40a214ef77e3d95c041efaf8b3a78000100000000000000120001000000000000001201",
+        "typed-audit byte golden");
+    auto decoded = decodePiiPolicyValue(encoded);
+    check(decoded.audit == result.audit &&
+        decoded.outputDigest == sha256Of(result.output),
+        "golden typed audit round-trip");
+}
 private void noTemps(string root) {
     foreach (entry; dirEntries(root, SpanMode.shallow))
         check(!entry.name.canFind(".scrubbed-"), "leaked temporary file");
@@ -65,6 +85,7 @@ private ShardDocument[] corpus() {
 }
 
 private void run() {
+    valueGoldens();
     auto root = buildPath(tempDir(), "scrubbed-pii-policy-overlay-" ~ randomUUID.toString);
     mkdir(root);
     scope(exit) rmdirRecurse(root);

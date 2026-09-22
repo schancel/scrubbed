@@ -274,15 +274,18 @@ is useful, but it is not sufficient on its own.
       outstanding state, durable publication intent/recovery, stable opaque
       public sink IDs, and explicit offline copy from v1
       (`docs/error-events.md`). The shipping CLI still uses v1; v2 CLI
-      activation and JSONL export have not shipped. Their digest wire format
-      and atomicity boundary require an owner choice before the final
-      successor is factory-ready.
+      activation and JSONL export have not shipped. The accepted export
+      contract uses a SHA-256 sidecar and fail-closed verification across
+      the non-atomic file pair; Stage 3a export is in progress, with CLI
+      activation a separately reviewed successor.
 - [~] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity
       (`docs/independent-sinks.md`). There is no CLI selector or metadata
-      extraction; the metadata source and tree output naming need an owner
-      decision before that successor is factory-ready.
+      extraction. Deterministic extraction stages are the primary planned
+      metadata source (#28); the CLI successor will mirror input-relative
+      paths under both output roots, with paired input optional. Direct
+      llama.cpp-backed extraction remains separately scoped (#65).
 - [~] Store immutable source documents and keyed analyzer overlays. A
       standalone binary-v1 artifact API now has bounded integrity-checked
       frames, version/revision-checked streaming joins, create-only source

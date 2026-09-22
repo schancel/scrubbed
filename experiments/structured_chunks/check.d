@@ -1,12 +1,19 @@
 module structured_chunks.check;
 
+import core.memory : GC;
+import core.sys.posix.sys.resource : RUSAGE_SELF, getrusage, rusage;
 import domain.document : DocumentId, SourceLocator;
 import domain.structured_chunks : ChunkMetadata, SpanKind, StructuredSpan,
-    chunkStructured, maxChunkBytes;
+    chunkStructured, maxChunkBytes, maxStructuredTextBytes;
 import effects.chunk_jsonl : decodeChunkJsonl, encodeChunkJsonl, maxChunkJsonlBytes;
 import std.array : replicate;
+import std.conv : to;
+import std.file : thisExePath;
+import std.process : execute;
 import std.stdio : writeln;
-import std.string : replace;
+import std.string : replace, split, strip;
+
+private enum ulong structuredRssCeiling = 256UL * 1024 * 1024;
 
 private void check(bool condition, string message) {
     if (!condition) throw new Exception(message);
@@ -19,7 +26,66 @@ private void rejects(void delegate() action, string message) {
     check(rejected, message);
 }
 
-void main() {
+private ulong peakRssBytes() {
+    rusage usage;
+    check(getrusage(RUSAGE_SELF, &usage) == 0, "RSS observation failed");
+    version (OSX) return cast(ulong) usage.ru_opaque[0];
+    else version (linux) return cast(ulong) usage.ru_maxrss * 1024;
+    else static assert(0, "structured chunk RSS proof requires Darwin or Linux");
+}
+
+private void rssWorker(string mode) {
+    auto id = DocumentId.from(SourceLocator("fixtures", "structured-rss", mode));
+    size_t payloadBytes;
+    size_t byteCap;
+    final switch (mode) {
+    case "max-payload":
+        payloadBytes = maxStructuredTextBytes;
+        byteCap = maxChunkBytes;
+        break;
+    case "max-chunks":
+        payloadBytes = 65_536;
+        byteCap = 1;
+        break;
+    }
+    auto material = cast(immutable(char)[]) "x".replicate(payloadBytes);
+    GC.collect();
+    auto chunks = chunkStructured(id, "rss-v1", material,
+        [StructuredSpan(SpanKind.paragraph, 0, material.length, [0])],
+        ChunkMetadata.init, byteCap);
+    ulong encodedBytes;
+    size_t encodedRows;
+    foreach (chunk; chunks) {
+        encodedBytes += encodeChunkJsonl(chunk).length;
+        ++encodedRows;
+    }
+    auto rss = peakRssBytes();
+    check(rss <= structuredRssCeiling,
+        "structured chunk RSS ceiling exceeded: " ~ rss.to!string);
+    writeln(rss, " ", chunks.length, " ", encodedRows, " ", encodedBytes);
+}
+
+private ulong runRssWorker(string mode, size_t expectedChunks) {
+    auto child = execute([thisExePath(), "--rss-worker", mode]);
+    check(child.status == 0, mode ~ " RSS child failed: " ~ child.output);
+    auto values = child.output.strip.split;
+    check(values.length == 4, mode ~ " RSS child output shape");
+    auto rss = values[0].to!ulong;
+    check(values[1].to!size_t == expectedChunks &&
+        values[2].to!size_t == expectedChunks && values[3].to!ulong != 0,
+        mode ~ " RSS child did not exercise expected output");
+    check(rss <= structuredRssCeiling, mode ~ " RSS exceeded parent ceiling");
+    return rss;
+}
+
+void main(string[] args) {
+    if (args.length == 3 && args[1] == "--rss-worker") {
+        check(args[2] == "max-payload" || args[2] == "max-chunks",
+            "unknown RSS worker mode");
+        rssWorker(args[2]);
+        return;
+    }
+    check(args.length == 1, "unexpected checker arguments");
     auto id = DocumentId.from(SourceLocator("fixtures", "structured", "one"));
     immutable text = "A\xc3\xa9\nB\xf0\x9f\x99\x82";
     auto spans = [
@@ -128,5 +194,10 @@ void main() {
         check(part.text.length <= maxChunkBytes &&
             encodeChunkJsonl(part).length <= maxChunkJsonlBytes,
             "bounded record payload");
-    writeln("structured chunks: hierarchy, Unicode, identity, rejection, JSONL, 256-KiB payload passed");
+    auto payloadRss = runRssWorker("max-payload",
+        maxStructuredTextBytes / maxChunkBytes);
+    auto chunksRss = runRssWorker("max-chunks", 65_536);
+    writeln("structured chunks: hierarchy, Unicode, identity, rejection, JSONL, " ~
+        "process-isolated max payload/chunks RSS passed (", payloadRss, ", ",
+        chunksRss, " bytes; ceiling ", structuredRssCeiling, ")");
 }

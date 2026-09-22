@@ -65,4 +65,8 @@ deeper input before recursion can exhaust a small process stack.
 The release-active checker is `experiments/structured_chunks/check.d`; it
 contains golden IDs, hierarchy/Unicode/invalid-span fixtures, a JSONL
 round-trip, a deeply nested hostile-row rejection, and a 256-KiB material
-payload with a bounded per-row assertion.
+payload with a bounded per-row assertion. It also launches fresh child
+processes for the maximum 1-MiB payload at the default cap and the maximum
+65,536 accepted chunk count, serializes every JSONL row, and rejects peak RSS
+above an explicit 256-MiB ceiling. Darwin `ru_maxrss` is read as bytes and
+Linux KiB is converted to bytes; the bound includes process/runtime overhead.

@@ -176,10 +176,10 @@ an isolated document failure may continue only after durable failed/uncertain
 state and an injected acknowledgment; run-fatal policy, resource, and lost-ledger
 errors stop with exit 2. Exit 1 means acknowledged failures or unresolved
 retry decisions. Keyed `--explain` records distinguish these outcomes. The
-shipping `run`/`repair` path still uses the v1 ledger. An [opt-in v2 failure
+shipping `run`/`repair` path defaults to the v1 ledger. An [opt-in v2 failure
 journal](docs/error-events.md), explicit CLI init/copy/export/verify commands,
 and bounded JSONL history/outstanding export with SHA-256 sidecars now exist;
-live v2 document processing is not yet wired into `run`/`repair`.
+`--error-journal` and `--error-retry` select live local file/tree v2 processing.
 An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
 commit caller-supplied content and metadata payloads separately. The
 [`route-metadata` CLI](docs/metadata-route.md) now feeds it filtered HTML
@@ -189,6 +189,10 @@ input and model extraction are not required. The
 [C01 shard API](docs/document-shards.md) now also has opt-in
 [quality-decision](docs/quality-annotations.md) and
 [exact-byte dedup](docs/exact-dedup.md) overlay facades. A bounded
+[structured-chunk facade](docs/structured-chunks.md) emits stable byte-offset
+chunks and canonical JSONL from caller-supplied paragraph/section/page spans;
+process-isolated maximum-payload and maximum-chunk-count checks enforce a
+256-MiB RSS ceiling, but no CLI path invokes it. A bounded
 [four-class PII scanner](docs/pii-patterns.md) is a pure D API with an
 [opt-in C01 findings overlay](docs/pii-annotations.md) and a
 [pure report/mask/opt-in redact policy](docs/pii-policy.md) plus a

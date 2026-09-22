@@ -315,9 +315,10 @@ is useful, but it is not sufficient on its own.
       publication remains separate; this is not complete de-identification.
 - [~] Mix from annotation policies (C08/#40). A pure, deterministic policy
       selects only C02 KEEP and C04 representatives for seeded sampling, with
-      typed exclusion and missing-annotation reasons (`docs/mix-policy.md`).
-      C01 revision-bound joining and durable versioned export remain open;
-      the current module does not read shards or publish an output artifact.
+      typed exclusion and missing-annotation reasons. A read-only C01 join now
+      validates C02/C04 analyzer versions and source revisions, then streams
+      typed decisions and fixed-size counts (`docs/mix-policy.md`). Durable
+      versioned export remains open; no output artifact is published yet.
 - [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
       adapter and explicit paired-dash `run`/`repair` mode preserve untouched
       JSON values semantically, derive stable caller-key/line IDs, cap records,

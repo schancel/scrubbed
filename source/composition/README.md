@@ -13,6 +13,13 @@ aggregate initializer, so callers cannot detach executable behavior from that
 identity. [`access_contract.d`](access_contract.d) pins that external-module
 construction boundary at compile time.
 
+[`executor.d`](executor.d) runs one compiled stage over checked documents. A
+nonempty filter chain is an explicit UTF-8 materialization barrier at the
+declared before/after position; an empty chain preserves the original Content
+object and borrowed-owner lifetime. After-filters apply only to emitted
+map/split payloads, not rejection or quarantine payloads. Multi-stage job and
+effects orchestration remain outside this slice.
+
 A stage registration declares filter placement: `none`, `before`, or `after`.
 Compilation rejects filters on `none`; actual before/after content application
 belongs to the later execution switch. `stages.text_transform` is the initial

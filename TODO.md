@@ -206,6 +206,13 @@ issue. This file remains the status record for implemented work.
       On one synthetic mojibake input scrubbed was much slower than ftfy;
       these samples do not establish broader throughput. No fair independent
       comparator for the current combined normalization task was verified.
+- [x] Profile and remove the scorer's dominant ASCII-heavy hot path. A macOS
+      sampler showed repeated runtime Unicode decoding of membership literals;
+      the scorer now rejects ASCII-only adjacency and compares compile-time
+      Unicode scalar sets. Pinned ftfy and held-out correctness gates pass.
+      A new D full-process exact-output check on 131,072 repeated lines gives
+      one local `-O3` result of 0.420–0.429 s versus ftfy's 4.656–4.909 s.
+      This is not varied-corpus or TB-scale throughput evidence.
 - [ ] Broaden the comparison beyond ftfy/trafilatura where functionality
       overlaps: pin relevant alternative tool versions and options by task
       (repair, web extraction, metadata, full corpus pipeline), use the same

@@ -9,7 +9,7 @@ import std.conv : ConvException, to;
 import std.range.primitives : empty, front, isForwardRange, isInputRange, popFront, save;
 import std.string : split;
 import std.typecons : No;
-import std.utf : UTFException, byUTF;
+import std.utf : UTFException, byUTF, toUTF32;
 
 /// CP1252 bytes 0x80..0x9F mapped to Unicode. Zero means undefined.
 /// Verified against Unicode's VENDORS/MICSFT/WINDOWS/CP1252.TXT.
@@ -100,40 +100,48 @@ private string roundTrip(string text, LegacyEncoding encoding) {
 string latin1RoundTrip(string text) { return roundTrip(text, LegacyEncoding.latin1); }
 string cp1252RoundTrip(string text) { return roundTrip(text, LegacyEncoding.cp1252); }
 
-private bool oneOf(dchar c, string members) {
-    foreach (dchar member; members)
+private bool oneOf(string members)(dchar c) {
+    // The scorer's sets are compile-time non-ASCII literals. Keep the hot
+    // ASCII rejection sound, and compare Unicode scalars without repeatedly
+    // decoding the UTF-8 membership string at runtime.
+    static foreach (dchar member; toUTF32(members))
+        static assert(member >= 0x80, "mojibake scorer set contains ASCII");
+    if (c < 0x80) return false;
+    static foreach (dchar member; toUTF32(members))
         if (c == member) return true;
     return false;
 }
+static assert(oneOf!"ÂÃÎÐ"('Ã'));
+static assert(!oneOf!"ÂÃÎÐ"('A'));
 
-private bool isBad(dchar c) { return oneOf(c, "¦¤¨¬¯¸ƒˆˇ˘˛˜†‡‰⌐◊�ªº"); }
+private bool isBad(dchar c) { return oneOf!"¦¤¨¬¯¸ƒˆˇ˘˛˜†‡‰⌐◊�ªº"(c); }
 private bool isLaw(dchar c) { return c == '¶' || c == '§'; }
-private bool isCurrency(dchar c) { return oneOf(c, "¢£¥₧€"); }
-private bool isStartPunctuation(dchar c) { return oneOf(c, "¡«¿΄΅‘‚“„•‹©"); }
-private bool isEndPunctuation(dchar c) { return oneOf(c, "®»˝”›™"); }
-private bool isNumericSymbol(dchar c) { return oneOf(c, "²³¹±¼½¾×µ÷⁄∂∆∏∑√∞∩∫≈≠≡≤≥№"); }
+private bool isCurrency(dchar c) { return oneOf!"¢£¥₧€"(c); }
+private bool isStartPunctuation(dchar c) { return oneOf!"¡«¿΄΅‘‚“„•‹©"(c); }
+private bool isEndPunctuation(dchar c) { return oneOf!"®»˝”›™"(c); }
+private bool isNumericSymbol(dchar c) { return oneOf!"²³¹±¼½¾×µ÷⁄∂∆∏∑√∞∩∫≈≠≡≤≥№"(c); }
 private bool isBox(dchar c) {
-    return oneOf(c, "│┌┐┘├┤┬┼═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬▀▄█▌▐░▒▓");
+    return oneOf!"│┌┐┘├┤┬┼═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬▀▄█▌▐░▒▓"(c);
 }
 private bool isUpperAccented(dchar c) {
     return (c >= 0xC0 && c <= 0xD1) ||
-        oneOf(c, "ØÜÝĂĀĄĆČĎĐĘĚĒĖĞĢİĪĶĹĽŁĻŃŇŅŒŘŚŞŠŢŤŮŰŸŹŻŽҔ");
+        oneOf!"ØÜÝĂĀĄĆČĎĐĘĚĒĖĞĢİĪĶĹĽŁĻŃŇŅŒŘŚŞŠŢŤŮŰŸŹŻŽҔ"(c);
 }
 private bool isLowerAccented(dchar c) {
     return c == 'ß' || (c >= 0xE0 && c <= 0xF1) ||
-        oneOf(c, "ăąāćčďđęěēėğģįīķĺľłļœŕśşšťüźżžҕﬁﬂ");
+        oneOf!"ăąāćčďđęěēėğģįīķĺľłļœŕśşšťüźżžҕﬁﬂ"(c);
 }
 private bool isUpperCommon(dchar c) {
     return c == 'Þ' || (c >= 0x391 && c <= 0x3A9) ||
-        (c >= 0x410 && c <= 0x42F) || oneOf(c, "ΆΈΉΊΌΎΏΪΫЁ");
+        (c >= 0x410 && c <= 0x42F) || oneOf!"ΆΈΉΊΌΎΏΪΫЁ"(c);
 }
 private bool isLowerCommon(dchar c) {
     return (c >= 0x3B1 && c <= 0x3C9) || (c >= 0x430 && c <= 0x45F) ||
-        oneOf(c, "άέήίΰόύώϊϋ");
+        oneOf!"άέήίΰόύώϊϋ"(c);
 }
 private bool isKaomoji(dchar c) {
     return (c >= 0xD2 && c <= 0xD6) || (c >= 0xD9 && c <= 0xDC) ||
-        (c >= 0xF2 && c <= 0xF6) || (c >= 0xF8 && c <= 0xFC) || oneOf(c, "ŐŌŪŲ°");
+        (c >= 0xF2 && c <= 0xF6) || (c >= 0xF8 && c <= 0xFC) || oneOf!"ŐŌŪŲ°"(c);
 }
 private bool broadSuspicious(dchar c) {
     return isBad(c) || isLowerAccented(c) || isUpperAccented(c) || isBox(c) ||
@@ -161,7 +169,10 @@ if (isInputRange!Range) {
     // Consume the UTF-8 string as a range without materializing UTF-32.
     foreach (dchar next; text) {
         if (next >= 0x80 && next <= 0x9F) result++;
-        if (seen >= 1) {
+        // Every adjacency/trigram rule needs a non-ASCII current or next
+        // character. Skip the expensive Unicode membership predicates for
+        // the overwhelmingly common ASCII-to-ASCII transitions.
+        if (seen >= 1 && (current >= 0x80 || next >= 0x80)) {
             const c = current;
             const n = next;
             if ((c == 'œ' || c == 'Œ') && !asciiLetter(n)) result++;
@@ -174,9 +185,9 @@ if (isInputRange!Range) {
                 (isBox(c) && isKaomoji(n)) || (broadSuspicious(c) && isBox(n)) ||
                 (isBox(c) && isEndPunctuation(n))) result++;
 
-            if (oneOf(c, "ÂÃÎÐ") && oneOf(n, "€œŠš¢£Ÿž ­®©°·»‘‚“„•‹”›™–—´")) result++;
-            if (c == '×' && oneOf(n, "²³")) result++;
-            if (c == 'à' && oneOf(n, "²µ¹¼½¾")) result++;
+            if (oneOf!"ÂÃÎÐ"(c) && oneOf!"€œŠš¢£Ÿž ­®©°·»‘‚“„•‹”›™–—´"(n)) result++;
+            if (c == '×' && oneOf!"²³"(n)) result++;
+            if (c == 'à' && oneOf!"²µ¹¼½¾"(n)) result++;
             if (c == 'Ã' && (n == 0xA0 || n == '¡')) result++;
             if ((c == 'Ã' || c == 'Â') && n == ' ' &&
                 (seen == 1 || asciiLetter(previous) || whitespace(previous))) result++;
@@ -185,9 +196,9 @@ if (isInputRange!Range) {
             if (seen >= 2) {
                 const p = previous;
                 if (asciiLetter(p) && (isLowerCommon(c) || isUpperCommon(c)) && isBad(n)) result++;
-                if (oneOf(p, "ØÙ") && broadSuspicious(c) && oneOf(n, "ØÙ")) result++;
-                if (oneOf(p, "ВГРС") && broadSuspicious(c) && oneOf(n, "ВГРС")) result++;
-                if (oneOf(p, "ΒΓΞΟ") && broadSuspicious(c) && oneOf(n, "ΒΓΞΟ")) result++;
+                if (oneOf!"ØÙ"(p) && broadSuspicious(c) && oneOf!"ØÙ"(n)) result++;
+                if (oneOf!"ВГРС"(p) && broadSuspicious(c) && oneOf!"ВГРС"(n)) result++;
+                if (oneOf!"ΒΓΞΟ"(p) && broadSuspicious(c) && oneOf!"ΒΓΞΟ"(n)) result++;
                 if (p >= 'a' && p <= 'z' && isUpperAccented(c) &&
                     (isStartPunctuation(n) || isCurrency(n))) result++;
                 if ((isUpperAccented(p) || isLowerAccented(p)) &&
@@ -413,6 +424,9 @@ static this() {
 }
 
 unittest {
+    import std.exception : enforce;
+    enforce(mojibakeBadness("CafÃ© at noon; the sign said rÃ©sumÃ©.\n") == 7,
+        "mojibake scorer rule weights changed on the benchmark fixture");
     auto bytes = legacyBytes("schÃ¶n", LegacyEncoding.cp1252);
     static assert(isInputRange!(typeof(bytes)));
     static assert(isForwardRange!(typeof(bytes)));

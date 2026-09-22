@@ -91,6 +91,38 @@ in-place `fix` command rather than a quality-matched file-to-file transform;
 cases are reported as unsupported rather than assigned misleading speed
 numbers.
 
+## Optimized mojibake follow-up
+
+The first A00 table above is historical, not the current repair speed. A
+September 2026 sampling profile of the `-O3` repair path showed repeated
+runtime UTF-8 decoding of scorer membership literals as the dominant cost.
+The scorer now rejects ASCII-only adjacencies and converts its non-ASCII
+membership sets to Unicode scalars at compile time. The pinned ftfy correctness
+gate still passes 39/39 supported repairs and preserves 48/48 encoding-negative
+cases; the held-out per-fix gate also passes.
+
+The separate D full-process scale check compares an authored 131,072-line
+(5,898,240-byte) mojibake file against ftfy 6.3.1. It checks the exact output
+after every run, interleaves three samples per tool, and emits binary/input
+hashes and raw timings. Run with the pinned Python environment above:
+
+The report records the observed checkout, host, commands, and binary hashes.
+It cannot prove that the supplied scrubbed binary was built from that checkout
+or with the shown flags; retain the build log alongside any published result.
+
+```sh
+DFLAGS=-O3 dub build --build=release --compiler=ldc2
+ldc2 -O3 -release benchmarks/mojibake_scale.d -of=/tmp/scrubbed-mojibake-scale
+/tmp/scrubbed-mojibake-scale "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy"
+```
+
+One Apple M4 / macOS 26.6.2 sample, with exact output in all six runs, measured
+scrubbed at 0.420–0.429 s and ftfy at 4.656–4.909 s. This establishes a win
+on this repetitive single-file task only; it does not establish speed or
+quality parity for varied, mixed-encoding corpora, HTML extraction, or
+terabyte-scale pipelines. The small A00 fixture is now near the BSD `time`
+tool's centisecond resolution and should not be used for a new speed ratio.
+
 ## Full-process pipeline resource evidence
 
 The separate full-process pipeline benchmark now has an opt-in, D-only

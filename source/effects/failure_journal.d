@@ -497,6 +497,26 @@ final class FailureJournal {
         row.updatedUtcMs = sqlite3_column_int64(s, 4);
         return nullable(row);
     }
+    /// A reserved destination belongs to one document and stable sink across
+    /// revisions. Stream the persisted rows; do not materialize the corpus.
+    void requireDestinationOwner(SinkKey key, string destination) {
+        live();
+        validateKey(key);
+        safeDestination(destination);
+        auto selected = resolvedName(destination);
+        auto s = db.prepare(`SELECT document_id,sink_key,destination FROM sink_state`);
+        scope(exit) sqlite3_finalize(s);
+        int rc;
+        while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+            auto owner = columnText(s, 0);
+            auto sink = columnText(s, 1);
+            if (owner == key.document.text && sink == key.sink) continue;
+            auto owned = columnText(s, 2);
+            if (owned == selected || sameInode(owned, selected))
+                throw new OutputPolicyViolation("failure journal: destination owned by another key");
+        }
+        need(rc == SQLITE_DONE, "destination-owner-read-failed");
+    }
     void plan(SinkKey key, string destination) {
         live();
         validV2SinkLabel(key.sink);

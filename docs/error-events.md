@@ -3,8 +3,9 @@
 Stage 2 adds an effects-only v2 SQLite journal and explicit offline v1-to-v2
 copy. The release-active `experiments/errors/check.d` pins v1 behavior and
 the v2 effects boundary. Stage 3a adds an opt-in effects-only JSONL exporter,
-pinned by `experiments/errors/export_check.d`. Stage 3b1 exposes only explicit
-v2 management verbs; the shipping run/repair pipeline still uses v1 by default.
+pinned by `experiments/errors/export_check.d`. Stage 3b1 exposes explicit
+v2 management verbs. Stage 3b2 adds an opt-in v2 run/repair route; no-flag
+processing still uses v1 by default.
 The v1 `sink_state` table is
 a last-state ledger, **not** immutable historical error events. Do not
 interpret this check as proof of the F13 JSONL acceptance criteria.
@@ -29,6 +30,50 @@ atomic per file, not across the JSONL/sidecar pair or both kinds. A process
 crash may leave a mismatched pair; verify then refuses until an explicit
 re-export. No parent-directory fsync or power-loss durability is promised.
 The release-active actual-binary proof is `experiments/errors/cli_check.d`.
+
+## Stage 3b2 opt-in live processing
+
+`run` and `repair` accept `--error-journal EXISTING_V2` and optional
+`--error-retry`. The journal must already exist from `errors-init` or
+`errors-copy`; processing never creates or migrates it. This route is local
+file/tree only, excludes `--manifest`, `--manifest-retry`, JSONL stdin/stdout,
+and dry-run, and serializes one journal writer. `--validate` checks the
+existing v2 journal without creating an output or journal; opening it may
+recover a previously unresolved publication intent. A verified committed output is
+skipped. An unresolved or pre-existing destination requires an explicit
+retry; planned state alone does not grant replacement authority. A retry of
+an exact key preserves old event history and clears only that key's
+outstanding row after an independently rehashed publication.
+
+The selected-file route uses the same typed document ID, input/config digest,
+and stable `local-primary:v1` private sink label as the v1 manifest route.
+`--explain` contains only fixed status/phase/code, typed document ID, and
+the journal's opaque public sink ID. The opt-in route never prints paths,
+source bytes, private labels, or exception text. Exit 0 means every selected
+document was verified or published; 1 means only acknowledged document
+failures or explicit retry-required decisions; 2 means syntax, preflight,
+resource/policy, ledger, or acknowledgment failure. Once a key is planned,
+document-level failure records one fixed-code event and exact-key outstanding
+state in an acknowledged transaction. A failed acknowledgment stops the run.
+Publication intent is acknowledged before sink bytes; on restart, unresolved
+intent becomes uncertain and requires explicit retry. This is process-crash
+recovery, not a power-loss or JSONL pair atomicity guarantee.
+
+The release-active binary proof is `experiments/errors/live_cli_check.d`.
+Compile it with `ldc2 -O3 -release -of=.dub/live-v2-cli-check
+experiments/errors/live_cli_check.d` and run `.dub/live-v2-cli-check
+./scrubbed`. A separate release-mode executable compiled with
+`ManifestCliHarness` and `FailurePolicyHarness` enables deterministic
+process-crash and acknowledgment-fault markers; that instrumentation is
+absent from the shipping binary. The checker accepts its path plus
+`--harness` and verifies restart and fail-stop behavior.
+On macOS, the shipping-binary checker additionally streams 384 256-KiB files
+(96 MiB total) through a one-document/one-descriptor scheduler cap and samples
+the child with `proc_pid_rusage` and `proc_pidinfo` until exit. It requires at
+least five live samples, no more than 64 MiB observed resident memory, and no
+more than 64 observed file descriptors. A D negative control retains all
+96 MiB of input buffers and must measurably exceed the child RSS cap. These
+are regression bounds, not promises about every host or unsampled peaks.
 
 ## Stage 3a export boundary
 

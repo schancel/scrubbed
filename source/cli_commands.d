@@ -38,6 +38,10 @@ mixin template ProcessingOptions() {
     string manifest;
     @(NamedArgument("manifest-retry").Description("Inspect and explicitly replace an unresolved manifest output"))
     bool manifestRetry;
+    @(NamedArgument("error-journal").Description("Existing opt-in v2 failure journal path"))
+    string errorJournal;
+    @(NamedArgument("error-retry").Description("Explicitly retry unresolved v2 outputs"))
+    bool errorRetry;
     @(NamedArgument("jsonl-fields").Description("Comma-separated top-level JSON text fields for stdin/stdout JSONL"))
     string jsonlFields;
     @(NamedArgument("dataset-namespace").Description("Stable JSONL dataset namespace"))
@@ -141,6 +145,9 @@ private int process(T)(ref T options, const string[] original) {
     if (options.explain) forwarded ~= "--explain";
     if (present(original, "--manifest")) forwarded ~= "--manifest=" ~ options.manifest;
     if (options.manifestRetry) forwarded ~= "--manifest-retry";
+    if (present(original, "--error-journal"))
+        forwarded ~= "--error-journal=" ~ options.errorJournal;
+    if (options.errorRetry) forwarded ~= "--error-retry";
     if (present(original, "--jsonl-fields"))
         forwarded ~= "--jsonl-fields=" ~ options.jsonlFields;
     if (present(original, "--dataset-namespace"))
@@ -156,6 +163,20 @@ private int process(T)(ref T options, const string[] original) {
 
 /// Dispatch from the shipping executable; argparse owns parsing, help and completion.
 int runCommands(string[] argv) {
+    // The opt-in failure route must contain all parser and runtime diagnostics:
+    // ordinary CLI diagnostics may echo a user path or filter argument.
+    if (present(argv, "--error-journal") || present(argv, "--error-retry")) {
+        string[] forwarded = ["scrubbed"];
+        size_t first = 1;
+        if (argv.length > 1 && (argv[1] == "run" || argv[1] == "clean" ||
+            argv[1] == "repair" || argv[1] == "fix")) first = 2;
+        forwarded ~= argv[first .. $];
+        try return runApp(forwarded);
+        catch (Throwable ignored) {
+            stderr.writeln("scrubbed: error-journal-fatal");
+            return 2;
+        }
+    }
     if (argv.length > 1 && argv[1] == "route-metadata") {
         foreach (arg; argv[2 .. $])
             if (arg == "--help" || arg == "-h") {

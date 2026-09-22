@@ -139,7 +139,7 @@ issue. This file remains the status record for implemented work.
       completion is not supported; parser startup/size observations are not
       per-document throughput evidence (`docs/cli-commands.md`).
 
-## Phase 4 — HTML->Markdown (`filters/html2md.d`, currently a stub)
+## Phase 4 — HTML->Markdown (pure converter exists; CLI route pending)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
       evidence harness compares pinned Lexbor and Gumbo on seven initial
       cases, a second authored custom-tag/attribute/charset slice, and one
@@ -154,9 +154,13 @@ issue. This file remains the status record for implemented work.
       JSON and observation-limit tests. This exports a selected parse tree,
       not main content or Markdown; charset sniffing, broad real-page coverage,
       richer DOM, bounded native RSS, and other-platform builds remain open.
-- [ ] Tag->markdown mapping (see the stub's TODO comment for the concrete
-      list: headings, links, emphasis, lists, code, blockquotes, images;
-      tables deferred/flattened if not worth the complexity).
+- [~] Mechanical tag->Markdown mapping exists in the bounded pure
+      `source/effects/html_markdown.d` converter, with release-active goldens
+      for headings, links, emphasis, lists, code, blockquotes, images, and
+      row-by-row plain-text tables. Wire a separately reviewed
+      `extract --format=markdown` effects/CLI route with actual-binary atomic
+      output and unchanged tree-json behavior before calling this complete;
+      the old `filters/html2md.d` stub is not the shipping route.
 - [ ] Explicitly NOT attempting trafilatura's boilerplate-detection
       problem (nav/ad/footer removal) in this phase — that's a
       substantially harder, separate problem (main-content vs.

@@ -849,6 +849,21 @@ final class FailureJournal {
         need(sqlite3_step(s) == SQLITE_ROW, "outstanding-read-failed");
         return sqlite3_column_int64(s, 0) == 1;
     }
+    /// Narrow pre-admission membership check for the local primary retry
+    /// route. This does not expose or materialize private target labels.
+    bool hasOutstandingForDocumentSink(DocumentId document, string sink) {
+        live();
+        validV2SinkLabel(sink);
+        auto s = db.prepare(`SELECT 1 FROM outstanding WHERE document_id=?1
+            AND sink_key=?2 LIMIT 1`);
+        scope(exit) sqlite3_finalize(s);
+        bindText(s, 1, document.text);
+        bindText(s, 2, sink);
+        auto rc = sqlite3_step(s);
+        need(rc == SQLITE_ROW || rc == SQLITE_DONE,
+            "outstanding-target-read-failed");
+        return rc == SQLITE_ROW;
+    }
     /// Streams the current retry targets in canonical full-key order. The
     /// callback receives private internal identity; callers must not render
     /// its raw sink label or retain rows unless they accept that memory cost.

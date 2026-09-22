@@ -92,7 +92,38 @@ private bool validUrl(string value) {
     else return false;
     size_t end = start;
     while (end < value.length && value[end] != '/' && value[end] != '?' && value[end] != '#') ++end;
-    if (end == start || value[start .. end].indexOf('@') >= 0) return false;
+    if (end == start) return false;
+    auto authority = value[start .. end];
+    if (authority.indexOf('@') >= 0) return false;
+    string host, port;
+    if (authority[0] == '[') {
+        auto close = authority.indexOf(']');
+        if (close <= 1) return false;
+        host = authority[1 .. close];
+        if (cast(size_t)close + 1 < authority.length) {
+            if (authority[close + 1] != ':') return false;
+            port = authority[close + 2 .. $];
+        }
+        foreach (c; host) if (!((c >= '0' && c <= '9') ||
+            (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
+            c == ':' || c == '.')) return false;
+        if (host.indexOf(':') < 0) return false;
+    } else {
+        auto colon = authority.indexOf(':');
+        host = colon < 0 ? authority : authority[0 .. colon];
+        if (colon >= 0) port = authority[colon + 1 .. $];
+        foreach (c; host) if (!((c >= '0' && c <= '9') ||
+            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            c == '.' || c == '-')) return false;
+    }
+    if (!host.length) return false;
+    if (authority[$ - 1] == ':') return false;
+    if (port.length) {
+        if (port.length > 5) return false;
+        foreach (c; port) if (c < '0' || c > '9') return false;
+        auto number = to!int(port);
+        if (number < 1 || number > 65535) return false;
+    }
     foreach (c; value) if (cast(ubyte)c <= 0x20 || c == '\\' || c == '"') return false;
     return true;
 }
@@ -158,18 +189,18 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) {
         } else if (node.name == "link" && attribute(node, "rel") == "canonical") {
             offer(result.url, attribute(node, "href"), "link:canonical", i, 0, false, true);
         } else if (node.name == "meta") {
-            auto key = attribute(node, "property");
-            if (!key.length) key = attribute(node, "name");
+            auto property = attribute(node, "property");
+            auto name = attribute(node, "name");
             auto content = attribute(node, "content");
-            switch (key) {
-            case "og:title": offer(result.title, content, key, i, 0); break;
-            case "author": offer(result.author, content, key, i, 0); break;
-            case "article:author": offer(result.author, content, key, i, 1); break;
-            case "article:published_time": offer(result.date, content, key, i, 0, true); break;
-            case "date": offer(result.date, content, key, i, 1, true); break;
-            case "og:url": offer(result.url, content, key, i, 1, false, true); break;
-            default: break;
-            }
+            if (property == "og:title") offer(result.title, content, "og:title", i, 0);
+            if (name == "author") offer(result.author, content, "author", i, 0);
+            if (property == "article:author")
+                offer(result.author, content, "article:author", i, 1);
+            if (property == "article:published_time")
+                offer(result.date, content, "article:published_time", i, 0, true);
+            if (name == "date") offer(result.date, content, "date", i, 1, true);
+            if (property == "og:url")
+                offer(result.url, content, "og:url", i, 1, false, true);
         }
     }
     decide(result.title); decide(result.author); decide(result.date); decide(result.url);

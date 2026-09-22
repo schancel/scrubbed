@@ -52,6 +52,18 @@ void main() {
         Fixture(`<head><meta name="date" content="2024-02-30"><link rel="canonical" href="/relative">
             <meta name="author" content=" "></head>`,
             ["", "", "", ""], ["absent", "invalid", "invalid", "invalid"]),
+        Fixture(`<head><title>Real</title><meta name="og:title" content="Wrong">
+            <meta property="author" content="Wrong"><meta name="article:published_time" content="2024-01-01">
+            <meta property="date" content="2024-01-02"><meta name="og:url" content="https://wrong.test/"></head>`,
+            ["Real", "", "", ""], ["selected", "absent", "absent", "absent"]),
+        Fixture(`<head><link rel="canonical" href="https://:443/path">
+            <meta property="og:url" content="https://fallback.test/path"></head>`,
+            ["", "", "", "https://fallback.test/path"],
+            ["absent", "absent", "absent", "selected"]),
+        Fixture(`<head><link rel="canonical" href="https://example.test:bad/path">
+            <meta property="og:url" content="https://fallback.test/second"></head>`,
+            ["", "", "", "https://fallback.test/second"],
+            ["absent", "absent", "absent", "selected"]),
     ];
     auto document = Document(SourceLocator("fixture:v1", "/PRIVATE/secret", "record"),
         OutputName("record.metadata.json"));
@@ -119,12 +131,25 @@ void main() {
             check(json["fields"]["date"]["invalidEvidence"].boolean &&
                 json["fields"]["url"]["invalidEvidence"].boolean,
                 "invalid evidence flag missing");
+        if (fixtureIndex == 4)
+            check(json["fields"]["title"]["candidates"].array.length == 1 &&
+                json["fields"]["title"]["rule"].str == "title" &&
+                json["fields"]["author"]["candidates"].array.length == 0 &&
+                json["fields"]["date"]["candidates"].array.length == 0 &&
+                json["fields"]["url"]["candidates"].array.length == 0,
+                "wrong-kind attributes became evidence");
+        if (fixtureIndex == 5 || fixtureIndex == 6)
+            check(json["fields"]["url"]["rule"].str == "og:url" &&
+                json["fields"]["url"]["candidates"].array.length == 1 &&
+                json["fields"]["url"]["invalidEvidence"].boolean,
+                "invalid canonical did not fall back");
         foreach (i, key; ["title", "author", "date", "url"]) {
             auto field = json["fields"][key];
             check(field["status"].str == fixture.status[i], key ~ " status mismatch");
             if (fixture.status[i] == "selected") {
                 ++selected[i];
-                if (field["value"].str == fixture.expected[i]) ++correct[i];
+                check(field["value"].str == fixture.expected[i], key ~ " selected value mismatch");
+                ++correct[i];
                 check(field["rule"].str.length && field["candidates"].array.length,
                     key ~ " provenance missing");
             } else {
@@ -135,6 +160,24 @@ void main() {
                 check(field["conflict"].boolean && field["candidates"].array.length == 2,
                     key ~ " conflict evidence missing");
         }
+    }
+    foreach (count; [16, 17]) {
+        string html = "<head>";
+        foreach (_; 0 .. count) html ~= `<meta name="author" content="Same">`;
+        html ~= "</head>";
+        auto capped = StageDocument(document,
+            new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
+        import stages.contract : runStage;
+        auto spec = plan.stages[0].declaration;
+        auto declaration = StageDeclaration(spec.key.idup, spec.passMode,
+            ResourceDeclaration(spec.resources.cpuSlots, spec.resources.memoryBytes));
+        auto result = runStage([capped], declaration, plan.stages[0].transform);
+        check(result.events.length == 1 && result.events[0].payload.document.id == document.id,
+            "capped stage identity mismatch");
+        auto field = parseJSON(bytes(result.events[0].payload.content))["fields"]["author"];
+        check(field["candidates"].array.length == 16 &&
+            field["status"].str == (count == 16 ? "selected" : "overflow") &&
+            field["overflow"].boolean == (count == 17), "16/17 cap mismatch");
     }
     auto malformed = parseHtml([cast(ubyte) 0xff]);
     check(!malformed.isParsed, "invalid UTF-8 accepted");

@@ -199,6 +199,16 @@ private string targetText(sqlite3_stmt* s, int at, int maxBytes) {
     need(bytes.indexOf('\0') < 0, "invalid-outstanding-target");
     return bytes.idup;
 }
+private ubyte[32] targetDigest(sqlite3_stmt* s, int at) {
+    enum sqliteBlob = 4;
+    need(sqlite3_column_type(s, at) == sqliteBlob &&
+        sqlite3_column_bytes(s, at) == 32, "invalid-outstanding-target");
+    auto bytes = cast(const(ubyte)*)sqlite3_column_blob(s, at);
+    need(bytes !is null, "invalid-outstanding-target");
+    ubyte[32] result;
+    result[] = bytes[0 .. 32];
+    return result;
+}
 private ubyte[32] columnDigest(sqlite3_stmt* s, int at) {
     need(sqlite3_column_bytes(s, at) == 32, "invalid-digest");
     ubyte[32] value;
@@ -858,8 +868,8 @@ final class FailureJournal {
             SinkKey key;
             try {
                 key.document = DocumentId.fromCanonicalText(targetText(s, 0, 73));
-                key.inputSha256 = columnDigest(s, 1);
-                key.configSha256 = columnDigest(s, 2);
+                key.inputSha256 = targetDigest(s, 1);
+                key.configSha256 = targetDigest(s, 2);
                 key.sink = targetText(s, 3, v2SinkLabelMaxBytes);
                 validateKey(key);
                 validV2SinkLabel(key.sink);

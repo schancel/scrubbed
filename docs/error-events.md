@@ -18,13 +18,17 @@ unbounded memory. Raw sink labels and paths must never be copied to a public
 CLI or diagnostic. This stage does not select sources or perform retries;
 those are later F14 stages. `experiments/retry_targets/check.d` proves exact
 selection/order, callback/reentrancy behavior, no mutation after open, malformed and
-foreign-v1 refusal, and a 10,000-target fresh-process resource bound. Its
+foreign-v1 refusal, and a 100,000-target fresh-process resource bound. Its
 large fixture uses near-maximum 254/255-byte private labels; a separate
 fresh child that deliberately retains every returned key must exceed the
-streaming child's observed RSS by at least 2 MiB. The streaming child must
-stay below 32 MiB and return to its baseline descriptor count after close.
+same 32 MiB cap that the streaming child passes, as well as exceed the
+streaming child's observed RSS by at least 2 MiB. The checker samples
+descriptors during callbacks and requires baseline descriptor count after
+close.
 Matching persisted rows with embedded NUL in either the document ID or sink
-label refuse before any callback, rather than shortening an identity.
+label refuse before any callback, rather than shortening an identity. A
+32-byte SQLite TEXT value in either digest column also refuses; target
+digests must be exact 32-byte BLOB values, not coercible text.
 Build it with `ldc2 -i -O3 -release -Isource
 experiments/retry_targets/check.d third_party/sqlite/sqlite3.o
 -of=.dub/retry-targets-check`, then run `.dub/retry-targets-check`.

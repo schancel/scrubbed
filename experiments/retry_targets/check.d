@@ -21,6 +21,8 @@ import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 private void need(bool yes, string label) {
     if (!yes) throw new Exception("retry target check: " ~ label);
 }
+private enum largeRows = 100_000;
+private enum streamRssCap = 32UL * 1024 * 1024;
 private void reject(void delegate() action, string token, string label) {
     bool refused;
     try action();
@@ -201,6 +203,31 @@ private void checkSmall(string root) {
     reject({ auto badDigestJournal = new FailureJournal(badDigestPath);
         badDigestJournal.close(); },
         "integrity-failed", "malformed digest accepted");
+    foreach (field; ["input", "config"]) {
+        auto textDigestPath = buildPath(root, "text-" ~ field ~ ".db");
+        createV2(textDigestPath);
+        auto inputSql = field == "input" ?
+            "'0123456789abcdef0123456789abcdef'" : "zeroblob(32)";
+        auto configSql = field == "config" ?
+            "'0123456789abcdef0123456789abcdef'" : "zeroblob(32)";
+        sql(textDigestPath, `BEGIN;
+            INSERT INTO sink_identity VALUES('private-text-digest',
+            '00000000-0000-4000-8000-000000000005');
+            INSERT INTO sink_state VALUES('` ~ a.text ~ `',` ~ inputSql ~
+            `,` ~ configSql ~ `,'private-text-digest','/tmp/unused',
+            'failed',NULL,0,0);
+            INSERT INTO outstanding VALUES('` ~ a.text ~ `',` ~ inputSql ~
+            `,` ~ configSql ~ `,'private-text-digest',
+            '00000000-0000-4000-8000-000000000005',
+            'failed','legacy-v1',NULL,NULL,NULL); COMMIT;`);
+        auto textJournal = new FailureJournal(textDigestPath);
+        corruptCallbacks = 0;
+        reject({ textJournal.visitOutstandingTargets((SinkKey key) {
+            ++corruptCallbacks;
+        }); }, "invalid-outstanding-target", "TEXT " ~ field ~ " digest accepted");
+        need(corruptCallbacks == 0, "TEXT digest invoked callback");
+        textJournal.close();
+    }
     auto foreign = buildPath(root, "foreign.db");
     write(foreign, "foreign database");
     reject({ auto f = new FailureJournal(foreign); f.close(); },
@@ -216,12 +243,12 @@ private void makeLarge(string root) {
     createV2(path);
     auto doc = DocumentId.from(SourceLocator("retry", "large", "all"));
     auto destination = buildPath(root, "unused");
-    // One transaction creates a valid 10,000-row legacy-v1 baseline without
-    // 20,000 per-row fsyncs. The visitor still uses the real v2 constructor.
+    // One transaction creates a valid large legacy-v1 baseline without
+    // per-row fsyncs. The visitor still uses the real v2 constructor.
     string statements = "BEGIN;";
     string filler;
     foreach (_; 0 .. 248) filler ~= "x";
-    foreach (i; 0 .. 10_000) {
+    foreach (i; 0 .. largeRows) {
         auto label = "s" ~ i.to!string ~ "-" ~ filler;
         need(label.length <= 256, "large sink label cap");
         auto opaque = randomUUID().toString;
@@ -240,23 +267,29 @@ private void checkLargeChild(string path, bool retain) {
     auto baselineRss = rssBytes();
     auto journal = new FailureJournal(path);
     size_t count;
+    size_t peakFds = baselineFds;
     SinkKey[] retained;
     journal.visitOutstandingTargets((SinkKey key) {
         ++count;
         if (retain) retained ~= key;
+        if (count % 256 == 0) {
+            auto current = fdCount();
+            if (current > peakFds) peakFds = current;
+        }
     });
-    need(count == 10_000, "large exact row count");
+    need(count == largeRows, "large exact row count");
     auto visitedFds = fdCount();
+    if (visitedFds > peakFds) peakFds = visitedFds;
     auto visitedRss = rssBytes();
     if (retain) need(retained.length == count &&
         retained[$ - 1].sink.length >= 250, "retaining control");
     journal.close();
-    need(visitedFds <= baselineFds + 8, "large descriptor bound");
+    need(peakFds <= baselineFds + 8, "large descriptor bound");
     need(fdCount() <= baselineFds, "large descriptor cleanup");
-    if (!retain) need(visitedRss <= 32UL * 1024 * 1024,
+    if (!retain) need(visitedRss <= streamRssCap,
         "large resident bound " ~ visitedRss.to!string);
     import std.stdio : writeln;
-    writeln(visitedRss, " ", visitedFds, " ", baselineRss, " ", baselineFds);
+    writeln(visitedRss, " ", peakFds, " ", baselineRss, " ", baselineFds);
 }
 void main(string[] args) {
     if (args.length == 3 && (args[1] == "--large-child" ||
@@ -281,10 +314,12 @@ void main(string[] args) {
         "large resource output shape");
     auto streamRss = streamMetrics[0].to!ulong;
     auto retainedRss = controlMetrics[0].to!ulong;
+    need(retainedRss > streamRssCap,
+        "retaining control did not breach streaming RSS cap");
     need(retainedRss >= streamRss + 2UL * 1024 * 1024,
         "retaining control did not separate from streaming RSS");
     import std.stdio : writeln;
-    writeln("retry targets: 10000 streamed; RSS ", streamRss,
+    writeln("retry targets: ", largeRows, " streamed; RSS ", streamRss,
         " bytes, FD ", streamMetrics[1], "; retained control RSS ",
         retainedRss, " bytes");
     writeln("retry target checker passed");

@@ -2,10 +2,46 @@
 
 Stage 2 adds an effects-only v2 SQLite journal and explicit offline v1-to-v2
 copy. The release-active `experiments/errors/check.d` pins v1 behavior and
-the v2 effects boundary. The shipping CLI still uses v1; it neither creates
-nor opens v2, and there is no JSONL exporter yet. The v1 `sink_state` table is
+the v2 effects boundary. Stage 3a adds an opt-in effects-only JSONL exporter,
+pinned by `experiments/errors/export_check.d`. The shipping CLI still uses v1;
+it neither creates nor opens v2. The v1 `sink_state` table is
 a last-state ledger, **not** immutable historical error events. Do not
 interpret this check as proof of the F13 JSONL acceptance criteria.
+
+## Stage 3a export boundary
+
+`exportV2(database, historyDestination, outstandingDestination, inputPath)`
+accepts one or both export destinations. An empty destination omits that kind.
+Each JSONL destination has a fixed `.sha256` sidecar. Both requested kinds are
+read under one SQLite read transaction and share a fresh opaque UUIDv4
+`snapshot_id`. A standalone kind verifies alone. Sidecar bytes are exactly
+one UTF-8/LF line, with keys in this order and no whitespace:
+
+```jsonl
+{"schema":"scrubbed.error-export-digest.v1","kind":"history","sha256":"<64 lowercase hex>","bytes":0,"snapshot_id":"<lowercase UUIDv4>"}
+```
+
+`kind` is `history` or `outstanding`; `sha256` covers every JSONL byte,
+including final LFs, and `bytes` is the decimal byte count. Empty JSONL is
+zero bytes and has SHA-256 of the empty string. Angle-bracket fields above
+are placeholders, not literal sidecar values. Export caps are 2,000,000 rows,
+1 GiB per kind, 4096 bytes per line and 256 bytes per sidecar. Reaching a cap
+refuses export. Destinations and sidecars must be non-aliased regular files or
+absent, in an existing resolved parent directory; symlinks and hardlinks are
+refused. The caller must serialize writers to this trusted directory.
+
+`verifyV2Export(historyPath, outstandingPath)` opens stable file descriptors,
+strictly checks canonical sidecar bytes, kind, byte count and streamed SHA-256,
+and, when both are supplied, equal snapshot IDs. A missing or mismatched pair
+is rejected. This is an integrity check, not an authenticity signature; an
+attacker who can rewrite both files can forge a new digest. Re-export must be
+explicit and start from the authoritative v2 database. The exporter stages
+and fsyncs each file in its target directory, then renames JSONL before its
+sidecar. Rename is atomic per file, not per pair or across kinds. A crash
+before JSONL rename leaves the previous pair; a crash after it may leave a
+pair that fails verification; a crash between kinds may leave individually
+valid but jointly mismatched snapshot IDs. No parent-directory fsync or
+power-loss durability is promised.
 
 Run the Stage 2 checker against a release executable built with
 `DFLAGS=-d-version=FailurePolicyHarness dub build --build=release
@@ -74,11 +110,11 @@ do not fabricate historical events. A later successful retry clears only its
 matching baseline atomically. Historical event export starts when v2 begins
 accepting events. No automatic same-path migration or silent downgrade.
 
-## Future JSONL v1 wire contract (SPEC ONLY; unexecuted)
+## JSONL v1 wire contract
 
 JSONL is a deterministic, bounded materialization of committed SQLite history,
 not a live second durability authority. The following is the Stage 1 target
-golden, **not** output of any current binary or a passing test. The DB schema
+golden, **not** output of the shipping CLI. The DB schema
 version is v2; JSONL history and outstanding records each have their own
 `schema` discriminator and wire version 1. One UTF-8 JSON object plus one LF
 is one record. No BOM, CRLF, insignificant spaces, or trailing non-record data.
@@ -143,10 +179,8 @@ historical event line. The example B line and a separate legacy fixture are:
 
 The two outstanding lines illustrate record shape; they are independent
 fixtures, not a claim that the earlier three-event history generated the
-legacy row. An export snapshot must carry a separately validated content
-digest over its exact record bytes (excluding the digest itself); the
-successor must freeze its envelope or sidecar representation before it ships.
-This Stage 1 document does not claim a digest format already exists.
+legacy row. An export snapshot carries the separately validated `.sha256`
+sidecar above.
 
 JSON strings escape quote and backslash with `\"` and `\\`, the five
 short-form controls with `\b`, `\f`, `\n`, `\r`, and `\t`,
@@ -169,8 +203,7 @@ reversible encoding of it. The canaries are test inputs only, never allowed
 diagnostic fields. Export must
 validate its destination and aliases, bound record/page size and memory, write
 a temporary file, fsync it, and atomically replace the destination. It must not claim a
-partially written line as committed. Parent-directory fsync is not yet promised,
+partially written line as committed. Parent-directory fsync is not promised,
 so process-crash evidence must not be described as power-loss durability.
-Executable proof of this golden schema, content digest, encoding/escaping,
-redaction canaries, kill/restart, lost-ack faults, and bounded exports belongs
-to later slices. Stage 1 deliberately does not test absent exporter behavior.
+Stage 3a pins the event, outstanding, and sidecar bytes at the effects boundary;
+Stage 3b owns shipping CLI activation and actual-binary proof.

@@ -87,6 +87,8 @@ private void need(bool okay, string token) {
 
 private final class Database {
     sqlite3* handle;
+    bool owned = true;
+    this(sqlite3* borrowed) { handle = borrowed; owned = false; }
     this(string path, int flags) {
         if (sqlite3_open_v2(path.toStringz, &handle, flags, null) != SQLITE_OK) {
             if (handle !is null) sqlite3_close(handle);
@@ -100,7 +102,7 @@ private final class Database {
         if (handle !is null) {
             auto prior = handle;
             handle = null;
-            need(sqlite3_close(prior) == SQLITE_OK, "close-failed");
+            if (owned) need(sqlite3_close(prior) == SQLITE_OK, "close-failed");
         }
     }
     void exec(string sql) {
@@ -125,6 +127,16 @@ private final class Database {
         need(sqlite3_step(s) == SQLITE_ROW, "read-failed");
         return sqlite3_column_text(s, 0).fromStringz.idup;
     }
+}
+
+/// Validate the same read transaction the exporter will subsequently stream.
+package void validateV2ReadSnapshot(sqlite3* handle) {
+    auto borrowed = new Database(handle);
+    need(borrowed.scalar("PRAGMA page_size") > 0 &&
+        borrowed.scalar("PRAGMA page_size") <= 65_536, "page-limit");
+    checkVersion(borrowed, 2);
+    checkV2Shape(borrowed);
+    borrowed.close();
 }
 
 private void bindText(sqlite3_stmt* s, int at, string value) {
@@ -305,8 +317,16 @@ private void checkV2Shape(Database db) {
         ON o.event_id=e.event_id WHERE o.origin='event' AND
         (e.event_id IS NULL OR e.document_id!=o.document_id OR
          e.input_sha256!=o.input_sha256 OR e.config_sha256!=o.config_sha256 OR
-         e.sink_id!=o.sink_id OR e.state!=o.state)`) == 0,
+         e.sink_id!=o.sink_id OR e.state!=o.state OR
+         e.run_id!=o.run_id OR e.time_utc_ms!=o.time_utc_ms)`) == 0,
         "repair-needed");
+    need(db.scalar(`SELECT count(*) FROM error_event e
+        LEFT JOIN error_event p ON e.retry_of=p.event_id
+        WHERE e.retry_of IS NOT NULL AND
+        (p.event_id IS NULL OR e.phase!='retry' OR e.code!='retry-succeeded' OR
+         e.document_id!=p.document_id OR e.input_sha256!=p.input_sha256 OR
+         e.config_sha256!=p.config_sha256 OR e.sink_id!=p.sink_id OR
+         e.sequence<=p.sequence)`) == 0, "repair-needed");
     need(db.scalar(`SELECT count(*) FROM error_event e LEFT JOIN sink_identity i
         ON e.sink_id=i.sink_id WHERE i.raw_sink IS NULL`) == 0,
         "repair-needed");

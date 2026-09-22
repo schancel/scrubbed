@@ -225,10 +225,13 @@ reconstructed pre-range mojibake implementation, are under `benchmarks/`.
 The D-only per-fix text corpus adds small exact-output and clean-preservation
 gates; its two clean examples per fix are not a population-level false-positive
 estimate.
-The first whole-CLI baseline there is sobering: on one synthetic 4,096-line
+The first whole-CLI baseline was sobering: on one synthetic 4,096-line
 mojibake input, scrubbed took roughly 3 seconds versus roughly 0.16 seconds
-for pinned ftfy. That is not a corpus-wide comparison, but it rules out a
-current blanket speed claim. A newer [quality-gated local pipeline harness](docs/benchmark-pipeline.md)
+for pinned ftfy. Profiling exposed a scorer hot path; after optimizing it, a
+separate `-O3` exact-output run on 131,072 repeated mojibake lines measured
+scrubbed at 0.420–0.429 s versus ftfy at 4.656–4.909 s. That is a task-specific
+result, not a broad corpus speed claim; see [benchmark details](benchmarks/README.md).
+A newer [quality-gated local pipeline harness](docs/benchmark-pipeline.md)
 adds small-tree first/skip/retry runs, a real planned-row kill/restart probe,
 and an exact-output CRLF task comparison with pinned dos2unix. A second,
 capacity-gated D run adds matched many-small/few-large 16 MiB and 128 MiB

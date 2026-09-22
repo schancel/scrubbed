@@ -2,6 +2,7 @@ module mix_overlay.check;
 
 import core.sys.posix.fcntl : fcntl, F_GETFD;
 import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
+import core.memory : GC;
 import domain.document : OutputName, SourceLocator;
 import domain.mix_policy : MissingAnnotation, MixDecision, MixPolicy, MixReason;
 import domain.quality_features : QualityPolicy, decide, measure;
@@ -14,9 +15,11 @@ import effects.quality_overlay : decisionAnalyzerKey, decisionAnalyzerVersion,
     decisionFieldKey, encodeDecisionValue;
 import std.algorithm.sorting : sort;
 import std.conv : to;
-import std.file : mkdir, rmdirRecurse, tempDir;
+import std.file : mkdir, rmdirRecurse, tempDir, thisExePath;
 import std.path : buildPath;
+import std.process : execute;
 import std.stdio : writeln;
+import std.string : split;
 import std.string : indexOf;
 import std.uuid : randomUUID;
 
@@ -167,7 +170,109 @@ private void largeStreaming(string root, QualityPolicy quality, MixPolicy mix) {
         "large streaming resident-set growth exceeded 32 MiB");
 }
 
-void main() {
+private struct ChildStats {
+    ulong rss;
+    size_t fdStart;
+    size_t fdPeak;
+    size_t fdEnd;
+    ulong total;
+    ulong selected;
+    ulong checksum;
+}
+
+private ChildStats childStats(string mode, string shard, string qualityPath,
+        string dedupPath) {
+    auto process = execute([thisExePath(), mode, shard, qualityPath, dedupPath]);
+    check(process.status == 0, "memory probe child failed");
+    auto values = process.output.split();
+    check(values.length == 7, "memory probe child output shape");
+    ChildStats result;
+    result.rss = values[0].to!ulong;
+    result.fdStart = values[1].to!size_t;
+    result.fdPeak = values[2].to!size_t;
+    result.fdEnd = values[3].to!size_t;
+    result.total = values[4].to!ulong;
+    result.selected = values[5].to!ulong;
+    result.checksum = values[6].to!ulong;
+    return result;
+}
+
+private void measureInChild(string mode, string shard, string qualityPath,
+        string dedupPath) {
+    auto quality = QualityPolicy(0, 1_000_000, 1_000_000, 1_000_000);
+    auto mix = MixPolicy("0123456789abcdef", 1, 1);
+    GC.collect();
+    auto fdStart = fds();
+    auto fdPeak = fdStart;
+    ulong checksum = 14_695_981_039_346_656_037UL;
+    ubyte[][] retained;
+    auto report = visitMixDecisions(shard, qualityPath, dedupPath,
+        quality, mix, (const(ShardDocument) source, MixDecision decision) {
+            foreach (ch; decision.id.text) {
+                checksum ^= cast(ubyte)ch;
+                checksum *= 1_099_511_628_211UL;
+            }
+            if (mode == "--buffer") retained ~= source.content.dup;
+            auto current = fds();
+            if (current > fdPeak) fdPeak = current;
+        });
+    auto fdEnd = fds();
+    if (mode == "--buffer") check(retained.length == report.total &&
+        retained[$ - 1].length == 256 * 1024, "negative control did not retain content");
+    writeln(rssBytes(), " ", fdStart, " ", fdPeak, " ", fdEnd, " ",
+        report.total, " ", report.counts[MixReason.selected], " ", checksum);
+}
+
+private void substantialStreaming(string root, QualityPolicy quality) {
+    enum count = 384;
+    enum bytesPerRecord = 256 * 1024;
+    auto shard = buildPath(root, "substantial-shard");
+    auto qualityPath = buildPath(root, "substantial-quality");
+    auto dedupPath = buildPath(root, "substantial-dedup");
+    ShardDocument[] records;
+    foreach (number; 0 .. count) {
+        auto content = new ubyte[bytesPerRecord];
+        content[] = 'x';
+        auto suffix = number.to!string;
+        foreach (i, ch; suffix)
+            content[bytesPerRecord - suffix.length + i] = cast(ubyte)ch;
+        records ~= ShardDocument(SourceLocator("mix-check", "large", number.to!string),
+            OutputName(number.to!string), content);
+    }
+    writeShard(shard, records);
+    writeQuality(qualityPath, shard, records, quality);
+    writeExactDedupOverlays([DedupShard(shard, dedupPath)]);
+    auto streamA = childStats("--stream", shard, qualityPath, dedupPath);
+    auto streamB = childStats("--stream", shard, qualityPath, dedupPath);
+    auto buffered = childStats("--buffer", shard, qualityPath, dedupPath);
+    writeln("RSS stream=", streamA.rss, "/", streamB.rss,
+        " buffered=", buffered.rss, " FD=", streamA.fdStart,
+        "/", streamA.fdPeak, "/", streamA.fdEnd);
+    check(streamA.total == count && streamA.selected == count &&
+        streamB.total == count && streamB.selected == count &&
+        buffered.total == count && buffered.selected == count &&
+        streamA.checksum == streamB.checksum &&
+        streamA.checksum == buffered.checksum,
+        "substantial fixture count/ID drift");
+    check(streamA.fdEnd == streamA.fdStart &&
+        streamB.fdEnd == streamB.fdStart &&
+        buffered.fdEnd == buffered.fdStart &&
+        streamA.fdPeak <= streamA.fdStart + 4 &&
+        streamB.fdPeak <= streamB.fdStart + 4,
+        "substantial join FD bound");
+    check(streamA.rss < 64UL * 1024 * 1024 &&
+        streamB.rss < 64UL * 1024 * 1024 &&
+        buffered.rss > streamA.rss + 48UL * 1024 * 1024 &&
+        buffered.rss > streamB.rss + 48UL * 1024 * 1024,
+        "substantial join RSS gate lacks buffering sensitivity");
+}
+
+void main(string[] args) {
+    if (args.length == 5 && (args[1] == "--stream" || args[1] == "--buffer")) {
+        measureInChild(args[1], args[2], args[3], args[4]);
+        return;
+    }
+    check(args.length == 1, "unsupported checker mode");
     auto root = buildPath(tempDir(), "mix-overlay-check-" ~ randomUUID.toString);
     mkdir(root);
     scope(exit) rmdirRecurse(root);
@@ -307,9 +412,9 @@ void main() {
         "empty joined shard");
 
     largeStreaming(root, quality, all);
-
     check(fds() == beforeFds, "file descriptor leak");
     check(rssBytes() - beforeRss < 64UL * 1024 * 1024,
         "resident-set growth exceeded 64 MiB");
-    writeln("mix overlay: joined/missing/stale/version/orphan/malformed/empty/prefix/4096/RSS/FD passed");
+    substantialStreaming(root, quality);
+    writeln("mix overlay: joined/missing/stale/version/orphan/malformed/empty/prefix/4096/substantial RSS/FD passed");
 }

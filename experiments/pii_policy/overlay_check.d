@@ -184,6 +184,39 @@ private void run() {
     rejects({ publishPiiPolicy(source, wrong, policyFile, "US", PiiPolicy.mask); });
 
     foreach (kind; 0 .. 3) {
+        auto malformedPath = buildPath(root,
+            "shape-" ~ randomUUID.toString ~ ".overlay");
+        AnnotationRecord[] records;
+        foreach (index, doc; docs) {
+            if (kind == 0 && index == 0) continue; // missing document
+            auto digest = doc.contentDigest;
+            if (kind == 1 && index == 0) digest[0] ^= 1; // stale revision
+            records ~= AnnotationRecord(doc.id.text, digest,
+                [AnnotationField(piiFieldKey,
+                    encodePiiFindings(scanPii(doc.content, "US"), "US",
+                        doc.content.length))]);
+        }
+        if (kind == 2) {
+            auto orphan = ShardDocument(SourceLocator("pii-policy-overlay",
+                "orphan", "not-in-source"), OutputName("orphan"),
+                cast(ubyte[])"orphan".dup);
+            records ~= AnnotationRecord(orphan.id.text, orphan.contentDigest,
+                [AnnotationField(piiFieldKey,
+                    encodePiiFindings([], "US", orphan.content.length))]);
+        }
+        records.sort!((a, b) => a.documentId < b.documentId);
+        auto shapeWriter = new OverlayWriter(malformedPath, source,
+            piiAnalyzerKey, piiAnalyzerVersion("US"));
+        foreach (record; records) shapeWriter.append(record);
+        shapeWriter.publish();
+        rejects({ publishPiiPolicy(source, malformedPath, policyFile, "US",
+            PiiPolicy.mask); });
+        check(cast(ubyte[])read(policyFile) == prior &&
+            info(policyFile).st_ino == priorInode,
+            "bad findings altered destination");
+    }
+
+    foreach (kind; 0 .. 3) {
         auto tampered = buildPath(root, "tampered-" ~ randomUUID.toString ~ ".overlay");
         auto forgedPolicy = new OverlayWriter(tampered, source,
             piiPolicyAnalyzerKey, piiPolicyAnalyzerVersion("US", PiiPolicy.mask));

@@ -1,5 +1,24 @@
 # Error events and outstanding failures (F13 staged contract)
 
+## F14 Stage 1 retry-target visitor
+
+`FailureJournal.visitOutstandingTargets` is an internal, read-only stream of
+the current v2 `outstanding` table. It yields the typed DocumentId, exact
+input and config SHA-256 digests, and private stable sink label in binary
+full-key order. Failed, uncertain, and planned-with-outstanding keys remain
+targets; committed and history-only keys do not. Opening the journal may
+recover interrupted publication intents before visitation. The visitor
+itself does not mutate state, and a throwing synchronous callback stops the
+scan. Internal storage stays bounded, but a caller that retains keys can use
+unbounded memory. Raw sink labels and paths must never be copied to a public
+CLI or diagnostic. This stage does not select sources or perform retries;
+those are later F14 stages. `experiments/retry_targets/check.d` proves exact
+selection/order, callback behavior, no mutation after open, malformed and
+foreign-v1 refusal, and a 10,000-target fresh-process resource bound.
+Build it with `ldc2 -i -O3 -release -Isource
+experiments/retry_targets/check.d third_party/sqlite/sqlite3.o
+-of=.dub/retry-targets-check`, then run `.dub/retry-targets-check`.
+
 Stage 2 adds an effects-only v2 SQLite journal and explicit offline v1-to-v2
 copy. The release-active `experiments/errors/check.d` pins v1 behavior and
 the v2 effects boundary. Stage 3a adds an opt-in effects-only JSONL exporter,

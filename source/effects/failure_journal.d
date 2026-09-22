@@ -6,6 +6,7 @@ import effects.local_manifest : SinkKey, SinkState, SinkRecord, Inspection,
     validateKey, resolvedName, safeRegularOrAbsent, sameInode, hashFile, nowUtcMs,
     v1Schema;
 import effects.atomic_piece_sink : OutputPolicyViolation;
+import domain.document : DocumentId;
 import std.file : exists, isFile, isSymlink, remove;
 import std.string : fromStringz, toStringz, indexOf;
 import std.uuid : UUID;
@@ -815,6 +816,35 @@ final class FailureJournal {
         bindKey(s, key);
         need(sqlite3_step(s) == SQLITE_ROW, "outstanding-read-failed");
         return sqlite3_column_int64(s, 0) == 1;
+    }
+    /// Streams the current retry targets in canonical full-key order. The
+    /// callback receives private internal identity; callers must not render
+    /// its raw sink label or retain rows unless they accept that memory cost.
+    /// Opening the journal may already have recovered interrupted intents;
+    /// this visitor itself does not write journal state.
+    void visitOutstandingTargets(scope void delegate(SinkKey) visit) {
+        live();
+        need(visit !is null, "missing-target-visitor");
+        auto s = db.prepare(`SELECT document_id,input_sha256,config_sha256,sink_key
+            FROM outstanding ORDER BY document_id COLLATE BINARY,
+            input_sha256,config_sha256,sink_key COLLATE BINARY`);
+        scope(exit) sqlite3_finalize(s);
+        int rc;
+        while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+            SinkKey key;
+            try {
+                key.document = DocumentId.fromCanonicalText(columnText(s, 0));
+                key.inputSha256 = columnDigest(s, 1);
+                key.configSha256 = columnDigest(s, 2);
+                key.sink = columnText(s, 3);
+                validateKey(key);
+                validV2SinkLabel(key.sink);
+            } catch (Exception ignored) {
+                throw new Exception("failure journal: invalid-outstanding-target");
+            }
+            visit(key);
+        }
+        need(rc == SQLITE_DONE, "outstanding-target-read-failed");
     }
     Inspection inspect(SinkKey key) {
         live();

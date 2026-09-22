@@ -33,9 +33,16 @@ private bool localChar(ubyte c) {
 private bool word(ubyte c) { return alnum(c) || c == '_'; }
 private bool leftClear(const(ubyte)[] b, size_t i) { return i == 0 || !word(b[i - 1]); }
 private bool rightClear(const(ubyte)[] b, size_t i) { return i == b.length || !word(b[i]); }
+private bool terminalDot(const(ubyte)[] b, size_t i) {
+    if (i == b.length || b[i] != '.') return false;
+    if (i + 1 == b.length) return true;
+    auto next = b[i + 1];
+    return next == ' ' || next == '\n' || next == '\r' || next == '\t' ||
+        next == ')' || next == ']' || next == '}' || next == '"' || next == '\'';
+}
 
 private size_t emailEnd(const(ubyte)[] b, size_t i) {
-    if ((i > 0 && localChar(b[i - 1])) || !alnum(b[i])) return i;
+    if ((i > 0 && (localChar(b[i - 1]) || b[i - 1] == '@')) || !alnum(b[i])) return i;
     size_t p = i;
     while (p < b.length && localChar(b[p])) {
         if (b[p] == '.' && (p == i || p + 1 == b.length || b[p + 1] == '.')) return i;
@@ -47,6 +54,7 @@ private size_t emailEnd(const(ubyte)[] b, size_t i) {
     size_t dots;
     size_t lastLabel = p;
     while (p < b.length && (alnum(b[p]) || b[p] == '-' || b[p] == '.')) {
+        if (terminalDot(b, p)) break;
         if (b[p] == '.') {
             if (p == lastLabel || b[p - 1] == '-' || p - lastLabel > 63) return i;
             ++dots;
@@ -55,7 +63,8 @@ private size_t emailEnd(const(ubyte)[] b, size_t i) {
         ++p;
     }
     if (dots == 0 || p == lastLabel || p - lastLabel < 2 || p - lastLabel > 63 ||
-        p - domainStart > 253 || b[p - 1] == '-' || !rightClear(b, p)) return i;
+        p - domainStart > 253 || b[p - 1] == '-' || !rightClear(b, p) ||
+        (p < b.length && b[p] == '@')) return i;
     foreach (c; b[lastLabel .. p]) if (!alpha(c)) return i;
     return p;
 }
@@ -73,7 +82,7 @@ private size_t ipEnd(const(ubyte)[] b, size_t i) {
             if (p == b.length || b[p++] != '.') return i;
         }
     }
-    return rightClear(b, p) && (p == b.length || b[p] != '.') ? p : i;
+    return rightClear(b, p) && (p == b.length || b[p] != '.' || terminalDot(b, p)) ? p : i;
 }
 
 private bool luhn(const(ubyte)[] b, size_t i, size_t end) {
@@ -117,7 +126,7 @@ private size_t cardEnd(const(ubyte)[] b, size_t i) {
     }
     if (count < 13 || count > 19 || (separator != 0 && (count != 16 || group != 4)) ||
         !rightClear(b, p) ||
-        (p < b.length && (digit(b[p]) || b[p] == '.' || b[p] == '-')) ||
+        (p < b.length && (digit(b[p]) || (b[p] == '.' && !terminalDot(b, p)) || b[p] == '-')) ||
         !plausibleCardPrefix(b, i, count) || !luhn(b, i, p)) return i;
     return p;
 }
@@ -151,7 +160,8 @@ private size_t phoneEnd(const(ubyte)[] b, size_t i, string locale, out bool ambi
         foreach (c; b[p .. p + 4]) if (!digit(c)) return i;
         p += 4;
     }
-    if (!rightClear(b, p) || (p < b.length && (b[p] == '-' || b[p] == '.'))) return i;
+    if (!rightClear(b, p) || (p < b.length &&
+        (b[p] == '-' || (b[p] == '.' && !terminalDot(b, p))))) return i;
     ambiguous = !international;
     return p;
 }

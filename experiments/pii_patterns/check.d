@@ -60,6 +60,28 @@ private void negatives() {
     check(scan("éhello@example.com").length == 1, "Unicode byte boundary");
 }
 
+private void punctuationBoundaries() {
+    void terminal(string prefix, string token, PiiCategory category) {
+        auto result = scan(prefix ~ token ~ ".");
+        check(result.length == 1 && result[0].start == prefix.length &&
+            result[0].end == prefix.length + token.length &&
+            result[0].category == category, "terminal punctuation byte span");
+    }
+    terminal("Sentence: ", "a@example.com", PiiCategory.email);
+    terminal("Sentence: ", "192.0.2.1", PiiCategory.ip);
+    terminal("Sentence: ", "202-555-0142", PiiCategory.phone);
+    terminal("Sentence: ", "4111 1111 1111 1111", PiiCategory.card);
+    check(scan("a@example.com@evil.com").length == 0, "chained at-sign is not two emails");
+    check(scan("a@example.com.more").length == 1 &&
+        scan("a@example.com.more")[0].end == "a@example.com.more".length,
+        "legitimate domain extension retained");
+    check(scan("a@example.com..more").length == 0, "double-dot extension rejected");
+    check(scan("192.0.2.1.5").length == 0 &&
+        scan("202-555-0142.9").length == 0 &&
+        scan("4111 1111 1111 1111.9").length == 0,
+        "malformed numeric extensions rejected");
+}
+
 private void boundsAndSafety() {
     rejects("unsupported locale", { scan("canary@example.com", "XX"); });
     rejects("invalid UTF-8", { scanPii([cast(ubyte)0xff], "US"); });
@@ -84,6 +106,7 @@ private void boundsAndSafety() {
 void main() {
     golden();
     negatives();
+    punctuationBoundaries();
     boundsAndSafety();
     writeln("pii patterns: release-active goldens passed");
 }

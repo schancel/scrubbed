@@ -6,6 +6,8 @@ then returns findings sorted by starting byte, ending byte, and category.
 Spans are half-open byte offsets into the original content. Overlaps are
 retained for the later policy layer; callers must not assume findings are a
 redaction decision.
+An ordinary terminal period delimits a finding and is excluded from its span;
+malformed numeric extensions and chained `@` addresses are rejected.
 
 The first slice recognizes conservative ASCII email domains, US/GB telephone
 formats, issuer-prefix and Luhn-valid 13–19 digit card candidates, and canonical dotted IPv4.

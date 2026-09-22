@@ -3,8 +3,9 @@
 module effects.independent_sinks;
 
 import content.pieces : Content;
+import core.stdc.errno : errno, ENOENT;
 import core.stdc.stdlib : free;
-import core.sys.posix.sys.stat : stat, stat_t;
+import core.sys.posix.sys.stat : lstat, stat, stat_t, S_ISDIR, S_ISLNK, S_ISREG;
 import domain.document : Document;
 import effects.atomic_piece_sink : OutputPolicyViolation, writeAtomicPieces;
 import effects.local_manifest : Inspection, LocalManifest, SinkKey, SinkState;
@@ -12,9 +13,9 @@ import effects.runner : Sink;
 import stages.contract : EventKind, StageEvent;
 import std.digest.sha : SHA256;
 import std.exception : enforce;
-import std.file : exists, isDir;
+import std.file : exists;
 import std.path : absolutePath, buildPath;
-import std.string : fromStringz, indexOf, toStringz;
+import std.string : fromStringz, indexOf, split, toStringz;
 
 enum contentSinkKey = "local-content:v1";
 enum metadataSinkKey = "local-metadata:v1";
@@ -42,21 +43,57 @@ class IndependentSinkFailure : Exception {
 private extern(C) char* realpath(const(char)*, char*);
 
 private string checkedRoot(string root) {
-    if (!root.length || root.indexOf('\0') >= 0 || !isDir(root))
+    if (!root.length || root.indexOf('\0') >= 0)
         throw new OutputPolicyViolation("independent sink root must be an existing directory");
-    auto resolved = realpath(absolutePath(root).toStringz, null);
+    auto absolute = absolutePath(root);
+    auto cursor = "/";
+    foreach (component; absolute.split('/')) {
+        if (!component.length) continue;
+        cursor = buildPath(cursor, component);
+        stat_t entry;
+        if (lstat(cursor.toStringz, &entry) != 0 ||
+            S_ISLNK(entry.st_mode) || !S_ISDIR(entry.st_mode))
+            throw new OutputPolicyViolation(
+                "independent sink root ancestors must be existing non-symlink directories");
+    }
+    auto resolved = realpath(absolute.toStringz, null);
     if (resolved is null)
         throw new OutputPolicyViolation("independent sink root cannot be resolved");
     scope(exit) free(resolved);
     return resolved.fromStringz.idup;
 }
 
-private string checkedName(Document document) {
+private string[] checkedName(Document document) {
     auto name = document.outputName.text;
-    if (!name.length || name == "." || name == ".." ||
-        name.indexOf('/') >= 0 || name.indexOf('\\') >= 0 || name.indexOf('\0') >= 0)
-        throw new OutputPolicyViolation("output name must be a single safe path component");
-    return name;
+    if (!name.length || name.indexOf('\\') >= 0 || name.indexOf('\0') >= 0)
+        throw new OutputPolicyViolation("output name must be a safe relative path");
+    auto components = name.split('/');
+    foreach (component; components)
+        if (!component.length || component == "." || component == "..")
+            throw new OutputPolicyViolation("output name has an unsafe path component");
+    return components;
+}
+
+private string checkedDestination(string root, string[] components) {
+    auto cursor = root;
+    foreach (component; components[0 .. $ - 1]) {
+        cursor = buildPath(cursor, component);
+        stat_t entry;
+        if (lstat(cursor.toStringz, &entry) != 0 ||
+            S_ISLNK(entry.st_mode) || !S_ISDIR(entry.st_mode))
+            throw new OutputPolicyViolation(
+                "independent sink output parent must be an existing non-symlink directory");
+    }
+    auto destination = buildPath(cursor, components[$ - 1]);
+    stat_t entry;
+    if (lstat(destination.toStringz, &entry) == 0) {
+        if (S_ISLNK(entry.st_mode) || !S_ISREG(entry.st_mode) || entry.st_nlink != 1)
+            throw new OutputPolicyViolation(
+                "independent sink destination must be a regular unaliased file or absent");
+    } else if (errno != ENOENT) {
+        throw new OutputPolicyViolation("independent sink destination cannot be inspected");
+    }
+    return destination;
 }
 
 private bool sameInode(string left, string right) {
@@ -143,13 +180,15 @@ final class IndependentLocalSinks : Sink {
     }
 
     private Destinations destinations(Document document) {
-        auto name = checkedName(document);
+        auto components = checkedName(document);
         auto contentDir = checkedRoot(contentRoot);
         auto metadataDir = checkedRoot(metadataRoot);
+        if (contentDir != contentRoot || metadataDir != metadataRoot)
+            throw new OutputPolicyViolation("independent sink root changed");
         if (contentDir == metadataDir)
             throw new OutputPolicyViolation("independent sink roots alias");
-        auto contentPath = buildPath(contentDir, name);
-        auto metadataPath = buildPath(metadataDir, name);
+        auto contentPath = checkedDestination(contentDir, components);
+        auto metadataPath = checkedDestination(metadataDir, components);
         if (contentPath == metadataPath || sameInode(contentPath, metadataPath))
             throw new OutputPolicyViolation("independent sink destinations collide");
         return Destinations(contentPath, metadataPath);

@@ -1,4 +1,4 @@
-# Independent local sinks (first adapter slice)
+# Independent local sinks (path-aware adapter slice)
 
 `effects.independent_sinks.IndependentLocalSinks` is an opt-in `effects.runner.Sink`.
 It accepts emitted stage events and calls a synchronous `PayloadProvider` for
@@ -10,10 +10,18 @@ events are not published. The existing CLI and single-sink route are unchanged.
 The caller supplies two existing local directory roots, one manifest, a source
 input digest, separate configuration digests, and a retry decision. The adapter
 uses stable keys `local-content:v1` and `local-metadata:v1`. Each output path is
-its canonical root plus the one-component output name. It rejects unsafe names,
-root aliases, destination aliases (including hard links), and manifest/output
-collisions before publishing either output. Routes are rechecked after the
-caller-supplied payload callback, which may itself change the filesystem.
+its canonical root plus the same NFC-normalized, slash-delimited relative
+`Document.outputName` (for example, `chapter/page.txt`). Flat names still work.
+Every path component must be nonempty and neither `.` nor `..`; absolute paths,
+backslashes, and NUL are refused. Both output parent chains must already exist
+as ordinary, non-symlink directories. The caller-supplied root paths also
+reject symlinks in every ancestor before canonicalization. Existing
+destinations must be regular files with one link. Root aliases, destination
+aliases, and manifest/output
+ownership collisions are rejected before publishing either output. Routes are
+rechecked after the caller-supplied payload callback, which may itself change
+the filesystem. A later CLI route will create bounded mirrored parents; this
+adapter never creates them.
 The manifest owns its own path policy; callers must keep it open for the
 duration of `accept`.
 
@@ -36,13 +44,15 @@ accept replacement risk. Digest/config values must describe the caller's
 actual source and transformations; reusing a digest for changed payloads can
 cause a legitimate committed skip.
 
-This is not a two-file transaction, a power-loss durability claim, metadata
-extraction, an S3 implementation, or a CLI selector. A later, separately
-reviewed route will expose the adapter to the shipping binary.
+This is not a two-file transaction, protection from hostile concurrent path
+replacement, a power-loss durability claim, metadata extraction, an S3
+implementation, or a CLI selector. A later, separately reviewed route will
+expose the adapter to the shipping binary.
 
 The release-active D checker covers both failure directions before and after
 publication, process-exit/reopen cutpoints, retry, cross-document ownership,
-same-document revisions, identity, aliases, and owner lifetime.
+same-document revisions, identity, nested routes, unsafe components, missing
+parents, pre-existing and provider-created aliases, and owner lifetime.
 After `dub test --compiler=ldc2` builds the project SQLite object, run:
 
 ```sh

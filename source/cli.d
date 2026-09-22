@@ -15,6 +15,7 @@ import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
 import effects.html_tree : maxRawBytes;
 import effects.html_tree_json_stage : htmlTreeJsonPlan;
+import effects.html_markdown_stage : htmlMarkdownPlan;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, runStage;
 import filters.entities;
@@ -242,7 +243,7 @@ private string destinationFor(string file, string inputRoot, string outputRoot,
 
 /// Opt-in local selected-tree export. It does not use the filter/manifest route.
 int runExtract(string requestedInput, string requestedOutput,
-    string declaredCharset = null) {
+    string declaredCharset = null, string format = "tree-json") {
     if (!exists(requestedInput) || isSymlink(requestedInput))
         throw new Exception("extract input must be an existing plain path");
     if (exists(requestedOutput) && isSymlink(requestedOutput))
@@ -259,7 +260,8 @@ int runExtract(string requestedInput, string requestedOutput,
     preflightOutput(output, isTree);
     auto sourceRoot = isTree ? input : dirName(input);
     auto outputRoot = isTree ? output : dirName(output);
-    auto plan = htmlTreeJsonPlan(declaredCharset);
+    auto plan = format == "markdown" ? htmlMarkdownPlan(declaredCharset) :
+        htmlTreeJsonPlan(declaredCharset);
     auto specification = plan.stages[0].declaration;
     auto stage = StageDeclaration(specification.key.idup, specification.passMode,
         ResourceDeclaration(specification.resources.cpuSlots,
@@ -270,7 +272,7 @@ int runExtract(string requestedInput, string requestedOutput,
             if (isSymlink(file) || !isFile(file))
                 throw new Exception("extract input changed to non-regular file: " ~ file);
             auto recordKey = relativePath(file, sourceRoot);
-            auto name = recordKey ~ ".tree.json";
+            auto name = recordKey ~ (format == "markdown" ? ".md" : ".tree.json");
             auto destination = isTree ? buildPath(output, name) : output;
             preflightDestination(destination, outputRoot);
             stat_t inputStat, outputStat;

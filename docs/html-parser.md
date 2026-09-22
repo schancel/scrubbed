@@ -103,8 +103,10 @@ tree walk. This route assumes trusted input/output directory ownership: it
 does not snapshot path components or guarantee safety against hostile
 concurrent path replacement. F08 publishes
 each complete output atomically, retaining any prior destination on failure.
-There is no manifest/restart path, article extraction, Markdown, metadata,
-boilerplate algorithm, archive input, or throughput claim.
+There is no manifest/restart path, article extraction, metadata,
+boilerplate algorithm, archive input, or throughput claim. A separate
+`extract --format=markdown` stage renders this selected tree mechanically;
+see [Markdown policy](html-markdown.md).
 
 Release-active actual-binary check:
 

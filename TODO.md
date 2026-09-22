@@ -133,13 +133,13 @@ issue. This file remains the status record for implemented work.
 - [x] Integrate pinned D `argparse` 2.0.2 for generated root/subcommand help
       and command/option-name completion. `run` and `repair` preserve the
       implemented filter pipeline and old no-verb flags; `extract` now accepts
-      only the separately reviewed `--format=tree-json` selected-tree route.
+      the separately reviewed `--format=tree-json` and `--format=markdown` routes.
       Release-active CLI tests cover help, errors,
       exits and a real queued-cancellation `--explain` path. Value/path/filter
       completion is not supported; parser startup/size observations are not
       per-document throughput evidence (`docs/cli-commands.md`).
 
-## Phase 4 — HTML->Markdown (pure converter exists; CLI route pending)
+## Phase 4 — HTML->Markdown (mechanical CLI route exists)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
       evidence harness compares pinned Lexbor and Gumbo on seven initial
       cases, a second authored custom-tag/attribute/charset slice, and one
@@ -152,15 +152,15 @@ issue. This file remains the status record for implemented work.
       exist. The shipping CLI now exposes bounded `extract --format=tree-json`
       via a self-registering effects-stage adapter, with release-active exact
       JSON and observation-limit tests. This exports a selected parse tree,
-      not main content or Markdown; charset sniffing, broad real-page coverage,
+      not main content; charset sniffing, broad real-page coverage,
       richer DOM, bounded native RSS, and other-platform builds remain open.
-- [~] Mechanical tag->Markdown mapping exists in the bounded pure
+- [x] Mechanical tag->Markdown mapping exists in the bounded pure
       `source/effects/html_markdown.d` converter, with release-active goldens
       for headings, links, emphasis, lists, code, blockquotes, images, and
-      row-by-row plain-text tables. Wire a separately reviewed
-      `extract --format=markdown` effects/CLI route with actual-binary atomic
-      output and unchanged tree-json behavior before calling this complete;
-      the old `filters/html2md.d` stub is not the shipping route.
+      row-by-row plain-text tables. The effects-owned `html-markdown` stage
+      powers `extract --format=markdown` with actual-binary atomic output
+      checks and unchanged tree-json behavior; the old `filters/html2md.d`
+      stub is not the shipping route.
 - [ ] Explicitly NOT attempting trafilatura's boilerplate-detection
       problem (nav/ad/footer removal) in this phase — that's a
       substantially harder, separate problem (main-content vs.

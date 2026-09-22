@@ -24,8 +24,9 @@ being upfront about that matters more than sounding impressive:
 - trafilatura does DOM-based main-content extraction with boilerplate
   removal (nav bars, ads, footers) — genuinely harder than mechanical
   HTML->Markdown conversion. A bounded pure converter now exists in
-  `source/effects/html_markdown.d`, but the CLI route is not wired; the older
-  `source/filters/html2md.d` remains an unimplemented stub.
+  `source/effects/html_markdown.d`, exposed by the opt-in
+  `extract --format=markdown` route. The older `source/filters/html2md.d`
+  remains an unregistered stub, not a second Markdown path.
 
 What *is* real and working right now: a pluggable filter-registry
 pipeline, a CLI that walks an input directory tree and mirrors it to an
@@ -66,6 +67,7 @@ dub build --build=release
 ./scrubbed --input path/to/docs --output path/to/clean --config scrubbed.example.json --dry-run --explain
 ./scrubbed repair --input path/to/docs --output path/to/clean --dry-run --explain
 ./scrubbed extract --input page.html --output page.tree.json --format tree-json
+./scrubbed extract --input page.html --output page.md --format markdown
 ./scrubbed run --input - --output - --jsonl-fields text,title --dataset-namespace corpus-v1 --source-key shard-0001 --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 < input.jsonl > clean.jsonl
 ```
 
@@ -89,9 +91,9 @@ decision record per visited file; parallel record order is not fixed. See the
 [inspection guide](docs/cli-inspection.md). A later traversal error can cancel
 already-admitted files; those receive failure records, and the command exits 2.
 `run` and `repair` also route to the implemented filter pipeline, with generated
-help and command/option-name completion. `extract --format=tree-json` is a
-separate opt-in bounded selected HTML parse-tree export, not article text or
-Markdown; see the [HTML parser guide](docs/html-parser.md) and
+help and command/option-name completion. `extract --format=tree-json` exports a
+bounded selected HTML parse tree; `--format=markdown` mechanically renders that
+tree without main-content selection. See the [HTML parser guide](docs/html-parser.md) and
 [command guide](docs/cli-commands.md).
 The explicit paired `--input - --output -` JSONL mode transforms selected
 top-level text fields through the same filter chain. It requires a stable
@@ -200,15 +202,13 @@ standards page through owned UTF-8 decoding, bounded Lexbor observations,
 sanitizers, and a full LICENSE/NOTICE bundle dry run. Pinned Lexbor source,
 a static archive, and a [restricted D-owned selected-tree wrapper](docs/html-parser.md)
 now exist with release-active ownership, cap, and exact accessor checks.
-The shipping CLI now has a bounded `extract --format=tree-json` selected-tree
-route, with real-binary JSON goldens and a self-registering stage. It is not
-main-content extraction, Markdown, or a trafilatura replacement. HTML charset
+The shipping CLI now has bounded `extract --format=tree-json` and
+`extract --format=markdown` routes, with real-binary goldens and self-registering
+stages. Neither is main-content extraction or a trafilatura replacement. HTML charset
 sniffing, broader page coverage, richer DOM fidelity, bounded native RSS,
 other-platform builds, and extraction-quality benchmarks remain open.
 A separately tested bounded converter maps that selected tree to mechanical
-Markdown ([policy and limits](docs/html-markdown.md)); it is not yet exposed
-through `extract --format=markdown`, so CLI atomic-output and tree-json
-compatibility proof for that route remain open.
+Markdown ([policy and limits](docs/html-markdown.md)).
 An [evidence-only S3 capability evaluation](docs/s3-capability-evaluation.md)
 tests fake credentials and local endpoint/TLS behavior. It is not a direct S3
 client and has not been tested against AWS or a compatible object store.

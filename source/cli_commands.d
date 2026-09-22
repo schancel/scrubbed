@@ -58,7 +58,7 @@ struct Repair {
     mixin ProcessingOptions;
 }
 
-@(Command("extract", "x").Description("Export a bounded selected HTML parse tree."))
+@(Command("extract", "x").Description("Export a bounded selected HTML parse tree or Markdown."))
 struct Extract {
     @(NamedArgument("input", "i").Description("Input path")) string input;
     @(NamedArgument("output", "o").Description("Output path")) string output;
@@ -142,11 +142,12 @@ int runCommands(string[] argv) {
     if (!result) return result.exitCode;
     return commands.command.matchCmd!((cmd) {
         static if (is(typeof(cmd) == Extract)) {
-            if (cmd.format != "tree-json" || !cmd.input.length || !cmd.output.length) {
-                stderr.writeln("scrubbed: extract requires --input, --output and --format=tree-json");
+            if ((cmd.format != "tree-json" && cmd.format != "markdown") ||
+                !cmd.input.length || !cmd.output.length) {
+                stderr.writeln("scrubbed: extract requires --input, --output and --format=tree-json|markdown");
                 return 2;
             }
-            return runExtract(cmd.input, cmd.output, cmd.charset);
+            return runExtract(cmd.input, cmd.output, cmd.charset, cmd.format);
         } else static if (is(typeof(cmd) == Completion)) {
             stderr.writeln("scrubbed: use completion init or completion complete");
             return 2;

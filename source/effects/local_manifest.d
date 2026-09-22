@@ -409,6 +409,32 @@ final class LocalManifest {
             throw new OutputPolicyViolation("local manifest: destination hard-links manifest file");
     }
 
+    /// Read-only ownership check for callers routing multiple logical documents
+    /// to local paths. Includes every v1 state; a failed or planned row still
+    /// reserves its destination. Same document and stable sink may use a new
+    /// input/config revision. The caller must use the F09 single-local-writer
+    /// premise and perform this check before planning either sibling output.
+    void requireDestinationOwner(SinkKey key, string destination) {
+        validateKey(key);
+        safeDestination(destination);
+        auto selected = resolvedName(destination);
+        auto statement = prepare(`SELECT document_id,sink_key,destination FROM sink_state`);
+        scope(exit) sqlite3_finalize(statement);
+        int rc;
+        while ((rc = sqlite3_step(statement)) == SQLITE_ROW) {
+            auto ownerDocument = sqlite3_column_text(statement, 0).fromStringz.idup;
+            auto ownerSink = sqlite3_column_text(statement, 1).fromStringz.idup;
+            if (ownerDocument == key.document.text && ownerSink == key.sink)
+                continue;
+            auto owned = sqlite3_column_text(statement, 2).fromStringz.idup;
+            if (resolvedNameAllowMissingParent(owned) == selected ||
+                sameInode(owned, selected))
+                throw new OutputPolicyViolation(
+                    "local manifest: destination owned by another document or sink");
+        }
+        require(rc == SQLITE_DONE, "destination ownership scan failed: " ~ error);
+    }
+
     /// Planning never upgrades an existing failed, uncertain or committed row.
     /// It rejects a different destination for the same immutable key.
     SinkRecord plan(SinkKey key, string destination) {

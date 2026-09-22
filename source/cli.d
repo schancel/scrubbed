@@ -7,6 +7,7 @@ import effects.jsonl_stream : JsonlFailure, JsonlLimits;
 import effects.stdio_stream : processStandardJsonl;
 import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
     configDigest, inputDigest, outputDigest;
+import effects.failure_journal : FailureJournal;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.failure_policy : recordDocumentFailure;
@@ -607,6 +608,132 @@ private class FatalDocumentFailure : Exception {
     }
 }
 
+private class V2DocumentFailure : Exception {
+    SinkKey key;
+    string status;
+    string phase;
+    string code;
+    this(SinkKey key, string status, string phase, string code) {
+        super(code);
+        this.key = key;
+        this.status = status;
+        this.phase = phase;
+        this.code = code;
+    }
+}
+
+private class V2FatalFailure : Exception {
+    this() { super("error-journal-fatal"); }
+}
+
+private void v2Explain(string status, SinkKey key, string sinkId,
+        string phase = "", string code = "") {
+    writeln("EXPLAIN\tstatus=", status, "\tphase=", phase,
+        "\tcode=", code, "\tdocument_id=", key.document.text,
+        "\tsink_id=", sinkId);
+}
+
+private ManifestOutcome processV2One(FailureJournal journal, string databasePath,
+        string file, string inputRoot, string outputRoot, bool inputIsDir,
+        const ref Pipeline chain, ulong reservedBytes, ubyte[32] configHash,
+        bool retry) {
+    // Until the input digest is trustworthy there is no key to journal.
+    if (isSymlink(file) || getSize(file) != reservedBytes)
+        throw new V2FatalFailure;
+    scope mm = reservedBytes ? new MmFile(file, MmFile.Mode.read, reservedBytes, null) : null;
+    string text;
+    if (mm !is null) text = cast(string)(cast(ubyte[])mm[]);
+    else {
+        scope source = File(file, "rb");
+        if (source.size != 0) throw new V2FatalFailure;
+    }
+    if (getSize(file) != reservedBytes) throw new V2FatalFailure;
+    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
+    auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
+    SinkKey key = SinkKey(id, inputDigest(cast(const(ubyte)[])text),
+        configHash, "local-primary:v1");
+    auto destination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
+    bool replacing;
+    try {
+        preflightDestination(destination, inputIsDir ? outputRoot : dirName(outputRoot));
+        ensurePlainDirectory(inputIsDir ? outputRoot : dirName(outputRoot),
+            dirName(destination));
+        journal.requireDestinationOwner(key, destination);
+        auto inspected = journal.inspect(key);
+        if (inspected == Inspection.verifiedCommitted)
+            return manifestOutcome("skipped", "", key);
+        auto previous = journal.lookup(key);
+        bool destinationExists = exists(destination);
+        bool unresolved = !previous.isNull &&
+            (previous.get.state != SinkState.planned || journal.hasOutstanding(key));
+        if (!retry && (destinationExists || unresolved))
+            throw new V2DocumentFailure(key,
+                !previous.isNull && previous.get.state == SinkState.uncertain ?
+                    "uncertain" : "retry-required", "inspect", "retry-required");
+        journal.plan(key, destination);
+        replacing = retry && (destinationExists || unresolved);
+        if (replacing && !previous.isNull) journal.retry(key);
+        version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
+    } catch (V2DocumentFailure decision) { throw decision; }
+      catch (Throwable ignored) { throw new V2FatalFailure; }
+    string phase = "filter";
+    bool touched;
+    try {
+        version (FailurePolicyHarness) {
+            phase = "read";
+            failureAt(databasePath, "read", file);
+            phase = "decode";
+            failureAt(databasePath, "decode", file);
+            phase = "filter";
+            failureAt(databasePath, "filter", file);
+        }
+        auto cleaned = chain.run(text);
+        phase = "scheduler";
+        if (getSize(file) != reservedBytes ||
+            inputDigest(mm is null ? cast(const(ubyte)[])"" :
+                cast(const(ubyte)[])mm[]) != key.inputSha256)
+            throw new Exception("input changed before publication");
+        const changed = cleaned != text;
+        phase = "policy";
+        version (FailurePolicyHarness) failureAt(databasePath, "policy", file);
+        auto content = new Content([ContentPiece.own(cast(const(ubyte)[])cleaned)]);
+        phase = "sink";
+        try {
+            journal.beginPublication(key);
+        } catch (Throwable ignored) { throw new V2FatalFailure; }
+        version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
+        touched = true;
+        version (FailurePolicyHarness) failureAt(databasePath, "sink", file);
+        writeAtomicPieces(destination, content.pieces());
+        version (ManifestCliHarness) manifestKillAt(databasePath, "after-publish");
+        try {
+            journal.commitPublished(key, destination,
+                outputDigest(cast(const(ubyte)[])cleaned));
+        } catch (Throwable ignored) { throw new V2FatalFailure; }
+        version (ManifestCliHarness) manifestKillAt(databasePath, "after-commit");
+        return manifestOutcome(replacing ? "retry" :
+            (changed ? "changed" : "unchanged"), "", key);
+    } catch (V2FatalFailure fatal) { throw fatal; }
+      catch (Exception failure) {
+        if (cast(OutputPolicyViolation)failure !is null) phase = "policy";
+        if (cast(ResourceExhaustion)failure !is null) phase = "resource";
+        if (phase == "filter" && cast(UTFException)failure !is null)
+            phase = "decode";
+        const code = phase == "sink" ? "sink-write-failed" : phase ~ "-failed";
+        try {
+            version (FailurePolicyHarness) {
+                if (exists(databasePath ~ ".fault-v2-arm-ack-on-failure"))
+                    write(databasePath ~ ".fault-v2-ack", "1");
+            }
+            journal.recordFailure(key, phase, code, touched);
+        }
+        catch (Throwable ignored) { throw new V2FatalFailure; }
+        if (phase == "policy" || phase == "resource" || phase == "scheduler")
+            throw new V2FatalFailure;
+        throw new V2DocumentFailure(key, touched ? "uncertain" : "failed", phase, code);
+    }
+}
+
 version (FailurePolicyHarness) {
     private void failureAt(string databasePath, string phase, string file) {
         auto marker = databasePath ~ ".fault-" ~ phase;
@@ -765,6 +892,8 @@ int runApp(string[] args) {
     bool explain;
     string manifestPath;
     bool manifestRetry;
+    string errorJournalPath;
+    bool errorRetry;
     string jsonlFields, datasetNamespace, sourceKey;
     size_t maxJsonlLineBytes, maxJsonlOutputBytes;
     const filtersExplicit = args.canFindOption("--filters");
@@ -775,6 +904,7 @@ int runApp(string[] args) {
     const lineCapExplicit = args.canFindOption("--max-jsonl-line-bytes");
     const outputCapExplicit = args.canFindOption("--max-jsonl-output-bytes");
     const manifestExplicit = args.canFindOption("--manifest");
+    const errorJournalExplicit = args.canFindOption("--error-journal");
     const fileSchedulingExplicit = args.canFindOption("--threads") ||
         args.canFindOption("--max-queued-docs") ||
         args.canFindOption("--max-input-bytes") || descriptorsExplicit;
@@ -795,6 +925,8 @@ int runApp(string[] args) {
         "explain", "Print one decision record per input file", &explain,
         "manifest", "Opt-in local SQLite restart manifest path", &manifestPath,
         "manifest-retry", "Inspect and replace unresolved manifest output", &manifestRetry,
+        "error-journal", "Existing opt-in v2 failure journal", &errorJournalPath,
+        "error-retry", "Explicitly retry unresolved v2 outputs", &errorRetry,
         "jsonl-fields", "Comma-separated selected JSONL text fields", &jsonlFields,
         "dataset-namespace", "Stable JSONL dataset namespace", &datasetNamespace,
         "source-key", "Stable JSONL source key", &sourceKey,
@@ -811,8 +943,14 @@ int runApp(string[] args) {
         throw new Exception("--manifest path must be nonempty");
     if (manifestRetry && !manifestPath.length)
         throw new Exception("--manifest-retry requires --manifest");
+    if (errorJournalExplicit && !errorJournalPath.length)
+        throw new Exception("--error-journal path must be nonempty");
+    if (errorRetry && !errorJournalPath.length)
+        throw new Exception("--error-retry requires --error-journal");
+    if (errorJournalPath.length && (manifestExplicit || manifestRetry || dryRun))
+        throw new Exception("v2 journal is exclusive with manifest and dry-run");
     if (jsonlRoute) {
-        if (manifestPath.length || manifestRetry)
+        if (manifestPath.length || manifestRetry || errorJournalPath.length || errorRetry)
             throw new Exception("--manifest is unavailable in JSONL mode");
         if (inputPath != "-" || outputPath != "-" ||
             !fieldsExplicit || !namespaceExplicit || !sourceExplicit ||
@@ -885,13 +1023,14 @@ int runApp(string[] args) {
     inputPath = resolveExistingPrefix(inputPath);
     outputPath = resolveExistingPrefix(outputPath);
 
-    auto configContents = manifestPath.length && configPath.length
+    auto configContents = (manifestPath.length || errorJournalPath.length) && configPath.length
         ? readText(configPath) : "";
     auto chain = configPath.length
-        ? Pipeline.buildConfigured(manifestPath.length
+        ? Pipeline.buildConfigured((manifestPath.length || errorJournalPath.length)
             ? parseFilterConfig(configContents) : loadFilterConfig(configPath))
         : Pipeline.build(filterList.split(","));
-    writeln("filter chain: ", chain.names.join(" -> "));
+    if (!errorJournalPath.length)
+        writeln("filter chain: ", chain.names.join(" -> "));
 
     const inputIsDir = isDir(inputPath);
     if (!inputIsDir && !isFile(inputPath))
@@ -905,21 +1044,28 @@ int runApp(string[] args) {
         manifestPath = resolveExistingPrefix(manifestPath);
         preflightManifest(manifestPath, inputPath, outputPath, inputIsDir);
     }
+    if (errorJournalPath.length) {
+        errorJournalPath = resolveExistingPrefix(errorJournalPath);
+        preflightManifest(errorJournalPath, inputPath, outputPath, inputIsDir);
+    }
     if (validateOnly) {
-        if (manifestPath.length)
+        if (manifestPath.length || errorJournalPath.length)
             manifestConfig(filterList, configContents, configPath.length != 0,
                 outputPath, inputIsDir);
-        writeln("valid. No files processed.");
+        if (!errorJournalPath.length) writeln("valid. No files processed.");
         return 0;
     }
     ubyte[32] configHash;
     LocalManifest manifest;
-    if (manifestPath.length) {
+    FailureJournal errorJournal;
+    if (manifestPath.length || errorJournalPath.length) {
         configHash = manifestConfig(filterList, configContents,
             configPath.length != 0, outputPath, inputIsDir);
-        if (!dryRun) manifest = new LocalManifest(manifestPath);
+        if (manifestPath.length && !dryRun) manifest = new LocalManifest(manifestPath);
+        if (errorJournalPath.length) errorJournal = new FailureJournal(errorJournalPath);
     }
     scope(exit) if (manifest !is null) manifest.close();
+    scope(exit) if (errorJournal !is null) errorJournal.close();
     if (!dryRun)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
@@ -928,17 +1074,23 @@ int runApp(string[] args) {
     size_t manifestCompletedPrefix;
     auto scheduler = new BoundedInput(
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs),
-        manifestPath.length ? 1 : nThreads,
+        manifestPath.length || errorJournalPath.length ? 1 : nThreads,
         (string file, ulong bytes) {
             ManifestOutcome decision;
             if (manifestPath.length)
                 decision = processManifestOne(manifest, manifestPath, file, inputPath, outputPath,
                     inputIsDir, chain, bytes, configHash, manifestRetry, dryRun,
                     manifestCompletedPrefix);
+            else if (errorJournalPath.length)
+                decision = processV2One(errorJournal, errorJournalPath, file, inputPath,
+                    outputPath, inputIsDir, chain, bytes, configHash, errorRetry);
             else
                 decision.status = processOne(file, inputPath, outputPath, inputIsDir,
                     chain, bytes, dryRun) ? "changed" : "unchanged";
-            if (explain)
+            if (explain && errorJournalPath.length)
+                v2Explain(decision.status, decision.key,
+                    errorJournal.publicSinkId(decision.key.sink));
+            else if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, decision.status, "", decision.detail,
                     decision.hasKey ? decision.key.document.text : "",
@@ -952,6 +1104,17 @@ int runApp(string[] args) {
             auto manifestDecision = cast(ManifestDecisionFailure)error;
             auto fatalPreFilter = cast(FatalManifestPreFilter)error;
             auto fatalPlanned = cast(FatalPlannedFailure)error;
+            auto v2Decision = cast(V2DocumentFailure)error;
+            if (errorJournalPath.length) {
+                stderr.writeln("scrubbed: ", v2Decision !is null ?
+                    v2Decision.code : "error-journal-fatal");
+                if (explain && v2Decision !is null)
+                    v2Explain(v2Decision.status, v2Decision.key,
+                        errorJournal.publicSinkId(v2Decision.key.sink),
+                        v2Decision.phase, v2Decision.code);
+                if (explain) pending.remove(file);
+                return;
+            }
             stderr.writefln("%s %s: %s",
                 documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
                 file, error.msg);
@@ -989,7 +1152,8 @@ int runApp(string[] args) {
             if (explain) pending.remove(file);
             if (documentFailure !is null) ++manifestCompletedPrefix;
         }, (Throwable error) {
-            return cast(DocumentFailure)error is null &&
+            return cast(V2DocumentFailure)error is null &&
+                cast(DocumentFailure)error is null &&
                 cast(ManifestDecisionFailure)error is null;
         });
     bool workerFatalAdmission;
@@ -998,7 +1162,7 @@ int runApp(string[] args) {
             foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
                 if (entry.isSymlink) {
                     auto reason = "refusing symlink in input tree: " ~ entry.name;
-                    if (explain)
+                    if (explain && !errorJournalPath.length)
                         explainOne(entry.name, destinationFor(entry.name, inputPath,
                             outputPath, inputIsDir), chainLabel, "failure", reason);
                     throw new Exception(reason);
@@ -1015,7 +1179,7 @@ int runApp(string[] args) {
                     }
                 }
                 catch (Exception error) {
-                    if (explain && !admissionCanceled) {
+                    if (explain && !admissionCanceled && !errorJournalPath.length) {
                         pending.remove(entry.name);
                         explainOne(entry.name, destinationFor(entry.name, inputPath,
                             outputPath, inputIsDir), chainLabel, "failure", error.msg);
@@ -1035,7 +1199,7 @@ int runApp(string[] args) {
                 }
             }
             catch (Exception error) {
-                if (explain && !admissionCanceled) {
+                if (explain && !admissionCanceled && !errorJournalPath.length) {
                     pending.remove(inputPath);
                     explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
                 }
@@ -1045,7 +1209,7 @@ int runApp(string[] args) {
     } catch (Exception error) {
         scheduler.cancel();
         scheduler.finish();
-        if (explain)
+        if (explain && !errorJournalPath.length)
             foreach (file; pending.drain())
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, workerFatalAdmission ? "canceled" : "failure",
@@ -1055,7 +1219,7 @@ int runApp(string[] args) {
     }
     const counts = scheduler.finish();
     if (scheduler.fatal() !is null) {
-        if (explain)
+        if (explain && !errorJournalPath.length)
             foreach (file; pending.drain())
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, "canceled", "fatal processing failure");
@@ -1063,7 +1227,8 @@ int runApp(string[] args) {
     }
     if (manifest !is null) manifest.checkpoint();
     const failures = counts.failed;
-    writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");
+    if (!errorJournalPath.length)
+        writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");
     return failures == 0 ? 0 : 1;
 }
 

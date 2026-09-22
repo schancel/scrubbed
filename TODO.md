@@ -269,13 +269,27 @@ is useful, but it is not sufficient on its own.
       later files, and missing-vs-unsafe output parents (`docs/failure-policy.md`).
       This does not implement a concrete JSONL error log or replay (#18/#19),
       or extend the policy to JSONL stdin/stdout.
+- [~] Route independent local content and metadata sinks (W05/#29). An
+      opt-in effects adapter now commits caller-supplied payloads with
+      separate F09 state and per-destination atomicity
+      (`docs/independent-sinks.md`). There is no CLI selector or metadata
+      extraction; the metadata source and tree output naming need an owner
+      decision before that successor is factory-ready.
 - [~] Store immutable source documents and keyed analyzer overlays. A
       standalone binary-v1 artifact API now has bounded integrity-checked
       frames, version/revision-checked streaming joins, create-only source
       publication, and atomic one-overlay replacement, with release-active D
       ordering, corruption, fault, alias, and concurrent no-clobber tests
-      (`docs/document-shards.md`; C01/#32 complete). CLI/analyzer wiring,
-      interchange exports, and corpus-scale storage proof remain open.
+      (`docs/document-shards.md`; C01/#32 complete). Opt-in quality-decision
+      and exact-byte dedup effects overlays now consume the C01 API
+      (`docs/quality-annotations.md`, `docs/exact-dedup.md`); CLI wiring,
+      interchange exports, near-duplicate decisions, and corpus-scale storage
+      proof remain open.
+- [~] Scan deterministic PII patterns (C06/#38). A bounded pure D scanner
+      reports ordered byte spans for email, phone, card, and IPv4 under
+      documented locale and confidence rules (`docs/pii-patterns.md`). Its
+      effects overlay, policy-driven redaction, and any additional identifier
+      families are not yet implemented.
 - [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
       adapter and explicit paired-dash `run`/`repair` mode preserve untouched
       JSON values semantically, derive stable caller-key/line IDs, cap records,

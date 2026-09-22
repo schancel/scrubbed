@@ -153,6 +153,15 @@ state and an injected acknowledgment; run-fatal policy, resource, and lost-ledge
 errors stop with exit 2. Exit 1 means acknowledged failures or unresolved
 retry decisions. Keyed `--explain` records distinguish these outcomes. The
 concrete structured error-log file and replay format are still unimplemented.
+An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
+commit caller-supplied content and metadata payloads separately; the CLI does
+not expose that selector or extract metadata for it. The
+[C01 shard API](docs/document-shards.md) now also has opt-in
+[quality-decision](docs/quality-annotations.md) and
+[exact-byte dedup](docs/exact-dedup.md) overlay facades. A bounded
+[four-class PII scanner](docs/pii-patterns.md) is a pure D API, not a CLI
+redaction or stored annotation path. None of these APIs establishes
+corpus-scale throughput or main-content extraction.
 
 ## Status
 

@@ -13,7 +13,7 @@ import effects.runner : Sink;
 import stages.contract : EventKind, StageEvent;
 import std.digest.sha : SHA256;
 import std.exception : enforce;
-import std.file : exists, isDir;
+import std.file : exists;
 import std.path : absolutePath, buildPath;
 import std.string : fromStringz, indexOf, split, toStringz;
 
@@ -43,12 +43,20 @@ class IndependentSinkFailure : Exception {
 private extern(C) char* realpath(const(char)*, char*);
 
 private string checkedRoot(string root) {
-    if (!root.length || root.indexOf('\0') >= 0 || !isDir(root))
+    if (!root.length || root.indexOf('\0') >= 0)
         throw new OutputPolicyViolation("independent sink root must be an existing directory");
-    stat_t entry;
-    if (lstat(root.toStringz, &entry) != 0 || S_ISLNK(entry.st_mode))
-        throw new OutputPolicyViolation("independent sink root must not be a symlink");
-    auto resolved = realpath(absolutePath(root).toStringz, null);
+    auto absolute = absolutePath(root);
+    auto cursor = "/";
+    foreach (component; absolute.split('/')) {
+        if (!component.length) continue;
+        cursor = buildPath(cursor, component);
+        stat_t entry;
+        if (lstat(cursor.toStringz, &entry) != 0 ||
+            S_ISLNK(entry.st_mode) || !S_ISDIR(entry.st_mode))
+            throw new OutputPolicyViolation(
+                "independent sink root ancestors must be existing non-symlink directories");
+    }
+    auto resolved = realpath(absolute.toStringz, null);
     if (resolved is null)
         throw new OutputPolicyViolation("independent sink root cannot be resolved");
     scope(exit) free(resolved);

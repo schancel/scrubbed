@@ -9,17 +9,20 @@ import effects.local_manifest : LocalManifest, SinkKey, SinkState,
 import effects.runner : Parser, Source, SourceRecord, runEffects;
 import stages.contract : PassMode, ResourceDeclaration, StageDeclaration,
     StageDecision, StageDocument, StageEvent;
+import core.stdc.stdlib : free;
 import core.sys.posix.sys.wait : waitpid;
 import core.sys.posix.sys.stat : stat, stat_t;
 import core.sys.posix.unistd : _exit, fork, link;
 import std.file : exists, mkdir, read, rmdir, rmdirRecurse, symlink, tempDir, write;
 import std.path : buildPath;
-import std.string : endsWith, toStringz;
+import std.string : endsWith, fromStringz, toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool yes, string message) {
     if (!yes) throw new Exception(message);
 }
+
+private extern(C) char* realpath(const(char)*, char*);
 
 private void expectFailure(scope void delegate() action) {
     bool failed;
@@ -204,6 +207,42 @@ private void checkNestedHazard(string root, string hazard) {
         "nested hazard changed output or manifest before publication");
 }
 
+private void checkRootAncestorSymlink(string root) {
+    auto safe = buildPath(root, "safe");
+    auto outside = buildPath(root, "outside");
+    mkdir(safe);
+    mkdir(outside);
+    auto rootAlias = buildPath(safe, "link");
+    symlink(outside, rootAlias);
+    auto contentRoot = buildPath(outside, "content");
+    auto metadataRoot = buildPath(outside, "metadata");
+    mkdir(contentRoot);
+    mkdir(metadataRoot);
+    auto contentFile = buildPath(contentRoot, "prior");
+    auto metadataFile = buildPath(metadataRoot, "prior");
+    write(contentFile, "content-prior");
+    write(metadataFile, "metadata-prior");
+    auto contentInode = inode(contentFile);
+    auto metadataInode = inode(metadataFile);
+    auto db = buildPath(root, "manifest.db");
+    scope manifest = new LocalManifest(db);
+    bool providerCalled;
+    expectFailure({ new IndependentLocalSinks(manifest,
+        buildPath(rootAlias, "content"), buildPath(rootAlias, "metadata"),
+        key(contentSinkKey).inputSha256, key(contentSinkKey).configSha256,
+        key(metadataSinkKey).configSha256,
+        (StageEvent event) {
+            providerCalled = true;
+            return IndependentPayloads(event.payload.content, event.payload.content);
+        }); });
+    require(!providerCalled && manifest.lookup(key(contentSinkKey)).isNull &&
+        manifest.lookup(key(metadataSinkKey)).isNull &&
+        inode(contentFile) == contentInode && inode(metadataFile) == metadataInode &&
+        cast(const(ubyte)[]) read(contentFile) == cast(const(ubyte)[]) "content-prior" &&
+        cast(const(ubyte)[]) read(metadataFile) == cast(const(ubyte)[]) "metadata-prior",
+        "symlinked root ancestor reached provider, manifest, or outside outputs");
+}
+
 private void checkCrash(string root, string crashSink) {
     auto p = paths(root);
     auto child = fork();
@@ -340,7 +379,11 @@ private void checkFailure(string root, string failedSink, string phase) {
 void main() {
     expectFailure({ document("1", ""); });
     expectFailure({ document("1", "chapter\0page.txt"); });
-    auto root = buildPath(tempDir(), "independent-sinks-" ~ randomUUID.toString);
+    auto canonicalTemp = realpath(tempDir().toStringz, null);
+    require(canonicalTemp !is null, "cannot resolve test temp directory");
+    scope(exit) free(canonicalTemp);
+    auto root = buildPath(canonicalTemp.fromStringz.idup,
+        "independent-sinks-" ~ randomUUID.toString);
     mkdir(root);
     scope(exit) rmdirRecurse(root);
     foreach (sink; [contentSinkKey, metadataSinkKey])
@@ -360,6 +403,9 @@ void main() {
     auto nestedRoot = buildPath(root, "nested");
     mkdir(nestedRoot);
     checkNested(nestedRoot);
+    auto rootAncestor = buildPath(root, "root-ancestor-symlink");
+    mkdir(rootAncestor);
+    checkRootAncestorSymlink(rootAncestor);
     foreach (index, name; ["/absolute", "./page.txt", "chapter/../page.txt",
             "chapter//page.txt", "chapter/page.txt/", "chapter\\page.txt", ".", ".."]) {
         auto invalidRoot = buildPath(root, "invalid-" ~ cast(char)('a' + index));

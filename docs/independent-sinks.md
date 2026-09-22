@@ -14,8 +14,10 @@ its canonical root plus the same NFC-normalized, slash-delimited relative
 `Document.outputName` (for example, `chapter/page.txt`). Flat names still work.
 Every path component must be nonempty and neither `.` nor `..`; absolute paths,
 backslashes, and NUL are refused. Both output parent chains must already exist
-as ordinary, non-symlink directories. Existing destinations must be regular
-files with one link. Root aliases, destination aliases, and manifest/output
+as ordinary, non-symlink directories. The caller-supplied root paths also
+reject symlinks in every ancestor before canonicalization. Existing
+destinations must be regular files with one link. Root aliases, destination
+aliases, and manifest/output
 ownership collisions are rejected before publishing either output. Routes are
 rechecked after the caller-supplied payload callback, which may itself change
 the filesystem. A later CLI route will create bounded mirrored parents; this

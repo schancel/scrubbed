@@ -42,11 +42,14 @@ currently capped at 16 filters and decode UTF-8 strictly. Algorithms requiring
 lookahead beyond fixed state, document-wide scoring, or unbounded expansion
 remain plain filters and therefore explicit materialization barriers.
 
-For options, use [`mojibake.d`](mojibake.d) as the existing example:
-`registerFilterFactory("fix-mojibake", &configureMojibake)` registers a
-factory that validates `FilterOptions` and returns a configured
-`ConfiguredFilter`; `Pipeline.buildConfigured` calls it once per chain
-construction. A plain filter rejects nonempty options. [`entities.d`](entities.d)
+For options, use [`mojibake.d`](mojibake.d) as the existing example. Its
+`registerTypedFilterFactory` declaration owns the `encodings:text` and
+`max-passes:integer` schema; `Pipeline.buildTyped` validates names and exact
+scalar types before calling the factory once per chain construction. During
+the v1 compatibility window, the same registration retains the predecessor
+string factory so current JSON coercion and diagnostics do not change. New
+configurable filters should expose a typed factory. A plain filter rejects
+nonempty options. [`entities.d`](entities.d)
 decodes a limited set of HTML entities and uses `mojibake`'s CP1252 helper;
 [`punctuation.d`](punctuation.d) owns quote normalization.
 

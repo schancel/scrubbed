@@ -39,6 +39,14 @@ string. Runs longer than 16 transducers split at a materialization boundary to
 bound recursive pull depth. This filter fusion is not yet the unwired
 `Document`/`Content`/effects pipeline described below.
 
+Filter lookup is injectable through `FilterRegistry`; the process-global
+instance is exposed read-only after module-constructor registration. The v3
+factory path declares exact text/integer/boolean option schemas and rejects a
+type mismatch before processing input. `fix-mojibake` uses that path while
+retaining its separate predecessor string adapter until #148 deletes v1.
+Neither registry path imports the `job` model; the future composition layer
+owns the explicit conversion.
+
 `cli.processOne` maps a nonempty input with `MmFile`, runs the chain while the
 mapping is open, and closes it before writing. A filter may return an unchanged
 or sliced view of that mapping; `processOne` copies such a result before the

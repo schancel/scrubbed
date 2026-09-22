@@ -21,14 +21,16 @@ worker errors, are reported as `FATAL` and exit 2; a completed run exits 0.
 The module imports the implemented filter modules so their `static this()`
 registrations run. It does not contain the filter algorithms.
 
-[`pipeline.d`](pipeline.d) owns the private name-to-filter registry and
+[`pipeline.d`](pipeline.d) owns the injectable name-to-filter registry and
 ordered `Pipeline`. Filters register with `registerFilter` for a plain
-`string -> string` function or `registerFilterFactory` for an option-aware
-factory. `Pipeline.build` resolves names; `Pipeline.buildConfigured` resolves
-`FilterSpec` entries and parses factory options once, before file processing.
-Unknown names or options fail while building the chain. `Pipeline.run` passes
-the whole returned string to the next stage in order. Individual filters may
-use lazy ranges internally, but the registered stage boundary is a string.
+`string -> string` function, the predecessor `registerFilterFactory`, or a
+typed option-schema factory. `Pipeline.build`/`buildConfigured` preserve the
+shipping predecessor edge; `buildTyped` resolves v3 scalar types without
+coercion. The global registry is read-only to consumers, while explicit
+`FilterRegistry` instances support isolated composition tests. Unknown names,
+options, missing required values, and type mismatches fail while building the
+chain. `Pipeline.run` passes whole-buffer results between materialization
+barriers; consecutive bounded scalar registrations share one lazy traversal.
 
 [`job/`](job/README.md) owns the pure v3 linear-job model. Strict JSON,
 ordered composition tokens, and predecessor filter-only forms lower to the

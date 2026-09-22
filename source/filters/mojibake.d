@@ -3,7 +3,8 @@
 /// one is safer than leaving the input alone. See THIRD_PARTY_NOTICES.md.
 module filters.mojibake;
 
-import pipeline : ConfiguredFilter, FilterOptions, registerFilterFactory;
+import pipeline : ConfiguredFilter, FilterOptionDeclaration, FilterOptionType,
+    FilterOptions, TypedFilterOptions, registerTypedFilterFactory;
 import std.array : appender;
 import std.conv : ConvException, to;
 import std.range.primitives : empty, front, isForwardRange, isInputRange, popFront, save;
@@ -319,6 +320,16 @@ private struct MojibakeOptions {
     bool useCp1252 = true;
 }
 
+private void selectEncodings(ref MojibakeOptions result, string encoded) {
+    result.useLatin1 = false;
+    result.useCp1252 = false;
+    foreach (name; encoded.split(',')) {
+        if (name == "latin1") result.useLatin1 = true;
+        else if (name == "cp1252") result.useCp1252 = true;
+        else throw new Exception("fix-mojibake unknown encoding: " ~ name);
+    }
+}
+
 private MojibakeOptions parseOptions(const ref FilterOptions options) {
     MojibakeOptions result;
     foreach (key; options.keys)
@@ -329,14 +340,21 @@ private MojibakeOptions parseOptions(const ref FilterOptions options) {
         catch (ConvException) throw new Exception("fix-mojibake max-passes must be an integer");
     }
     if (auto value = "encodings" in options) {
-        result.useLatin1 = false;
-        result.useCp1252 = false;
-        foreach (name; (*value).split(',')) {
-            if (name == "latin1") result.useLatin1 = true;
-            else if (name == "cp1252") result.useCp1252 = true;
-            else throw new Exception("fix-mojibake unknown encoding: " ~ name);
-        }
+        selectEncodings(result, *value);
     }
+    return result;
+}
+
+private MojibakeOptions parseTypedOptions(const ref TypedFilterOptions options) {
+    MojibakeOptions result;
+    if (auto value = "max-passes" in options) {
+        const parsed = value.asInteger;
+        if (parsed < 0 || cast(ulong) parsed > size_t.max)
+            throw new Exception("fix-mojibake max-passes is out of range");
+        result.maxPasses = cast(size_t) parsed;
+    }
+    if (auto value = "encodings" in options)
+        selectEncodings(result, value.asText);
     return result;
 }
 
@@ -512,12 +530,22 @@ private ConfiguredFilter configureMojibake(const ref FilterOptions options) {
     return (string text) => repairMojibake(text, parsed);
 }
 
+private ConfiguredFilter configureTypedMojibake(
+        const ref TypedFilterOptions options) {
+    const parsed = parseTypedOptions(options);
+    return (string text) => repairMojibake(text, parsed);
+}
+
 static this() {
-    registerFilterFactory("fix-mojibake", &configureMojibake);
+    registerTypedFilterFactory("fix-mojibake", [
+        FilterOptionDeclaration("encodings", FilterOptionType.text),
+        FilterOptionDeclaration("max-passes", FilterOptionType.integer)
+    ], &configureTypedMojibake, &configureMojibake);
 }
 
 unittest {
-    import std.exception : enforce;
+    import pipeline : FilterOption, Pipeline, TypedFilterSpec;
+    import std.exception : assertThrown, enforce;
     enforce(mojibakeBadness("CafÃ© at noon; the sign said rÃ©sumÃ©.\n") == 7,
         "mojibake scorer rule weights changed on the benchmark fixture");
     auto bytes = legacyBytes("schÃ¶n", LegacyEncoding.cp1252);
@@ -527,6 +555,16 @@ unittest {
     static assert(isInputRange!(typeof(decoded)));
     static assert(isForwardRange!(typeof(decoded)));
     assert(decoded.to!string == "schön");
+    assert(Pipeline.buildTyped([TypedFilterSpec("fix-mojibake", [
+        "encodings": FilterOption.text("cp1252"),
+        "max-passes": FilterOption.integer(2)])]).run("FranÃƒÂ§ais") ==
+        "Français");
+    assertThrown(Pipeline.buildTyped([TypedFilterSpec("fix-mojibake", [
+        "encodings": FilterOption.text("utf16")])]));
+    assertThrown(Pipeline.buildTyped([TypedFilterSpec("fix-mojibake", [
+        "max-passes": FilterOption.text("2")])]));
+    assertThrown(Pipeline.buildTyped([TypedFilterSpec("fix-mojibake", [
+        "max-passes": FilterOption.integer(-1)])]));
 }
 
 unittest {

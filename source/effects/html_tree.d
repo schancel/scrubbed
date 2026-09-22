@@ -8,6 +8,8 @@ import std.utf : validate, UTFException;
 
 enum size_t maxRawBytes = 64 * 1024;
 enum size_t maxDecodedBytes = 64 * 1024;
+enum size_t defaultExtractHtmlBytes = 1024 * 1024;
+enum size_t maxConfigurableHtmlBytes = 8 * 1024 * 1024;
 enum size_t maxDepth = 128;
 enum size_t maxNodes = 8192;
 enum size_t maxAttributesPerNode = 256;
@@ -149,17 +151,24 @@ private void observe(NativeNode* first, size_t parent, size_t depth,
     }
 }
 
+size_t checkedHtmlByteLimit(ulong limit) {
+    enforce(limit > 0 && limit <= maxConfigurableHtmlBytes,
+        "HTML byte limit must be between 1 and 8388608");
+    return cast(size_t)limit;
+}
+
 private HtmlOutcome parseImpl(const(ubyte)[] raw, string charset, string source,
-    Fault fault, Accounting* accounting) {
+    Fault fault, Accounting* accounting, size_t byteLimit = maxRawBytes) {
+    checkedHtmlByteLimit(byteLimit);
     // This check runs before decodeBytes or any native allocation.
-    if (raw.length > maxRawBytes) return failed(HtmlFailureReason.rawLimit);
+    if (raw.length > byteLimit) return failed(HtmlFailureReason.rawLimit);
     auto decoded = decodeBytes(raw, charset, source);
     if (!decoded.isDecoded) {
         auto quarantine = decoded.quarantined;
         return failed(HtmlFailureReason.decode, quarantine.reason,
             quarantine.hasOffendingOffset, quarantine.offendingOffset);
     }
-    if (decoded.decoded.text.length > maxDecodedBytes)
+    if (decoded.decoded.text.length > byteLimit)
         return failed(HtmlFailureReason.decodedLimit);
     // DecodedText is publicly constructible; this boundary owns and validates
     // a fresh copy rather than treating the type as provenance proof.
@@ -202,8 +211,8 @@ private HtmlOutcome parseImpl(const(ubyte)[] raw, string charset, string source,
 /// Parse only the selected HTML element names, ordered decoded attributes,
 /// and text nodes. No HTML encoding sniffing or unrestricted DOM semantics.
 HtmlOutcome parseHtml(const(ubyte)[] raw, string declaredCharset = null,
-    string source = "") {
-    return parseImpl(raw, declaredCharset, source, Fault.none, null);
+    string source = "", size_t byteLimit = maxRawBytes) {
+    return parseImpl(raw, declaredCharset, source, Fault.none, null, byteLimit);
 }
 
 unittest {

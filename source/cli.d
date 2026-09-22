@@ -14,11 +14,12 @@ import effects.failure_policy : recordDocumentFailure;
 import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
-import effects.html_tree : maxRawBytes;
+import effects.html_tree : checkedHtmlByteLimit, defaultExtractHtmlBytes;
 import effects.html_tree_json_stage : htmlTreeJsonPlan;
 import effects.html_markdown_stage : htmlMarkdownPlan;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, runStage;
+import stages.config : buildConfigV2;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
@@ -244,7 +245,12 @@ private string destinationFor(string file, string inputRoot, string outputRoot,
 
 /// Opt-in local selected-tree export. It does not use the filter/manifest route.
 int runExtract(string requestedInput, string requestedOutput,
-    string declaredCharset = null, string format = "tree-json") {
+    string declaredCharset = null, string format = "tree-json",
+    ulong requestedHtmlBytes = 0, string configPath = null) {
+    if (configPath.length && (requestedHtmlBytes != 0 || declaredCharset !is null))
+        throw new Exception("extract --config cannot be combined with HTML stage options");
+    auto byteLimit = requestedHtmlBytes == 0 ? defaultExtractHtmlBytes :
+        checkedHtmlByteLimit(requestedHtmlBytes);
     if (!exists(requestedInput) || isSymlink(requestedInput))
         throw new Exception("extract input must be an existing plain path");
     if (exists(requestedOutput) && isSymlink(requestedOutput))
@@ -261,14 +267,21 @@ int runExtract(string requestedInput, string requestedOutput,
     preflightOutput(output, isTree);
     auto sourceRoot = isTree ? input : dirName(input);
     auto outputRoot = isTree ? output : dirName(output);
-    auto plan = format == "markdown" ? htmlMarkdownPlan(declaredCharset) :
-        htmlTreeJsonPlan(declaredCharset);
+    auto plan = configPath.length ? buildConfigV2(readText(configPath)) :
+        (format == "markdown" ? htmlMarkdownPlan(declaredCharset, byteLimit) :
+        htmlTreeJsonPlan(declaredCharset, byteLimit));
+    auto expectedStage = format == "markdown" ? "html-markdown" : "html-tree-json";
+    if (plan.stages.length != 1 || plan.stages[0].declaration.key != expectedStage)
+        throw new Exception("extract config must contain exactly one " ~ expectedStage ~ " stage");
+    auto configuredLimit = "max-html-bytes" in plan.stages[0].options;
+    byteLimit = configuredLimit is null ? defaultExtractHtmlBytes :
+        checkedHtmlByteLimit(configuredLimit.asInteger());
     auto specification = plan.stages[0].declaration;
     auto stage = StageDeclaration(specification.key.idup, specification.passMode,
         ResourceDeclaration(specification.resources.cpuSlots,
             specification.resources.memoryBytes));
     size_t quarantined, published;
-    auto scheduler = new BoundedInput(InputLimits(1, maxRawBytes + 1, 1), 1,
+    auto scheduler = new BoundedInput(InputLimits(1, byteLimit + 1, 1), 1,
         (string file, ulong reservedBytes) {
             if (isSymlink(file) || !isFile(file))
                 throw new Exception("extract input changed to non-regular file: " ~ file);
@@ -284,7 +297,7 @@ int runExtract(string requestedInput, string requestedOutput,
                 throw new Exception("extract output aliases input: " ~ destination);
             auto document = Document(SourceLocator("local-html:v1", sourceRoot,
                 recordKey), OutputName(name));
-            if (reservedBytes > maxRawBytes) {
+            if (reservedBytes > byteLimit) {
                 stderr.writefln("SKIP %s DocumentId %s: rawLimit", file, document.id.text);
                 ++quarantined;
                 return;
@@ -324,12 +337,12 @@ int runExtract(string requestedInput, string requestedOutput,
                     throw new Exception("refusing symlink in extract input tree: " ~ entry.name);
                 if (!entry.isFile) continue;
                 auto size = getSize(entry.name);
-                if (!scheduler.submit(entry.name, size > maxRawBytes ? maxRawBytes + 1 : size))
+                if (!scheduler.submit(entry.name, size > byteLimit ? byteLimit + 1 : size))
                     throw new Exception("extract admission canceled");
             }
         } else {
             auto size = getSize(input);
-            if (!scheduler.submit(input, size > maxRawBytes ? maxRawBytes + 1 : size))
+            if (!scheduler.submit(input, size > byteLimit ? byteLimit + 1 : size))
                 throw new Exception("extract admission canceled");
         }
     } catch (Exception error) {

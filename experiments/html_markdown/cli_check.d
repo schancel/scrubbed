@@ -90,7 +90,7 @@ int main(string[] args) {
     write(input, "<p>bad\xff</p>");
     expect(executable, input, output, "markdown", 1, "malformedUnicode@");
     need(readText(output) == prior, "decode quarantine replaced output");
-    write(input, new ubyte[64 * 1024 + 1]);
+    write(input, new ubyte[1024 * 1024 + 1]);
     expect(executable, input, output, "markdown", 1, "rawLimit");
     need(readText(output) == prior, "raw limit replaced output");
     string deep;
@@ -129,7 +129,7 @@ int main(string[] args) {
         "directory .md names/bytes");
     need(!exists(buildPath(destination, "a.html.tree.json")),
         "Markdown emitted tree-json suffix");
-    write(buildPath(tree, "b.html"), new ubyte[64 * 1024 + 1]);
+    write(buildPath(tree, "b.html"), new ubyte[1024 * 1024 + 1]);
     expect(executable, tree, destination, "markdown", 1, "rawLimit");
     need(readText(buildPath(destination, "b.html.md")) == "B\n",
         "directory quarantine replaced prior output");

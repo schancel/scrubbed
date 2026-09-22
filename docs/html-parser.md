@@ -8,9 +8,11 @@ decoded attribute names/values, and text leaves. No native pointer or borrowed
 input slice appears in the result. The opt-in `extract --input FILE|TREE
 --output PATH --format=tree-json` command exports only this selected tree.
 
-The public entry caps raw input at 64 KiB **before** calling the existing
-`text.decoding.decodeBytes`. Quarantine preserves that decoder's reason and
-offending offset. A decoded outcome must fit 64 KiB of UTF-8; the boundary
+The public entry caps raw input at the configured byte limit **before** calling
+the existing `text.decoding.decodeBytes`. The direct parser API retains its
+64 KiB default; the `extract` route defaults to 1 MiB. A caller may select
+1 through 8 MiB. Quarantine preserves the decoder's reason and
+offending offset. A decoded outcome must fit the same limit in UTF-8; the boundary
 then makes and validates another owned UTF-8 copy before Lexbor sees it. It
 accepts no HTML `meta charset` sniffing and no replacement decoding. Native
 parse errors and unsupported/resource outcomes have distinct failure reasons.
@@ -90,12 +92,30 @@ The CLI does not sniff HTML meta charset. `--charset` explicitly declares
 UTF-8, UTF-16LE, or UTF-16BE; a BOM can select a supported encoding without
 that option. An unsupported/conflicting declaration quarantines the document,
 preserving decode reason and byte offset when available. Raw input is at most
-64 KiB before allocation/native parse; decoded UTF-8 is at most 64 KiB;
-selected observation has the limits above; serialized JSON is at most 4 MiB
-before any output publication. The `html-tree-json` stage declares a 32 MiB
-descriptive planning estimate; it is not a reservation or process/native RSS
-limit. The local file walk uses one bounded worker,
-one reserved input, and one held descriptor. A quarantined file is skipped,
+1 MiB by default before allocation/native parse; decoded UTF-8 has the same
+default. `extract --max-html-bytes N` raises or lowers both, within 1..8,388,608.
+Equivalently, `extract --config html-extract.json` accepts a strict v2 config:
+
+```json
+{"version":2,"stages":[{"name":"html-tree-json","options":{"max-html-bytes":1048576,"charset":"utf-8"}}]}
+```
+
+Use `html-markdown` as the stage name for `--format markdown`. The stage name
+must match `--format`, and JSON config cannot be combined with the CLI's HTML
+limit or charset flags. Both routes validate the same stage option and apply
+the same admission and parser cap. The `run --config` filter-chain schema is
+separate; generic multi-stage v2 CLI composition is not yet wired.
+Raising the input cap does not raise the independent depth, node, attribute,
+observation, or serialized-output limits, nor does it bound Lexbor's native
+heap. With a larger cap the route still runs one bounded worker and holds one
+input descriptor. At its maximum, raw and stage input copies can each reach
+8 MiB. Decoding may temporarily allocate more than 8 MiB before the decoded
+length is checked (for example, UTF-16 expanding to UTF-8), in addition to
+native parser allocations; this is not a proven RSS bound.
+
+Serialized JSON is capped at 4 MiB before publication. The `html-tree-json`
+stage declares a 32 MiB descriptive planning estimate; it is not a reservation
+or process/native RSS limit. A quarantined file is skipped,
 earlier published files remain, and the command returns incomplete exit 1.
 I/O, path/policy, and resource failures are run-fatal exit 2. Static symlink
 and hard-link aliases are rejected, including symlinks discovered during the
@@ -112,14 +132,14 @@ Release-active actual-binary check:
 
 ```sh
 dub build --build=release
-ldc2 -O -release -Isource -of=.dub/html-cli-check experiments/html_parser/cli_check.d source/domain/document.d source/content/pieces.d source/stages/contract.d source/stages/config.d source/stages/registry.d source/effects/html_tree_json_stage.d source/effects/html_tree_export.d source/effects/html_tree.d source/effects/lexbor_ffi.d source/text/decoding.d .dub/lexbor/liblexbor_static.a
+ldc2 -O3 -release -Isource -of=.dub/html-cli-check experiments/html_parser/cli_check.d source/domain/document.d source/content/pieces.d source/stages/contract.d source/stages/config.d source/stages/registry.d source/effects/html_tree_json_stage.d source/effects/html_tree_export.d source/effects/html_tree.d source/effects/lexbor_ffi.d source/text/decoding.d .dub/lexbor/liblexbor_static.a
 .dub/html-cli-check ./scrubbed
 ```
 
 The D check reports child-process peak RSS; one local macOS arm64 run observed
 14,860,288 bytes across its small/cap fixtures. This is a measurement, not an
 enforced native heap or archive-throughput bound. At the extract boundary,
-the admitted raw input is at most 64 KiB; `ContentPiece.own`, the stage input
+the admitted raw input is at most 1 MiB by default; `ContentPiece.own`, the stage input
 copy, decoded UTF-8, and the native wrapper's validation copy each retain
 their own bounded buffers. The selected tree is charged to 1 MiB logical
 observation, and the serializer is checked to 4 MiB before its owned content

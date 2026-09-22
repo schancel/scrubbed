@@ -10,6 +10,7 @@ import std.json : JSONType, JSONValue, parseJSON;
 struct ConfiguredStage {
     const(StageDeclaration) declaration;
     StageTransform transform;
+    StageOptions options;
 }
 
 struct StagePlan {
@@ -81,7 +82,7 @@ StagePlan buildConfigV2(string json, const(StageRegistry)* registry = null) {
                     "missing option for " ~ name ~ ": " ~ declared.key);
         auto transform = registration.factory(options);
         enforce(transform !is null, "stage factory returned no transform: " ~ name);
-        plan.stages ~= ConfiguredStage(registration.declaration, transform);
+        plan.stages ~= ConfiguredStage(registration.declaration, transform, options);
     }
     // Relative constraints refer to configured peers, not compulsory stages.
     foreach (i, stage; plan.stages) {

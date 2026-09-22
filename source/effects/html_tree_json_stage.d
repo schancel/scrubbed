@@ -2,7 +2,8 @@
 module effects.html_tree_json_stage;
 
 import content.pieces : Content, ContentPiece;
-import effects.html_tree : HtmlFailureReason, maxRawBytes, parseHtml;
+import effects.html_tree : HtmlFailureReason, checkedHtmlByteLimit,
+    defaultExtractHtmlBytes, parseHtml;
 import effects.html_tree_export : HtmlTreeOutputLimit, serializeTreeJson;
 import stages.config : StagePlan, buildConfigV2;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
@@ -19,15 +20,18 @@ private string failureReason(HtmlFailureReason reason) {
 private StageTransform factory(const ref StageOptions options) {
     auto chosen = "charset" in options;
     auto charset = chosen is null ? null : chosen.asText();
+    auto configuredLimit = "max-html-bytes" in options;
+    auto byteLimit = configuredLimit is null ? defaultExtractHtmlBytes :
+        checkedHtmlByteLimit(configuredLimit.asInteger());
     return (StageDocument input) {
-        if (input.content.size > maxRawBytes)
+        if (input.content.size > byteLimit)
             return StageDecision.quarantine("rawLimit");
         auto raw = new ubyte[input.content.size];
         size_t offset;
         foreach (piece; input.content.pieces()) {
             foreach (i; 0 .. piece.size) raw[offset++] = piece.at(i);
         }
-        auto outcome = parseHtml(raw, charset, input.document.source.recordKey);
+        auto outcome = parseHtml(raw, charset, input.document.source.recordKey, byteLimit);
         if (!outcome.isParsed) {
             auto failure = outcome.failure;
             auto reason = failureReason(failure.reason);
@@ -49,13 +53,18 @@ private StageTransform factory(const ref StageOptions options) {
 static this() {
     registerStage(StageRegistration(StageDeclaration("html-tree-json",
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
-        [OptionDeclaration("charset", OptionType.text)], null, null, &factory));
+        [OptionDeclaration("charset", OptionType.text),
+         OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory));
 }
 
 /// The concrete module owns its name; CLI consumes only this typed plan.
-StagePlan htmlTreeJsonPlan(string charset = null) {
-    auto options = charset is null ? "" : `,"options":{"charset":` ~
-        JSONValue(charset).toString ~ `}`;
+StagePlan htmlTreeJsonPlan(string charset = null,
+    size_t byteLimit = defaultExtractHtmlBytes) {
+    checkedHtmlByteLimit(byteLimit);
+    auto options = `,"options":{"max-html-bytes":` ~
+        JSONValue(cast(long)byteLimit).toString;
+    if (charset !is null) options ~= `,"charset":` ~ JSONValue(charset).toString;
+    options ~= `}`;
     return buildConfigV2(`{"version":2,"stages":[{"name":"html-tree-json"` ~
         options ~ `}]}`);
 }

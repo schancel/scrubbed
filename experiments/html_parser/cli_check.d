@@ -115,10 +115,67 @@ int main(string[] args) {
         "--format", "tree-json", "--manifest", buildPath(root, "state.db")],
         2, "Unrecognized");
     need(!exists(buildPath(root, "state.db")), "manifest was created");
-    write(input, new ubyte[64 * 1024 + 1]);
+    write(input, new ubyte[1024 * 1024 + 1]);
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json"], 1, "rawLimit");
     need(readText(output) == escapedOutput, "quarantine changed prior output");
+    auto largeText = new char[70 * 1024];
+    largeText[] = 'x';
+    write(input, "<p>" ~ largeText.idup ~ "</p>");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json"], 0, "1 published");
+    need(parseJSON(readText(output))["nodes"].array[$ - 1]["text"].str == largeText,
+        "1 MiB default rejected an ordinary larger page");
+    auto defaultOutput = readText(output);
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--max-html-bytes", "1024"], 1, "rawLimit");
+    need(readText(output) == defaultOutput, "lowered limit replaced prior output");
+    auto comment = new char[1_100_000];
+    comment[] = 'x';
+    write(input, "<!--" ~ comment.idup ~ "--><p>Hi</p>");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json"], 1, "rawLimit");
+    need(readText(output) == defaultOutput, "default cap replaced prior output");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--max-html-bytes", "2097152"], 0, "1 published");
+    auto raisedOutput = readText(output);
+    need(parseJSON(raisedOutput)["nodes"].array[$ - 1]["text"].str == "Hi",
+        "raised CLI limit did not preserve HTML text");
+    auto htmlConfig = buildPath(root, "html-config.json");
+    write(htmlConfig, `{"version":2,"stages":[{"name":"html-tree-json",` ~
+        `"options":{"max-html-bytes":2097152}}]}`);
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--config", htmlConfig], 0, "1 published");
+    need(readText(output) == raisedOutput, "JSON and CLI HTML limits differ");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--max-html-bytes", "0"], 2, "max-html-bytes");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--max-html-bytes", "8388609"], 2, "limit");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--config", htmlConfig,
+        "--max-html-bytes", "2097152"], 2, "cannot be combined");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--config="], 2, "nonempty path");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--config=", "--max-html-bytes", "2097152"],
+        2, "nonempty path");
+    write(htmlConfig, `{"version":2,"stages":[{"name":"html-tree-json",` ~
+        `"options":{"max-html-bytes":8388609}}]}`);
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--config", htmlConfig], 2, "limit");
+    write(htmlConfig, `{"version":2,"stages":[{"name":"html-markdown",` ~
+        `"options":{"max-html-bytes":2097152}}]}`);
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "tree-json", "--config", htmlConfig], 2, "exactly one");
+    need(readText(output) == raisedOutput, "invalid limit changed prior output");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "markdown", "--max-html-bytes", "2097152"], 0, "1 published");
+    need(readText(output) == "Hi\n",
+        "Markdown route did not use raised limit");
+    expect(executable, ["extract", "--input", input, "--output", output,
+        "--format", "markdown", "--config", htmlConfig], 0, "1 published");
+    need(readText(output) == "Hi\n",
+        "Markdown JSON limit differed from CLI");
     write(input, cast(const(ubyte)[])"\xef\xbb\xbf<p>BOM</p>");
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json"], 0, "1 published");
@@ -144,11 +201,26 @@ int main(string[] args) {
         "--format", "tree-json"], 2, "plain path");
     need(readText(output) == utf16Output, "input symlink replaced prior file");
     ubyte[] expanded = [0xff, 0xfe];
-    foreach (_; 0 .. 22_000) { expanded ~= 0x00; expanded ~= 0x4e; }
+    foreach (c; "<!--") { expanded ~= cast(ubyte)c; expanded ~= 0; }
+    foreach (_; 0 .. 350_000) { expanded ~= 0x00; expanded ~= 0x4e; }
+    foreach (c; "--><p>Hi</p>") { expanded ~= cast(ubyte)c; expanded ~= 0; }
     write(input, expanded);
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json"], 1, "decodedLimit");
     need(readText(output) == utf16Output, "decoded cap replaced prior file");
+    auto expandedOutput = buildPath(root, "expanded.json");
+    expect(executable, ["extract", "--input", input, "--output", expandedOutput,
+        "--format", "tree-json", "--charset", "utf-16le",
+        "--max-html-bytes", "2097152"], 0, "1 published");
+    auto expandedResult = readText(expandedOutput);
+    need(parseJSON(expandedResult)["nodes"].array[$ - 1]["text"].str == "Hi",
+        "raised decoded cap did not publish the page");
+    write(htmlConfig, `{"version":2,"stages":[{"name":"html-tree-json",` ~
+        `"options":{"max-html-bytes":2097152,"charset":"utf-16le"}}]}`);
+    expect(executable, ["extract", "--input", input, "--output", expandedOutput,
+        "--format", "tree-json", "--config", htmlConfig], 0, "1 published");
+    need(readText(expandedOutput) == expandedResult,
+        "JSON and CLI decoded HTML limits differ");
     string deep;
     foreach (_; 0 .. 130) deep ~= "<b>";
     foreach (_; 0 .. 130) deep ~= "</b>";
@@ -194,7 +266,7 @@ int main(string[] args) {
         "tree second output");
     auto priorA = readText(buildPath(treeOutput, "a.html.tree.json"));
     auto priorB = readText(buildPath(treeOutput, "b.html.tree.json"));
-    write(buildPath(tree, "b.html"), new ubyte[64 * 1024 + 1]);
+    write(buildPath(tree, "b.html"), new ubyte[1024 * 1024 + 1]);
     expect(executable, ["extract", "--input", tree, "--output", treeOutput,
         "--format", "tree-json"], 1, "rawLimit");
     need(readText(buildPath(treeOutput, "a.html.tree.json")) == priorA &&

@@ -68,6 +68,8 @@ dub build --build=release
 ./scrubbed repair --input path/to/docs --output path/to/clean --dry-run --explain
 ./scrubbed extract --input page.html --output page.tree.json --format tree-json
 ./scrubbed extract --input page.html --output page.md --format markdown
+./scrubbed extract --input page.html --output page.md --format markdown --max-html-bytes 1048576
+./scrubbed extract --input page.html --output page.md --format markdown --config html-extract.json
 ./scrubbed run --input - --output - --jsonl-fields text,title --dataset-namespace corpus-v1 --source-key shard-0001 --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 < input.jsonl > clean.jsonl
 ./scrubbed errors-init --journal path/to/errors-v2.db
 ./scrubbed run --input path/to/docs --output path/to/clean --filters normalize-line-endings --error-journal path/to/errors-v2.db
@@ -85,6 +87,15 @@ plain names or objects with `name` and `options`; see `scrubbed.example.json`.
 combined with `--filters`. Put `uncurl-quotes` before it when typographic quotes surround
 otherwise mojibaked text, because the current repair operates on whole-buffer
 round-trip candidates rather than isolated spans.
+
+For `extract`, `--max-html-bytes` sets one raw-input and decoded-UTF-8 cap
+(default 1,048,576; maximum 8,388,608). Alternatively, `extract --config` reads a
+v2 JSON config containing exactly one `html-tree-json` or `html-markdown` stage
+matching `--format`; its `options` may include `max-html-bytes` and `charset`.
+The extract config is distinct from `run`'s filter-chain config, and cannot be
+combined with extract's `--max-html-bytes` or `--charset` flags. Raising the cap
+does not raise the separate tree/Markdown output limits or guarantee a native
+parser memory ceiling.
 
 `--validate` checks the invocation, registered filter options, and roots
 without visiting files or writing output. `--dry-run` runs per-file transforms

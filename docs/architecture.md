@@ -1,6 +1,7 @@
 # Current architecture
 
-Scrubbed is a D executable, not a library with a separate document or job API.
+Scrubbed is a D executable, not a supported library API. Its pure internal v3
+job model is not yet a shipping CLI format.
 The [source guide](../source/README.md) describes the current boundary, and
 the [filter guide](../source/filters/README.md) is the shortest path to adding
 one transform.
@@ -12,6 +13,7 @@ app (process exit)
        -> filters/* (imported so their module constructors register)
 filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
+job.* (pure canonical v3 specification and predecessor/token lowering; unwired)
 domain.document (standalone typed identity/view facade; no current CLI caller)
 content.pieces -> domain.document (checked borrowed content; no current CLI caller)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
@@ -73,6 +75,17 @@ must not manually free or reallocate while open. `copy` explicitly retains
 only the selected range; all view access is rejected after owner close. The
 current CLI retains its own mapping-lifetime logic and is not wired to this
 facade.
+
+The pure `job` subtree defines one linear v3 `JobSpec`: stable stage-instance
+ID, registered implementation name, typed stage options, and ordered filters
+with typed options. Strict JSON and ordered CLI composition tokens lower to
+that model, while v1/default compatibility inputs lower to one implicit
+`legacy-text=text-transform` stage. Canonical fixed-order JSON with sorted
+option keys owns the `job:v3:` digest. Duplicate/unknown keys, duplicate stage
+IDs, ambiguous/orphan CLI options, and non-scalar JSON values fail at this
+boundary. It neither resolves registries nor performs I/O; the shipping CLI
+does not accept v3 until #148's switch slice. See the
+[v3 format guide](job-spec-v3.md).
 
 `content.pieces` is the standalone ordered byte-content facade. A
 `ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one
@@ -151,7 +164,7 @@ is added. F04 materializes events per
 document and ordered-list content has poor high-edit scaling; production
 callers must measure representation and backpressure before using this seam
 for corpus throughput. The checker rejects direct imports from
-domain/content/stages into effects or known concrete file, mmap, socket,
+job/domain/content/stages into effects or known concrete file, mmap, socket,
 network, stdio, and process modules; effects may import concrete I/O. This is
 a direct-import check, not proof of transitive I/O independence. Its additional
 D unittests and generated good/bad fixtures run with:

@@ -88,6 +88,12 @@ combined with `--filters`. Put `uncurl-quotes` before it when typographic quotes
 otherwise mojibaked text, because the current repair operates on whole-buffer
 round-trip candidates rather than isolated spans.
 
+A pure [canonical v3 job specification](docs/job-spec-v3.md) now models
+stable stage instances, registered implementations, ordered filters, and
+typed options identically for JSON and ordered CLI tokens. It is the migration
+target, not a shipping input yet; the commands above continue to use the
+documented predecessor forms until #148's execution switch is reviewed.
+
 For `extract`, `--max-html-bytes` sets one raw-input and decoded-UTF-8 cap
 (default 1,048,576; maximum 8,388,608). Alternatively, `extract --config` reads a
 v2 JSON config containing exactly one `html-tree-json` or `html-markdown` stage

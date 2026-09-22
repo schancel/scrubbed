@@ -30,6 +30,13 @@ Unknown names or options fail while building the chain. `Pipeline.run` passes
 the whole returned string to the next stage in order. Individual filters may
 use lazy ranges internally, but the registered stage boundary is a string.
 
+[`job/`](job/README.md) owns the pure v3 linear-job model. Strict JSON,
+ordered composition tokens, and predecessor filter-only forms lower to the
+same typed stages, ordered filters, and scalar options; canonical bytes own a
+stable `job:v3:` identity. Stable stage-instance IDs are distinct from
+registered implementation names. This subtree has no registry or I/O import,
+and the shipping CLI does not consume v3 yet.
+
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`
 also importing filter modules for registration and filters importing

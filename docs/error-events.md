@@ -37,7 +37,9 @@ The release-active actual-binary proof is `experiments/errors/cli_check.d`.
 `--error-retry`. The journal must already exist from `errors-init` or
 `errors-copy`; processing never creates or migrates it. This route is local
 file/tree only, excludes `--manifest`, `--manifest-retry`, JSONL stdin/stdout,
-and dry-run, and serializes one journal writer. A verified committed output is
+and dry-run, and serializes one journal writer. `--validate` checks the
+existing v2 journal without creating an output or journal; opening it may
+recover a previously unresolved publication intent. A verified committed output is
 skipped. An unresolved or pre-existing destination requires an explicit
 retry; planned state alone does not grant replacement authority. A retry of
 an exact key preserves old event history and clears only that key's

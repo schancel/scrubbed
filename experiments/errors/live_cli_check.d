@@ -6,7 +6,7 @@ import std.conv : to;
 import std.file : exists, mkdir, readText, remove, rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.process : execute;
-import std.string : toStringz;
+import std.string : splitLines, toStringz;
 import std.uuid : randomUUID;
 import core.sys.posix.unistd : link, symlink;
 
@@ -42,8 +42,39 @@ void main(string[] args) {
     auto route = ["run", "--input", source, "--output", output,
         "--error-journal", db, "--threads", "1", "--explain"];
     call(route, 2);
+    call(route ~ ["--validate"], 2);
     need(!exists(db) && !exists(output), "implicit journal creation");
     call(["errors-init", "--journal", db], 0);
+    call(route ~ ["--validate"], 0);
+    need(!exists(output), "validate did not create output");
+    auto foreign = buildPath(root, "foreign.db");
+    write(foreign, "foreign schema");
+    call(["run", "--input", source, "--output", output,
+        "--error-journal", foreign, "--validate"], 2);
+    need(readText(foreign) == "foreign schema" && !exists(output),
+        "foreign validation did not mutate paths");
+    auto v1Implicit = buildPath(root, "v1-implicit.txt");
+    auto v1Explicit = buildPath(root, "v1-explicit.txt");
+    auto legacyImplicit = call(["--input", source, "--output", v1Implicit], 0);
+    auto legacyExplicit = call(["run", "--input", source,
+        "--output", v1Explicit], 0);
+    need(legacyImplicit == legacyExplicit &&
+        readText(v1Implicit) == readText(v1Explicit),
+        "no-flag v1 route equivalence");
+    auto unownedInput = buildPath(root, "unowned-input.txt");
+    auto unownedOutput = buildPath(root, "unowned-output.txt");
+    write(unownedInput, "new bytes");
+    write(unownedOutput, "old bytes");
+    auto unownedRoute = ["run", "--input", unownedInput,
+        "--output", unownedOutput, "--error-journal", db, "--explain"];
+    auto unownedDecision = call(unownedRoute, 1);
+    need(unownedDecision.canFind("retry-required") &&
+        unownedDecision.canFind("document_id=") &&
+        !unownedDecision.canFind("sink_id="),
+        "unowned output has safe identity-free explanation");
+    need(readText(unownedOutput) == "old bytes", "unowned output untouched");
+    call(unownedRoute ~ ["--error-retry"], 0);
+    need(readText(unownedOutput) == "new bytes", "explicit unowned retry");
     need(call(route, 0).canFind("status=unchanged"), "initial publish");
     need(readText(output) == readText(source), "published bytes");
     need(call(route, 0).canFind("status=skipped"), "verified skip");
@@ -93,6 +124,12 @@ void main(string[] args) {
     foreach (index; 0 .. 48)
         need(readText(buildPath(treeOut, index.to!string ~ ".txt")) == "small",
             "bounded tree output");
+    auto oversized = buildPath(root, "oversized.txt");
+    auto oversizedOut = buildPath(root, "oversized-out.txt");
+    write(oversized, "sixsix");
+    call(["run", "--input", oversized, "--output", oversizedOut,
+        "--error-journal", db, "--max-input-bytes", "3"], 2);
+    need(!exists(oversizedOut), "input cap refusal did not publish");
     if (harness) {
         auto failed = buildPath(root, "failed.txt");
         auto failedOut = buildPath(root, "failed-out.txt");
@@ -126,6 +163,22 @@ void main(string[] args) {
         need(!exists(buildPath(partialOut, "bad.txt")) &&
             readText(buildPath(partialOut, "good.txt")) == "good",
             "acknowledged failure continued other document");
+        auto secondFailed = buildPath(root, "second-failed.txt");
+        auto secondFailedOut = buildPath(root, "second-failed-out.txt");
+        write(secondFailed, "second-failed");
+        auto secondFailedRoute = ["run", "--input", secondFailed,
+            "--output", secondFailedOut, "--error-journal", db];
+        marker = db ~ ".fault-filter";
+        write(marker, "");
+        call(secondFailedRoute, 1);
+        remove(marker);
+        call(["errors-export", "--journal", db, "--outstanding-jsonl", outstanding], 0);
+        need(readText(outstanding).splitLines.length == 2,
+            "two exact outstanding keys");
+        call(secondFailedRoute ~ ["--error-retry"], 0);
+        call(["errors-export", "--journal", db, "--outstanding-jsonl", outstanding], 0);
+        need(readText(outstanding).splitLines.length == 1,
+            "retry cleared only its exact key");
         auto sink = buildPath(root, "sink.txt");
         auto sinkOut = buildPath(root, "sink-out.txt");
         write(sink, "sink");

@@ -613,12 +613,15 @@ private class V2DocumentFailure : Exception {
     string status;
     string phase;
     string code;
-    this(SinkKey key, string status, string phase, string code) {
+    bool hasPublicSink;
+    this(SinkKey key, string status, string phase, string code,
+            bool hasPublicSink) {
         super(code);
         this.key = key;
         this.status = status;
         this.phase = phase;
         this.code = code;
+        this.hasPublicSink = hasPublicSink;
     }
 }
 
@@ -628,9 +631,10 @@ private class V2FatalFailure : Exception {
 
 private void v2Explain(string status, SinkKey key, string sinkId,
         string phase = "", string code = "") {
-    writeln("EXPLAIN\tstatus=", status, "\tphase=", phase,
-        "\tcode=", code, "\tdocument_id=", key.document.text,
-        "\tsink_id=", sinkId);
+    auto line = "EXPLAIN\tstatus=" ~ status ~ "\tphase=" ~ phase ~
+        "\tcode=" ~ code ~ "\tdocument_id=" ~ key.document.text;
+    if (sinkId.length) line ~= "\tsink_id=" ~ sinkId;
+    writeln(line);
 }
 
 private ManifestOutcome processV2One(FailureJournal journal, string databasePath,
@@ -669,7 +673,8 @@ private ManifestOutcome processV2One(FailureJournal journal, string databasePath
         if (!retry && (destinationExists || unresolved))
             throw new V2DocumentFailure(key,
                 !previous.isNull && previous.get.state == SinkState.uncertain ?
-                    "uncertain" : "retry-required", "inspect", "retry-required");
+                    "uncertain" : "retry-required", "inspect", "retry-required",
+                    !previous.isNull);
         journal.plan(key, destination);
         replacing = retry && (destinationExists || unresolved);
         if (replacing && !previous.isNull) journal.retry(key);
@@ -730,7 +735,8 @@ private ManifestOutcome processV2One(FailureJournal journal, string databasePath
         catch (Throwable ignored) { throw new V2FatalFailure; }
         if (phase == "policy" || phase == "resource" || phase == "scheduler")
             throw new V2FatalFailure;
-        throw new V2DocumentFailure(key, touched ? "uncertain" : "failed", phase, code);
+        throw new V2DocumentFailure(key, touched ? "uncertain" : "failed",
+            phase, code, true);
     }
 }
 
@@ -1052,6 +1058,10 @@ int runApp(string[] args) {
         if (manifestPath.length || errorJournalPath.length)
             manifestConfig(filterList, configContents, configPath.length != 0,
                 outputPath, inputIsDir);
+        if (errorJournalPath.length) {
+            auto checkedJournal = new FailureJournal(errorJournalPath);
+            checkedJournal.close();
+        }
         if (!errorJournalPath.length) writeln("valid. No files processed.");
         return 0;
     }
@@ -1110,7 +1120,8 @@ int runApp(string[] args) {
                     v2Decision.code : "error-journal-fatal");
                 if (explain && v2Decision !is null)
                     v2Explain(v2Decision.status, v2Decision.key,
-                        errorJournal.publicSinkId(v2Decision.key.sink),
+                        v2Decision.hasPublicSink ?
+                            errorJournal.publicSinkId(v2Decision.key.sink) : "",
                         v2Decision.phase, v2Decision.code);
                 if (explain) pending.remove(file);
                 return;

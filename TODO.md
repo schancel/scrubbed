@@ -41,8 +41,10 @@ issue. This file remains the status record for implemented work.
 - [~] Pure structured chunking and canonical JSONL export now provide stable
       document/revision-bound chunk identities, UTF-8 byte spans, bounded
       hierarchy depth, and output caps (`docs/structured-chunks.md`; #42
-      Stage 1). Maximum-payload process-isolated RSS evidence, living-status
-      integration, and pipeline/CLI wiring remain before #42 is complete.
+      Stage 1). Process-isolated release checks now cover both the maximum
+      1-MiB payload and maximum 65,536 accepted chunks, including all JSONL
+      rows, under an explicit 256-MiB RSS ceiling. Pipeline/CLI wiring is a
+      separate integration concern; the accepted opt-in #42 outcome is complete.
 - [~] Standalone document stage contracts now cover ordered map, reject,
       quarantine, split, cancellation and resource declarations, with tagged
       derived-child IDs. Typed stage self-registration and strict nested v2

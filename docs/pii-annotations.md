@@ -17,12 +17,16 @@ Category, rule, locale, and confidence derive unambiguously from those codes.
 Findings retain the pure scanner's strict order and overlaps. No source or
 matched text, value hash, or source-specific metadata is stored in the value.
 The C01 record binds document ID and content digest; its header binds the
-source-shard digest, analyzer key, and version. The decoder validates lengths,
+source-shard digest, analyzer key, and version. An existing destination must
+already be this analyzer's overlay for the same source shard; the facade will
+not replace an unrelated analyzer overlay. The decoder validates lengths,
 spans, order, rule codes, locale, and frame budget. A different locale or
 version is rejected even for an empty shard.
 
-`visitPiiFindings` validates the C01 join and supplies only document ID and
-typed findings to the callback, without source bytes. It does not rescan.
+`visitPiiFindings` validates header and records on one open overlay descriptor,
+so a legitimate path replacement cannot change the version mid-replay. It
+supplies only document ID and typed findings to the callback, without source
+bytes. It validates source UTF-8 but does not rescan for findings.
 Callers must not interpret a finding as a policy or redaction decision.
 Scanner and overlay errors use fixed, non-content-bearing text. The scanner's
 1 MiB input and 4096-finding caps apply; C01's 64 KiB annotation-frame cap is

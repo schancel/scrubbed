@@ -4,9 +4,13 @@ module effects.pii_overlay;
 import domain.pii_patterns;
 import domain.shard_format : AnnotationField, AnnotationRecord, ShardDocument,
     maxAnnotationPayload;
-import effects.document_shards : DocumentShardReader, JoinedOverlay, OverlayReader,
-    OverlayWriter, PublishFault, joinShards;
+import effects.document_shards : DocumentShardReader, OverlayReader, OverlayWriter,
+    PublishFault, shardDigest;
+import core.stdc.errno : errno, ENOENT;
+import core.sys.posix.sys.stat : lstat, stat_t;
 import std.exception : enforce;
+import std.string : toStringz;
+import std.utf : validate;
 
 enum piiAnalyzerKey = "pii.four-class";
 enum piiFieldKey = "findings";
@@ -143,6 +147,19 @@ PiiFinding[] decodePiiFindings(const(ubyte)[] bytes, string locale,
 void publishPiiFindings(string shardPath, string overlayPath, string locale,
         PublishFault fault = null) {
     auto analyzerVersion = piiAnalyzerVersion(locale);
+    // C01 protects the destination inode and immutable source. A regular
+    // existing overlay is replaceable only when it belongs to this analyzer
+    // and exact source shard. This prevents overwriting another analyzer's
+    // otherwise-safe single-link file. The output directory has one writer.
+    stat_t targetInfo;
+    if (lstat(overlayPath.toStringz, &targetInfo) == 0) {
+        auto existing = new OverlayReader(overlayPath);
+        scope(exit) existing.closeReader();
+        require(existing.header.analyzerKey == piiAnalyzerKey &&
+            existing.header.sourceShardDigest == shardDigest(shardPath),
+            "destination belongs to another analyzer or shard");
+        existing.closeReader();
+    } else require(errno == ENOENT, "cannot inspect destination");
     auto reader = new DocumentShardReader(shardPath);
     scope(exit) reader.closeReader();
     auto writer = new OverlayWriter(overlayPath, shardPath, piiAnalyzerKey, analyzerVersion);
@@ -161,16 +178,33 @@ void publishPiiFindings(string shardPath, string overlayPath, string locale,
 void visitPiiFindings(string shardPath, string overlayPath, string locale,
         scope void delegate(string documentId, PiiFinding[] findings) visit) {
     auto analyzerVersion = piiAnalyzerVersion(locale);
-    auto reader = new OverlayReader(overlayPath);
-    scope(exit) reader.closeReader();
-    require(reader.header.analyzerKey == piiAnalyzerKey &&
-        reader.header.analyzerVersion == analyzerVersion, "conflicting analyzer version");
-    reader.closeReader();
-    joinShards(shardPath, [overlayPath], (ShardDocument source, JoinedOverlay[] joined) {
-        require(joined.length == 1 && joined[0].present &&
-            joined[0].fields.length == 1 && joined[0].fields[0].key == piiFieldKey,
+    auto overlay = new OverlayReader(overlayPath);
+    scope(exit) overlay.closeReader();
+    require(overlay.header.analyzerKey == piiAnalyzerKey &&
+        overlay.header.analyzerVersion == analyzerVersion &&
+        overlay.header.sourceShardDigest == shardDigest(shardPath),
+        "conflicting analyzer version or source shard");
+    // Keep the validated overlay descriptor open throughout replay. Reopening
+    // by path after a separate header check could consume a different version
+    // following a legitimate atomic rename, especially on an empty shard.
+    auto documents = new DocumentShardReader(shardPath);
+    scope(exit) documents.closeReader();
+    ShardDocument source;
+    AnnotationRecord annotation;
+    while (documents.next(source)) {
+        require(source.content.length <= maxPiiInputBytes,
+            "source exceeds scanner cap");
+        try validate(cast(string) source.content);
+        catch (Exception) throw new Exception("pii overlay: invalid UTF-8 source");
+        require(overlay.next(annotation) &&
+            annotation.documentId == source.id.text &&
+            annotation.contentDigest == source.contentDigest,
+            "missing, orphan, or stale finding annotation");
+        require(annotation.fields.length == 1 &&
+            annotation.fields[0].key == piiFieldKey,
             "missing or malformed finding annotation");
-        visit(source.id.text, decodePiiFindings(joined[0].fields[0].value,
+        visit(source.id.text, decodePiiFindings(annotation.fields[0].value,
             locale, source.content.length));
-    });
+    }
+    require(!overlay.next(annotation), "orphan finding annotation");
 }

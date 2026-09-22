@@ -99,6 +99,14 @@ private void run() {
     otherWriter.publish();
     auto otherBytes = cast(ubyte[])read(otherPath);
     auto otherInfo = info(otherPath);
+    auto otherDigest = sha256Of(otherBytes);
+    foreach (target; [otherPath, root ~ "/./other.overlay"]) {
+        rejects({ publishPiiFindings(sourcePath, target, "US"); });
+        check(cast(ubyte[])read(otherPath) == otherBytes &&
+            sha256Of(cast(ubyte[])read(otherPath)) == otherDigest &&
+            info(otherPath).st_ino == otherInfo.st_ino,
+            "unrelated analyzer overlay replaced");
+    }
 
     publishPiiFindings(sourcePath, overlayPath, "US");
     check(descriptorCount() == steadyDescriptors, "publish leaked descriptors");
@@ -189,6 +197,35 @@ private void run() {
     wrongVersionWriter.publish();
     rejects({ visitPiiFindings(sourcePath, wrongVersionPath, "US",
         (string id, PiiFinding[] findings) {}); });
+    // A path swap after the first replay callback must not change the already
+    // opened and validated overlay descriptor used for remaining documents.
+    auto originalOverlay = buildPath(root, "original.overlay");
+    auto swappedOverlay = buildPath(root, "swapped.overlay");
+    auto originalWriter = new OverlayWriter(originalOverlay, sourcePath,
+        piiAnalyzerKey, piiAnalyzerVersion("US"));
+    auto swapWriter = new OverlayWriter(swappedOverlay, sourcePath,
+        piiAnalyzerKey, piiAnalyzerVersion("GB"));
+    foreach (doc; documents) {
+        originalWriter.append(AnnotationRecord(doc.id.text, doc.contentDigest,
+            [AnnotationField(piiFieldKey,
+                encodePiiFindings(scanPii(doc.content, "US"), "US", doc.content.length))]));
+        swapWriter.append(AnnotationRecord(doc.id.text, doc.contentDigest,
+            [AnnotationField(piiFieldKey,
+                encodePiiFindings(scanPii(doc.content, "GB"), "GB", doc.content.length))]));
+    }
+    originalWriter.publish();
+    swapWriter.publish();
+    import std.file : rename;
+    size_t stableVisits;
+    visitPiiFindings(sourcePath, originalOverlay, "US",
+        (string id, PiiFinding[] findings) {
+            if (stableVisits++ == 0) rename(swappedOverlay, originalOverlay);
+            check(findings == scanPii(documents[stableVisits - 1].content, "US"),
+                "replay switched overlay descriptor");
+        });
+    check(stableVisits == documents.length, "replay stopped after path swap");
+    rejects({ visitPiiFindings(sourcePath, originalOverlay, "US",
+        (string id, PiiFinding[] findings) {}); });
     auto invalidPath = buildPath(root, "invalid.shard");
     auto invalidWriter = new DocumentShardWriter(invalidPath);
     invalidWriter.append(ShardDocument(SourceLocator("pii-overlay-v1", "bad", "utf8"),
@@ -197,6 +234,17 @@ private void run() {
     rejects({ publishPiiFindings(invalidPath, overlayPath, "US"); });
     check(cast(ubyte[])read(overlayPath) == first, "scan failure replaced overlay");
     noTemporaries(root);
+    auto forgedInvalid = buildPath(root, "invalid.overlay");
+    auto invalidOverlayWriter = new OverlayWriter(forgedInvalid, invalidPath,
+        piiAnalyzerKey, piiAnalyzerVersion("US"));
+    auto invalidDoc = ShardDocument(SourceLocator("pii-overlay-v1", "bad", "utf8"),
+        OutputName("bad"), [cast(ubyte)0xc0, 0x80]);
+    invalidOverlayWriter.append(AnnotationRecord(invalidDoc.id.text,
+        invalidDoc.contentDigest, [AnnotationField(piiFieldKey,
+            encodePiiFindings([], "US", invalidDoc.content.length))]));
+    invalidOverlayWriter.publish();
+    rejects({ visitPiiFindings(invalidPath, forgedInvalid, "US",
+        (string id, PiiFinding[] findings) {}); });
     auto cappedPath = buildPath(root, "capped.shard");
     auto cappedWriter = new DocumentShardWriter(cappedPath);
     ubyte[] repeated;

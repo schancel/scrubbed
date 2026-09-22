@@ -20,6 +20,7 @@ private enum recordLimit = 4096;
 private enum sidecarLimit = 256;
 private enum byteLimit = 1_073_741_824L;
 private enum rowLimit = 2_000_000L;
+private enum publicPrefixGroupLimit = 4096L;
 private extern(C) void arc4random_buf(void*, size_t);
 private extern(C) int rename(const(char)*, const(char)*);
 
@@ -133,6 +134,28 @@ private enum outstandingSql = `SELECT document_id,input_sha256,config_sha256,sin
     state,origin,event_id,run_id,time_utc_ms FROM outstanding
     ORDER BY document_id,input_sha256,config_sha256,sink_id`;
 
+private void preflightOutstandingSort(sqlite3* db) {
+    // The v2 PK ends in private sink_key. SQLite sorts sink_id within each
+    // public three-field prefix. Refuse an oversized group before preparing
+    // the ORDER BY cursor, so its temporary B-tree remains bounded.
+    version (FailurePolicyHarness) enum groupCap = 8L;
+    else enum groupCap = publicPrefixGroupLimit;
+    sqlite3_stmt* count;
+    need(sqlite3_prepare_v2(db, "SELECT count(*) FROM outstanding".toStringz,
+        -1, &count, null) == SQLITE_OK, "prepare-failed");
+    scope(exit) sqlite3_finalize(count);
+    need(sqlite3_step(count) == SQLITE_ROW &&
+        sqlite3_column_int64(count, 0) <= rowLimit, "row-limit");
+    sqlite3_stmt* groups;
+    auto sql = `SELECT count(*) FROM outstanding GROUP BY
+        document_id,input_sha256,config_sha256 HAVING count(*) > ` ~
+        to!string(groupCap) ~ ` LIMIT 1`;
+    need(sqlite3_prepare_v2(db, sql.toStringz, -1, &groups, null) == SQLITE_OK,
+        "prepare-failed");
+    scope(exit) sqlite3_finalize(groups);
+    need(sqlite3_step(groups) == SQLITE_DONE, "public-prefix-group-limit");
+}
+
 private void writeAll(int fd, const(ubyte)[] bytes) {
     while (bytes.length) {
         auto n = write(fd, bytes.ptr, bytes.length);
@@ -190,6 +213,7 @@ private void preflight(string dbPath, string inputPath, ref Stage[] stages) {
     }
 }
 private void stageRows(sqlite3* db, ref Stage stage, string id, string dbPath) {
+    if (stage.kind == "outstanding") preflightOutstandingSort(db);
     auto sql = stage.kind == "history" ? historySql : outstandingSql;
     sqlite3_stmt* cursor;
     need(sqlite3_prepare_v2(db, sql.toStringz, -1, &cursor, null) == SQLITE_OK,
@@ -212,10 +236,12 @@ private void stageRows(sqlite3* db, ref Stage stage, string id, string dbPath) {
         hash.put(chunk);
         bytes += line.length;
         fault(dbPath, "write");
+        fault(dbPath, stage.kind ~ "-write");
     }
     need(rc == SQLITE_DONE, "read-failed");
     need(fsync(fd) == 0, "sync-failed");
     fault(dbPath, "sync");
+    fault(dbPath, stage.kind ~ "-sync");
     stage.sideTemporary = stage.sideTarget ~ ".stage-" ~ uuid();
     auto sf = open(stage.sideTemporary.toStringz, O_WRONLY | O_CREAT | O_EXCL, 384);
     need(sf >= 0, "stage-create-failed");
@@ -225,6 +251,7 @@ private void stageRows(sqlite3* db, ref Stage stage, string id, string dbPath) {
     writeAll(sf, cast(const(ubyte)[])line);
     need(fsync(sf) == 0, "sync-failed");
     fault(dbPath, "side-sync");
+    fault(dbPath, stage.kind ~ "-side-sync");
 }
 
 /// Empty destination means that export is not requested. Sidecars use .sha256.
@@ -252,21 +279,28 @@ private void exportImpl(string database, string historyDestination,
     need(sqlite3_exec(db, "COMMIT", null, null, null) == SQLITE_OK, "snapshot-failed");
     foreach (ref stage; stages) {
         fault(dbPath, "before-json-rename");
+        fault(dbPath, stage.kind ~ "-before-json-rename");
         need(rename(stage.temporary.toStringz, stage.target.toStringz) == 0,
             "publish-failed");
         stage.published = true;
         fault(dbPath, "after-json-rename");
+        fault(dbPath, stage.kind ~ "-after-json-rename");
         need(rename(stage.sideTemporary.toStringz, stage.sideTarget.toStringz) == 0,
             "publish-failed");
         stage.sidePublished = true;
         fault(dbPath, "after-side-rename");
+        fault(dbPath, stage.kind ~ "-after-side-rename");
     }
 }
 
 void exportV2(string database, string historyDestination = "",
     string outstandingDestination = "", string inputPath = "") {
     try exportImpl(database, historyDestination, outstandingDestination, inputPath);
-    catch (Exception) { throw new Exception("error export: refused"); }
+    catch (Exception failure) {
+        if (failure.msg == "failure journal: v2-sink-label-too-long")
+            throw new Exception("error export: v2-sink-label-too-long");
+        throw new Exception("error export: refused");
+    }
 }
 
 private string verifyOne(string path, string kind) {

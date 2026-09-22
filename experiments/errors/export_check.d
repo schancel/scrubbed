@@ -5,16 +5,19 @@ import domain.document : DocumentId, SourceLocator;
 import effects.local_manifest : SinkKey, LocalManifest, inputDigest, configDigest;
 import effects.failure_journal : FailureJournal, createV2, copyV1ToV2;
 import effects.error_export : exportV2, verifyV2Export;
+import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : sha256Of;
-import std.file : exists, mkdir, readText, remove, rmdirRecurse, tempDir, write;
+import std.file : SpanMode, dirEntries, exists, mkdir, readText, remove,
+    rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.string : indexOf, replace;
 import std.uuid : randomUUID;
 import std.process : execute;
 import core.sys.posix.unistd : symlink, link;
+import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 import std.string : toStringz;
 
 private void need(bool yes, string label) {
@@ -23,6 +26,16 @@ private void need(bool yes, string label) {
 private void refuse(void delegate() action, string label) {
     bool failed;
     try action(); catch (Exception) failed = true;
+    need(failed, label);
+}
+private void refuseToken(void delegate() action, string token, string label) {
+    bool failed;
+    try action();
+    catch (Exception error) {
+        failed = error.msg.canFind(token) &&
+            !error.msg.canFind("F13_SECRET_TOKEN") &&
+            !error.msg.canFind("/private/f13-canary.txt");
+    }
     need(failed, label);
 }
 private string sidecar(string kind, string bytes, string id) {
@@ -46,7 +59,67 @@ private string record(string schema, string id, long sequence, string run,
         `","phase":"` ~ phase ~ `","code":"` ~ code ~ `","state":"` ~
         state ~ `","retry_of":` ~ retry ~ `,"time_utc_ms":` ~ at.to!string ~ "}\n";
 }
+private size_t fdCount() {
+    size_t n;
+    foreach (_; dirEntries("/dev/fd", SpanMode.shallow)) ++n;
+    return n;
+}
+private long rssBytes() {
+    rusage usage;
+    need(getrusage(RUSAGE_SELF, &usage) == 0, "RSS observation");
+    version (OSX) return usage.ru_opaque[0];
+    else version (linux) return usage.ru_maxrss * 1024;
+    else static assert(0, "RSS observation requires platform support");
+}
+private void checkLabelLimit(string root) {
+    auto path = buildPath(root, "label-limit.db");
+    createV2(path);
+    char[256] ascii;
+    ascii[] = 'a';
+    auto exactly = ascii[].idup;
+    string multibyte;
+    foreach (_; 0 .. 128) multibyte ~= "é";
+    need(exactly.length == 256 && multibyte.length == 256,
+        "label boundary fixture");
+    auto doc = DocumentId.from(SourceLocator("label", "set", "one"));
+    auto input = inputDigest(cast(const(ubyte)[])"label-input");
+    auto config = configDigest(cast(const(ubyte)[])"label-config");
+    auto journal = new FailureJournal(path);
+    foreach (i, label; [exactly, multibyte]) {
+        auto key = SinkKey(doc, input, config, label);
+        journal.plan(key, buildPath(root, "label-output-" ~ i.to!string));
+        need(!journal.lookup(key).isNull, "256-byte label refused");
+    }
+    foreach (label; [exactly ~ "b", multibyte ~ "b"]) {
+        auto key = SinkKey(doc, input, config, label);
+        refuseToken({ journal.plan(key, buildPath(root, "over-label")); },
+            "v2-sink-label-too-long", "257-byte label accepted");
+        need(journal.lookup(key).isNull, "rejected label persisted");
+    }
+    journal.close();
+    journal = new FailureJournal(path);
+    need(!journal.lookup(SinkKey(doc, input, config, exactly)).isNull &&
+        !journal.lookup(SinkKey(doc, input, config, multibyte)).isNull,
+        "boundary labels changed on reopen");
+    journal.close();
+
+    auto v1Path = buildPath(root, "long-label-v1.db");
+    auto v1 = new LocalManifest(v1Path);
+    auto old = SinkKey(doc, input, config, exactly ~ "b");
+    v1.plan(old, buildPath(root, "old-label-output"));
+    v1.markFailed(old);
+    need(!v1.lookup(old).isNull, "v1 oversized label changed");
+    v1.close();
+    auto copyPath = buildPath(root, "oversized-copy.db");
+    refuseToken({ copyV1ToV2(v1Path, copyPath); },
+        "v2-sink-label-too-long", "oversized v1 copy accepted");
+    need(!exists(copyPath), "oversized v1 copy published destination");
+    v1 = new LocalManifest(v1Path);
+    need(!v1.lookup(old).isNull, "v1 source changed after copy refusal");
+    v1.close();
+}
 private void check(string root, string executable) {
+    checkLabelLimit(root);
     auto db = buildPath(root, "journal.db");
     auto history = buildPath(root, "history.jsonl");
     auto outstanding = buildPath(root, "outstanding.jsonl");
@@ -171,6 +244,85 @@ private void check(string root, string executable) {
             verifyV2Export(history, outstanding);
         }
     }
+    foreach (point; ["write", "sync", "side-sync", "before-json-rename",
+            "after-json-rename", "after-side-rename"]) {
+        exportV2(db, history, outstanding);
+        auto oldHistory = readText(history);
+        auto oldOutstanding = readText(outstanding);
+        journal = new FailureJournal(db);
+        journal.recordFailure(b, "filter", "filter-failed", false);
+        journal.close();
+        auto marker = db ~ ".fault-export-kill-outstanding-" ~ point;
+        write(marker, "1");
+        auto child = execute([executable, "export", root]);
+        remove(marker);
+        need(child.status == 73 && !child.output.canFind("F13_SECRET_TOKEN"),
+            "outstanding fault process result");
+        verifyV2Export(history);
+        if (point == "write" || point == "sync" || point == "side-sync") {
+            need(readText(history) == oldHistory &&
+                readText(outstanding) == oldOutstanding,
+                "pre-publish outstanding fault changed JSONL");
+            verifyV2Export(history, outstanding);
+            continue;
+        }
+        if (point == "after-json-rename")
+            refuse({ verifyV2Export("", outstanding); },
+                "new outstanding with old sidecar accepted");
+        else verifyV2Export("", outstanding);
+        if (point == "after-side-rename") verifyV2Export(history, outstanding);
+        else refuse({ verifyV2Export(history, outstanding); },
+            "mixed export snapshots accepted at " ~ point);
+    }
+    // A growing history must not become an in-memory collection or leak
+    // SQLite/file descriptors across repeated materializations.
+    journal = new FailureJournal(db);
+    foreach (_; 0 .. 2048)
+        journal.recordFailure(b, "filter", "filter-failed", false);
+    journal.close();
+    auto beforeFd = fdCount();
+    auto beforeRss = rssBytes();
+    foreach (_; 0 .. 3) {
+        exportV2(db, history, outstanding);
+        verifyV2Export(history, outstanding);
+    }
+    need(fdCount() <= beforeFd + 1 && rssBytes() - beforeRss < 64 * 1024 * 1024,
+        "long-log RSS/FD bound");
+    auto priorOutstanding = readText(outstanding);
+    auto ninth = SinkKey(doc, a.inputSha256, a.configSha256, "ninth-private-sink");
+    journal = new FailureJournal(db);
+    journal.plan(ninth, buildPath(root, "ninth-output"));
+    journal.recordFailure(ninth, "filter", "filter-failed", false);
+    journal.close();
+    refuse({ exportV2(db, "", outstanding); }, "oversized public-prefix group accepted");
+    need(readText(outstanding) == priorOutstanding,
+        "group refusal changed prior export");
+
+    // Construct a valid enormous private key in another process so its
+    // allocation cannot mask an export-side RSS spike in this process.
+    auto fixture = execute([executable, "large-fixture", root]);
+    need(fixture.status == 0, "large fixture creation");
+    auto large = buildPath(root, "large.db");
+    auto largeH = buildPath(root, "large-history.jsonl");
+    auto largeO = buildPath(root, "large-outstanding.jsonl");
+    beforeFd = fdCount();
+    beforeRss = rssBytes();
+    refuseToken({ new FailureJournal(large); }, "v2-sink-label-too-long",
+        "oversized v2 reopen accepted");
+    refuseToken({ exportV2(large, largeH, largeO); }, "v2-sink-label-too-long",
+        "oversized private key accepted without a bound");
+    auto rssGrowth = rssBytes() - beforeRss;
+    need(fdCount() <= beforeFd + 1 && rssGrowth < 24 * 1024 * 1024,
+        "large private key materialized during export: " ~ rssGrowth.to!string);
+    need(!exists(largeH) && !exists(largeO), "large key published partial export");
+    beforeFd = fdCount();
+    beforeRss = rssBytes();
+    auto largeCopy = buildPath(root, "large-copy.db");
+    refuseToken({ copyV1ToV2(buildPath(root, "large-v1.db"), largeCopy); },
+        "v2-sink-label-too-long", "large v1 copy accepted");
+    need(!exists(largeCopy) && fdCount() <= beforeFd + 1 &&
+        rssBytes() - beforeRss < 24 * 1024 * 1024,
+        "large v1 copy refusal unbounded or published");
 }
 
 void main(string[] args) {
@@ -178,6 +330,34 @@ void main(string[] args) {
         auto root = args[2];
         exportV2(buildPath(root, "journal.db"), buildPath(root, "history.jsonl"),
             buildPath(root, "outstanding.jsonl"));
+        return;
+    }
+    if (args.length == 3 && args[1] == "large-fixture") {
+        auto root = args[2];
+        auto path = buildPath(root, "large.db");
+        createV2(path);
+        char[] huge;
+        huge.length = 32 * 1024 * 1024;
+        huge[] = 'x';
+        auto raw = "F13_SECRET_TOKEN" ~ huge.idup;
+        sqlite3* db;
+        need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READWRITE, null) == SQLITE_OK,
+            "large fixture open");
+        sqlite3_stmt* insert;
+        auto sql = "INSERT INTO sink_identity(raw_sink,sink_id) VALUES(?1,'00000000-0000-4000-8000-000000000001')";
+        need(sqlite3_prepare_v2(db, sql.toStringz, -1, &insert, null) == SQLITE_OK &&
+            sqlite3_bind_text(insert, 1, raw.toStringz, cast(int)raw.length,
+                cast(void*)-1) == SQLITE_OK && sqlite3_step(insert) == SQLITE_DONE,
+            "large fixture insert");
+        sqlite3_finalize(insert);
+        need(sqlite3_close(db) == SQLITE_OK, "large fixture close");
+        auto v1 = new LocalManifest(buildPath(root, "large-v1.db"));
+        auto key = SinkKey(DocumentId.from(SourceLocator("large", "set", "one")),
+            inputDigest(cast(const(ubyte)[])"large-input"),
+            configDigest(cast(const(ubyte)[])"large-config"), raw);
+        v1.plan(key, buildPath(root, "large-v1-sink"));
+        v1.markFailed(key);
+        v1.close();
         return;
     }
     auto root = buildPath(tempDir(), "scrubbed-export-" ~ randomUUID().toString);

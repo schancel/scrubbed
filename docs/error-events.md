@@ -25,8 +25,11 @@ one UTF-8/LF line, with keys in this order and no whitespace:
 including final LFs, and `bytes` is the decimal byte count. Empty JSONL is
 zero bytes and has SHA-256 of the empty string. Angle-bracket fields above
 are placeholders, not literal sidecar values. Export caps are 2,000,000 rows,
-1 GiB per kind, 4096 bytes per line and 256 bytes per sidecar. Reaching a cap
-refuses export. Destinations and sidecars must be non-aliased regular files or
+1 GiB per kind, 4096 bytes per line and 256 bytes per sidecar. Outstanding
+also refuses more than 4096 rows sharing one public
+`(document_id,input_sha256,config_sha256)` prefix before SQLite's final
+`sink_id` sort; the release harness uses a lower test cap to exercise this
+path. Reaching a cap refuses export. Destinations and sidecars must be non-aliased regular files or
 absent, in an existing resolved parent directory; symlinks and hardlinks are
 refused. The caller must serialize writers to this trusted directory.
 
@@ -41,7 +44,17 @@ sidecar. Rename is atomic per file, not per pair or across kinds. A crash
 before JSONL rename leaves the previous pair; a crash after it may leave a
 pair that fails verification; a crash between kinds may leave individually
 valid but jointly mismatched snapshot IDs. No parent-directory fsync or
-power-loss durability is promised.
+power-loss durability is promised. A digest verifies bytes, not physical
+generation: if two JSONL publications are byte-identical, the older matching
+sidecar can still verify that standalone JSONL file.
+
+V2 limits the stable private `SinkKey.sink` label to 256 UTF-8 bytes (not
+characters). Exactly 256 bytes is allowed; 257 is refused without truncation
+or changing identity. V1 retains its prior key behavior. Opt-in v1-to-v2 copy
+refuses an oversized key before publishing the destination and leaves v1
+untouched. Existing v2 databases with oversized keys refuse reopen/export
+before shape or integrity scans and before any export publication. The fixed
+refusal token is `v2-sink-label-too-long`; no private label is printed.
 
 Run the Stage 2 checker against a release executable built with
 `DFLAGS=-d-version=FailurePolicyHarness dub build --build=release

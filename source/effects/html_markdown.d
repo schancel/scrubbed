@@ -4,7 +4,8 @@ module effects.html_markdown;
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
 import std.ascii : toLower;
 import std.conv : to;
-import std.string : replace;
+import std.uni : isControl, isFormat, isSpace;
+import std.utf : UTFException;
 
 enum size_t maxMarkdownBytes = 4 * 1024 * 1024;
 
@@ -19,6 +20,12 @@ private struct Writer {
         if (value.length > maxMarkdownBytes - bytes.length)
             throw new HtmlMarkdownOutputLimit;
         bytes ~= value;
+    }
+
+    void putText(string value) {
+        if (value.length && bytes.length && bytes[$ - 1] == ' ' &&
+            value[0] == ' ') put(value[1 .. $]);
+        else put(value);
     }
 
     void trim() {
@@ -96,17 +103,11 @@ private bool safeTarget(string target) {
     if (!target.length || target.length > 4096 || target.length >= 2 &&
         (target[0 .. 2] == "//" || target[0 .. 2] == "\\\\")) return false;
     if (target[0] == '\\') return false;
-    foreach (i, char c; target) {
-        if (cast(ubyte)c <= 0x20 || cast(ubyte)c == 0x7f ||
-            c == '<' || c == '>' || c == '\\') return false;
-        if (i + 1 < target.length && cast(ubyte)c == 0xc2 &&
-            cast(ubyte)target[i + 1] >= 0x80 &&
-            cast(ubyte)target[i + 1] <= 0xa0) return false;
-        if (i + 2 < target.length && cast(ubyte)c == 0xe2 &&
-            cast(ubyte)target[i + 1] == 0x80 &&
-            cast(ubyte)target[i + 2] >= 0x80 &&
-            cast(ubyte)target[i + 2] <= 0xaf) return false;
-    }
+    try {
+        foreach (dchar c; target)
+            if (isControl(c) || isFormat(c) || isSpace(c) ||
+                c == '<' || c == '>' || c == '\\') return false;
+    } catch (UTFException) return false;
     size_t colon;
     while (colon < target.length && target[colon] != ':' &&
         target[colon] != '/' && target[colon] != '?' && target[colon] != '#') ++colon;
@@ -119,6 +120,15 @@ private bool safeTarget(string target) {
         return lowered == "http" || lowered == "https" || lowered == "mailto";
     }
     return true;
+}
+
+private string markdownTarget(string target) {
+    Writer writer;
+    foreach (char c; target) {
+        if (c == '&') writer.put("&amp;");
+        else writer.put(cast(string)(&c)[0 .. 1]);
+    }
+    return writer.result();
 }
 
 private size_t endOf(const ref HtmlTree tree, size_t index) {
@@ -139,7 +149,9 @@ private size_t endOf(const ref HtmlTree tree, size_t index) {
 private string nodeText(const ref HtmlTree tree, size_t index) {
     Writer writer;
     foreach (i; index + 1 .. endOf(tree, index)) {
-        if (tree.nodes[i].kind != HtmlNodeKind.text) continue;
+        bool breakNode = tree.nodes[i].kind == HtmlNodeKind.element &&
+            tree.nodes[i].name == "br";
+        if (tree.nodes[i].kind != HtmlNodeKind.text && !breakNode) continue;
         bool hidden;
         for (size_t parent = tree.nodes[i].parentIndex;
              parent != index && parent != size_t.max && parent < i;
@@ -148,7 +160,7 @@ private string nodeText(const ref HtmlTree tree, size_t index) {
             if (name == "script" || name == "style" || name == "template" ||
                 name == "head") { hidden = true; break; }
         }
-        if (!hidden) writer.put(tree.nodes[i].text);
+        if (!hidden) writer.put(breakNode ? "\n" : tree.nodes[i].text);
     }
     return writer.result();
 }
@@ -169,7 +181,10 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     ref Writer writer, size_t depth) {
     if (depth > 128) throw new HtmlMarkdownOutputLimit;
     ref const node = tree.nodes[index];
-    if (node.kind == HtmlNodeKind.text) { writer.put(clean(node.text)); return; }
+    if (node.kind == HtmlNodeKind.text) {
+        writer.putText(clean(node.text));
+        return;
+    }
     string name = node.name;
     if (name == "script" || name == "style" || name == "template" ||
         name == "head") return;
@@ -177,8 +192,9 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     if (name == "img") {
         auto alt = clean(attribute(node, "alt"));
         auto src = attribute(node, "src");
-        if (safeTarget(src)) writer.put("![" ~ alt ~ "](<" ~ src ~ ">)");
-        else writer.put(alt);
+        if (safeTarget(src)) writer.put("![" ~ alt ~ "](<" ~
+            markdownTarget(src) ~ ">)");
+        else writer.putText(alt);
         return;
     }
     if (name == "pre") {
@@ -224,10 +240,12 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             auto prefix = name == "ul" ? "- " : to!string(ordinal) ~ ". ";
             if (ordinal < long.max) ++ordinal;
             writer.put(prefix);
-            auto itemValue = item.result().replace("\n\n", "\n");
+            auto itemValue = item.result();
             foreach (char c; itemValue) {
                 writer.put(cast(string)(&c)[0 .. 1]);
-                if (c == '\n') writer.put("  ");
+                if (c == '\n') {
+                    foreach (_; 0 .. prefix.length) writer.put(" ");
+                }
             }
         }
         writer.block();
@@ -269,16 +287,30 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         foreach (_; 0 .. name[1] - '0') writer.put("#");
         writer.put(" ");
     }
-    if (name == "strong" || name == "b") writer.put("**");
-    if (name == "em" || name == "i") writer.put("*");
+    if (name == "strong" || name == "b" || name == "em" || name == "i") {
+        Writer emphasized;
+        renderChildren(tree, index, emphasized, depth + 1);
+        auto content = emphasized.result();
+        size_t left, right = content.length;
+        while (left < right && content[left] == ' ') ++left;
+        while (right > left && content[right - 1] == ' ') --right;
+        writer.putText(content[0 .. left]);
+        if (left < right) {
+            auto marker = name == "strong" || name == "b" ? "**" : "*";
+            writer.put(marker);
+            writer.put(content[left .. right]);
+            writer.put(marker);
+        }
+        writer.putText(content[right .. $]);
+        if (block) writer.block();
+        return;
+    }
     if (name == "a") {
         auto href = attribute(node, "href");
         if (safeTarget(href)) writer.put("[");
         renderChildren(tree, index, writer, depth + 1);
-        if (safeTarget(href)) writer.put("](<" ~ href ~ ">)");
+        if (safeTarget(href)) writer.put("](<" ~ markdownTarget(href) ~ ">)");
     } else renderChildren(tree, index, writer, depth + 1);
-    if (name == "strong" || name == "b") writer.put("**");
-    if (name == "em" || name == "i") writer.put("*");
     if (block) writer.block();
 }
 

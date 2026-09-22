@@ -29,8 +29,17 @@ void main() {
         "# Title\n\nA &amp; **bold** *word*\\.\n", "headings/emphasis/entities");
     golden("<p><a href='https://example.test/a?q=1&amp;x=2'>Go</a> " ~
         "<img alt='A [cat]' src='/img/cat.png'></p>",
-        "[Go](<https://example.test/a?q=1&x=2>) ![A \\[cat\\]](</img/cat.png>)\n",
+        "[Go](<https://example.test/a?q=1&amp;x=2>) ![A \\[cat\\]](</img/cat.png>)\n",
         "links/images");
+    golden("<a href='javascript&amp;colon;alert(1)'>x</a> " ~
+        "<a href='&amp;sol;&amp;sol;evil.test'>relative</a> " ~
+        "<a href='/foo&amp;copy;bar'>literal</a> " ~
+        "<img alt='image' src='/foo&amp;copy;bar'>",
+        "[x](<javascript&amp;colon;alert(1)>) " ~
+        "[relative](<&amp;sol;&amp;sol;evil.test>) " ~
+        "[literal](</foo&amp;copy;bar>) " ~
+        "![image](</foo&amp;copy;bar>)\n",
+        "destination entity escaping");
     golden("<p><a href='javascript:alert(1)'>Click</a> " ~
         "<a href='//evil.test'>bad</a> " ~
         "<img alt='safe alt' src='data:x'>" ~
@@ -60,13 +69,28 @@ void main() {
         "custom space slash\n", "unsafe target forms");
     golden("<a href='x\u0085y'>control</a>", "control\n",
         "Unicode-control target");
+    golden("<a href='x\u2066y'>isolate</a> " ~
+        "<a href='x\u061Cy'>mark</a> " ~
+        "<img alt='joiner' src='x\u2060y'>",
+        "isolate mark joiner\n", "Unicode-format targets");
     golden("<ol start='oops'><li>A</li></ol>", "1. A\n",
         "invalid ordered start");
     golden("<ol start='-2'><li>A</li></ol>", "1. A\n",
         "negative ordered start");
     golden("<p>A<br>B</p>", "A  \nB\n", "line break");
     golden("<ul><li>Outer<ul><li>Inner</li></ul></li></ul>",
-        "- Outer\n  - Inner\n", "nested list");
+        "- Outer\n  \n  - Inner\n", "nested list");
+    golden("<ol start='100'><li>Outer<ul><li>Inner</li></ul></li>" ~
+        "<li>Next</li></ol>",
+        "100. Outer\n     \n     - Inner\n101. Next\n",
+        "multi-digit ordered nested list");
+    golden("<ul><li><p>First</p><p>Second</p></li></ul>",
+        "- First\n  \n  Second\n", "two paragraphs in list item");
+    golden("<p>Before <strong> bold </strong> and <em> word </em> after</p>",
+        "Before **bold** and *word* after\n",
+        "emphasis boundary spaces");
+    golden("<pre>a<br>b</pre>", "```\na\nb\n```\n",
+        "pre line break retained");
 
     HtmlTree synthetic;
     synthetic.nodes = [HtmlNode(HtmlNodeKind.text, size_t.max, "", "A\0B")];

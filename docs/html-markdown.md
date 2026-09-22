@@ -15,10 +15,11 @@ visible children. HTML parser repairs determine malformed tree structure;
 the converter never synthesizes missing words.
 
 V1 maps `h1`–`h6`, `p`, `br`, `em`/`i`, `strong`/`b`, `ul`, `ol`, `li`,
-`blockquote`, `code`, `pre`, `a`, `img`, and tables. Nested lists use two-space
-indentation. An ordered list uses a positive integer `start` attribute or
+`blockquote`, `code`, `pre`, `a`, `img`, and tables. List continuations are
+indented by the full marker width, preserving blank lines between paragraphs
+inside an item. An ordered list uses a positive integer `start` attribute or
 starts at 1; zero, negative, overflowed, and invalid starts use 1. Inline code
-delimiter longer than its content's longest run, and fenced code chooses at
+chooses a backtick delimiter longer than its content's longest run, and fenced code chooses at
 least three backticks, likewise longer than any run. Whitespace inside code
 is retained, apart from CR normalization and omitted controls.
 
@@ -32,8 +33,12 @@ rectangular grid.
 Links and images activate a target only for `http:`, `https:`, `mailto:`,
 or relative references. Protocol-relative, backslash-leading, control,
 whitespace, angle-bracket, overlong (more than 4096 bytes), and other-scheme
-targets are rejected. Rejected links retain their visible label; rejected
-images retain escaped alt text. No raw HTML is passed through.
+targets are rejected, including Unicode control and format characters.
+Allowed destinations escape literal `&` as `&amp;` when written to Markdown,
+so a Markdown parser's entity decoding cannot turn an apparently relative
+target into an active scheme or alter a literal entity-looking path. Rejected
+links retain their visible label; rejected images retain escaped alt text. No
+raw HTML is passed through.
 
 The writer throws `HtmlMarkdownOutputLimit` before exceeding 4 MiB and
 returns no partial string. The upstream parser separately caps raw input,

@@ -3,8 +3,8 @@ module effects.quality_overlay;
 
 import domain.quality_features;
 import domain.shard_format : AnnotationField, AnnotationRecord, ShardDocument;
-import effects.document_shards : DocumentShardReader, JoinedOverlay, OverlayWriter,
-    PublishFault, joinShards;
+import effects.document_shards : DocumentShardReader, JoinedOverlay, OverlayReader,
+    OverlayWriter, PublishFault, joinShards;
 import core.stdc.errno : errno, ENOENT;
 import core.sys.posix.sys.stat : stat, stat_t;
 import std.digest : LetterCase, toHexString;
@@ -116,6 +116,13 @@ private MeasuredFeatures stored(ShardDocument source, JoinedOverlay overlay) {
 /// Replay uses only C01-joined stored measurements, never measure().
 void visitStoredDecisions(string shardPath, string featureOverlayPath,
         QualityPolicy policy, scope void delegate(QualityDecision) visit) {
+    // Validate at overlay-open time: an empty shard yields no stored() calls.
+    auto features = new OverlayReader(featureOverlayPath);
+    scope(exit) features.closeReader();
+    enforce(features.header.analyzerKey == featureAnalyzerKey &&
+        features.header.analyzerVersion == featureAnalyzerVersion(),
+        "quality overlay: conflicting feature analyzer version");
+    features.closeReader();
     joinShards(shardPath, [featureOverlayPath], (ShardDocument source,
             JoinedOverlay[] overlays) {
         enforce(overlays.length == 1, "quality overlay: missing feature overlay");

@@ -465,10 +465,44 @@ private void boundedReplay() {
         "replay retained corpus memory or file descriptors");
 }
 
+private void emptyHeaderRefusal() {
+    auto root = buildPath(tempDir(), "scrubbed-quality-empty-" ~ randomUUID.toString);
+    mkdir(root);
+    scope(exit) rmdirRecurse(root);
+    auto shard = buildPath(root, "empty.shard");
+    auto features = buildPath(root, "features.overlay");
+    auto wrongKey = buildPath(root, "wrong-key.overlay");
+    auto wrongVersion = buildPath(root, "wrong-version.overlay");
+    auto decisions = buildPath(root, "decisions.overlay");
+    auto shardWriter = new DocumentShardWriter(shard);
+    shardWriter.publish();
+    publishMeasurements(shard, features);
+    auto baseline = QualityPolicy(0, partsPerMillion, partsPerMillion,
+        partsPerMillion);
+    auto changed = QualityPolicy(1, 0, 0, 0);
+    publishDecisions(shard, features, decisions, baseline);
+    auto prior = cast(ubyte[])read(decisions);
+    auto wrongKeyWriter = new OverlayWriter(wrongKey, shard,
+        "not.quality.features", featureAnalyzerVersion());
+    wrongKeyWriter.publish();
+    auto wrongVersionWriter = new OverlayWriter(wrongVersion, shard,
+        featureAnalyzerKey, "features:v0:schema=1");
+    wrongVersionWriter.publish();
+    foreach (bad; [wrongKey, wrongVersion]) {
+        rejects({ dryRun(shard, bad, changed); });
+        rejects({ publishDecisions(shard, bad, decisions, changed); });
+        check(cast(ubyte[])read(decisions) == prior,
+            "empty-shard wrong header replaced prior decision overlay");
+    }
+    check(dryRun(shard, features, changed).documents == 0,
+        "valid empty feature overlay refused");
+}
+
 void main() {
     featureGoldens();
     policyAndReplay();
     overlayGoldens();
     boundedReplay();
+    emptyHeaderRefusal();
     writeln("quality feature/policy/replay and overlay goldens: ok");
 }

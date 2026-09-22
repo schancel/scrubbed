@@ -69,6 +69,8 @@ dub build --build=release
 ./scrubbed extract --input page.html --output page.tree.json --format tree-json
 ./scrubbed extract --input page.html --output page.md --format markdown
 ./scrubbed run --input - --output - --jsonl-fields text,title --dataset-namespace corpus-v1 --source-key shard-0001 --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 < input.jsonl > clean.jsonl
+./scrubbed errors-init --journal path/to/errors-v2.db
+./scrubbed run --input path/to/docs --output path/to/clean --filters normalize-line-endings --error-journal path/to/errors-v2.db
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -95,6 +97,11 @@ help and command/option-name completion. `extract --format=tree-json` exports a
 bounded selected HTML parse tree; `--format=markdown` mechanically renders that
 tree without main-content selection. See the [HTML parser guide](docs/html-parser.md) and
 [command guide](docs/cli-commands.md).
+The optional existing-v2 `--error-journal` records sanitized local file/tree
+failures and publication intent; add `--error-retry` only when explicitly
+reprocessing unresolved output. The default remains the v1 path. Exported
+error-event JSONL and its SHA-256 sidecar are individually atomically replaced,
+not an atomic pair. See the [error journal guide](docs/error-events.md).
 The explicit paired `--input - --output -` JSONL mode transforms selected
 top-level text fields through the same filter chain. It requires a stable
 dataset namespace, source key, and input/output record byte caps. Untouched

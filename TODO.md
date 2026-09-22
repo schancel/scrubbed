@@ -267,20 +267,21 @@ is useful, but it is not sufficient on its own.
       lost-ledger failures stop with exit 2. Keyed `--explain` and release-active
       actual-binary fault tests cover verified skips, unsafe routes, canceled
       later files, and missing-vs-unsafe output parents (`docs/failure-policy.md`).
-      This does not implement a concrete JSONL error log or replay (#18/#19),
-      or extend the policy to JSONL stdin/stdout.
-- [~] Emit structured errors and outstanding failures (F13/#18). An
-      effects-only v2 SQLite journal now supports fixed-code events, exact-key
+      The separate opt-in v2 journal now supplies structured errors (F13/#18),
+      but targeted F14/#19 retry and JSONL stdin/stdout policy remain open.
+- [x] Emit structured errors and outstanding failures (F13/#18). An
+      opt-in v2 SQLite journal supports fixed-code events, exact-key
       outstanding state, durable publication intent/recovery, stable opaque
       public sink IDs, and explicit offline copy from v1
       (`docs/error-events.md`). Opt-in bounded JSONL history/outstanding
       export and SHA-256 sidecar verification have landed; each file is
       atomically replaced, but the pair is not atomic. V2 sink labels are
       limited to 256 UTF-8 bytes while legacy v1 retains longer keys. The
-      shipping `run`/`repair` path still uses v1, while explicit v2
+      default `run`/`repair` path still uses v1; explicit `--error-journal`
+      and `--error-retry` opt into live local-file/tree v2 processing. V2
       `errors-init`, `errors-copy`, `errors-export`, and `errors-verify`
-      management verbs are available. Live v2 document processing remains a
-      separately reviewed successor.
+      management verbs are available. Automatic targeted retry, S3, and
+      JSONL stdin/stdout journaling are not included.
 - [x] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity

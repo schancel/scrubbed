@@ -5,13 +5,82 @@ import std.algorithm.searching : canFind;
 import std.conv : to;
 import std.file : exists, mkdir, readText, remove, rmdirRecurse, tempDir, write;
 import std.path : buildPath;
-import std.process : execute;
+import std.process : execute, spawnProcess, tryWait, wait;
 import std.string : splitLines, toStringz;
 import std.uuid : randomUUID;
 import core.sys.posix.unistd : link, symlink;
 
+version (OSX) {
+    // libproc reports this child's resident bytes and live descriptor list.
+    // The layout and flavor values are from the macOS SDK's public headers.
+    private extern(C) int proc_pid_rusage(int pid, int flavor, void* buffer);
+    private extern(C) int proc_pidinfo(int pid, int flavor, ulong arg,
+        void* buffer, int bufferSize);
+    private struct RusageV0 {
+        ubyte[16] uuid;
+        ulong userTime, systemTime, idleWakeups, interruptWakeups;
+        ulong pageins, wiredSize, residentSize, physicalFootprint;
+        ulong processStart, processExit;
+    }
+}
+
 private void need(bool okay, string label) {
     if (!okay) throw new Exception("live v2 check: " ~ label);
+}
+
+private void checkMeasuredTree(string binary, string root, string db) {
+    import core.thread : Thread;
+    import std.datetime : dur;
+    import std.stdio : File, stdin;
+    auto input = buildPath(root, "measured-tree");
+    auto output = buildPath(root, "measured-out");
+    mkdir(input);
+    foreach (index; 0 .. 1024)
+        write(buildPath(input, index.to!string ~ ".txt"), "payload");
+    scope silent = File("/dev/null", "w");
+    auto child = spawnProcess([binary, "run", "--input", input,
+        "--output", output, "--error-journal", db, "--threads", "4",
+        "--max-queued-docs", "1", "--max-input-bytes", "7",
+        "--max-open-inputs", "1"], stdin, silent, silent);
+    scope(exit) if (child.processID > 0) wait(child);
+    ulong maxResident;
+    size_t maxDescriptors, samples;
+    int status;
+    while (true) {
+        version (OSX) {
+            RusageV0 usage;
+            int rssResult = proc_pid_rusage(child.processID, 0, &usage);
+            ubyte[4096] descriptors;
+            int fdBytes = proc_pidinfo(child.processID, 1, 0,
+                descriptors.ptr, cast(int)descriptors.length);
+            if (rssResult == 0 && fdBytes > 0) {
+                maxResident = maxResident > usage.residentSize ?
+                    maxResident : usage.residentSize;
+                auto count = cast(size_t)fdBytes / 8;
+                maxDescriptors = maxDescriptors > count ? maxDescriptors : count;
+                ++samples;
+            }
+        }
+        auto result = tryWait(child);
+        if (result.terminated) { status = result.status; break; }
+        Thread.sleep(dur!"msecs"(5));
+    }
+    need(status == 0, "measured tree exited " ~ status.to!string);
+    version (OSX) {
+        need(samples >= 5, "insufficient live resource samples");
+        // A 1024-file tree exceeds the queued/file-token limits many times;
+        // these deliberately generous caps detect whole-corpus buffering or
+        // leaked descriptors without depending on one allocator version.
+        need(maxResident > 0 && maxResident <= 192UL * 1024 * 1024,
+            "resident bound " ~ maxResident.to!string);
+        need(maxDescriptors > 0 && maxDescriptors <= 64,
+            "descriptor bound " ~ maxDescriptors.to!string);
+        import std.stdio : writeln;
+        writeln("live v2 resources: ", samples, " samples, peak observed RSS ",
+            maxResident, " bytes, peak observed FDs ", maxDescriptors);
+    }
+    need(readText(buildPath(output, "1023.txt")) == "payload",
+        "measured tree completed");
 }
 
 void main(string[] args) {
@@ -130,6 +199,7 @@ void main(string[] args) {
     call(["run", "--input", oversized, "--output", oversizedOut,
         "--error-journal", db, "--max-input-bytes", "3"], 2);
     need(!exists(oversizedOut), "input cap refusal did not publish");
+    checkMeasuredTree(args[1], root, db);
     if (harness) {
         auto failed = buildPath(root, "failed.txt");
         auto failedOut = buildPath(root, "failed-out.txt");

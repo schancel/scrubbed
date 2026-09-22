@@ -3,10 +3,32 @@
 Stage 2 adds an effects-only v2 SQLite journal and explicit offline v1-to-v2
 copy. The release-active `experiments/errors/check.d` pins v1 behavior and
 the v2 effects boundary. Stage 3a adds an opt-in effects-only JSONL exporter,
-pinned by `experiments/errors/export_check.d`. The shipping CLI still uses v1;
-it neither creates nor opens v2. The v1 `sink_state` table is
+pinned by `experiments/errors/export_check.d`. Stage 3b1 exposes only explicit
+v2 management verbs; the shipping run/repair pipeline still uses v1 by default.
+The v1 `sink_state` table is
 a last-state ledger, **not** immutable historical error events. Do not
 interpret this check as proof of the F13 JSONL acceptance criteria.
+
+## Stage 3b1 explicit management CLI
+
+The shipping executable accepts `errors-init --journal NEW_PATH`,
+`errors-copy --from-v1 EXISTING_V1 --journal NEW_V2`,
+`errors-export --journal EXISTING_V2 [--errors-jsonl PATH]
+[--outstanding-jsonl PATH]`, and `errors-verify [--errors-jsonl PATH]
+[--outstanding-jsonl PATH]`. Export and verify require at least one JSONL
+path. Both kinds requested in one export share a read snapshot. Init/copy
+refuse existing journal paths and companions; copy leaves the v1 source intact.
+All four verbs are opt-in: they never process documents, activate v2 for
+run/repair, or migrate a path in place. Successful management commands exit 0
+without stdout records or diagnostics; syntax and effects refusals exit 2
+with fixed tokens that contain no user path, source byte, private sink key, or
+freeform exception. Exit 1 remains a document-processing outcome.
+
+Use one trusted, exclusive local directory for each export. Publication is
+atomic per file, not across the JSONL/sidecar pair or both kinds. A process
+crash may leave a mismatched pair; verify then refuses until an explicit
+re-export. No parent-directory fsync or power-loss durability is promised.
+The release-active actual-binary proof is `experiments/errors/cli_check.d`.
 
 ## Stage 3a export boundary
 

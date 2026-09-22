@@ -94,7 +94,9 @@ typed options identically for JSON and ordered CLI tokens. It is the migration
 target, not a shipping input yet; the commands above continue to use the
 documented predecessor forms until #148's execution switch is reviewed. The
 filter registry now has an injectable typed-schema path for that compiler;
-`fix-mojibake` is migrated while retaining its exact predecessor adapter.
+`fix-mojibake` is migrated while retaining its exact predecessor adapter. The
+pure compiler now resolves injected stage/filter registries and canonical job
+identity, but does not execute documents or expose v3 flags yet.
 
 For `extract`, `--max-html-bytes` sets one raw-input and decoded-UTF-8 cap
 (default 1,048,576; maximum 8,388,608). Alternatively, `extract --config` reads a

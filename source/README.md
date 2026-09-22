@@ -39,6 +39,12 @@ stable `job:v3:` identity. Stable stage-instance IDs are distinct from
 registered implementation names. This subtree has no registry or I/O import,
 and the shipping CLI does not consume v3 yet.
 
+[`composition/`](composition/README.md) compiles that model through injected
+stage and filter registries without importing concrete implementations. It
+retains stage-instance identity and validates exact option types, relative
+stage order, and declared before/after/no-filter placement. Compilation is
+tested but not wired to document execution or shipping CLI flags.
+
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`
 also importing filter modules for registration and filters importing
@@ -87,6 +93,10 @@ declaration is descriptive, not an enforced RSS limit. The existing v1
 `--config` path remains unchanged. Registration and parsing do not reserve resources or establish
 production document-stage backpressure; F04's high-edit content path still
 needs measurement. The CLI's bounded local file queue is a separate seam.
+[`stages/text_transform.d`](stages/text_transform.d) is the self-registering
+no-op document map used by compiled jobs whose content work is an ordered
+filter chain. Its declared `before` placement is metadata until execution is
+wired.
 
 [`effects/runner.d`](effects/runner.d) defines typed `Source`, `Parser`, and
 `Sink` ports and the one-document-at-a-time `runEffects` composition root.

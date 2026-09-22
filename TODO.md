@@ -138,8 +138,10 @@ do not gate that release.
       strict duplicate-aware JSON parser, canonical serializer/identity,
       ordered typed CLI-token lowering, and v1/default lowering are tested.
       Stable stage-instance IDs are distinct from registered implementation
-      names. Filter resolution is now injectable and `fix-mojibake` has a
-      registry-owned typed option schema plus its exact v1 adapter. The
+      names. Filter/stage resolution is injectable; the pure composition
+      compiler retains instance IDs and identity, validates option types/order
+      and filter placement, and `fix-mojibake` has a registry-owned typed
+      option schema plus its exact v1 adapter. The
       shipping CLI and execution engine are not switched yet; v3 flags/config
       must not be advertised as available until that slice lands.
 - [x] Config file using JSON via Phobos `std.json` (no added dependency),

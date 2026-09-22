@@ -2,8 +2,10 @@
 module effects.metadata_route_cli;
 
 import content.pieces : Content, ContentPiece;
-import core.stdc.errno : errno, ENOENT;
-import core.sys.posix.sys.stat : lstat, stat, stat_t, S_ISDIR, S_ISREG, S_ISLNK;
+import core.stdc.errno : errno, EINTR, ENOENT;
+import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
+import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t, S_ISDIR, S_ISREG, S_ISLNK;
+import core.sys.posix.unistd : close, posixRead = read;
 import domain.document : Document, OutputName, SourceLocator;
 import effects.atomic_piece_sink : OutputPolicyViolation;
 import effects.html_metadata_stage : htmlMetadataPlan;
@@ -17,10 +19,11 @@ import filters.mojibake;
 import filters.normalize;
 import filters.punctuation;
 import pipeline : Pipeline;
+import std.digest.sha : SHA256;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, runStage;
 import std.algorithm.sorting : sort;
-import std.file : SpanMode, dirEntries, mkdir, read;
+import std.file : SpanMode, dirEntries, mkdir, read, thisExePath;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, extension, relativePath;
 import std.stdio : stderr;
@@ -32,6 +35,49 @@ private struct Options {
     string filters = "normalize-line-endings,strip-control";
     bool retry;
     bool hasInput, hasContent, hasMetadata, hasManifest, hasFilters;
+}
+
+private enum size_t maxRouteFiles = 65_536;
+private enum size_t maxRouteNameBytes = 16 * 1024 * 1024;
+
+/// Bind both independent sink revisions to the running binary, as the v1
+/// single-sink CLI does. Check the opened inode/size before and after hashing.
+private ubyte[32] runningExecutableDigest() {
+    auto path = thisExePath();
+    if (!path.length) throw new Exception("running executable unavailable");
+    stat_t before, opened, after;
+    if (lstat(path.toStringz, &before) != 0 || !S_ISREG(before.st_mode))
+        throw new Exception("running executable is not a plain file");
+    int fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) throw new Exception("running executable cannot be opened");
+    scope(exit) close(fd);
+    if (fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode) ||
+        before.st_dev != opened.st_dev || before.st_ino != opened.st_ino ||
+        before.st_size != opened.st_size)
+        throw new Exception("running executable changed before hashing");
+    SHA256 digest;
+    ubyte[64 * 1024] buffer;
+    ulong total;
+    while (true) {
+        auto count = posixRead(fd, buffer.ptr, buffer.length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) throw new Exception("running executable read failed");
+        if (count == 0) break;
+        digest.put(buffer[0 .. cast(size_t) count]);
+        total += cast(ulong) count;
+    }
+    if (lstat(path.toStringz, &after) != 0 ||
+        opened.st_dev != after.st_dev || opened.st_ino != after.st_ino ||
+        opened.st_size != after.st_size || total != cast(ulong) opened.st_size)
+        throw new Exception("running executable changed while hashing");
+    return digest.finish();
+}
+
+private ubyte[32] routeConfigDigest(string domain, string config,
+    ubyte[32] executable) {
+    ubyte[] identity = (cast(const(ubyte)[]) (domain ~ config)).dup;
+    identity ~= executable[];
+    return configDigest(identity);
 }
 
 private bool parseOptions(const string[] args, ref Options o) {
@@ -181,21 +227,30 @@ private Input[] preflight(ref Options o) {
         throw new OutputPolicyViolation("invalid input file");
     checkedAncestors(tree ? o.input : dirName(o.input));
     Input[] files;
+    size_t nameBytes;
+    void admit(string path, string relative) {
+        if (files.length == maxRouteFiles)
+            throw new OutputPolicyViolation("route file admission limit");
+        auto suffix = extension(path).toLower;
+        if (suffix != ".html" && suffix != ".htm")
+            throw new OutputPolicyViolation("route accepts HTML files only");
+        auto name = OutputName(relative).text;
+        if (name.length > maxRouteNameBytes - nameBytes)
+            throw new OutputPolicyViolation("route name admission limit");
+        nameBytes += name.length;
+        files ~= Input(path, name);
+    }
     if (tree) {
         foreach (entry; dirEntries(o.input, SpanMode.depth, false)) {
             auto path = clean(entry.name);
             if (entry.isSymlink) throw new OutputPolicyViolation("symlink in input tree");
             if (entry.isDir) { checkedEntry(path, true); continue; }
             checkedEntry(path, false);
-            files ~= Input(path, relativePath(path, o.input));
+            admit(path, relativePath(path, o.input));
         }
-    } else files ~= Input(o.input, baseName(o.input));
+    } else admit(o.input, baseName(o.input));
     bool[string] names;
     foreach (ref file; files) {
-        auto suffix = extension(file.path).toLower;
-        if (suffix != ".html" && suffix != ".htm")
-            throw new OutputPolicyViolation("route accepts HTML files only");
-        file.name = OutputName(file.name).text;
         if (file.name in names) throw new OutputPolicyViolation("duplicate logical output name");
         names[file.name] = true;
         checkedTarget(o.contentRoot, file.name, false);
@@ -239,9 +294,10 @@ int runMetadataRoute(const string[] args) {
         auto files = preflight(o);
         auto chain = Pipeline.build(o.filters.split(","));
         auto plan = htmlMetadataPlan();
-        auto contentHash = configDigest(cast(const(ubyte)[])
-            ("route-content:v1:" ~ o.filters));
-        auto metadataHash = configDigest(cast(const(ubyte)[]) "route-metadata:v1:html-metadata");
+        auto executable = runningExecutableDigest();
+        auto contentHash = routeConfigDigest("route-content:v2:", o.filters, executable);
+        auto metadataHash = routeConfigDigest("route-metadata:v2:",
+            "html-metadata", executable);
         scope manifest = new LocalManifest(o.manifest);
         bool incomplete;
         foreach (file; files) {

@@ -2,9 +2,11 @@
 module experiments.metadata_route.cli_check;
 
 import domain.document : Document, OutputName, SourceLocator;
+import effects.local_manifest : LocalManifest, SinkKey, SinkState,
+    configDigest, inputDigest;
 import std.algorithm.searching : canFind;
 import std.conv : to, octal;
-import std.file : exists, mkdir, readText, remove, rmdirRecurse, symlink,
+import std.file : copy, exists, mkdir, read, readText, remove, rmdirRecurse, symlink,
     tempDir, write;
 import std.json : parseJSON;
 import std.path : buildPath;
@@ -12,8 +14,10 @@ import std.process : execute;
 import std.stdio : writeln;
 import std.string : toStringz;
 import std.uuid : randomUUID;
+import std.digest.sha : sha256Of;
 import core.sys.posix.unistd : link;
 import core.sys.posix.sys.stat : chmod, stat, stat_t;
+import core.sys.posix.sys.resource : getrusage, RUSAGE_CHILDREN, rusage;
 import core.stdc.stdlib : free;
 import std.string : fromStringz;
 
@@ -37,7 +41,8 @@ private string html = `<html><head><title>Fallback</title>` ~
     `</head><body>Alpha` ~ "\r\n" ~ `Beta</body></html>`;
 
 void main(string[] args) {
-    need(args.length == 2, "expected shipping binary path");
+    need(args.length == 2 || (args.length == 3 && args[2] == "--cap"),
+        "expected shipping binary path and optional --cap");
     auto canonicalTemp = realpath(tempDir().toStringz, null);
     need(canonicalTemp !is null, "temporary directory resolution");
     scope(exit) free(canonicalTemp);
@@ -45,6 +50,31 @@ void main(string[] args) {
         "scrubbed-metadata-route-" ~ randomUUID().toString);
     mkdir(root);
     scope(exit) rmdirRecurse(root);
+    if (args.length == 3) {
+        auto inputRoot = buildPath(root, "cap-input");
+        auto contentRoot = buildPath(root, "cap-content");
+        auto metadataRoot = buildPath(root, "cap-metadata");
+        auto capDb = buildPath(root, "cap.db");
+        mkdir(inputRoot); mkdir(contentRoot); mkdir(metadataRoot);
+        foreach (i; 0 .. 65_537)
+            write(buildPath(inputRoot, i.to!string ~ ".html"), "");
+        auto result = execute([args[1], "route-metadata", "--input", inputRoot,
+            "--content-output", contentRoot, "--metadata-output", metadataRoot,
+            "--manifest", capDb]);
+        need(result.status == 2 && result.output == "scrubbed: route-refused\n",
+            "cap+1 refusal");
+        need(!exists(capDb) && !exists(buildPath(contentRoot, "0.html")) &&
+            !exists(buildPath(metadataRoot, "0.html")),
+            "cap+1 caused manifest or output publication");
+        rusage usage;
+        need(getrusage(RUSAGE_CHILDREN, &usage) == 0 &&
+            // LDC's Darwin rusage binding exposes the 14 longs after time
+            // as opaque; Darwin's first is ru_maxrss, measured in bytes.
+            usage.ru_opaque[0] < 512L * 1024 * 1024,
+            "cap+1 child exceeded 512 MiB RSS ceiling");
+        writeln("metadata route cap+1 check: 65,537 entries refused before publication");
+        return;
+    }
     size_t checks;
     auto call(string[] argv, int expected) {
         auto result = execute([args[1]] ~ argv);
@@ -87,6 +117,26 @@ void main(string[] args) {
     call(route, 0);
     need(readText(contentFile) == priorContent &&
         readText(metadataFile) == priorMetadata, "verified replay changed bytes");
+    auto oldContentInode = inode(contentFile);
+    auto oldMetadataInode = inode(metadataFile);
+    auto variant = buildPath(root, "scrubbed-variant");
+    copy(args[1], variant);
+    need(chmod(variant.toStringz, octal!"755") == 0,
+        "variant executable permission");
+    auto signing = execute(["/usr/bin/codesign", "--force", "--sign", "-",
+        "--identifier", "scrubbed-route-variant", variant]);
+    need(signing.status == 0, "variant binary signing failed");
+    auto variantRoute = [variant] ~ route;
+    auto changedBinary = execute(variantRoute);
+    need(changedBinary.status == 2 &&
+        changedBinary.output == "scrubbed: route-refused\n",
+        "changed binary incorrectly verified old sinks, exit " ~
+            changedBinary.status.to!string ~ " output " ~ changedBinary.output);
+    changedBinary = execute(variantRoute ~ "--retry");
+    need(changedBinary.status == 0 && inode(contentFile) != oldContentInode &&
+        inode(metadataFile) != oldMetadataInode,
+        "changed binary did not revise both sink identities");
+    checks += 2;
     auto tree = buildPath(root, "tree");
     mkdir(tree); mkdir(buildPath(tree, "chapter"));
     write(buildPath(tree, "chapter", "one.html"), html);
@@ -135,6 +185,69 @@ void main(string[] args) {
         need(record["documentId"].str == id, "nested typed identity " ~ name);
     }
     call(treeRoute, 0);
+    auto ownerA = buildPath(root, "owner-a");
+    auto ownerB = buildPath(root, "owner-b");
+    auto ownerContent = buildPath(root, "owner-content");
+    auto ownerMetadata = buildPath(root, "owner-metadata");
+    auto ownerDb = buildPath(root, "owner.db");
+    mkdir(ownerA); mkdir(ownerB); mkdir(ownerContent); mkdir(ownerMetadata);
+    write(buildPath(ownerA, "shared.html"), html);
+    write(buildPath(ownerB, "shared.html"), html);
+    auto ownerRoute = ["route-metadata", "--input", ownerA,
+        "--content-output", ownerContent, "--metadata-output", ownerMetadata,
+        "--manifest", ownerDb];
+    call(ownerRoute, 0);
+    auto ownerContentFile = buildPath(ownerContent, "shared.html");
+    auto ownerMetadataFile = buildPath(ownerMetadata, "shared.html");
+    auto ownerContentInode = inode(ownerContentFile);
+    auto ownerMetadataInode = inode(ownerMetadataFile);
+    auto ownerContentBytes = readText(ownerContentFile);
+    auto ownerMetadataBytes = readText(ownerMetadataFile);
+    auto executableHash = sha256Of(cast(const(ubyte)[]) read(args[1]));
+    ubyte[32] routeHash(string domain, string config) {
+        ubyte[] material = (cast(const(ubyte)[]) (domain ~ config)).dup;
+        material ~= executableHash[];
+        return configDigest(material);
+    }
+    auto ownerDocument = Document(SourceLocator("local-html:v1", ownerA,
+        "shared.html"), OutputName("shared.html"));
+    auto ownerInput = inputDigest(cast(const(ubyte)[]) html);
+    auto ownerContentKey = SinkKey(ownerDocument.id, ownerInput,
+        routeHash("route-content:v2:", "normalize-line-endings,strip-control"),
+        "local-content:v1");
+    auto ownerMetadataKey = SinkKey(ownerDocument.id, ownerInput,
+        routeHash("route-metadata:v2:", "html-metadata"),
+        "local-metadata:v1");
+    scope ownerManifest = new LocalManifest(ownerDb);
+    auto priorContentRow = ownerManifest.lookup(ownerContentKey).get;
+    auto priorMetadataRow = ownerManifest.lookup(ownerMetadataKey).get;
+    need(priorContentRow.state == SinkState.committed &&
+        priorMetadataRow.state == SinkState.committed, "initial owner ledger rows");
+    ownerManifest.close();
+    ownerRoute[2] = ownerB;
+    call(ownerRoute ~ "--retry", 2);
+    need(inode(ownerContentFile) == ownerContentInode &&
+        inode(ownerMetadataFile) == ownerMetadataInode &&
+        readText(ownerContentFile) == ownerContentBytes &&
+        readText(ownerMetadataFile) == ownerMetadataBytes,
+        "cross-document route changed prior outputs");
+    scope reopenedOwner = new LocalManifest(ownerDb);
+    auto afterContentRow = reopenedOwner.lookup(ownerContentKey).get;
+    auto afterMetadataRow = reopenedOwner.lookup(ownerMetadataKey).get;
+    auto otherDocument = Document(SourceLocator("local-html:v1", ownerB,
+        "shared.html"), OutputName("shared.html"));
+    auto otherContentKey = ownerContentKey;
+    otherContentKey.document = otherDocument.id;
+    auto otherMetadataKey = ownerMetadataKey;
+    otherMetadataKey.document = otherDocument.id;
+    need(afterContentRow.state == priorContentRow.state &&
+        afterContentRow.attempt == priorContentRow.attempt &&
+        afterMetadataRow.state == priorMetadataRow.state &&
+        afterMetadataRow.attempt == priorMetadataRow.attempt &&
+        reopenedOwner.lookup(otherContentKey).isNull &&
+        reopenedOwner.lookup(otherMetadataKey).isNull,
+        "cross-document route changed prior ledger rows");
+    reopenedOwner.close();
     auto other = buildPath(root, "other");
     mkdir(other);
     call(["route-metadata", "--input", tree, "--content-output", tree,

@@ -103,7 +103,7 @@ string digestDiagnostic(ubyte[32] digest) {
     return "sha256:" ~ toHexString!(LetterCase.lower)(digest).idup;
 }
 
-private enum schema = `
+package enum v1Schema = `
 CREATE TABLE sink_state(
  document_id TEXT NOT NULL,
  input_sha256 BLOB NOT NULL CHECK(length(input_sha256)=32),
@@ -125,12 +125,12 @@ private void require(bool okay, string message) {
     if (!okay) throw new Exception("local manifest: " ~ message);
 }
 
-private long nowUtcMs() {
+package long nowUtcMs() {
     auto now = Clock.currTime;
     return now.toUnixTime * 1000 + now.fracSecs.total!"msecs";
 }
 
-private void validateKey(ref const(SinkKey) key) {
+package void validateKey(ref const(SinkKey) key) {
     auto id = key.document.text;
     bool prefix = (id.length == 71 && id[0 .. 7] == "doc:v1:") ||
         (id.length == 73 && id[0 .. 9] == "child:v1:");
@@ -142,7 +142,7 @@ private void validateKey(ref const(SinkKey) key) {
         "sink key must be nonempty and NUL-free");
 }
 
-private string resolvedName(string path) {
+package string resolvedName(string path) {
     require(path.length != 0 && path.indexOf('\0') < 0, "invalid path");
     auto absolute = absolutePath(path);
     require(exists(dirName(absolute)), "path parent missing");
@@ -154,7 +154,7 @@ private string resolvedName(string path) {
 
 private extern(C) char* realpath(const(char)*, char*);
 
-private void safeRegularOrAbsent(string path, bool outputDestination = false) {
+package void safeRegularOrAbsent(string path, bool outputDestination = false) {
     bool link;
     try link = isSymlink(path);
     catch (FileException failure) {
@@ -171,7 +171,7 @@ private void safeRegularOrAbsent(string path, bool outputDestination = false) {
     }
 }
 
-private bool sameInode(string left, string right) {
+package bool sameInode(string left, string right) {
     if (!exists(left) || !exists(right)) return false;
     stat_t a, b;
     require(stat(left.toStringz, &a) == 0 && stat(right.toStringz, &b) == 0,
@@ -266,7 +266,7 @@ version (FailurePolicyHarness) {
     }
 }
 
-private ubyte[32] hashFile(string path) {
+package ubyte[32] hashFile(string path) {
     version (FailurePolicyHarness) injectedRehashFault(path, "open");
     auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
     if (fd < 0) {
@@ -329,7 +329,7 @@ final class LocalManifest {
                 exec("PRAGMA journal_mode=WAL");
                 exec("PRAGMA synchronous=FULL");
                 exec("BEGIN IMMEDIATE");
-                try { exec(schema); exec("COMMIT"); }
+                try { exec(v1Schema); exec("COMMIT"); }
                 catch (Throwable failure) { exec("ROLLBACK"); throw failure; }
             } else {
                 require(application == 1396920898 && schemaVersion == 1,

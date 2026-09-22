@@ -1,14 +1,13 @@
 # Error events and outstanding failures (F13 staged contract)
 
-Stage 1 adds no error-event journal or JSONL output. The release-active
-`experiments/errors/check.d` pins existing v1 behavior only: exact per-sink
-failed/uncertain state, explicit retry, fail-stop on lost acknowledgment, and
-refusal of an incompatible manifest version. The current v1 `sink_state` table
-is a last-state ledger, **not** immutable historical error events. Do not
-interpret a successful Stage 1 check as proof of the F13 JSONL acceptance
-criteria.
+Stage 2 adds an effects-only v2 SQLite journal and explicit offline v1-to-v2
+copy. The release-active `experiments/errors/check.d` pins v1 behavior and
+the v2 effects boundary. The shipping CLI still uses v1; it neither creates
+nor opens v2, and there is no JSONL exporter yet. The v1 `sink_state` table is
+a last-state ledger, **not** immutable historical error events. Do not
+interpret this check as proof of the F13 JSONL acceptance criteria.
 
-Run the Stage 1 checker against a release executable built with
+Run the Stage 2 checker against a release executable built with
 `DFLAGS=-d-version=FailurePolicyHarness dub build --build=release
 --compiler=ldc2 --force`:
 
@@ -16,14 +15,41 @@ Run the Stage 1 checker against a release executable built with
 ldc2 -O3 -release -Isource \
   source/domain/document.d source/content/pieces.d \
   source/effects/atomic_piece_sink.d source/effects/sqlite_ffi.d \
-  source/effects/local_manifest.d experiments/errors/check.d \
+  source/effects/local_manifest.d source/effects/failure_journal.d \
+  experiments/errors/check.d \
   third_party/sqlite/sqlite3.o -of=/tmp/scrubbed-errors-check
 /tmp/scrubbed-errors-check ./scrubbed
 ```
 
-## Required v2 durability and migration invariants (not implemented yet)
+## Stage 2 effects boundary
 
-The successor must use one authoritative versioned SQLite journal. An event
+`createV2(newPath)` explicitly creates a fresh v2 database. `copyV1ToV2`
+requires an existing, valid v1 database and a separate absent destination;
+it checkpoints a quiescent source, stages and validates the new v2 database,
+and renames it into view without changing source rows. It rejects existing
+targets and companion paths, aliases, foreign/corrupt/version-mismatched v1,
+and busy checkpoint state. A copied failed/uncertain row becomes a `legacy-v1`
+outstanding baseline with no invented event, run, or timestamp. The full raw
+sink key stays private; a distinct random opaque public sink ID is persisted
+per raw sink value and reused across reopen.
+
+`FailureJournal` is the exclusive v2 state owner; the v1 `LocalManifest`
+rejects its version. Its fixed-code failure append, exact-key outstanding
+transition, and sink-state transition share one FULL-synchronous transaction.
+The handle fails closed after a begin/write/commit/read-back acknowledgment
+failure. Planned retry keeps outstanding; only verified publication records
+retry success and clears that key. Inspect invalidation records uncertainty.
+On reopen, inconsistent outstanding, sink-state, event, or identity mappings
+produce an explicit repair-needed refusal. This is process-crash evidence at
+SQLite's documented FULL-synchronous boundary, not a claim about directory
+fsync or power loss during the final staged-file rename.
+
+Stage 3 owns shipping CLI activation and bounded JSONL materialization. There
+is no automatic same-path migration, live stream, or S3 journal in Stage 2.
+
+## Durability and migration invariants
+
+The effects boundary uses one authoritative versioned SQLite journal. An event
 append and its exact outstanding `SinkKey` transition must commit and
 acknowledge together. Failure of begin, write, commit, or acknowledgment must
 stop further processing. Retry success removes only its matching outstanding
@@ -31,11 +57,12 @@ key; it never erases historical events. On restart, journal outstanding and
 manifest failed/uncertain state must reconcile or refuse with an explicit
 repair-needed result, never silently skip.
 
-Existing v1 continues to work without F13. F13 against v1 must refuse with an
-actionable opt-in upgrade requirement. Upgrade is an offline copy to a **new**
-v2 DB path after the writer is quiescent and checkpointed: validate integrity
+Existing v1 continues to work without F13. Stage 3 must refuse F13 activation
+against v1 with an actionable opt-in upgrade requirement. Upgrade is an offline
+copy to a **new** v2 DB path after the writer is quiescent and checkpointed:
+validate integrity
 and version, copy every exact sink-state key and field, compare counts and
-fields before making v2 visible, and leave v1 untouched. Failed/uncertain v1
+fields before making v2 visible, and leave v1 rows untouched. Failed/uncertain v1
 rows become outstanding `legacy-v1` baselines with unknown run/event identity;
 do not fabricate historical events. A later successful retry clears only its
 matching baseline atomically. Historical event export starts when v2 begins
@@ -59,18 +86,18 @@ for the same exact sink key; if the predecessor is a migrated v1 baseline,
 `retry_of` is null because no event was forged.
 
 The raw `SinkKey.sink` is **internal only**: v1 permits arbitrary nonempty,
-NUL-free strings, including paths, URLs, and credentials. V2 must persist a
+NUL-free strings, including paths, URLs, and credentials. V2 persists a
 private mapping from each distinct raw sink value to a randomly generated,
 opaque UUID `sink_id` before that identity is exposed. The mapping is stable
 across restart and reused for historical events, outstanding rows, retry,
 and v1-copy baselines; it must be created transactionally with the v2 record
 that first uses it. It is neither a raw value nor a reversible/plain hash of
-one. The full public sink identity is
+one. The full public sink identity for Stage 3 export is
 `(document_id,input_sha256,config_sha256,sink_id)`; the full internal key
 retains the exact raw sink value for migration, retry, and reconciliation.
-Refuse export if a persisted mapping is missing or inconsistent; never fall
-back to emitting a raw sink value. This is a known durable v2 shape constraint,
-not an implemented mapping in Stage 1.
+Stage 3 must refuse export if a persisted mapping is missing or inconsistent;
+never fall back to emitting a raw sink value. This is an implemented effects-layer shape
+constraint; Stage 3 has not shipped the wire surface.
 
 The byte-exact history fixture below represents a failure in sink A, a failure
 in sink B for the same document, then a successful retry of A. The repeated

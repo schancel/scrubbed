@@ -42,6 +42,8 @@ mixin template ProcessingOptions() {
     string errorJournal;
     @(NamedArgument("error-retry").Description("Explicitly retry unresolved v2 outputs"))
     bool errorRetry;
+    @(NamedArgument("error-targeted").Description("Retry only exact local v2 outstanding targets"))
+    bool errorTargeted;
     @(NamedArgument("jsonl-fields").Description("Comma-separated top-level JSON text fields for stdin/stdout JSONL"))
     string jsonlFields;
     @(NamedArgument("dataset-namespace").Description("Stable JSONL dataset namespace"))
@@ -148,6 +150,7 @@ private int process(T)(ref T options, const string[] original) {
     if (present(original, "--error-journal"))
         forwarded ~= "--error-journal=" ~ options.errorJournal;
     if (options.errorRetry) forwarded ~= "--error-retry";
+    if (options.errorTargeted) forwarded ~= "--error-targeted";
     if (present(original, "--jsonl-fields"))
         forwarded ~= "--jsonl-fields=" ~ options.jsonlFields;
     if (present(original, "--dataset-namespace"))
@@ -165,7 +168,8 @@ private int process(T)(ref T options, const string[] original) {
 int runCommands(string[] argv) {
     // The opt-in failure route must contain all parser and runtime diagnostics:
     // ordinary CLI diagnostics may echo a user path or filter argument.
-    if (present(argv, "--error-journal") || present(argv, "--error-retry")) {
+    if (present(argv, "--error-journal") || present(argv, "--error-retry") ||
+        present(argv, "--error-targeted")) {
         string[] forwarded = ["scrubbed"];
         size_t first = 1;
         if (argv.length > 1 && (argv[1] == "run" || argv[1] == "clean" ||

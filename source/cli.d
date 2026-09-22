@@ -640,7 +640,7 @@ private void v2Explain(string status, SinkKey key, string sinkId,
 private ManifestOutcome processV2One(FailureJournal journal, string databasePath,
         string file, string inputRoot, string outputRoot, bool inputIsDir,
         const ref Pipeline chain, ulong reservedBytes, ubyte[32] configHash,
-        bool retry) {
+        bool retry, bool targeted) {
     // Until the input digest is trustworthy there is no key to journal.
     if (isSymlink(file) || getSize(file) != reservedBytes)
         throw new V2FatalFailure;
@@ -656,6 +656,9 @@ private ManifestOutcome processV2One(FailureJournal journal, string databasePath
     auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
     SinkKey key = SinkKey(id, inputDigest(cast(const(ubyte)[])text),
         configHash, "local-primary:v1");
+    if (targeted && !journal.hasOutstanding(key))
+        throw new V2DocumentFailure(key, "target-mismatch", "inspect",
+            "target-mismatch", true);
     auto destination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
     bool replacing;
     try {
@@ -738,6 +741,13 @@ private ManifestOutcome processV2One(FailureJournal journal, string databasePath
         throw new V2DocumentFailure(key, touched ? "uncertain" : "failed",
             phase, code, true);
     }
+}
+
+private bool isLocalPrimaryTarget(FailureJournal journal, string file,
+        string inputRoot, bool inputIsDir) {
+    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
+    auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
+    return journal.hasOutstandingForDocumentSink(id, "local-primary:v1");
 }
 
 version (FailurePolicyHarness) {
@@ -900,6 +910,7 @@ int runApp(string[] args) {
     bool manifestRetry;
     string errorJournalPath;
     bool errorRetry;
+    bool errorTargeted;
     string jsonlFields, datasetNamespace, sourceKey;
     size_t maxJsonlLineBytes, maxJsonlOutputBytes;
     const filtersExplicit = args.canFindOption("--filters");
@@ -933,6 +944,7 @@ int runApp(string[] args) {
         "manifest-retry", "Inspect and replace unresolved manifest output", &manifestRetry,
         "error-journal", "Existing opt-in v2 failure journal", &errorJournalPath,
         "error-retry", "Explicitly retry unresolved v2 outputs", &errorRetry,
+        "error-targeted", "Retry only exact local v2 outstanding targets", &errorTargeted,
         "jsonl-fields", "Comma-separated selected JSONL text fields", &jsonlFields,
         "dataset-namespace", "Stable JSONL dataset namespace", &datasetNamespace,
         "source-key", "Stable JSONL source key", &sourceKey,
@@ -953,10 +965,13 @@ int runApp(string[] args) {
         throw new Exception("--error-journal path must be nonempty");
     if (errorRetry && !errorJournalPath.length)
         throw new Exception("--error-retry requires --error-journal");
+    if (errorTargeted && (!errorJournalPath.length || !errorRetry))
+        throw new Exception("--error-targeted requires --error-journal and --error-retry");
     if (errorJournalPath.length && (manifestExplicit || manifestRetry || dryRun))
         throw new Exception("v2 journal is exclusive with manifest and dry-run");
     if (jsonlRoute) {
-        if (manifestPath.length || manifestRetry || errorJournalPath.length || errorRetry)
+        if (manifestPath.length || manifestRetry || errorJournalPath.length ||
+            errorRetry || errorTargeted)
             throw new Exception("--manifest is unavailable in JSONL mode");
         if (inputPath != "-" || outputPath != "-" ||
             !fieldsExplicit || !namespaceExplicit || !sourceExplicit ||
@@ -1045,7 +1060,7 @@ int runApp(string[] args) {
         if (pathIsWithin(outputPath, inputPath))
             throw new Exception("output directory must not be inside the input tree");
     }
-    preflightOutput(outputPath, inputIsDir);
+    if (!errorTargeted) preflightOutput(outputPath, inputIsDir);
     if (manifestPath.length) {
         manifestPath = resolveExistingPrefix(manifestPath);
         preflightManifest(manifestPath, inputPath, outputPath, inputIsDir);
@@ -1076,7 +1091,7 @@ int runApp(string[] args) {
     }
     scope(exit) if (manifest !is null) manifest.close();
     scope(exit) if (errorJournal !is null) errorJournal.close();
-    if (!dryRun)
+    if (!dryRun && !errorTargeted)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
     const chainLabel = chain.names.join(" -> ");
@@ -1093,7 +1108,8 @@ int runApp(string[] args) {
                     manifestCompletedPrefix);
             else if (errorJournalPath.length)
                 decision = processV2One(errorJournal, errorJournalPath, file, inputPath,
-                    outputPath, inputIsDir, chain, bytes, configHash, errorRetry);
+                    outputPath, inputIsDir, chain, bytes, configHash, errorRetry,
+                    errorTargeted);
             else
                 decision.status = processOne(file, inputPath, outputPath, inputIsDir,
                     chain, bytes, dryRun) ? "changed" : "unchanged";
@@ -1179,6 +1195,8 @@ int runApp(string[] args) {
                     throw new Exception(reason);
                 }
                 if (!entry.isFile) continue;
+                if (errorTargeted && !isLocalPrimaryTarget(errorJournal,
+                    entry.name, inputPath, inputIsDir)) continue;
                 bool admissionCanceled;
                 try {
                     if (explain) pending.add(entry.name);
@@ -1199,22 +1217,25 @@ int runApp(string[] args) {
                 }
             }
         } else {
-            bool admissionCanceled;
-            try {
-                if (explain) pending.add(inputPath);
-                auto bytes = getSize(inputPath);
-                if (!scheduler.submit(inputPath, bytes)) {
-                    admissionCanceled = true;
-                    workerFatalAdmission = true;
-                    throw new Exception("input admission canceled: " ~ inputPath);
+            if (!errorTargeted || isLocalPrimaryTarget(errorJournal,
+                    inputPath, inputPath, inputIsDir)) {
+                bool admissionCanceled;
+                try {
+                    if (explain) pending.add(inputPath);
+                    auto bytes = getSize(inputPath);
+                    if (!scheduler.submit(inputPath, bytes)) {
+                        admissionCanceled = true;
+                        workerFatalAdmission = true;
+                        throw new Exception("input admission canceled: " ~ inputPath);
+                    }
                 }
-            }
-            catch (Exception error) {
-                if (explain && !admissionCanceled && !errorJournalPath.length) {
-                    pending.remove(inputPath);
-                    explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
+                catch (Exception error) {
+                    if (explain && !admissionCanceled && !errorJournalPath.length) {
+                        pending.remove(inputPath);
+                        explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
+                    }
+                    throw error;
                 }
-                throw error;
             }
         }
     } catch (Exception error) {

@@ -33,6 +33,32 @@ Build it with `ldc2 -i -O3 -release -Isource
 experiments/retry_targets/check.d third_party/sqlite/sqlite3.o
 -of=.dub/retry-targets-check`, then run `.dub/retry-targets-check`.
 
+## F14 Stage 2 local targeted retry
+
+`run` and `repair` accept `--error-targeted` only alongside an existing v2
+`--error-journal` and explicit `--error-retry`. This opt-in local file/tree
+route selects only documents with a current outstanding `local-primary:v1`
+sink before file-size admission, content reads, or output preflight. It does
+not materialize the target corpus. After hashing a selected input it requires
+the exact outstanding document/input/config/sink key; changed input or config
+reports a fixed `target-mismatch` and leaves the prior key and output alone.
+Matching targets reuse the v2 plan, publication-intent, rehash and commit
+path; a repeat skips cleared targets without rewriting outputs. Other sinks,
+roots, and missing sources may still have outstanding rows: success is not a
+claim that the journal is globally empty. Use `errors-export` and
+`errors-verify` for inspection. The route does not handle multi-sink
+publication, non-seekable sources or S3. Default v1 and plain v2
+`--error-retry` behavior remain unchanged.
+
+`experiments/retry_targets/live_cli_check.d` drives the shipping executable
+through exact mismatch, multi-target, unrelated-sink preservation,
+pre-admission over-cap skip, idempotence, privacy and path checks. Its macOS
+resource fixture retries 384 256-KiB targets (96 MiB total) under a
+one-document/one-open-input cap, samples child RSS/FDs, and requires a D
+retain-all control to exceed the 64 MiB RSS limit. A separate release-mode
+`ManifestCliHarness` executable covers a deterministic crash after sink
+publication; that marker code is absent from the shipping binary.
+
 Stage 2 adds an effects-only v2 SQLite journal and explicit offline v1-to-v2
 copy. The release-active `experiments/errors/check.d` pins v1 behavior and
 the v2 effects boundary. Stage 3a adds an opt-in effects-only JSONL exporter,

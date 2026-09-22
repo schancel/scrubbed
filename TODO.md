@@ -269,6 +269,14 @@ is useful, but it is not sufficient on its own.
       later files, and missing-vs-unsafe output parents (`docs/failure-policy.md`).
       This does not implement a concrete JSONL error log or replay (#18/#19),
       or extend the policy to JSONL stdin/stdout.
+- [~] Emit structured errors and outstanding failures (F13/#18). An
+      effects-only v2 SQLite journal now supports fixed-code events, exact-key
+      outstanding state, durable publication intent/recovery, stable opaque
+      public sink IDs, and explicit offline copy from v1
+      (`docs/error-events.md`). The shipping CLI still uses v1; v2 CLI
+      activation and JSONL export have not shipped. Their digest wire format
+      and atomicity boundary require an owner choice before the final
+      successor is factory-ready.
 - [~] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity

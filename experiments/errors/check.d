@@ -302,6 +302,33 @@ private void checkForgedIdentity(string root) {
     rawExec(db, "UPDATE sink_identity SET sink_id=raw_sink");
     expectRefusal(new FailureJournal(db),
         "planned-only forged raw sink identity accepted on reopen");
+
+    auto uuidRaw = "00000000-0000-4000-8000-0000000000aa";
+    auto planned = buildPath(root, "forged-uuid-planned.db");
+    createV2(planned);
+    auto plannedJournal = new FailureJournal(planned);
+    plannedJournal.plan(key(uuidRaw), buildPath(root, "forged-uuid-planned-output"));
+    need(plannedJournal.publicSinkId(uuidRaw) != uuidRaw,
+        "generated sink ID equals UUID-shaped raw sink");
+    rawExec(planned, "UPDATE sink_identity SET sink_id=raw_sink");
+    expectRefusal(plannedJournal.publicSinkId(uuidRaw),
+        "UUID-shaped raw sink identity accepted by live public getter");
+    plannedJournal.close();
+    expectRefusal(new FailureJournal(planned),
+        "UUID-shaped planned raw sink identity accepted on reopen");
+
+    auto referenced = buildPath(root, "forged-uuid-referenced.db");
+    createV2(referenced);
+    auto referencedJournal = new FailureJournal(referenced);
+    auto k = key(uuidRaw);
+    referencedJournal.plan(k, buildPath(root, "forged-uuid-referenced-output"));
+    referencedJournal.recordFailure(k, "sink", "sink-write-failed", true);
+    referencedJournal.close();
+    rawExec(referenced, `UPDATE sink_identity SET sink_id=raw_sink;
+        UPDATE error_event SET sink_id=(SELECT raw_sink FROM sink_identity);
+        UPDATE outstanding SET sink_id=(SELECT raw_sink FROM sink_identity);`);
+    expectRefusal(new FailureJournal(referenced),
+        "UUID-shaped referenced raw sink identity accepted on reopen");
 }
 
 private void checkPublicationFaults(string root) {
@@ -312,11 +339,11 @@ private void checkPublicationFaults(string root) {
         auto output = buildPath(root, "publication-output-" ~ point);
         auto journal = new FailureJournal(db);
         journal.plan(k, output);
-        write(output, "published");
         expectRefusal(journal.commitPublished(k, output,
             outputDigest(cast(const(ubyte)[]) "published")),
             "publication without durable intent accepted");
         journal.beginPublication(k);
+        write(output, "published");
         write(db ~ ".fault-v2-" ~ point, "");
         expectRefusal(journal.commitPublished(k, output,
             outputDigest(cast(const(ubyte)[]) "published")),

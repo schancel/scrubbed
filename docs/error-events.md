@@ -98,12 +98,16 @@ opaque UUID `sink_id` before that identity is exposed. The mapping is stable
 across restart and reused for historical events, outstanding rows, retry,
 and v1-copy baselines; it must be created transactionally with the v2 record
 that first uses it. It is neither a raw value nor a reversible/plain hash of
-one. The full public sink identity for Stage 3 export is
+one, even when the raw sink already looks like a UUID. The effects layer
+rejects a persisted public ID equal to its raw sink on reopen and read. The
+full public sink identity for Stage 3 export is
 `(document_id,input_sha256,config_sha256,sink_id)`; the full internal key
 retains the exact raw sink value for migration, retry, and reconciliation.
 Stage 3 must refuse export if a persisted mapping is missing or inconsistent;
 never fall back to emitting a raw sink value. This is an implemented effects-layer shape
 constraint; Stage 3 has not shipped the wire surface.
+Stage 3 must also validate stored public event and run IDs before export;
+Stage 2 does not expose those stored fields through a public-record API.
 
 The byte-exact history fixture below represents a failure in sink A, a failure
 in sink B for the same document, then a successful retry of A. The repeated

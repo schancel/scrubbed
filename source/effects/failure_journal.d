@@ -190,12 +190,13 @@ private string ensureSinkId(Database db, string raw) {
     auto rc = sqlite3_step(lookup);
     if (rc == SQLITE_ROW) {
         auto id = columnText(lookup, 0);
-        need(canonicalUuid4(id), "repair-needed");
+        need(canonicalUuid4(id) && id != raw, "repair-needed");
         return id;
     }
     need(rc == SQLITE_DONE, "identity-read-failed");
     foreach (_; 0 .. 16) {
         auto candidate = uuid();
+        if (candidate == raw) continue;
         auto add = db.prepare("INSERT OR IGNORE INTO sink_identity VALUES(?1,?2)");
         scope(exit) sqlite3_finalize(add);
         bindText(add, 1, raw);
@@ -302,11 +303,13 @@ private void checkV2Shape(Database db) {
         (document_id,input_sha256,config_sha256,sink_key)
         WHERE s.document_id IS NULL OR s.state!='planned'`) == 0,
         "repair-needed");
-    auto identities = db.prepare("SELECT sink_id FROM sink_identity");
+    auto identities = db.prepare("SELECT raw_sink,sink_id FROM sink_identity");
     scope(exit) sqlite3_finalize(identities);
     int rc;
     while ((rc = sqlite3_step(identities)) == SQLITE_ROW)
-        need(canonicalUuid4(columnText(identities, 0)), "repair-needed");
+        need(canonicalUuid4(columnText(identities, 1)) &&
+            columnText(identities, 0) != columnText(identities, 1),
+            "repair-needed");
     need(rc == SQLITE_DONE, "identity-read-failed");
 }
 
@@ -404,7 +407,7 @@ final class FailureJournal {
         bindText(s, 1, raw);
         need(sqlite3_step(s) == SQLITE_ROW, "repair-needed");
         auto id = columnText(s, 0);
-        need(canonicalUuid4(id), "repair-needed");
+        need(canonicalUuid4(id) && id != raw, "repair-needed");
         return id;
     }
     private void safeDestination(string destination) {

@@ -10,12 +10,23 @@ import effects.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree,
 import stages.contract : DecisionKind, ResourceDeclaration, StageDeclaration,
     StageDocument;
 import std.conv : to;
-import std.json : JSONType, parseJSON;
+import std.json : JSONType, JSONValue, parseJSON;
 import std.stdio : writeln;
 import std.string : indexOf;
 
 private void check(bool condition, string message) {
     if (!condition) throw new Exception(message);
+}
+
+private void checkCandidates(JSONValue field, string[] values, string[] rules,
+    long[] nodes) {
+    auto candidates = field["candidates"].array;
+    check(candidates.length == values.length && values.length == rules.length &&
+        rules.length == nodes.length, "candidate count mismatch");
+    foreach (i, candidate; candidates)
+        check(candidate["value"].str == values[i] &&
+            candidate["rule"].str == rules[i] &&
+            candidate["node"].integer == nodes[i], "candidate golden mismatch");
 }
 
 private string bytes(Content content) {
@@ -64,6 +75,16 @@ void main() {
             <meta property="og:url" content="https://fallback.test/second"></head>`,
             ["", "", "", "https://fallback.test/second"],
             ["absent", "absent", "absent", "selected"]),
+        Fixture(`<head><link rel="canonical" href="https://[:::]/">
+            <meta property="og:url" content="https://fallback.test/malformed"></head>`,
+            ["", "", "", "https://fallback.test/malformed"],
+            ["absent", "absent", "absent", "selected"]),
+        Fixture(`<head><link rel="canonical" href="https://[2001:db8::1]/">
+            <meta property="og:url" content="https://fallback.test/ipv6"></head>`,
+            ["", "", "", "https://fallback.test/ipv6"],
+            ["absent", "absent", "absent", "selected"]),
+        Fixture(`<head><link rel="canonical" href="https://[:]/"></head>`,
+            ["", "", "", ""], ["absent", "absent", "absent", "invalid"]),
     ];
     auto document = Document(SourceLocator("fixture:v1", "/PRIVATE/secret", "record"),
         OutputName("record.metadata.json"));
@@ -120,6 +141,23 @@ void main() {
                 json["fields"]["author"]["rule"].str == "author" &&
                 json["fields"]["date"]["rule"].str == "date",
                 "field precedence or source evidence mismatch");
+            checkCandidates(json["fields"]["title"], ["Fallback", "Café & Tea"],
+                ["title", "og:title"], [2, 4]);
+            checkCandidates(json["fields"]["author"], [`Ana "Q"`], ["author"], [6]);
+            checkCandidates(json["fields"]["date"], ["2024-02-29"], ["date"], [7]);
+            checkCandidates(json["fields"]["url"],
+                ["https://example.org/a?x=1&y=2", "https://elsewhere.org/a"],
+                ["link:canonical", "og:url"], [9, 11]);
+        }
+        if (fixtureIndex == 1) {
+            checkCandidates(json["fields"]["title"], ["One", "Two"],
+                ["og:title", "og:title"], [2, 3]);
+            checkCandidates(json["fields"]["author"], ["A", "B"],
+                ["author", "author"], [5, 6]);
+            checkCandidates(json["fields"]["date"], ["2024-01-01", "2024-01-02"],
+                ["date", "date"], [8, 9]);
+            checkCandidates(json["fields"]["url"], ["https://a.test/", "https://b.test/"],
+                ["link:canonical", "link:canonical"], [11, 12]);
         }
         if (fixtureIndex == 2)
             check(!json["fields"]["title"]["conflict"].boolean &&
@@ -138,7 +176,7 @@ void main() {
                 json["fields"]["date"]["candidates"].array.length == 0 &&
                 json["fields"]["url"]["candidates"].array.length == 0,
                 "wrong-kind attributes became evidence");
-        if (fixtureIndex == 5 || fixtureIndex == 6)
+        if (fixtureIndex >= 5 && fixtureIndex <= 8)
             check(json["fields"]["url"]["rule"].str == "og:url" &&
                 json["fields"]["url"]["candidates"].array.length == 1 &&
                 json["fields"]["url"]["invalidEvidence"].boolean,
@@ -179,6 +217,19 @@ void main() {
             field["status"].str == (count == 16 ? "selected" : "overflow") &&
             field["overflow"].boolean == (count == 17), "16/17 cap mismatch");
     }
+    string slashes;
+    foreach (_; 0 .. 512) slashes ~= "\\";
+    string largeMetadata = "<head>";
+    foreach (_; 0 .. 16) {
+        largeMetadata ~= `<meta property="og:title" content="` ~ slashes ~ `">`;
+        largeMetadata ~= `<meta name="author" content="` ~ slashes ~ `">`;
+    }
+    largeMetadata ~= "</head>";
+    auto largeInput = StageDocument(document,
+        new Content([ContentPiece.own(cast(const(ubyte)[]) largeMetadata)]));
+    auto largeDecision = plan.stages[0].transform(largeInput);
+    check(largeDecision.kind == DecisionKind.quarantine &&
+        largeDecision.reason == "outputLimit", "metadata output cap failed");
     auto malformed = parseHtml([cast(ubyte) 0xff]);
     check(!malformed.isParsed, "invalid UTF-8 accepted");
     auto badInput = StageDocument(document,

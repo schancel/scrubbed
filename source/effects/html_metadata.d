@@ -95,27 +95,14 @@ private bool validUrl(string value) {
     if (end == start) return false;
     auto authority = value[start .. end];
     if (authority.indexOf('@') >= 0) return false;
-    string host, port;
-    if (authority[0] == '[') {
-        auto close = authority.indexOf(']');
-        if (close <= 1) return false;
-        host = authority[1 .. close];
-        if (cast(size_t)close + 1 < authority.length) {
-            if (authority[close + 1] != ':') return false;
-            port = authority[close + 2 .. $];
-        }
-        foreach (c; host) if (!((c >= '0' && c <= '9') ||
-            (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
-            c == ':' || c == '.')) return false;
-        if (host.indexOf(':') < 0) return false;
-    } else {
-        auto colon = authority.indexOf(':');
-        host = colon < 0 ? authority : authority[0 .. colon];
-        if (colon >= 0) port = authority[colon + 1 .. $];
-        foreach (c; host) if (!((c >= '0' && c <= '9') ||
-            (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-            c == '.' || c == '-')) return false;
-    }
+    // IP-literal validation is deliberately out of scope for this slice.
+    if (authority.indexOf('[') >= 0 || authority.indexOf(']') >= 0) return false;
+    auto colon = authority.indexOf(':');
+    auto host = colon < 0 ? authority : authority[0 .. colon];
+    auto port = colon < 0 ? "" : authority[colon + 1 .. $];
+    foreach (c; host) if (!((c >= '0' && c <= '9') ||
+        (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        c == '.' || c == '-')) return false;
     if (!host.length) return false;
     if (authority[$ - 1] == ':') return false;
     if (port.length) {

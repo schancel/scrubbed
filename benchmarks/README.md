@@ -3,6 +3,29 @@
 All project benchmark and corpus-analysis utilities are written in D. The
 baseline also measures the external ftfy CLI on its task-equivalent fixture.
 
+## Fused scalar-filter microbenchmark
+
+`fused_filters.d` compares the former separately materialized
+line-ending/control/quote transforms with the runtime registry's fused scalar
+range. It generates 131,072 identical mixed CRLF/control/curly-quote rows
+(4,063,232 input bytes), checks every output byte and SHA-256, interleaves the
+two implementations, and reports five rounds per sample.
+
+```sh
+ldc2 -O3 -release -Isource benchmarks/fused_filters.d \
+  source/pipeline.d source/filters/normalize.d source/filters/punctuation.d \
+  -of=/tmp/scrubbed-fused-filters
+/tmp/scrubbed-fused-filters
+```
+
+On an Apple M4 / macOS 25.6.0 / LDC 1.43.0, the inline-state implementation's
+three samples measured legacy at 0.41224–0.41767 seconds and fused at
+0.21459–0.22009 seconds for five rounds, about 1.9x faster. Both produced
+2,752,512 bytes with SHA-256
+`31FED0E686961EAC721F89861DBA3AB0157F33C3C438AA314B3B4E226D96A62A`.
+This is a warm synthetic in-process microbenchmark, not whole-CLI,
+terabyte-scale, or contextual-filter evidence.
+
 ## Pre-refactor full-CLI baseline (A00)
 
 `cli_baseline.d` measures whole processes, including input/output and startup,

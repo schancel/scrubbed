@@ -25,6 +25,18 @@ filter/pipeline dependency runs toward `pipeline`; `pipeline` does not import
 individual filters. The current `entities` to `mojibake` helper import is a
 specific existing cross-filter dependency, not a general layering rule.
 
+The registry has two execution contracts. Whole-buffer filters retain the
+original `string -> string` boundary and are materialization barriers. Bounded
+UTF-8-scalar transducers additionally register push/finish callbacks;
+consecutive transducers are composed at runtime into one function-local
+Voldemort InputRange. Its fixed-capacity stage array, state, and pending scalar
+queues live in the returned value on the caller side, with no per-group stage
+heap allocation. The source remains borrowed and must outlive consumption;
+the current `Pipeline.run` still materializes the fused result as one output
+string. Runs longer than 16 transducers split at a materialization boundary to
+bound recursive pull depth. This filter fusion is not yet the unwired
+`Document`/`Content`/effects pipeline described below.
+
 `cli.processOne` maps a nonempty input with `MmFile`, runs the chain while the
 mapping is open, and closes it before writing. A filter may return an unchanged
 or sliced view of that mapping; `processOne` copies such a result before the

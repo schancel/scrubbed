@@ -1,7 +1,8 @@
 /// Lazy smart-punctuation normalization.
 module filters.punctuation;
 
-import pipeline : registerFilter;
+import pipeline : StreamingFilter, StreamingState, maxStreamingExpansion,
+    registerStreamingFilter;
 import std.algorithm : map;
 import std.conv : to;
 
@@ -22,7 +23,16 @@ string uncurlQuotesFilter(string text) {
     return text.uncurlQuotes.to!string;
 }
 
-static this() { registerFilter("uncurl-quotes", &uncurlQuotesFilter); }
+private size_t uncurlQuotesPush(ref StreamingState, dchar input,
+    dchar[maxStreamingExpansion]* output) {
+    (*output)[0] = straightenQuote(input);
+    return 1;
+}
+
+static this() {
+    registerStreamingFilter("uncurl-quotes", &uncurlQuotesFilter,
+        StreamingFilter(StreamingState.init, &uncurlQuotesPush, null));
+}
 
 unittest {
     assert("“It’s ‘fine’,” she said.".uncurlQuotes.to!string ==

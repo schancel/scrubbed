@@ -282,6 +282,11 @@ is useful, but it is not sufficient on its own.
       `errors-init`, `errors-copy`, `errors-export`, and `errors-verify`
       management verbs are available. Automatic targeted retry, S3, and
       JSONL stdin/stdout journaling are not included.
+- [~] Retry exact failed records and sinks (F14/#19). A read-only-after-open
+      v2 visitor now streams current outstanding full keys in stable order,
+      rejecting malformed stored identities and reentrant journal calls
+      (`docs/error-events.md`). It does not select sources, retry outputs, or
+      rescan non-seekable objects; those successors remain open.
 - [x] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity

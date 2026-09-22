@@ -221,6 +221,13 @@ The [release execution plan](docs/release-execution-plan.md) orders the work
 from one canonical CLI/JSON document pipeline through transform completeness,
 quality-matched optimization, and clean-machine packages; direct S3 and
 distributed execution are not on the first-release critical path.
+Heterogeneous input dispatch is now an explicit planned prerequisite (#155):
+bounded media/container detection will select exactly one extraction route,
+and every accepted route must converge on a common text-document contract
+before mojibake and other Unicode filters run. Production Office/PDF/image
+support remains unimplemented; #67 evaluates specialist adapters and #156 owns
+bounded adoption for only the formats that pass those gates. This is not a
+claim of Tika, Docling, Pandoc, or general OCR parity.
 The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
 describe the current module boundaries. A typed document-identity and borrowed
 view module, ordered borrowed/owned content-piece module with a lazy range,

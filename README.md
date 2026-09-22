@@ -152,9 +152,10 @@ an isolated document failure may continue only after durable failed/uncertain
 state and an injected acknowledgment; run-fatal policy, resource, and lost-ledger
 errors stop with exit 2. Exit 1 means acknowledged failures or unresolved
 retry decisions. Keyed `--explain` records distinguish these outcomes. The
-shipping CLI still uses the v1 ledger. An [effects-only v2 failure journal](docs/error-events.md),
-explicit offline v1-to-v2 copy, and opt-in bounded JSONL history/outstanding
-export with SHA-256 sidecars now exist; CLI activation is still unimplemented.
+shipping `run`/`repair` path still uses the v1 ledger. An [opt-in v2 failure
+journal](docs/error-events.md), explicit CLI init/copy/export/verify commands,
+and bounded JSONL history/outstanding export with SHA-256 sidecars now exist;
+live v2 document processing is not yet wired into `run`/`repair`.
 An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
 commit caller-supplied content and metadata payloads separately; the CLI does
 not expose that selector. An [opt-in deterministic HTML metadata stage](docs/metadata-extraction.md)
@@ -164,7 +165,9 @@ the independent metadata sink by the CLI. The
 [quality-decision](docs/quality-annotations.md) and
 [exact-byte dedup](docs/exact-dedup.md) overlay facades. A bounded
 [four-class PII scanner](docs/pii-patterns.md) is a pure D API with an
-[opt-in C01 findings overlay](docs/pii-annotations.md), not CLI redaction.
+[opt-in C01 findings overlay](docs/pii-annotations.md) and a
+[pure report/mask/opt-in redact policy](docs/pii-policy.md), not a policy
+overlay or CLI redaction.
 None of these APIs establishes
 corpus-scale throughput or main-content extraction.
 

@@ -2,10 +2,18 @@
 
 Status key: [x] done and verified, [~] partially done, [ ] not started.
 
-Planning status (2026-09-21): [67 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
+Planning status (2026-09-22): [68 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
 cover the broader corpus-curation roadmap with 136 native dependency edges.
 Acceptance is not an implementation claim; worker readiness is tracked per
 issue. This file remains the status record for implemented work.
+
+The ordered path to the first public package release is maintained in
+[`docs/release-execution-plan.md`](docs/release-execution-plan.md). Its critical
+path is canonical CLI/JSON composition (#148), complete built-in transform
+wiring, extraction/curation parity, full-pipeline profiling and tuning, then
+clean-machine packages and executable examples. Direct S3/distributed
+execution and wholesale specialist-parser reimplementation are deferred and
+do not gate that release.
 
 ## Phase 0 — scaffold
 - [x] dub project, MIT license, git repo

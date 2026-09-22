@@ -205,6 +205,10 @@ corpus-scale throughput or main-content extraction.
 
 Phases 0-2 are usable within the documented scope; JSON configuration from
 Phase 3 is implemented. See `TODO.md` for precise coverage and remaining work.
+The [release execution plan](docs/release-execution-plan.md) orders the work
+from one canonical CLI/JSON document pipeline through transform completeness,
+quality-matched optimization, and clean-machine packages; direct S3 and
+distributed execution are not on the first-release critical path.
 The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
 describe the current module boundaries. A typed document-identity and borrowed
 view module, ordered borrowed/owned content-piece module with a lazy range,

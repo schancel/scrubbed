@@ -5,7 +5,7 @@ import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
 import std.ascii : toLower;
 import std.conv : to;
 import std.uni : isControl, isFormat, isSpace;
-import std.utf : UTFException;
+import std.utf : UTFException, encode;
 
 enum size_t maxMarkdownBytes = 4 * 1024 * 1024;
 
@@ -48,33 +48,23 @@ private bool white(char c) {
 private string clean(string input, bool code = false) {
     Writer writer;
     bool pending;
-    for (size_t i; i < input.length; ++i) {
-        char c = input[i];
-        // C1 and Unicode line separators are controls even though UTF-8
-        // represents them with printable-looking individual bytes.
-        if (i + 1 < input.length && cast(ubyte)c == 0xc2 &&
-            cast(ubyte)input[i + 1] >= 0x80 &&
-            cast(ubyte)input[i + 1] <= 0x9f) { ++i; continue; }
-        if (i + 2 < input.length && cast(ubyte)c == 0xe2 &&
-            cast(ubyte)input[i + 1] == 0x80 &&
-            (cast(ubyte)input[i + 2] == 0xa8 ||
-             cast(ubyte)input[i + 2] == 0xa9)) {
-            if (!code) pending = true;
-            else writer.put("\n");
-            i += 2;
-            continue;
-        }
+    foreach (dchar c; input) {
         if (code) {
             if (c == '\r') c = '\n';
-            if (c == '\n' || c == '\t' || cast(ubyte)c >= 0x20 &&
-                cast(ubyte)c != 0x7f) writer.put(cast(string)(&c)[0 .. 1]);
+            if (c == '\n' || c == '\t' || c == 0x2028 || c == 0x2029) {
+                writer.put(c == '\t' ? "\t" : "\n");
+                continue;
+            }
+            if (isControl(c) || isFormat(c)) continue;
+            char[4] encoded;
+            writer.put(cast(string)encoded[0 .. encode(encoded, c)]);
             continue;
         }
-        if (white(c)) {
+        if (isControl(c) || isFormat(c)) continue;
+        if (isSpace(c) || c == 0x2028 || c == 0x2029) {
             pending = true;
             continue;
         }
-        if (cast(ubyte)c < 0x20 || cast(ubyte)c == 0x7f) continue;
         if (pending) writer.put(" ");
         pending = false;
         switch (c) {
@@ -87,9 +77,22 @@ private string clean(string input, bool code = false) {
         case '>': writer.put("&gt;"); continue;
         default: break;
         }
-        writer.put(cast(string)(&c)[0 .. 1]);
+        char[4] encoded;
+        writer.put(cast(string)encoded[0 .. encode(encoded, c)]);
     }
     if (pending) writer.put(" ");
+    return writer.result();
+}
+
+private string singleLine(string input) {
+    Writer writer;
+    bool pending;
+    foreach (char c; input) {
+        if (white(c)) { pending = true; continue; }
+        if (pending && writer.bytes.length) writer.put(" ");
+        pending = false;
+        writer.put(cast(string)(&c)[0 .. 1]);
+    }
     return writer.result();
 }
 
@@ -210,11 +213,14 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         return;
     }
     if (name == "code") {
-        auto content = clean(nodeText(tree, index), true);
+        auto content = singleLine(clean(nodeText(tree, index), true));
+        if (!content.length) return;
         auto ticks = new char[longestRun(content, '`') + 1];
         ticks[] = '`';
         auto delimiter = ticks.idup;
-        writer.put(delimiter ~ " " ~ content ~ " " ~ delimiter);
+        if (content[0] == '`' || content[$ - 1] == '`')
+            writer.put(delimiter ~ " " ~ content ~ " " ~ delimiter);
+        else writer.put(delimiter ~ content ~ delimiter);
         return;
     }
     if (name == "ul" || name == "ol") {
@@ -273,7 +279,9 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             if (tree.nodes[child].parentIndex != index) continue;
             if (!first) writer.put(" | ");
             first = false;
-            renderChildren(tree, child, writer, depth + 1);
+            Writer cell;
+            renderChildren(tree, child, cell, depth + 1);
+            writer.put(singleLine(cell.result()));
         }
         writer.block();
         return;

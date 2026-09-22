@@ -5,7 +5,11 @@ import effects.html_markdown : HtmlMarkdownOutputLimit, maxMarkdownBytes,
     renderMarkdown;
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree, parseHtml;
 import std.algorithm.searching : canFind;
+import std.file : remove, tempDir, write;
+import std.path : buildPath;
+import std.process : execute;
 import std.stdio : writeln;
+import std.uuid : randomUUID;
 
 private void need(bool condition, string label) {
     if (!condition) throw new Exception("HTML Markdown check: " ~ label);
@@ -23,7 +27,21 @@ private void golden(string html, string expected, string label) {
     need(convert(html) == actual, label ~ " nondeterministic");
 }
 
-void main() {
+private void commonmarkProof() {
+    auto path = buildPath(tempDir, "scrubbed-markdown-" ~ randomUUID.toString ~ ".md");
+    scope(exit) remove(path);
+    write(path, convert("<code>[evil](javascript:alert(1))\n\n" ~
+        "&lt;img src=x onerror=alert(1)&gt;</code>"));
+    auto parsed = execute(["pandoc", "--from=commonmark", "--to=html", path]);
+    need(parsed.status == 0 && parsed.output.canFind("<code>") &&
+        !parsed.output.canFind("href=\"javascript:") &&
+        !parsed.output.canFind("<img"),
+        "CommonMark inline code activated link or raw HTML");
+}
+
+void main(string[] args) {
+    need(args.length == 1 || args.length == 2 && args[1] == "--commonmark",
+        "usage: check [--commonmark]");
     golden("<h1>Title</h1><p>A &amp; <strong>bold</strong> " ~
         "<em>word</em>.</p>",
         "# Title\n\nA &amp; **bold** *word*\\.\n", "headings/emphasis/entities");
@@ -53,10 +71,18 @@ void main() {
     golden("<blockquote><p>A</p><p>B</p></blockquote>",
         "> A\n> \n> B\n", "quote");
     golden("<p>Before <code>a`b</code> after</p><pre>a```b\n&lt;raw&gt;</pre>",
-        "Before `` a`b `` after\n\n````\na```b\n<raw>\n````\n", "code delimiters");
+        "Before ``a`b`` after\n\n````\na```b\n<raw>\n````\n", "code delimiters");
+    golden("<p><code>[evil](javascript:alert(1))\n\n" ~
+        "&lt;img src=x onerror=alert(1)&gt;</code></p>",
+        "`[evil](javascript:alert(1)) <img src=x onerror=alert(1)>`\n",
+        "inline code cannot break into active Markdown");
+    golden("<p>A<code></code>B<code>   </code>C</p>",
+        "ABC\n", "empty code invents no padding");
     golden("<table><tr><th>A|B</th><th>C</th></tr><tr><td>x</td>" ~
         "<td>y&amp;z</td></tr></table>",
         "- A\\|B | C\n\n- x | y&amp;z\n", "plain table rows");
+    golden("<table><tr><td><p>A</p><p>B</p></td><td>C</td></tr></table>",
+        "- A B | C\n", "nested table cell blocks stay in row");
     golden("<p>Hi<div>there", "Hi\n\nthere\n", "malformed flow");
     golden("<p>x-[] # * _ &lt;b&gt;</p>",
         "x\\-\\[\\] \\# \\* \\_ &lt;b&gt;\n", "syntax escaping");
@@ -89,6 +115,10 @@ void main() {
     golden("<p>Before <strong> bold </strong> and <em> word </em> after</p>",
         "Before **bold** and *word* after\n",
         "emphasis boundary spaces");
+    golden("<p>A\u202eB</p><pre>C\u202eD</pre>" ~
+        "<p><code>E\u202eF</code><img alt='G\u202eH' src='/image'></p>",
+        "AB\n\n```\nCD\n```\n\n`EF`![GH](</image>)\n",
+        "Unicode format controls absent from prose code and alt");
     golden("<pre>a<br>b</pre>", "```\na\nb\n```\n",
         "pre line break retained");
 
@@ -96,7 +126,8 @@ void main() {
     synthetic.nodes = [HtmlNode(HtmlNodeKind.text, size_t.max, "", "A\0B")];
     need(renderMarkdown(synthetic) == "AB\n", "NUL escaped from owned tree");
     synthetic.nodes[0].text = "A\u0085B\u2028C";
-    need(renderMarkdown(synthetic) == "AB C\n", "Unicode controls escaped");
+    need(renderMarkdown(synthetic) == "AB C\n",
+        "Unicode controls escaped actual=" ~ renderMarkdown(synthetic));
     auto longText = new char[maxMarkdownBytes / 2 + 1];
     longText[] = '*';
     synthetic.nodes = [HtmlNode(HtmlNodeKind.text, size_t.max, "", longText.idup)];
@@ -106,5 +137,6 @@ void main() {
     need(rejected, "output cap did not reject expansion");
     need(!convert("<script>secret</script>").canFind("secret"),
         "hidden prose leaked");
+    if (args.length == 2) commonmarkProof();
     writeln("html markdown check: exact structure, malformed, safety, cap pass");
 }

@@ -9,7 +9,8 @@ The converter preserves selected visible text in document order and emits
 one trailing newline for nonempty output. Whitespace in ordinary text is
 collapsed to single spaces; block elements are separated by one blank line.
 Markdown punctuation and literal `<`, `>`, `&` in ordinary text are escaped.
-ASCII controls, including NUL, are omitted. `script`, `style`, `template`,
+Unicode control and format characters, including NUL and bidi overrides, are
+omitted from ordinary text, code, and alt text. `script`, `style`, `template`,
 and the non-visible `head` subtree are omitted; unknown elements unwrap their
 visible children. HTML parser repairs determine malformed tree structure;
 the converter never synthesizes missing words.
@@ -19,13 +20,17 @@ V1 maps `h1`–`h6`, `p`, `br`, `em`/`i`, `strong`/`b`, `ul`, `ol`, `li`,
 indented by the full marker width, preserving blank lines between paragraphs
 inside an item. An ordered list uses a positive integer `start` attribute or
 starts at 1; zero, negative, overflowed, and invalid starts use 1. Inline code
-chooses a backtick delimiter longer than its content's longest run, and fenced code chooses at
-least three backticks, likewise longer than any run. Whitespace inside code
-is retained, apart from CR normalization and omitted controls.
+chooses a backtick delimiter longer than its content's longest run; inline
+code is normalized to one line so it cannot break into active Markdown. Empty
+inline code emits nothing. Fenced code chooses at least three backticks,
+likewise longer than any run. Whitespace inside fenced code is retained,
+apart from CR normalization and omitted controls.
 
 Tables deliberately do **not** claim GFM table layout. Each `tr` becomes a
 plain `- ` row, with cells in source reading order separated by ` | `;
-literal cell pipes are escaped. Header and data cells use the same policy.
+literal cell pipes are escaped. Block whitespace inside a cell is flattened
+to spaces, keeping all cell text on its row. Header and data cells use the
+same policy.
 Rowspan/colspan are not interpreted. Parser-repaired malformed rows follow
 the selected tree's order. This policy retains text without inventing a
 rectangular grid.
@@ -54,6 +59,9 @@ ldc2 -O -release -Isource -of=/tmp/html-markdown-check \
   source/effects/html_tree.d source/effects/lexbor_ffi.d \
   source/text/decoding.d .dub/lexbor/liblexbor_static.a
 /tmp/html-markdown-check
+# If pandoc is installed, also prove the malicious inline-code golden
+# stays inert after CommonMark parsing:
+/tmp/html-markdown-check --commonmark
 ```
 
 It checks exact output, repeat determinism, unsafe targets, malformed

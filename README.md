@@ -152,7 +152,9 @@ an isolated document failure may continue only after durable failed/uncertain
 state and an injected acknowledgment; run-fatal policy, resource, and lost-ledger
 errors stop with exit 2. Exit 1 means acknowledged failures or unresolved
 retry decisions. Keyed `--explain` records distinguish these outcomes. The
-concrete structured error-log file and replay format are still unimplemented.
+shipping CLI still uses the v1 ledger. An [effects-only v2 failure journal](docs/error-events.md)
+and explicit offline v1-to-v2 copy now exist, but CLI activation and JSONL
+error/outstanding export are still unimplemented.
 An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
 commit caller-supplied content and metadata payloads separately; the CLI does
 not expose that selector or extract metadata for it. The

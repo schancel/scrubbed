@@ -47,8 +47,10 @@ stage and filter registries without importing concrete implementations. It
 retains stage-instance identity and validates exact option types, relative
 stage order, and declared before/after/no-filter placement. Compilation is
 tested; the pure one-stage executor applies before/after filters over checked
-`Content`, but multi-stage/effects execution and shipping CLI flags remain
-unwired.
+`Content`. A pure one-record job executor now carries emitted documents through
+every compiled stage, retaining terminal decisions, split order and immediate
+parent provenance, and returns only final/terminal events. The effects runner
+and shipping CLI remain unwired.
 
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`

@@ -14,7 +14,8 @@ app (process exit)
 filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
 job.* (pure canonical v3 specification and predecessor/token lowering; unwired)
-composition.compiler -> job, pipeline, stages (pure registry compilation; unwired)
+composition.compiler/executor/job_executor -> job, pipeline, stages
+  (pure registry compilation and one-record execution; effects/CLI unwired)
 domain.document (standalone typed identity/view facade; no current CLI caller)
 content.pieces -> domain.document (checked borrowed content; no current CLI caller)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
@@ -105,11 +106,16 @@ deterministic sequential or concurrent reuse; streaming state remains local
 to each pipeline run. The stage-instance ID and canonical job identity remain
 behind read-only compiled
 views. Stage registrations declare filter placement as none, before, or after;
-compilation rejects unsupported filters. `stages.text_transform` is a self-registering no-op map with before
-placement. `composition.executor` now proves one compiled stage's declared
-placement over checked `Content`: nonempty chains are explicit UTF-8
-materialization barriers, while empty chains preserve borrowed content. It is
-not yet the shipping multi-stage/effects execution path.
+compilation rejects unsupported filters. `stages.text_transform` is a
+self-registering no-op map with before placement. `composition.executor`
+proves one compiled stage's declared placement over checked `Content`:
+nonempty chains are explicit UTF-8 materialization barriers, while empty
+chains preserve borrowed content. `composition.job_executor` applies those
+compiled stages to one source record in order, advances only emitted events,
+preserves terminal decisions and split-child lineage, and returns only
+final/terminal events. It does not fetch sources, write sinks, close content
+owners, reserve resources, or expose the still-unwired v3 model through the
+shipping CLI.
 
 `content.pieces` is the standalone ordered byte-content facade. A
 `ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one

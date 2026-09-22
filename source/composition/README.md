@@ -22,7 +22,15 @@ nonempty filter chain is an explicit UTF-8 materialization barrier at the
 declared before/after position; an empty chain preserves the original Content
 object and borrowed-owner lifetime. After-filters apply only to emitted
 map/split payloads, not rejection or quarantine payloads. Multi-stage job and
-effects orchestration remain outside this slice.
+effects orchestration remain outside this module.
+
+[`job_executor.d`](job_executor.d) runs one compiled linear job for one checked
+source record. Only emitted events continue to the next stage; rejection and
+quarantine are terminal, while split children retain order and immediate-parent
+provenance through later maps or terminal decisions. It returns only final and
+terminal events. An empty job is a checked no-op map. The caller still owns the
+content lifetime: this pure layer performs no source fetch, sink write, owner
+close, cancellation, resource reservation, or filesystem work.
 
 A stage registration declares filter placement: `none`, `before`, or `after`.
 Compilation rejects filters on `none`; actual before/after content application

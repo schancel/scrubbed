@@ -2,7 +2,8 @@
 module experiments.retry_targets.live_cli_check;
 
 import effects.failure_journal : FailureJournal;
-import effects.local_manifest : SinkKey;
+import effects.local_manifest : SinkKey, inputDigest;
+import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
 import std.array : replicate;
 import std.conv : to;
@@ -34,6 +35,29 @@ private ulong inode(string path) {
     stat_t info;
     need(stat(path.toStringz, &info) == 0, "stat output");
     return cast(ulong)info.st_ino;
+}
+
+private long historyCount(string path, SinkKey key) {
+    sqlite3* db;
+    need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READONLY,
+        null) == SQLITE_OK, "history read-only open");
+    scope(exit) need(sqlite3_close(db) == SQLITE_OK, "history read-only close");
+    sqlite3_stmt* statement;
+    enum query = `SELECT count(*) FROM error_event e JOIN sink_identity i
+        ON e.sink_id=i.sink_id WHERE e.document_id=?1 AND
+        e.input_sha256=?2 AND e.config_sha256=?3 AND i.raw_sink=?4`;
+    need(sqlite3_prepare_v2(db, query.toStringz, -1, &statement, null) == SQLITE_OK,
+        "history query prepare");
+    scope(exit) need(sqlite3_finalize(statement) == SQLITE_OK,
+        "history query finalize");
+    need(sqlite3_bind_text(statement, 1, key.document.text.toStringz, -1,
+            null) == SQLITE_OK &&
+        sqlite3_bind_blob(statement, 2, key.inputSha256.ptr, 32, null) == SQLITE_OK &&
+        sqlite3_bind_blob(statement, 3, key.configSha256.ptr, 32, null) == SQLITE_OK &&
+        sqlite3_bind_text(statement, 4, key.sink.toStringz, -1,
+            null) == SQLITE_OK &&
+        sqlite3_step(statement) == SQLITE_ROW, "history query step");
+    return sqlite3_column_int64(statement, 0);
 }
 
 private void checkResources(string binary, string root) {
@@ -174,6 +198,17 @@ void main(string[] args) {
     write(outA, "tampered-a");
     write(outB, "tampered-b");
     call(binary, base, 1); // Inspection records two exact outstanding keys.
+    auto journal = new FailureJournal(db);
+    SinkKey bKey;
+    journal.visitOutstandingTargets((SinkKey key) {
+        if (key.inputSha256 == inputDigest(cast(const(ubyte)[])read(b)))
+            bKey = key;
+    });
+    need(bKey.sink == "local-primary:v1", "b outstanding key selected");
+    auto bBefore = journal.lookup(bKey).get;
+    auto eventsBefore = journal.eventCount();
+    journal.close();
+    auto bHistory = historyCount(db, bKey);
     auto huge = buildPath(input, "huge.txt");
     write(huge, "H".replicate(1024 * 1024));
     auto capped = targeted ~ ["--max-input-bytes", "64"];
@@ -185,13 +220,33 @@ void main(string[] args) {
     need(readText(outA) == readText(a) && readText(outB) == "tampered-b" &&
         !exists(buildPath(output, "huge.txt")),
         "one target succeeded, mismatch and non-target preserved");
+    journal = new FailureJournal(db);
+    need(journal.eventCount() == eventsBefore + 1 &&
+        journal.lookup(bKey).get == bBefore && journal.hasOutstanding(bKey),
+        "input mismatch changed old event or state");
+    journal.close();
+    need(historyCount(db, bKey) == bHistory,
+        "input mismatch changed old key history");
+    ++eventsBefore; // The independently successful a retry appended one success event.
     auto committedInode = inode(outA);
     call(binary, capped, 1);
     need(inode(outA) == committedInode, "repeat did not rewrite cleared key");
+    journal = new FailureJournal(db);
+    need(journal.eventCount() == eventsBefore &&
+        journal.lookup(bKey).get == bBefore && journal.hasOutstanding(bKey),
+        "repeat mismatch changed old event or state");
+    journal.close();
+    need(historyCount(db, bKey) == bHistory,
+        "repeat mismatch changed old key history");
     write(b, "TARGET_SOURCE_SECRET b");
     call(binary, capped ~ ["--filters", "strip-control"], 1);
     need(readText(outB) == "tampered-b", "config-only mismatch preserved output");
-    auto journal = new FailureJournal(db);
+    journal = new FailureJournal(db);
+    need(journal.eventCount() == eventsBefore &&
+        journal.lookup(bKey).get == bBefore && journal.hasOutstanding(bKey),
+        "config mismatch changed old event or state");
+    need(historyCount(db, bKey) == bHistory,
+        "config mismatch changed old key history");
     SinkKey[] remaining;
     journal.visitOutstandingTargets((SinkKey key) { remaining ~= key; });
     need(remaining.length == 1, "only one local-primary outstanding");
@@ -226,6 +281,61 @@ void main(string[] args) {
         "--error-journal", db, "--error-retry", "--error-targeted",
         "--max-input-bytes", "1"], 0);
     need(!exists(noTargetOutput), "non-target directory created output");
+    auto revisionsInput = buildPath(root, "revisions-input.txt");
+    auto revisionsOutput = buildPath(root, "revisions-output.txt");
+    auto revisionsDb = buildPath(root, "revisions.db");
+    auto revisionsBase = ["run", "--input", revisionsInput, "--output",
+        revisionsOutput, "--error-journal", revisionsDb];
+    write(revisionsInput, "first revision");
+    call(binary, ["errors-init", "--journal", revisionsDb], 0);
+    call(binary, revisionsBase, 0);
+    write(revisionsOutput, "tampered first");
+    call(binary, revisionsBase, 1);
+    write(revisionsInput, "second revision");
+    call(binary, revisionsBase ~ ["--error-retry"], 0);
+    write(revisionsOutput, "tampered second");
+    call(binary, revisionsBase, 1);
+    journal = new FailureJournal(revisionsDb);
+    SinkKey[] revisions;
+    journal.visitOutstandingTargets((SinkKey key) { revisions ~= key; });
+    need(revisions.length == 2 &&
+        revisions[0].document == revisions[1].document &&
+        revisions[0].sink == "local-primary:v1" &&
+        revisions[1].sink == "local-primary:v1" &&
+        revisions[0].inputSha256 != revisions[1].inputSha256,
+        "two full-key revisions outstanding");
+    auto currentRevision = revisions[0].inputSha256 ==
+        inputDigest(cast(const(ubyte)[])"second revision")
+        ? revisions[0] : revisions[1];
+    auto olderRevision = currentRevision == revisions[0] ? revisions[1] : revisions[0];
+    auto olderBefore = journal.lookup(olderRevision).get;
+    auto revisionEvents = journal.eventCount();
+    journal.close();
+    auto olderHistory = historyCount(revisionsDb, olderRevision);
+    call(binary, revisionsBase ~ ["--error-retry", "--error-targeted"], 0);
+    need(readText(revisionsOutput) == "second revision",
+        "current revision published");
+    journal = new FailureJournal(revisionsDb);
+    need(!journal.hasOutstanding(currentRevision) &&
+        journal.hasOutstanding(olderRevision) &&
+        journal.lookup(olderRevision).get == olderBefore &&
+        journal.eventCount() == revisionEvents + 1 &&
+        historyCount(revisionsDb, olderRevision) == olderHistory,
+        "targeted cleared only matching revision");
+    journal.close();
+    ++revisionEvents;
+    auto revisionInode = inode(revisionsOutput);
+    call(binary, revisionsBase ~ ["--error-retry", "--error-targeted"], 1);
+    need(inode(revisionsOutput) == revisionInode &&
+        readText(revisionsOutput) == "second revision",
+        "older-only mismatch preserves current output");
+    journal = new FailureJournal(revisionsDb);
+    need(journal.hasOutstanding(olderRevision) &&
+        journal.lookup(olderRevision).get == olderBefore &&
+        journal.eventCount() == revisionEvents &&
+        historyCount(revisionsDb, olderRevision) == olderHistory,
+        "older-only mismatch changed old event or state");
+    journal.close();
     auto hazardInput = buildPath(root, "hazard-input");
     auto hazardOutput = buildPath(root, "hazard-output");
     auto hazardDb = buildPath(root, "hazard.db");

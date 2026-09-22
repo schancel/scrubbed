@@ -14,6 +14,7 @@ app (process exit)
 filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
 job.* (pure canonical v3 specification and predecessor/token lowering; unwired)
+composition.compiler -> job, pipeline, stages (pure registry compilation; unwired)
 domain.document (standalone typed identity/view facade; no current CLI caller)
 content.pieces -> domain.document (checked borrowed content; no current CLI caller)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
@@ -94,6 +95,15 @@ IDs, ambiguous/orphan CLI options, and non-scalar JSON values fail at this
 boundary. It neither resolves registries nor performs I/O; the shipping CLI
 does not accept v3 until #148's switch slice. See the
 [v3 format guide](job-spec-v3.md).
+
+`composition.compiler` is the only conversion point from `JobOption` to the
+registry-owned stage/filter scalar types. It resolves injected registries,
+invokes factories once, validates relative implementation order, and retains
+the stage-instance ID and canonical job identity behind read-only compiled
+views. Stage registrations declare filter placement as none, before, or after;
+compilation rejects unsupported filters. `stages.text_transform` is a self-registering no-op map with before
+placement. Actual Content conversion and filter placement remain unwired, so
+compilation alone does not change shipping behavior.
 
 `content.pieces` is the standalone ordered byte-content facade. A
 `ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one

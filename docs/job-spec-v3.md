@@ -31,8 +31,9 @@ today's `--filters` and v1 JSON behavior remains unchanged.
 }
 ```
 
-`id` identifies this occurrence in the job. `implementation` is the eventual
-self-registering stage-factory lookup. They are separate so the same
+`id` identifies this occurrence in the job. `implementation` is the
+self-registering stage-factory lookup used by the pure compiler. They are
+separate so the same
 implementation can appear more than once without colliding in provenance or
 future graph references. Stage IDs are unique; filter order is significant.
 Options are JSON text, signed 64-bit integer, or boolean values. Floating
@@ -64,7 +65,7 @@ following `--filter-option` tokens attach to that filter. Option values use
 cannot acquire the same identity by inference. Shell quoting is needed only
 when a value itself contains shell metacharacters or whitespace.
 
-The parser for these tokens is pure and tested, but these are not advertised
+The parser and registry compiler are pure and tested, but these are not advertised
 shipping flags yet. Argparse help and the JSON file route will move together
 when the execution switch is ready; neither surface will own a second model.
 

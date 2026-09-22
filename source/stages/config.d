@@ -76,30 +76,12 @@ StagePlan buildConfigV2(string json, const(StageRegistry)* registry = null) {
                 enforce(found, "unknown option for " ~ name ~ ": " ~ key);
             }
         }
-        foreach (declared; registration.options)
-            if (declared.required)
-                enforce((declared.key in options) !is null,
-                    "missing option for " ~ name ~ ": " ~ declared.key);
-        auto transform = registration.factory(options);
-        enforce(transform !is null, "stage factory returned no transform: " ~ name);
+        auto transform = registry.build(name, options);
         plan.stages ~= ConfiguredStage(registration.declaration, transform, options);
     }
-    // Relative constraints refer to configured peers, not compulsory stages.
-    foreach (i, stage; plan.stages) {
-        auto registration = registry.find(stage.declaration.key);
-        foreach (key; registration.before) {
-            enforce(registry.find(key) !is null, "unknown ordering peer: " ~ key);
-            foreach (j, peer; plan.stages)
-                if (peer.declaration.key == key)
-                    enforce(i < j, "stage " ~ stage.declaration.key ~ " must precede " ~ key);
-        }
-        foreach (key; registration.after) {
-            enforce(registry.find(key) !is null, "unknown ordering peer: " ~ key);
-            foreach (j, peer; plan.stages)
-                if (peer.declaration.key == key)
-                    enforce(j < i, "stage " ~ stage.declaration.key ~ " must follow " ~ key);
-        }
-    }
+    string[] keys;
+    foreach (stage; plan.stages) keys ~= stage.declaration.key;
+    registry.validateOrder(keys);
     return plan;
 }
 

@@ -134,6 +134,12 @@ do not gate that release.
       lazily with `stripControlChars`; registry adapters materialize strings.
 
 ## Phase 3 — configurability
+- [~] Canonical document/filter composition (#148): the pure v3 `JobSpec`,
+      strict duplicate-aware JSON parser, canonical serializer/identity,
+      ordered typed CLI-token lowering, and v1/default lowering are tested.
+      Stable stage-instance IDs are distinct from registered implementation
+      names. The shipping CLI and execution engine are not switched yet; v3
+      flags/config must not be advertised as available until that slice lands.
 - [x] Config file using JSON via Phobos `std.json` (no added dependency),
       specifying the filter chain and per-filter options. Implemented with
       ordered string/object entries; mojibake exposes `encodings` and

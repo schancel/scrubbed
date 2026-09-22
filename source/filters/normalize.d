@@ -102,9 +102,9 @@ private size_t normalizeLineEndingsFinish(ref StreamingState state,
 }
 
 static this() {
-    registerStreamingFilter("strip-control", &stripControlCharsFilter,
+    registerStreamingFilter("strip-control",
         StreamingFilter(StreamingState.init, &stripControlPush, null));
-    registerStreamingFilter("normalize-line-endings", &normalizeLineEndingsFilter,
+    registerStreamingFilter("normalize-line-endings",
         StreamingFilter(StreamingState.init, &normalizeLineEndingsPush,
             &normalizeLineEndingsFinish));
 }

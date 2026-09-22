@@ -34,8 +34,9 @@ module tests, executable, and visible registration.
 
 Use `registerStreamingFilter` instead when an algorithm can consume one
 decoded scalar at a time with fixed state and emit at most
-`maxStreamingExpansion` scalars per push/finish call. Supply the ordinary
-string transform as a compatibility fallback. Mutable state belongs in
+`maxStreamingExpansion` scalars per push/finish call. A module may retain a
+separate public materialized helper for direct callers and equivalence tests;
+it is not duplicated in the registry. Mutable state belongs in
 `StreamingState`; do not retain input/output pointers. Runtime groups are
 currently capped at 16 filters and decode UTF-8 strictly. Algorithms requiring
 lookahead beyond fixed state, document-wide scoring, or unbounded expansion

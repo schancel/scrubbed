@@ -281,13 +281,14 @@ is useful, but it is not sufficient on its own.
       `errors-init`, `errors-copy`, `errors-export`, and `errors-verify`
       management verbs are available. Live v2 document processing remains a
       separately reviewed successor.
-- [~] Route independent local content and metadata sinks (W05/#29). An
+- [x] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity
       (`docs/independent-sinks.md`). A deterministic HTML metadata stage
-      now supplies title/author/date/URL candidates with evidence (#28),
-      but there is no CLI selector yet. The CLI successor will mirror input-relative
-      paths under both output roots, with paired input optional. Direct
+      supplies title/author/date/URL candidates with evidence (#28), and
+      `route-metadata` now uses that stage as its primary metadata source
+      (`docs/metadata-route.md`). The opt-in CLI mirrors input-relative
+      paths under both output roots; paired input is not required. Direct
       llama.cpp-backed extraction remains separately scoped (#65).
 - [~] Store immutable source documents and keyed analyzer overlays. A
       standalone binary-v1 artifact API now has bounded integrity-checked
@@ -306,11 +307,12 @@ is useful, but it is not sufficient on its own.
       without raw matched values (`docs/pii-annotations.md`). Policy-driven
       redaction belongs to C07/#39. Any later identifier families require
       separate evidence and benchmarks; none are part of C06 completion.
-- [~] Apply explicit PII policies (C07/#39). A pure four-class
+- [x] Apply explicit PII policies (C07/#39). A pure four-class
       report/mask/opt-in redact API now resolves overlapping byte spans and
       emits typed, content-free audit records (`docs/pii-policy.md`). The
-      revision-bound C01 policy overlay and any CLI publication remain
-      separate; this is not complete de-identification.
+      revision-bound C01 policy overlay stores compact typed audit and output
+      digest without transformed content (`docs/pii-policy-overlay.md`). CLI
+      publication remains separate; this is not complete de-identification.
 - [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
       adapter and explicit paired-dash `run`/`repair` mode preserve untouched
       JSON values semantically, derive stable caller-key/line IDs, cap records,

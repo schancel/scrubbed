@@ -157,17 +157,19 @@ journal](docs/error-events.md), explicit CLI init/copy/export/verify commands,
 and bounded JSONL history/outstanding export with SHA-256 sidecars now exist;
 live v2 document processing is not yet wired into `run`/`repair`.
 An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
-commit caller-supplied content and metadata payloads separately; the CLI does
-not expose that selector. An [opt-in deterministic HTML metadata stage](docs/metadata-extraction.md)
-extracts title, author, date, and URL evidence, but is not yet routed to
-the independent metadata sink by the CLI. The
+commit caller-supplied content and metadata payloads separately. The
+[`route-metadata` CLI](docs/metadata-route.md) now feeds it filtered HTML
+content and [deterministic stage-derived metadata](docs/metadata-extraction.md)
+for title, author, date, and URL under mirrored local output paths; paired
+input and model extraction are not required. The
 [C01 shard API](docs/document-shards.md) now also has opt-in
 [quality-decision](docs/quality-annotations.md) and
 [exact-byte dedup](docs/exact-dedup.md) overlay facades. A bounded
 [four-class PII scanner](docs/pii-patterns.md) is a pure D API with an
 [opt-in C01 findings overlay](docs/pii-annotations.md) and a
-[pure report/mask/opt-in redact policy](docs/pii-policy.md), not a policy
-overlay or CLI redaction.
+[pure report/mask/opt-in redact policy](docs/pii-policy.md) plus a
+[revision-bound C01 policy overlay](docs/pii-policy-overlay.md), not CLI
+redaction or complete de-identification.
 None of these APIs establishes
 corpus-scale throughput or main-content extraction.
 

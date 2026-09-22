@@ -183,6 +183,17 @@ private bool canonicalUuid4(string value) {
     return true;
 }
 
+private bool identityContains(Database db, string value, bool byPublicId) {
+    auto sql = byPublicId ?
+        "SELECT count(*) FROM sink_identity WHERE sink_id=?1" :
+        "SELECT count(*) FROM sink_identity WHERE raw_sink=?1";
+    auto s = db.prepare(sql);
+    scope(exit) sqlite3_finalize(s);
+    bindText(s, 1, value);
+    need(sqlite3_step(s) == SQLITE_ROW, "identity-read-failed");
+    return sqlite3_column_int64(s, 0) != 0;
+}
+
 private string ensureSinkId(Database db, string raw) {
     auto lookup = db.prepare("SELECT sink_id FROM sink_identity WHERE raw_sink=?1");
     scope(exit) sqlite3_finalize(lookup);
@@ -190,13 +201,15 @@ private string ensureSinkId(Database db, string raw) {
     auto rc = sqlite3_step(lookup);
     if (rc == SQLITE_ROW) {
         auto id = columnText(lookup, 0);
-        need(canonicalUuid4(id) && id != raw, "repair-needed");
+        need(canonicalUuid4(id) && !identityContains(db, id, false),
+            "repair-needed");
         return id;
     }
     need(rc == SQLITE_DONE, "identity-read-failed");
+    need(!identityContains(db, raw, true), "raw-sink-collides-public-id");
     foreach (_; 0 .. 16) {
         auto candidate = uuid();
-        if (candidate == raw) continue;
+        if (candidate == raw || identityContains(db, candidate, false)) continue;
         auto add = db.prepare("INSERT OR IGNORE INTO sink_identity VALUES(?1,?2)");
         scope(exit) sqlite3_finalize(add);
         bindText(add, 1, raw);
@@ -298,6 +311,9 @@ private void checkV2Shape(Database db) {
         ON e.sink_id=i.sink_id WHERE i.raw_sink IS NULL`) == 0,
         "repair-needed");
     need(db.scalar("SELECT count(*) FROM pragma_foreign_key_check") == 0,
+        "repair-needed");
+    need(db.scalar(`SELECT count(*) FROM sink_identity p
+        JOIN sink_identity r ON p.sink_id=r.raw_sink`) == 0,
         "repair-needed");
     need(db.scalar(`SELECT count(*) FROM publication_intent p LEFT JOIN sink_state s USING
         (document_id,input_sha256,config_sha256,sink_key)
@@ -407,7 +423,8 @@ final class FailureJournal {
         bindText(s, 1, raw);
         need(sqlite3_step(s) == SQLITE_ROW, "repair-needed");
         auto id = columnText(s, 0);
-        need(canonicalUuid4(id) && id != raw, "repair-needed");
+        need(canonicalUuid4(id) && !identityContains(db, id, false),
+            "repair-needed");
         return id;
     }
     private void safeDestination(string destination) {

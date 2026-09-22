@@ -99,7 +99,9 @@ across restart and reused for historical events, outstanding rows, retry,
 and v1-copy baselines; it must be created transactionally with the v2 record
 that first uses it. It is neither a raw value nor a reversible/plain hash of
 one, even when the raw sink already looks like a UUID. The effects layer
-rejects a persisted public ID equal to its raw sink on reopen and read. The
+rejects a persisted public ID equal to **any** raw sink on reopen and read.
+It refuses a new raw sink equal to an existing public ID rather than changing
+that previously published stable ID. The
 full public sink identity for Stage 3 export is
 `(document_id,input_sha256,config_sha256,sink_id)`; the full internal key
 retains the exact raw sink value for migration, retry, and reconciliation.

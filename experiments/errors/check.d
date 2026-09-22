@@ -329,6 +329,37 @@ private void checkForgedIdentity(string root) {
         UPDATE outstanding SET sink_id=(SELECT raw_sink FROM sink_identity);`);
     expectRefusal(new FailureJournal(referenced),
         "UUID-shaped referenced raw sink identity accepted on reopen");
+
+    auto cross = buildPath(root, "forged-cross-raw.db");
+    createV2(cross);
+    auto crossJournal = new FailureJournal(cross);
+    auto otherRaw = "00000000-0000-4000-8000-0000000000bb";
+    crossJournal.plan(key(uuidRaw), buildPath(root, "forged-cross-a-output"));
+    crossJournal.plan(key(otherRaw), buildPath(root, "forged-cross-b-output"));
+    rawExec(cross, `UPDATE sink_identity
+        SET sink_id='00000000-0000-4000-8000-0000000000bb'
+        WHERE raw_sink='00000000-0000-4000-8000-0000000000aa'`);
+    expectRefusal(crossJournal.publicSinkId(uuidRaw),
+        "cross-key raw sink leaked through live public getter");
+    crossJournal.close();
+    expectRefusal(new FailureJournal(cross),
+        "cross-key raw sink leaked after reopen");
+
+    auto collision = buildPath(root, "future-raw-collision.db");
+    createV2(collision);
+    auto writer = new FailureJournal(collision);
+    writer.plan(key("seed-sink"), buildPath(root, "future-raw-seed-output"));
+    auto publicId = writer.publicSinkId("seed-sink");
+    expectRefusal(writer.plan(key(publicId),
+        buildPath(root, "future-raw-collision-output")),
+        "new raw sink matching existing public ID accepted");
+    writer.close();
+    auto stable = new FailureJournal(collision);
+    need(stable.publicSinkId("seed-sink") == publicId &&
+        count(collision, "SELECT count(*) FROM sink_identity") == 1 &&
+        count(collision, "SELECT count(*) FROM sink_state") == 1,
+        "colliding raw sink refusal changed stable identity");
+    stable.close();
 }
 
 private void checkPublicationFaults(string root) {

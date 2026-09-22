@@ -159,8 +159,9 @@ not expose that selector or extract metadata for it. The
 [C01 shard API](docs/document-shards.md) now also has opt-in
 [quality-decision](docs/quality-annotations.md) and
 [exact-byte dedup](docs/exact-dedup.md) overlay facades. A bounded
-[four-class PII scanner](docs/pii-patterns.md) is a pure D API, not a CLI
-redaction or stored annotation path. None of these APIs establishes
+[four-class PII scanner](docs/pii-patterns.md) is a pure D API with an
+[opt-in C01 findings overlay](docs/pii-annotations.md), not CLI redaction.
+None of these APIs establishes
 corpus-scale throughput or main-content extraction.
 
 ## Status

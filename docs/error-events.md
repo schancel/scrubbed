@@ -58,30 +58,48 @@ run-scoped UUID string. A retry-success event references the prior event ID
 for the same exact sink key; if the predecessor is a migrated v1 baseline,
 `retry_of` is null because no event was forged.
 
+The raw `SinkKey.sink` is **internal only**: v1 permits arbitrary nonempty,
+NUL-free strings, including paths, URLs, and credentials. V2 must persist a
+private mapping from each distinct raw sink value to a randomly generated,
+opaque UUID `sink_id` before that identity is exposed. The mapping is stable
+across restart and reused for historical events, outstanding rows, retry,
+and v1-copy baselines; it must be created transactionally with the v2 record
+that first uses it. It is neither a raw value nor a reversible/plain hash of
+one. The full public sink identity is
+`(document_id,input_sha256,config_sha256,sink_id)`; the full internal key
+retains the exact raw sink value for migration, retry, and reconciliation.
+Refuse export if a persisted mapping is missing or inconsistent; never fall
+back to emitting a raw sink value. This is a known durable v2 shape constraint,
+not an implemented mapping in Stage 1.
+
 The byte-exact history fixture below represents a failure in sink A, a failure
 in sink B for the same document, then a successful retry of A. The repeated
 hex digits are fixture digests, not hashes of these example strings. The
-embedded quote and newline in the sink name are escaped as JSON bytes; neither
-is an actual line break inside a record.
+private sink A may contain an embedded quote, newline, or path canary; none
+appears in the public record. The two public sink UUIDs remain stable across
+both runs.
 
 ```jsonl
-{"schema":"scrubbed.error-event.v1","event_id":"ev-1","sequence":1,"run_id":"00000000-0000-4000-8000-000000000001","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","sink_key":"sink\"A\n","phase":"sink","code":"sink-write-failed","state":"uncertain","retry_of":null,"time_utc_ms":1700000000000}
-{"schema":"scrubbed.error-event.v1","event_id":"ev-2","sequence":2,"run_id":"00000000-0000-4000-8000-000000000001","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","sink_key":"sink-B","phase":"filter","code":"filter-failed","state":"failed","retry_of":null,"time_utc_ms":1700000000001}
-{"schema":"scrubbed.error-event.v1","event_id":"ev-3","sequence":3,"run_id":"00000000-0000-4000-8000-000000000002","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","sink_key":"sink\"A\n","phase":"retry","code":"retry-succeeded","state":"committed","retry_of":"ev-1","time_utc_ms":1700000000002}
+{"schema":"scrubbed.error-event.v1","event_id":"ev-1","sequence":1,"run_id":"00000000-0000-4000-8000-000000000001","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","sink_id":"00000000-0000-4000-8000-0000000000a1","phase":"sink","code":"sink-write-failed","state":"uncertain","retry_of":null,"time_utc_ms":1700000000000}
+{"schema":"scrubbed.error-event.v1","event_id":"ev-2","sequence":2,"run_id":"00000000-0000-4000-8000-000000000001","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","sink_id":"00000000-0000-4000-8000-0000000000b2","phase":"filter","code":"filter-failed","state":"failed","retry_of":null,"time_utc_ms":1700000000001}
+{"schema":"scrubbed.error-event.v1","event_id":"ev-3","sequence":3,"run_id":"00000000-0000-4000-8000-000000000002","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","sink_id":"00000000-0000-4000-8000-0000000000a1","phase":"retry","code":"retry-succeeded","state":"committed","retry_of":"ev-1","time_utc_ms":1700000000002}
 ```
 
 The matching outstanding export contains B only. It is sorted by full
-canonical `(document_id,input_sha256,config_sha256,sink_key)` bytes, not by
-document alone. It derives from current journal outstanding rows, not a
+canonical public `(document_id,input_sha256,config_sha256,sink_id)` bytes,
+not by document alone. Sorting by private sink values could reveal their
+relative order and is forbidden. It derives from current journal outstanding
+rows, not a
 last-wins scan of history. The `origin` value is `event` for a v2 failure and
 `legacy-v1` for a copied v1 failed/uncertain baseline. Legacy baselines use
 literal JSON null for unknown `event_id`, `run_id`, and `time_utc_ms` while
-retaining the exact copied sink key, state, and digests. They produce no
+retaining the exact copied sink key internally and publishing its persisted
+opaque `sink_id`, state, and digests. They produce no
 historical event line. The example B line and a separate legacy fixture are:
 
 ```jsonl
-{"schema":"scrubbed.outstanding.v1","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","sink_key":"sink-B","state":"failed","origin":"event","event_id":"ev-2","run_id":"00000000-0000-4000-8000-000000000001","time_utc_ms":1700000000001}
-{"schema":"scrubbed.outstanding.v1","document_id":"doc:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","input_sha256":"3333333333333333333333333333333333333333333333333333333333333333","config_sha256":"4444444444444444444444444444444444444444444444444444444444444444","sink_key":"sink-C","state":"uncertain","origin":"legacy-v1","event_id":null,"run_id":null,"time_utc_ms":null}
+{"schema":"scrubbed.outstanding.v1","document_id":"doc:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","input_sha256":"2222222222222222222222222222222222222222222222222222222222222222","config_sha256":"1111111111111111111111111111111111111111111111111111111111111111","sink_id":"00000000-0000-4000-8000-0000000000b2","state":"failed","origin":"event","event_id":"ev-2","run_id":"00000000-0000-4000-8000-000000000001","time_utc_ms":1700000000001}
+{"schema":"scrubbed.outstanding.v1","document_id":"doc:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","input_sha256":"3333333333333333333333333333333333333333333333333333333333333333","config_sha256":"4444444444444444444444444444444444444444444444444444444444444444","sink_id":"00000000-0000-4000-8000-0000000000c3","state":"uncertain","origin":"legacy-v1","event_id":null,"run_id":null,"time_utc_ms":null}
 ```
 
 The two outstanding lines illustrate record shape; they are independent
@@ -105,7 +123,11 @@ must inject a path canary (`/private/f13-canary.txt`), a credential canary
 (`F13_SECRET_TOKEN`), a URL canary (`https://invalid.example/f13-canary`),
 and source/freeform-message canaries (`F13_SOURCE_BYTES`,
 `F13_EXCEPTION_TEXT`); none may occur in exported bytes or stderr. The
-canaries are test inputs only, never allowed diagnostic fields. Export must
+same negative expectation applies when every canary is placed in the raw
+`SinkKey.sink` of a migrated v1 row and a newly recorded v2 failure: exports
+and stderr contain only their opaque `sink_id`, never the raw key or a
+reversible encoding of it. The canaries are test inputs only, never allowed
+diagnostic fields. Export must
 validate its destination and aliases, bound record/page size and memory, write
 a temporary file, fsync it, and atomically replace the destination. It must not claim a
 partially written line as committed. Parent-directory fsync is not yet promised,

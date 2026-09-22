@@ -141,7 +141,9 @@ do not gate that release.
       names. Filter/stage resolution is injectable; the pure composition
       compiler retains instance IDs and identity, validates option types/order
       and filter placement, and `fix-mojibake` has a registry-owned typed
-      option schema plus its exact v1 adapter. The
+      option schema plus its exact v1 adapter. A pure one-stage executor now
+      applies before/after filters with explicit UTF-8 materialization and
+      preserves borrowed content for empty chains. The
       shipping CLI and execution engine are not switched yet; v3 flags/config
       must not be advertised as available until that slice lands.
 - [x] Config file using JSON via Phobos `std.json` (no added dependency),

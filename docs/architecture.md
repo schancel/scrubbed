@@ -102,8 +102,10 @@ invokes factories once, validates relative implementation order, and retains
 the stage-instance ID and canonical job identity behind read-only compiled
 views. Stage registrations declare filter placement as none, before, or after;
 compilation rejects unsupported filters. `stages.text_transform` is a self-registering no-op map with before
-placement. Actual Content conversion and filter placement remain unwired, so
-compilation alone does not change shipping behavior.
+placement. `composition.executor` now proves one compiled stage's declared
+placement over checked `Content`: nonempty chains are explicit UTF-8
+materialization barriers, while empty chains preserve borrowed content. It is
+not yet the shipping multi-stage/effects execution path.
 
 `content.pieces` is the standalone ordered byte-content facade. A
 `ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one

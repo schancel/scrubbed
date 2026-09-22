@@ -238,6 +238,13 @@ unittest {
         `"options":{"label":"ready","count":3,"enabled":false}}]}`);
     assert(compileJob(disabled, &stages, &filters).stages[0]
         .transform()(StageDocument.init).kind == DecisionKind.reject);
+    auto disabledFilter = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"disabled-filter","implementation":"text-transform",` ~
+        `"options":{"label":"ready","count":3,"enabled":true},` ~
+        `"filters":[{"name":"typed","options":` ~
+        `{"label":"v","count":2,"enabled":false}}]}]}`);
+    assert(compileJob(disabledFilter, &stages, &filters).stages[0]
+        .runFilters("x") == "xv2F");
 
     auto legacy = lowerLegacyNames(["plain"]);
     // The predecessor implicit stage has no stage options.

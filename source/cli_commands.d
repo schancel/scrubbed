@@ -4,6 +4,7 @@ module cli_commands;
 import argparse;
 import cli : runApp, runExtract;
 import effects.error_cli : runErrorCommand;
+import effects.metadata_route_cli : runMetadataRoute;
 import std.conv : to;
 import std.stdio : stderr;
 import std.string : startsWith;
@@ -97,10 +98,20 @@ struct ErrorsVerify {
     string outstandingJsonl;
 }
 
+@(Command("route-metadata").Description("Route local HTML content and stage metadata to independent sinks."))
+struct RouteMetadata {
+    @(NamedArgument("input").Description("HTML file or directory tree")) string input;
+    @(NamedArgument("content-output").Description("Existing content root")) string contentOutput;
+    @(NamedArgument("metadata-output").Description("Existing metadata root")) string metadataOutput;
+    @(NamedArgument("manifest").Description("Local v1 manifest path")) string manifest;
+    @(NamedArgument("filters").Description("Comma-separated content filters")) string filters;
+    @(NamedArgument("retry").Description("Explicitly retry unresolved sink outputs")) bool retry;
+}
+
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
     SubCommand!(Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
-        ErrorsExport, ErrorsVerify, Default!Run) command;
+        ErrorsExport, ErrorsVerify, RouteMetadata, Default!Run) command;
 }
 
 enum Config parserConfig = { errorExitCode: 2 };
@@ -145,6 +156,16 @@ private int process(T)(ref T options, const string[] original) {
 
 /// Dispatch from the shipping executable; argparse owns parsing, help and completion.
 int runCommands(string[] argv) {
+    if (argv.length > 1 && argv[1] == "route-metadata") {
+        foreach (arg; argv[2 .. $])
+            if (arg == "--help" || arg == "-h") {
+                Commands help;
+                auto result = CLI!(parserConfig, Commands).parseArgs(help,
+                    [argv[1], "--help"]);
+                return result.exitCode;
+            }
+        return runMetadataRoute(argv[2 .. $]);
+    }
     if (argv.length > 1 && (argv[1] == "errors-init" ||
         argv[1] == "errors-copy" || argv[1] == "errors-export" ||
         argv[1] == "errors-verify")) {
@@ -197,7 +218,7 @@ int runCommands(string[] argv) {
             return 2;
         } else static if (is(typeof(cmd) == ErrorsInit) ||
             is(typeof(cmd) == ErrorsCopy) || is(typeof(cmd) == ErrorsExport) ||
-            is(typeof(cmd) == ErrorsVerify)) {
+            is(typeof(cmd) == ErrorsVerify) || is(typeof(cmd) == RouteMetadata)) {
             assert(0, "management verbs dispatched before argparse");
             return 2;
         } else {

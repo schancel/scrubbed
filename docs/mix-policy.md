@@ -10,8 +10,9 @@ The first policy admits only quality `keep` and exact-dedup representatives to
 sampling. `drop`, `quarantine`, and duplicates get distinct exclusion reasons.
 Missing annotations either fail with `mix policy: missing annotation` or are
 excluded with a typed missing-quality or missing-dedup reason. Invalid IDs,
-contradictory dedup evidence, invalid disposition, and malformed policy fail
-before selection. The caller must supply already validated C02 decisions and
+contradictory dedup evidence (including a representative ID greater than its
+member ID), invalid disposition, and malformed policy fail before selection.
+The caller must supply already validated C02 decisions and
 C04 links; this module rechecks their structural and ID consistency but cannot
 prove that their content digests belong to a C01 revision.
 

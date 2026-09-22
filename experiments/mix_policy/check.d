@@ -7,6 +7,7 @@ import domain.quality_features : Disposition, QualityDecision;
 import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 import core.sys.posix.fcntl : fcntl, F_GETFD;
 import std.digest.sha : sha256Of;
+import std.digest : LetterCase, toHexString;
 import std.stdio : writeln;
 
 private void check(bool okay, string reason) {
@@ -78,6 +79,19 @@ private void goldenAndPartitions() {
     foreach (i; 0 .. evidence.length)
         inputs ~= input(id(cast(uint)i), evidence[i]);
     auto expected = decideMixBatch(inputs, half);
+    check(toHexString!(LetterCase.lower)(half.canonicalBytes) ==
+        "73637275626265643a6d69782d706f6c6963793a7631000123456789abcdef000000010000000201",
+        "literal policy byte golden");
+    check(toHexString!(LetterCase.lower)(find(expected, id(2)).canonicalBytes) ==
+        "73637275626265643a6d69782d6465636973696f6e3a76310047646f633a76313a" ~
+        "62363235313761663866306132353735343365356635653665643262316338643731336337363031" ~
+        "643265313766313037643535626232626132663765313261010000000000",
+        "literal selected decision byte golden");
+    check(toHexString!(LetterCase.lower)(find(expected, id(7)).canonicalBytes) ==
+        "73637275626265643a6d69782d6465636973696f6e3a76310047646f633a76313a" ~
+        "61616462343763656563393664326138333865616531333864363232353335383438643964393838" ~
+        "3466326531316636353331653331373931326234386335340002ffffffff",
+        "literal excluded decision byte golden");
     check(expected.counts[MixReason.selected] == 4 &&
         expected.counts[MixReason.sampledOut] == 3 &&
         expected.selectedIds.length == 4, "pinned seeded count golden");
@@ -178,6 +192,12 @@ private void refusals() {
         bad.dedup.groupCardinality = 0;
         decideMix(input(one, bad), policy);
     });
+    auto low = one.text < two.text ? one : two;
+    auto high = one.text < two.text ? two : one;
+    foreach (disposition; [Disposition.keep, Disposition.drop]) {
+        auto bad = fixture(low, disposition, true, high);
+        rejects("invalid dedup evidence", { decideMix(input(low, bad), policy); });
+    }
     rejects("duplicate document ID", { decideMixBatch([keep, keep], policy); });
     rejects("missing annotation", { decideMix(MixInput(one, null, &evidence.dedup), policy); });
     rejects("missing annotation", { decideMix(MixInput(one, &evidence.quality, null), policy); });
@@ -186,6 +206,17 @@ private void refusals() {
         MixReason.missingQuality &&
         decideMix(MixInput(one, &evidence.quality, null), excluding).reason ==
         MixReason.missingDedup, "typed missing reasons");
+    auto million = MixPolicy("0123456789abcdef", 1_000_000, 1_000_000);
+    auto millionDecision = decideMix(keep, million);
+    check(millionDecision.include && millionDecision.sampleBucket < 1_000_000,
+        "maximum denominator boundary");
+    MixInput[] maxBatch;
+    foreach (number; 0 .. maxMixBatch)
+        maxBatch ~= MixInput(id(cast(uint)number), null, null);
+    check(decideMixBatch(maxBatch, excluding).decisions.length == maxMixBatch,
+        "exact batch cap accepted");
+    maxBatch ~= MixInput(id(cast(uint)maxMixBatch), null, null);
+    rejects("batch exceeds cap", { decideMixBatch(maxBatch, excluding); });
 }
 
 void main() {

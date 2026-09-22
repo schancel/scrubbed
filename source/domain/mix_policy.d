@@ -131,6 +131,7 @@ MixDecision decideMix(MixInput input, MixPolicy policy) {
         require(d.documentId == input.id && validId(d.representativeId) &&
             d.canonicalVersion == exactBytesVersion && d.groupCardinality > 0 &&
             d.duplicate == (d.documentId != d.representativeId) &&
+            d.representativeId.text <= d.documentId.text &&
             (!d.duplicate || d.groupCardinality > 1),
             "invalid dedup evidence");
     }

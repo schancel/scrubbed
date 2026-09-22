@@ -293,13 +293,13 @@ is useful, but it is not sufficient on its own.
       (`docs/quality-annotations.md`, `docs/exact-dedup.md`); CLI wiring,
       interchange exports, near-duplicate decisions, and corpus-scale storage
       proof remain open.
-- [~] Scan deterministic PII patterns (C06/#38). A bounded pure D scanner
+- [x] Scan deterministic PII patterns (C06/#38). A bounded pure D scanner
       reports ordered byte spans for email, phone, card, and IPv4 under
       documented locale and confidence rules (`docs/pii-patterns.md`). An
       opt-in C01 effects overlay persists revision-bound typed findings
       without raw matched values (`docs/pii-annotations.md`). Policy-driven
-      redaction and any additional owner-selected identifier families are
-      not yet implemented.
+      redaction belongs to C07/#39. Any later identifier families require
+      separate evidence and benchmarks; none are part of C06 completion.
 - [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
       adapter and explicit paired-dash `run`/`repair` mode preserve untouched
       JSON values semantically, derive stable caller-key/line IDs, cap records,

@@ -14,7 +14,7 @@ import std.file : SpanMode, dirEntries, exists, mkdir, read, rmdirRecurse,
     tempDir, write;
 import std.path : buildPath;
 import std.process : execute;
-import std.string : toStringz;
+import std.string : split, strip, toStringz;
 import std.uuid : randomUUID;
 import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 
@@ -117,6 +117,19 @@ private void checkSmall(string root) {
         if (callbacks == 2) throw new Exception("callback stopped");
     }); }, "callback stopped", "callback failure did not abort");
     need(callbacks == 2, "callback continued after failure");
+    reject({ journal.visitOutstandingTargets((SinkKey key) {
+        journal.close();
+    }); }, "target-visitor-active", "callback closed active journal");
+    reject({ journal.visitOutstandingTargets((SinkKey key) {
+        journal.lookup(first);
+    }); }, "target-visitor-active", "callback reentered lookup");
+    reject({ journal.visitOutstandingTargets((SinkKey key) {
+        journal.retry(first);
+    }); }, "target-visitor-active", "callback reentered mutation");
+    actual.length = 0;
+    journal.visitOutstandingTargets((SinkKey key) { actual ~= key; });
+    need(actual == tracked && journal.lookup(first).get.state == SinkState.failed,
+        "journal unusable after callback refusal");
     need(digestFile(path) == beforeDb &&
         (exists(path ~ "-wal") ? digestFile(path ~ "-wal") : ubyte[32].init) == beforeWal &&
         (exists(path ~ "-shm") ? digestFile(path ~ "-shm") : ubyte[32].init) == beforeShm,
@@ -137,6 +150,44 @@ private void checkSmall(string root) {
     reject({ bad.visitOutstandingTargets((SinkKey key) {}); },
         "invalid-outstanding-target", "malformed ID accepted");
     bad.close();
+    auto nulDocumentPath = buildPath(root, "nul-document.db");
+    createV2(nulDocumentPath);
+    auto nulDocument = "'" ~ a.text ~ "'||char(0)||'suffix'";
+    sql(nulDocumentPath, `BEGIN;
+        INSERT INTO sink_identity VALUES('private-nul-doc',
+        '00000000-0000-4000-8000-000000000003');
+        INSERT INTO sink_state VALUES(` ~ nulDocument ~ `,zeroblob(32),
+        zeroblob(32),'private-nul-doc','/tmp/unused','failed',NULL,0,0);
+        INSERT INTO outstanding VALUES(` ~ nulDocument ~ `,zeroblob(32),
+        zeroblob(32),'private-nul-doc',
+        '00000000-0000-4000-8000-000000000003',
+        'failed','legacy-v1',NULL,NULL,NULL); COMMIT;`);
+    auto nulDocumentJournal = new FailureJournal(nulDocumentPath);
+    size_t corruptCallbacks;
+    reject({ nulDocumentJournal.visitOutstandingTargets((SinkKey key) {
+        ++corruptCallbacks;
+    }); }, "invalid-outstanding-target", "NUL document ID accepted");
+    need(corruptCallbacks == 0, "NUL document invoked callback");
+    nulDocumentJournal.close();
+    auto nulSinkPath = buildPath(root, "nul-sink.db");
+    createV2(nulSinkPath);
+    auto nulSink = "'PRIVATE_SINK_LABEL'||char(0)||'suffix'";
+    sql(nulSinkPath, `BEGIN;
+        INSERT INTO sink_identity VALUES(` ~ nulSink ~ `,
+        '00000000-0000-4000-8000-000000000004');
+        INSERT INTO sink_state VALUES('` ~ a.text ~ `',zeroblob(32),
+        zeroblob(32),` ~ nulSink ~ `,'/tmp/unused','failed',NULL,0,0);
+        INSERT INTO outstanding VALUES('` ~ a.text ~ `',zeroblob(32),
+        zeroblob(32),` ~ nulSink ~ `,
+        '00000000-0000-4000-8000-000000000004',
+        'failed','legacy-v1',NULL,NULL,NULL); COMMIT;`);
+    auto nulSinkJournal = new FailureJournal(nulSinkPath);
+    corruptCallbacks = 0;
+    reject({ nulSinkJournal.visitOutstandingTargets((SinkKey key) {
+        ++corruptCallbacks;
+    }); }, "invalid-outstanding-target", "NUL sink label accepted");
+    need(corruptCallbacks == 0, "NUL sink invoked callback");
+    nulSinkJournal.close();
     auto badDigestPath = buildPath(root, "bad-digest.db");
     createV2(badDigestPath);
     sql(badDigestPath, `PRAGMA ignore_check_constraints=ON; BEGIN;
@@ -168,8 +219,11 @@ private void makeLarge(string root) {
     // One transaction creates a valid 10,000-row legacy-v1 baseline without
     // 20,000 per-row fsyncs. The visitor still uses the real v2 constructor.
     string statements = "BEGIN;";
+    string filler;
+    foreach (_; 0 .. 248) filler ~= "x";
     foreach (i; 0 .. 10_000) {
-        auto label = "private-" ~ i.to!string;
+        auto label = "s" ~ i.to!string ~ "-" ~ filler;
+        need(label.length <= 256, "large sink label cap");
         auto opaque = randomUUID().toString;
         statements ~= "INSERT INTO sink_identity VALUES('" ~ label ~ "','" ~
             opaque ~ "');INSERT INTO sink_state VALUES('" ~ doc.text ~
@@ -181,28 +235,33 @@ private void makeLarge(string root) {
     statements ~= "COMMIT;";
     sql(path, statements);
 }
-private void checkLargeChild(string path) {
+private void checkLargeChild(string path, bool retain) {
     auto baselineFds = fdCount();
     auto baselineRss = rssBytes();
     auto journal = new FailureJournal(path);
     size_t count;
-    journal.visitOutstandingTargets((SinkKey key) { ++count; });
+    SinkKey[] retained;
+    journal.visitOutstandingTargets((SinkKey key) {
+        ++count;
+        if (retain) retained ~= key;
+    });
     need(count == 10_000, "large exact row count");
     auto visitedFds = fdCount();
     auto visitedRss = rssBytes();
+    if (retain) need(retained.length == count &&
+        retained[$ - 1].sink.length >= 250, "retaining control");
     journal.close();
     need(visitedFds <= baselineFds + 8, "large descriptor bound");
     need(fdCount() <= baselineFds, "large descriptor cleanup");
-    need(visitedRss <= 32UL * 1024 * 1024,
+    if (!retain) need(visitedRss <= 32UL * 1024 * 1024,
         "large resident bound " ~ visitedRss.to!string);
     import std.stdio : writeln;
-    writeln("retry targets: 10000 visited; RSS ", visitedRss,
-        " bytes (baseline ", baselineRss, "); FD ", visitedFds,
-        " (baseline ", baselineFds, ")");
+    writeln(visitedRss, " ", visitedFds, " ", baselineRss, " ", baselineFds);
 }
 void main(string[] args) {
-    if (args.length == 3 && args[1] == "--large-child") {
-        checkLargeChild(args[2]);
+    if (args.length == 3 && (args[1] == "--large-child" ||
+        args[1] == "--large-retain-child")) {
+        checkLargeChild(args[2], args[1] == "--large-retain-child");
         return;
     }
     need(args.length == 1, "unexpected arguments");
@@ -211,9 +270,22 @@ void main(string[] args) {
     scope(exit) rmdirRecurse(root);
     checkSmall(root);
     makeLarge(root);
-    auto result = execute([args[0], "--large-child", buildPath(root, "large.db")]);
-    need(result.status == 0, "large child failed: " ~ result.output);
+    auto path = buildPath(root, "large.db");
+    auto result = execute([args[0], "--large-child", path]);
+    need(result.status == 0, "large stream child failed: " ~ result.output);
+    auto control = execute([args[0], "--large-retain-child", path]);
+    need(control.status == 0, "large control child failed: " ~ control.output);
+    auto streamMetrics = result.output.strip.split(" ");
+    auto controlMetrics = control.output.strip.split(" ");
+    need(streamMetrics.length == 4 && controlMetrics.length == 4,
+        "large resource output shape");
+    auto streamRss = streamMetrics[0].to!ulong;
+    auto retainedRss = controlMetrics[0].to!ulong;
+    need(retainedRss >= streamRss + 2UL * 1024 * 1024,
+        "retaining control did not separate from streaming RSS");
     import std.stdio : writeln;
-    writeln(result.output);
+    writeln("retry targets: 10000 streamed; RSS ", streamRss,
+        " bytes, FD ", streamMetrics[1], "; retained control RSS ",
+        retainedRss, " bytes");
     writeln("retry target checker passed");
 }

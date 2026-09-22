@@ -1,6 +1,7 @@
 module pii_policy.overlay_check;
 
 import core.sys.posix.sys.stat : stat, stat_t;
+import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 import core.sys.posix.unistd : link;
 import domain.document : OutputName, SourceLocator;
 import domain.pii_patterns : PiiFinding, PiiCategory, PiiConfidence,
@@ -46,6 +47,13 @@ private size_t descriptors() {
     size_t n;
     foreach (_; dirEntries("/dev/fd", SpanMode.shallow)) ++n;
     return n;
+}
+private ulong rssBytes() {
+    rusage usage;
+    check(getrusage(RUSAGE_SELF, &usage) == 0, "cannot inspect RSS");
+    version (OSX) return cast(ulong)usage.ru_opaque[0];
+    else version (linux) return cast(ulong)usage.ru_maxrss * 1024;
+    else static assert(0, "RSS observation requires platform support");
 }
 private void valueGoldens() {
     auto plain = applyPiiPolicy(cast(ubyte[])"plain text",
@@ -232,6 +240,9 @@ private void run() {
         shapeWriter.publish();
         rejects({ publishPiiPolicy(source, malformedPath, policyFile, "US",
             PiiPolicy.mask); });
+        rejects({ visitPiiPolicy(source, malformedPath, policyFile, "US",
+            PiiPolicy.mask, false,
+            (string id, PiiPolicyResult result) {}); });
         check(cast(ubyte[])read(policyFile) == prior &&
             info(policyFile).st_ino == priorInode,
             "bad findings altered destination");
@@ -291,6 +302,16 @@ private void run() {
     check(cast(ubyte[])read(cappedPolicy) == cappedPriorBytes &&
         info(cappedPolicy).st_ino == cappedPriorInode,
         "oversize altered destination");
+    auto before = rssBytes();
+    foreach (_; 0 .. 64) {
+        size_t replayed;
+        visitPiiPolicy(source, findings, policyFile, "US", PiiPolicy.mask,
+            false, (string id, PiiPolicyResult result) { ++replayed; });
+        check(replayed == docs.length, "bounded replay lost document");
+    }
+    auto after = rssBytes();
+    check(after <= before + 16 * 1024 * 1024,
+        "repeated replay RSS grew beyond bound");
     check(descriptors() == steadyFd, "final descriptor leak");
     noTemps(root);
 }

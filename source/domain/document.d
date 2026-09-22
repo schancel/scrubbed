@@ -41,6 +41,24 @@ struct DocumentId {
     private this(string digest) { value = digest; }
     string text() const { return value; }
 
+    /// Parse an already-stored typed ID without deriving new provenance.
+    static DocumentId fromCanonicalText(string text) {
+        auto prefix = text.length == 71 ? "doc:v1:" : "child:v1:";
+        bool canonical = text.length == prefix.length + 64 &&
+            text[0 .. prefix.length] == prefix;
+        if (canonical) {
+            foreach (ch; text[prefix.length .. $]) {
+                if (!((ch >= '0' && ch <= '9') ||
+                    (ch >= 'a' && ch <= 'f'))) {
+                    canonical = false;
+                    break;
+                }
+            }
+        }
+        enforce(canonical, "document ID: invalid canonical text");
+        return DocumentId(text.idup);
+    }
+
     static DocumentId from(SourceLocator source) {
         enforce(source.datasetNamespace.length != 0 && source.sourceKey.length != 0 &&
             source.recordKey.length != 0, "source locator is not initialized");
@@ -193,6 +211,7 @@ struct DocumentView {
 }
 
 unittest {
+    import std.array : replicate;
     import std.conv : to;
     import std.exception : assertThrown;
 
@@ -227,6 +246,22 @@ unittest {
     assertThrown(SourceLocator("archive", cast(string) [cast(char) 0xff], "record"));
     assertThrown(OutputName(""));
     assertThrown(DocumentId.from(SourceLocator.init));
+    auto original = document.id.text.dup;
+    auto parsed = DocumentId.fromCanonicalText(cast(string)original);
+    assert(parsed == document.id);
+    original[0] = 'x';
+    assert(parsed == document.id); // Parser owns a copy, not caller storage.
+    assert(DocumentId.fromCanonicalText("child:v1:" ~ "a".replicate(64)).text.length == 73);
+    foreach (bad; ["", "doc:v1:", "other:v1:" ~ "a".replicate(64),
+            "doc:v1:" ~ "A".replicate(64), "doc:v1:" ~ "g".replicate(64),
+            "doc:v1:" ~ "a".replicate(63), "doc:v1:" ~ "a".replicate(65)]) {
+        try DocumentId.fromCanonicalText(bad);
+        catch (Exception error) {
+            assert(error.msg == "document ID: invalid canonical text");
+            continue;
+        }
+        assert(0, "expected canonical ID refusal");
+    }
 }
 
 unittest {

@@ -3,6 +3,18 @@
 All project benchmark and corpus-analysis utilities are written in D. The
 baseline also measures the external ftfy CLI on its task-equivalent fixture.
 
+## Attested full-process target
+
+`pipeline.d --attested-build` refuses a dirty checkout, builds the release
+target into private scratch, and binds every v5/v6 timing sample to the
+executed target SHA-256 plus a versioned source/compiler/build attestation.
+`pipeline_attestation_check.d` is the D-only changed-executable control: two
+distinct target variants process the same exact-output fixture in A/B/A/B
+order, and every sample retains its own executable hash. The control makes no
+speed ranking. Supplied binaries continue to emit explicitly unverified v3/v4
+reports. Commands, report fields, negatives, and unsupported metrics are in
+[`docs/benchmark-pipeline.md`](../docs/benchmark-pipeline.md).
+
 ## Fused scalar-filter microbenchmark
 
 `fused_filters.d` compares the former separately materialized

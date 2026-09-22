@@ -28,11 +28,16 @@ dub test --compiler=ldc2
 dub build --build=release --compiler=ldc2
 ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
 /tmp/scrubbed-pipeline --self-test
+/tmp/scrubbed-pipeline --self-test-attestation \
+  benchmarks/pipeline_attestation_check.d
 /tmp/scrubbed-pipeline --self-test-snapshot "$(pwd)/scrubbed" \
   /tmp/dos2unix-7.5.7/dos2unix
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" > /tmp/scrubbed-pipeline-result.json
 # To preserve a publication-safe raw sample in the repository instead:
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" benchmarks/pipeline-sample.json
+# From a clean checkout, build and time only harness-attested target bytes:
+/tmp/scrubbed-pipeline --attested-build "$(pwd)" \
+  /tmp/scrubbed-pipeline-attested.json
 ```
 
 The self-test runs in release mode. It rejects missing required metadata,
@@ -47,6 +52,12 @@ The separate release snapshot self-test copies dos2unix into an owned
 disposable path, atomically replaces that original path with an invalid
 executable after the first comparator sample, and requires the later sample
 and published hash to remain bound to the pre-timing snapshot.
+The D-only attestation self-test builds two task-equivalent line-ending targets
+from `pipeline_attestation_check.d`. Their executable hashes must differ, their
+exact output must match, and the A/B/A/B samples must each carry the hash of
+the executable actually run. It release-actively rejects a modified post-build
+target, a changed snapshot, mixed sample attribution, and false exact-output
+status. This is an attribution control, not a speed comparison.
 
 The timing runner is paired with the pre-existing release-active, actual-binary
 manifest boundary check. Run it on the *same shipping executable* before
@@ -54,7 +65,8 @@ accepting a manifest timing report:
 
 ```sh
 ldc2 -O3 -release -Isource experiments/manifest_cli/check.d \
-  source/domain/document.d source/effects/sqlite_ffi.d \
+  source/domain/document.d source/content/pieces.d \
+  source/effects/atomic_piece_sink.d source/effects/sqlite_ffi.d \
   source/effects/local_manifest.d third_party/sqlite/sqlite3.o \
   -of=/tmp/scrubbed-manifest-cli-check
 /tmp/scrubbed-manifest-cli-check "$(pwd)/scrubbed"
@@ -107,6 +119,21 @@ unverified. All snapshots are removed with the benchmark's own scratch tree.
 The filter digest hashes the selected filter string, not the
 manifest's entire effective canonical configuration (which also includes
 output route, binary and other policy bytes).
+
+The opt-in `--attested-build` path emits version 5 for the small corpus and
+version 6 for `--large`. It refuses a dirty source checkout, records the exact
+source commit/tree plus SHA-256 of a Git source archive, `dub.json`, and
+`dub.selections.json`, hashes the resolved `ldc2` executable, records its
+version and fixed release build command/status, and verifies the source inputs
+again after building. The target is built in private scratch, hashed, copied
+to a read-only snapshot, and accepted only when the built-target and snapshot
+hashes match. Every timed case, manifest transition, replay, and skip in v5/v6
+carries that target hash. The embedded changed-executable control retains both
+distinct variant hashes and raw A/B/A/B sample attribution. Supplied binaries
+remain v3/v4 and explicitly `UNVERIFIED`; adding an attestation to an old
+schema, spoofing compiler/flags, or mixing a sample hash causes rejection.
+Reports contain only path tokens and hashes, never checkout or scratch paths.
+
 On Linux, the D harness reads `model name`, `Hardware`, or `Processor` from
 `/proc/cpuinfo` and `MemTotal` in `kB` from `/proc/meminfo`. If either cannot
 be parsed, it exits nonzero without publishing a report; it never records a
@@ -128,9 +155,10 @@ is made from these runs.
 The current generated corpus is small and repetitive: each layout contains
 32,768 records, 786,432 bytes (0.75 MiB) of input. It is an integration and
 methodology baseline, not a representative document corpus. The benchmark
-times changed input/filter selection/output route and post-kill replay, but
-does not time changed executable bytes. The paired release gate above checks
-all of those correctness paths. Peak open-FD/GC and actual read/write byte
+times changed input/filter selection/output route and post-kill replay.
+Attested reports additionally run the separate task-equivalent
+changed-executable attribution control, but make no ranking from its timings.
+Peak open-FD/GC and actual read/write byte
 counters and a safely completed greater-than-RAM
 case remain unsupported. On the observed Apple M4 host, `sysctl -n hw.memsize`
 reported 17,179,869,184 bytes (16 GiB) RAM and `df -k .` reported

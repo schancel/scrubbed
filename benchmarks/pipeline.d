@@ -15,7 +15,7 @@ import std.datetime : dur;
 import std.file : SpanMode, copy, dirEntries, exists, getSize, mkdirRecurse,
     read, readText, remove, rename, rmdirRecurse, tempDir, write;
 import std.json : JSONValue, parseJSON;
-import std.path : buildPath, relativePath;
+import std.path : baseName, buildPath, relativePath;
 import std.process : execute, spawnProcess, wait;
 import std.stdio : File, stderr, writeln;
 import std.string : replace, split, splitLines, strip, toStringz;
@@ -32,6 +32,17 @@ private string hashFile(string path) {
 private struct ExecutableSnapshot {
     string path;
     string sha256;
+}
+
+private struct AttestedExecutable {
+    ExecutableSnapshot snapshot;
+    JSONValue attestation;
+}
+
+private struct ControlVariant {
+    string identity;
+    string builtPath;
+    ExecutableSnapshot snapshot;
 }
 
 private string privateScratch(string prefix) {
@@ -54,6 +65,15 @@ private ExecutableSnapshot snapshotExecutable(string source, string root,
 private void verifySnapshot(ExecutableSnapshot snapshot) {
     require(hashFile(snapshot.path) == snapshot.sha256,
         "executable snapshot changed during benchmark");
+}
+
+private ExecutableSnapshot snapshotExpectedExecutable(string source, string root,
+                                                       string name,
+                                                       string expectedHash) {
+    auto snapshot = snapshotExecutable(source, root, name);
+    require(snapshot.sha256 == expectedHash,
+        "built executable changed before attested snapshot");
+    return snapshot;
 }
 
 private string checked(string[] args) {
@@ -154,19 +174,113 @@ private JSONValue largePreflight(long ramBytes, long freeBytes,
     return result;
 }
 
-private JSONValue unsupportedCases() {
-    return arr(["OS cold cache not controlled",
+private JSONValue unsupportedCases(bool attested = false) {
+    auto values = ["OS cold cache not controlled",
         "peak open FDs and GC not instrumented",
         "actual syscall read/write bytes not observable",
-        "greater-than-RAM case not attempted; verify host RAM, scratch, and time budget before running",
-        "changed-executable timing not included; paired correctness gate covers identity"]);
+        "greater-than-RAM case not attempted; verify host RAM, scratch, and time budget before running"];
+    if (!attested)
+        values ~= "changed-executable timing not included; paired correctness gate covers identity";
+    return arr(values);
 }
 
 private string identityPolicy() {
     return "private read-only executable snapshots hashed before and after all samples";
 }
 
-private void validateBuildProvenance(JSONValue report, bool comparator) {
+private string attestedBuildCommand() {
+    return "dub build --root=<clean-source> --build=release " ~
+        "--compiler=<attested-compiler> --force --dest=<private-scratch> " ~
+        "--non-interactive";
+}
+
+private void requireCleanStatus(string status) {
+    require(status.length == 0, "attested source checkout is not clean");
+}
+
+private void validateAttestation(JSONValue attestation, string targetHash) {
+    require(attestation["schema"].str == "scrubbed-build-attestation-v1",
+        "build attestation schema");
+    foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
+                   "dub_recipe_sha256", "dependency_lock_sha256",
+                   "compiler_executable_sha256", "target_sha256"])
+        require(digestField(attestation[key].str,
+            key == "source_sha" || key == "source_tree_id" ? 40 : 64),
+            "invalid attestation digest " ~ key);
+    require(attestation["source_status"].str == "clean-before-and-after" &&
+        attestation["compiler_executable_name"].str == "ldc2" &&
+        attestation["compiler_version"].str.length != 0 &&
+        !attestation["compiler_version"].str.canFind('/') &&
+        !attestation["compiler_version"].str.canFind('\\') &&
+        attestation["build_command_template"].str == attestedBuildCommand() &&
+        attestation["build_flags"].str == "release; force; non-interactive" &&
+        attestation["build_status"].integer == 0 &&
+        attestation["target_sha256"].str == targetHash,
+        "inconsistent build attestation");
+}
+
+private AttestedExecutable buildAttestedExecutable(string sourceRoot,
+                                                    string scratchRoot) {
+    requireCleanStatus(checked(["git", "-C", sourceRoot, "status", "--porcelain",
+        "--untracked-files=all"]));
+    auto sourceSha = checked(["git", "-C", sourceRoot, "rev-parse", "HEAD"]);
+    auto treeId = checked(["git", "-C", sourceRoot, "rev-parse", "HEAD^{tree}"]);
+    require(digestField(sourceSha, 40) && digestField(treeId, 40),
+        "invalid source revision identity");
+    auto archive = buildPath(scratchRoot, "source.tar");
+    checked(["git", "-C", sourceRoot, "archive", "--format=tar",
+        "--output=" ~ archive, "HEAD"]);
+    auto archiveHash = hashFile(archive);
+    auto recipeHash = hashFile(buildPath(sourceRoot, "dub.json"));
+    auto lockHash = hashFile(buildPath(sourceRoot, "dub.selections.json"));
+    auto compiler = checked(["which", "ldc2"]);
+    require(baseName(compiler) == "ldc2", "attested compiler must resolve to ldc2");
+    auto compilerHash = hashFile(compiler);
+    auto compilerVersion = checked([compiler, "--version"]).splitLines[0];
+    auto destination = buildPath(scratchRoot, "attested-build");
+    mkdirRecurse(destination);
+    auto buildResult = execute(["dub", "build", "--root=" ~ sourceRoot,
+        "--build=release", "--compiler=" ~ compiler, "--force",
+        "--dest=" ~ destination, "--non-interactive"]);
+    require(buildResult.status == 0, "attested build failed: " ~ buildResult.output);
+    requireCleanStatus(checked(["git", "-C", sourceRoot, "status", "--porcelain",
+        "--untracked-files=all"]));
+    require(checked(["git", "-C", sourceRoot, "rev-parse", "HEAD"]) == sourceSha &&
+        checked(["git", "-C", sourceRoot, "rev-parse", "HEAD^{tree}"]) == treeId,
+        "source revision changed during attested build");
+    auto archiveAfter = buildPath(scratchRoot, "source-after.tar");
+    checked(["git", "-C", sourceRoot, "archive", "--format=tar",
+        "--output=" ~ archiveAfter, "HEAD"]);
+    require(hashFile(archiveAfter) == archiveHash &&
+        hashFile(buildPath(sourceRoot, "dub.json")) == recipeHash &&
+        hashFile(buildPath(sourceRoot, "dub.selections.json")) == lockHash,
+        "source or dependency inputs changed during attested build");
+    auto target = buildPath(destination, "scrubbed");
+    require(exists(target), "attested build produced no scrubbed target");
+    auto targetHash = hashFile(target);
+    auto snapshot = snapshotExpectedExecutable(target, scratchRoot,
+        "scrubbed-attested-snapshot", targetHash);
+    JSONValue attestation = JSONValue([
+        "schema": JSONValue("scrubbed-build-attestation-v1"),
+        "source_sha": JSONValue(sourceSha),
+        "source_tree_id": JSONValue(treeId),
+        "source_archive_sha256": JSONValue(archiveHash),
+        "dub_recipe_sha256": JSONValue(recipeHash),
+        "dependency_lock_sha256": JSONValue(lockHash),
+        "source_status": JSONValue("clean-before-and-after"),
+        "compiler_executable_name": JSONValue("ldc2"),
+        "compiler_executable_sha256": JSONValue(compilerHash),
+        "compiler_version": JSONValue(compilerVersion),
+        "build_command_template": JSONValue(attestedBuildCommand()),
+        "build_flags": JSONValue("release; force; non-interactive"),
+        "build_status": JSONValue(0),
+        "target_sha256": JSONValue(targetHash)]);
+    validateAttestation(attestation, snapshot.sha256);
+    return AttestedExecutable(snapshot, attestation);
+}
+
+private void validateBuildProvenance(JSONValue report, bool comparator,
+                                     bool attested = false) {
     require(report["binary_identity_policy"].str == identityPolicy(),
         "report did not declare verified executable snapshot policy");
     require(("compiler" in report.object) is null &&
@@ -177,8 +291,18 @@ private void validateBuildProvenance(JSONValue report, bool comparator) {
     require(report["harness_compiler_available_version"].str.length != 0 &&
         report["harness_reproduction_command"].str.length != 0,
         "missing harness environment/recipe");
-    require(report["target_binary_compiler"].str == "UNVERIFIED" &&
-        report["target_binary_build_flags"].str == "UNVERIFIED",
+    if (attested) {
+        require(report["source_binary_mapping"].str == "ATTESTED" &&
+            ("build_attestation" in report.object) !is null,
+            "attested report lacks source/binary mapping");
+        validateAttestation(report["build_attestation"],
+            report["binary_sha256"].str);
+        require(("target_binary_compiler" in report.object) is null &&
+            ("target_binary_build_flags" in report.object) is null,
+            "attested report retained ambiguous unverified fields");
+    } else require(report["target_binary_compiler"].str == "UNVERIFIED" &&
+        report["target_binary_build_flags"].str == "UNVERIFIED" &&
+        ("build_attestation" in report.object) is null,
         "supplied target binary build provenance was not attested");
     if (comparator)
         require(report["dos2unix_binary_compiler"].str == "UNVERIFIED" &&
@@ -240,7 +364,7 @@ private void requireTreeStatus(JSONValue sample, size_t files,
 }
 
 private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0,
-                        size_t treeFiles = 0) {
+                        size_t treeFiles = 0, string targetHash = "") {
     auto result = execute((mac ? ["/usr/bin/time", "-l", "-p"] :
         ["/usr/bin/time", "-v"]) ~ command);
     require(result.status == 0, "timed command failed: " ~ result.output);
@@ -254,6 +378,7 @@ private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0,
             "manifest warm run did not report every verified skip");
     }
     JSONValue sample = JSONValue(["status": JSONValue(result.status)]);
+    if (targetHash.length) sample["target_binary_sha256"] = targetHash;
     sample["decisions"] = cast(long) decisionCount;
     sample["skipped"] = cast(long) skipCount;
     sample["retry"] = cast(long) retryCount;
@@ -283,6 +408,141 @@ private JSONValue timed(string[] command, bool mac, size_t expectedSkips = 0,
     foreach (field; ["wall_seconds", "user_seconds", "system_seconds", "peak_rss_bytes"])
         require((field in sample.object) !is null, "missing time metric " ~ field);
     return sample;
+}
+
+private ControlVariant buildControlVariant(string source, string root,
+                                           string compiler, string identity,
+                                           string versionName) {
+    auto target = buildPath(root, identity ~ "-built");
+    auto result = execute([compiler, "-O3", "-release",
+        "-d-version=" ~ versionName, source, "-of=" ~ target]);
+    require(result.status == 0, "attestation control build failed: " ~ result.output);
+    auto builtHash = hashFile(target);
+    auto snapshot = snapshotExpectedExecutable(target, root,
+        identity ~ "-snapshot", builtHash);
+    require(checked([snapshot.path, "--identity"]) == identity,
+        "attestation control variant identity mismatch");
+    return ControlVariant(identity, target, snapshot);
+}
+
+private void validateChangedExecutableControl(JSONValue report) {
+    require(report["schema"].str == "scrubbed-changed-executable-control-v1" &&
+        digestField(report["fixture_sha256"].str, 64) &&
+        digestField(report["expected_output_sha256"].str, 64) &&
+        digestField(report["compiler_executable_sha256"].str, 64) &&
+        report["compiler_executable_name"].str == "ldc2" &&
+        report["compiler_version"].str.length != 0 &&
+        report["variants"].array.length == 2 &&
+        report["samples"].array.length == 4 &&
+        report["conclusion"].str == "attribution control only; no speed ranking",
+        "incomplete changed-executable control");
+    auto aHash = report["variants"][0]["target_sha256"].str;
+    auto bHash = report["variants"][1]["target_sha256"].str;
+    require(digestField(aHash, 64) && digestField(bHash, 64) && aHash != bHash &&
+        report["variants"][0]["identity"].str == "attestation-variant-a" &&
+        report["variants"][1]["identity"].str == "attestation-variant-b",
+        "control variants are not distinct and identified");
+    foreach (index, sample; report["samples"].array) {
+        auto expectedIdentity = index % 2 == 0 ?
+            "attestation-variant-a" : "attestation-variant-b";
+        auto expectedHash = index % 2 == 0 ? aHash : bHash;
+        require(sample["variant"].str == expectedIdentity &&
+            sample["target_binary_sha256"].str == expectedHash &&
+            sample["status"].integer == 0 && sample["exact_output"].boolean &&
+            sample["fixture_sha256"].str == report["fixture_sha256"].str &&
+            sample["output_sha256"].str == report["expected_output_sha256"].str,
+            "mixed or incorrect changed-executable sample attribution");
+    }
+}
+
+private JSONValue changedExecutableControl(string source, string root, bool mac) {
+    auto compiler = checked(["which", "ldc2"]);
+    require(baseName(compiler) == "ldc2", "control compiler must resolve to ldc2");
+    auto a = buildControlVariant(source, root, compiler,
+        "attestation-variant-a", "AttestationVariantA");
+    auto b = buildControlVariant(source, root, compiler,
+        "attestation-variant-b", "AttestationVariantB");
+    require(a.snapshot.sha256 != b.snapshot.sha256,
+        "changed-executable control produced identical binaries");
+    auto input = buildPath(root, "attestation-control-input.txt");
+    auto output = buildPath(root, "attestation-control-output.txt");
+    write(input, "alpha\r\nbeta\rgamma\n".replicate(4096));
+    auto expected = "alpha\nbeta\ngamma\n".replicate(4096);
+    JSONValue[] samples;
+    foreach (index; 0 .. 4) {
+        auto variant = index % 2 == 0 ? a : b;
+        if (exists(output)) remove(output);
+        auto sample = timed([variant.snapshot.path, input, output], mac, 0, 0,
+            variant.snapshot.sha256);
+        require(exists(output) && readText(output) == expected,
+            "changed-executable control exact output mismatch");
+        sample["variant"] = variant.identity;
+        sample["fixture_sha256"] = hashFile(input);
+        sample["output_sha256"] = hashFile(output);
+        sample["exact_output"] = true;
+        samples ~= sample;
+    }
+    verifySnapshot(a.snapshot);
+    verifySnapshot(b.snapshot);
+    JSONValue report = JSONValue([
+        "schema": JSONValue("scrubbed-changed-executable-control-v1"),
+        "fixture_sha256": JSONValue(hashFile(input)),
+        "expected_output_sha256": JSONValue(toHexString(
+            sha256Of(cast(const(ubyte)[]) expected)).to!string),
+        "compiler_executable_name": JSONValue("ldc2"),
+        "compiler_executable_sha256": JSONValue(hashFile(compiler)),
+        "compiler_version": JSONValue(checked([compiler, "--version"]).splitLines[0]),
+        "conclusion": JSONValue("attribution control only; no speed ranking"),
+        "variants": JSONValue([
+            JSONValue(["identity": JSONValue(a.identity),
+                "target_sha256": JSONValue(a.snapshot.sha256),
+                "build_flags": JSONValue("-O3 -release -d-version=AttestationVariantA")]),
+            JSONValue(["identity": JSONValue(b.identity),
+                "target_sha256": JSONValue(b.snapshot.sha256),
+                "build_flags": JSONValue("-O3 -release -d-version=AttestationVariantB")])]),
+        "samples": JSONValue(samples)]);
+    validateChangedExecutableControl(report);
+
+    auto bad = parseJSON(report.toString);
+    bad["samples"][1]["target_binary_sha256"] = a.snapshot.sha256;
+    bool failed;
+    try { validateChangedExecutableControl(bad); }
+    catch (Exception) { failed = true; }
+    require(failed, "mixed changed-executable sample negative did not fail");
+    bad = parseJSON(report.toString);
+    bad["samples"][0]["exact_output"] = false;
+    failed = false;
+    try { validateChangedExecutableControl(bad); }
+    catch (Exception) { failed = true; }
+    require(failed, "changed-executable exact-output negative did not fail");
+    write(output, "wrong output");
+    failed = false;
+    try { require(readText(output) == expected,
+        "changed-executable control exact output mismatch"); }
+    catch (Exception) { failed = true; }
+    require(failed, "changed-executable wrong-byte negative did not fail");
+
+    auto stale = buildPath(root, "stale-built-target");
+    copy(a.builtPath, stale);
+    auto staleHash = hashFile(stale);
+    write(stale, "modified after build");
+    failed = false;
+    try { snapshotExpectedExecutable(stale, root, "stale-snapshot", staleHash); }
+    catch (Exception) { failed = true; }
+    require(failed, "modified post-build target negative did not fail");
+
+    write(a.builtPath, "replaced original target");
+    verifySnapshot(a.snapshot);
+    require(hashFile(a.builtPath) != a.snapshot.sha256,
+        "original-path swap control did not change the original");
+    require(chmod(b.snapshot.path.toStringz, S_IRWXU) == 0,
+        "cannot prepare snapshot tamper negative");
+    write(b.snapshot.path, "tampered snapshot");
+    failed = false;
+    try { verifySnapshot(b.snapshot); }
+    catch (Exception) { failed = true; }
+    require(failed, "snapshot hash mismatch negative did not fail");
+    return report;
 }
 
 private string expectedBytes(size_t records) {
@@ -333,7 +593,7 @@ private JSONValue verifyTree(string input, string output, size_t files,
 
 private JSONValue caseRun(string name, string[] command, string input,
                           string output, size_t files, size_t records,
-                          bool mac, bool manifest) {
+                          bool mac, bool manifest, string targetHash = "") {
     JSONValue[] samples;
     JSONValue identities;
     foreach (run; 0 .. 3) {
@@ -341,7 +601,7 @@ private JSONValue caseRun(string name, string[] command, string input,
             if (exists(output)) rmdirRecurse(output);
         }
         auto sample = timed(command, mac, manifest && run > 0 ? files : 0,
-            manifest ? files : 0);
+            manifest ? files : 0, targetHash);
         if (manifest) requireTreeStatus(sample, files,
             run == 0 ? "changed" : "skipped",
             run == 0 ? "changed" : "skipped");
@@ -379,14 +639,16 @@ private JSONValue caseRun(string name, string[] command, string input,
 
 private JSONValue manifestTransitions(string[] command, string input,
                                       string output, size_t files,
-                                      size_t records, bool mac) {
+                                      size_t records, bool mac,
+                                      string targetHash = "") {
     JSONValue[] steps;
     auto firstFile = buildPath(input, "doc-0.txt");
     auto bytes = cast(ubyte[]) read(firstFile);
     require(bytes.length && bytes[0] == 'a', "fixture lacks visible mutation site");
     bytes[0] = 'A';
     write(firstFile, bytes);
-    auto changedInput = timed(command ~ ["--manifest-retry"], mac, 0, files);
+    auto changedInput = timed(command ~ ["--manifest-retry"], mac, 0, files,
+        targetHash);
     require(changedInput["decisions"].integer == files &&
         changedInput["retry"].integer == 1 &&
         changedInput["skipped"].integer == files - 1,
@@ -398,7 +660,8 @@ private JSONValue manifestTransitions(string[] command, string input,
 
     auto changedConfig = command.dup;
     changedConfig[6] = "strip-control,normalize-line-endings";
-    auto configSample = timed(changedConfig ~ ["--manifest-retry"], mac, 0, files);
+    auto configSample = timed(changedConfig ~ ["--manifest-retry"], mac, 0, files,
+        targetHash);
     require(configSample["decisions"].integer == files &&
         configSample["retry"].integer == files,
         "changed config did not retry every file");
@@ -410,7 +673,7 @@ private JSONValue manifestTransitions(string[] command, string input,
     auto newRoute = changedConfig.dup;
     auto alternate = output ~ "-alternate";
     newRoute[4] = alternate;
-    auto routeSample = timed(newRoute, mac, 0, files);
+    auto routeSample = timed(newRoute, mac, 0, files, targetHash);
     require(routeSample["decisions"].integer == files &&
         routeSample["changed"].integer == files,
         "changed output route did not publish every file");
@@ -421,7 +684,8 @@ private JSONValue manifestTransitions(string[] command, string input,
     return JSONValue(steps);
 }
 
-private JSONValue restartProbe(string binary, string root, bool mac) {
+private JSONValue restartProbe(string binary, string root, bool mac,
+                               string targetHash = "") {
     auto input = buildPath(root, "restart-input.txt");
     auto output = buildPath(root, "restart-output.txt");
     auto db = buildPath(root, "restart.sqlite");
@@ -456,14 +720,14 @@ private JSONValue restartProbe(string binary, string root, bool mac) {
     require(query == "1", "killed process lost durable planned row");
     bool hadOutput = exists(output);
     auto replay = timed(hadOutput ? command ~ ["--manifest-retry"] : command,
-        mac);
+        mac, 0, 0, targetHash);
     require(replay["decisions"].integer == 1 &&
         (replay["changed"].integer == 1 || replay["unchanged"].integer == 1 ||
          replay["retry"].integer == 1),
         "restart replay was not a publish/retry: " ~ replay.toString);
     require(exists(output) && getSize(output) == 64UL * 1024 * 1024 &&
         hashFile(output) == hashFile(input), "restart output bytes differ");
-    auto skip = timed(command, mac, 1);
+    auto skip = timed(command, mac, 1, 0, targetHash);
     require(hashFile(output) == hashFile(input), "restart skip changed output");
     JSONValue result = JSONValue(["planned_seen": JSONValue(planned),
         "killed_after_planned": JSONValue(true),
@@ -492,14 +756,36 @@ private void validateRestart(JSONValue probe) {
         "restart report incorrect output identity");
 }
 
+private void validateSampleTarget(JSONValue sample, string targetHash) {
+    require(sample["target_binary_sha256"].str == targetHash,
+        "sample attributed to the wrong target binary");
+}
+
+private void validateAttestedSamples(JSONValue report) {
+    auto targetHash = report["binary_sha256"].str;
+    foreach (item; report["cases"].array)
+        foreach (sample; item["samples"].array)
+            validateSampleTarget(sample, targetHash);
+    foreach (transition; report["manifest_transitions"].array)
+        foreach (sample; transition["steps"].array)
+            validateSampleTarget(sample, targetHash);
+    validateSampleTarget(report["restart_probe"]["replay"], targetHash);
+    validateSampleTarget(report["restart_probe"]["verified_skip"], targetHash);
+}
+
 private void validate(JSONValue report) {
-    bool large = report["schema"].str == "scrubbed-pipeline-v4";
-    require(large || report["schema"].str == "scrubbed-pipeline-v3", "report schema");
+    auto schema = report["schema"].str;
+    bool large = schema == "scrubbed-pipeline-v4" ||
+        schema == "scrubbed-pipeline-v6";
+    bool attested = schema == "scrubbed-pipeline-v5" ||
+        schema == "scrubbed-pipeline-v6";
+    require(large || schema == "scrubbed-pipeline-v3" ||
+        schema == "scrubbed-pipeline-v5", "report schema");
     foreach (key; ["source_sha", "binary_sha256", "harness_sha256", "os",
                    "cpu"])
         require(key in report.object && report[key].str.length,
             "missing report metadata " ~ key);
-    validateBuildProvenance(report, false);
+    validateBuildProvenance(report, false, attested);
     require(digestField(report["source_sha"].str, 40) &&
         digestField(report["binary_sha256"].str, 64) &&
         digestField(report["harness_sha256"].str, 64),
@@ -510,15 +796,16 @@ private void validate(JSONValue report) {
             !value.canFind('\n') && !value.canFind('\r') &&
             !value.canFind('\t'), "hostile report metadata " ~ key);
     }
-    require(report["source_binary_mapping"].str == "UNVERIFIED",
-        "unverified source/binary relation must not be claimed verified");
+    require(report["source_binary_mapping"].str ==
+        (attested ? "ATTESTED" : "UNVERIFIED"),
+        "source/binary relation does not match report schema");
     bool darwinReport = report["os"].str.startsWith("Darwin ");
     bool linuxReport = report["os"].str.startsWith("Linux ");
     require(report["ram_bytes"].integer > 0 &&
         ((darwinReport && report["ram_source"].str == "sysctl hw.memsize") ||
          (linuxReport && report["ram_source"].str == "/proc/meminfo MemTotal")),
         "RAM metadata was not measured");
-    require(report["unsupported"].toString == unsupportedCases().toString,
+    require(report["unsupported"].toString == unsupportedCases(attested).toString,
         "unsupported status must be host-neutral and complete");
     require(report["cases"].array.length > 0, "zero cases");
     if (large) {
@@ -561,6 +848,12 @@ private void validate(JSONValue report) {
             require(sample["exact_output"].boolean && sample["status"].integer == 0,
                 "bad sample");
     }
+    if (attested) validateAttestedSamples(report);
+    if (attested) {
+        require(("changed_executable_control" in report.object) !is null,
+            "attested report lacks changed-executable control");
+        validateChangedExecutableControl(report["changed_executable_control"]);
+    }
     auto published = report.toString.replace("\\/", "/");
     require(!published.canFind(tempDir) && !published.canFind(checked(["uname", "-n"])) &&
         !published.canFind("/Users/") && !published.canFind("/home/") &&
@@ -590,6 +883,98 @@ private void selfTest() {
     report["cases"] = JSONValue([JSONValue(["samples":
         JSONValue([sample, sample, sample])])]);
     validate(report);
+    auto attested = parseJSON(report.toString);
+    attested["schema"] = "scrubbed-pipeline-v5";
+    attested["source_binary_mapping"] = "ATTESTED";
+    attested["unsupported"] = unsupportedCases(true);
+    attested.object.remove("target_binary_compiler");
+    attested.object.remove("target_binary_build_flags");
+    JSONValue buildAttestation = JSONValue([
+        "schema": JSONValue("scrubbed-build-attestation-v1"),
+        "source_sha": JSONValue("0".replicate(40)),
+        "source_tree_id": JSONValue("1".replicate(40)),
+        "source_archive_sha256": JSONValue("2".replicate(64)),
+        "dub_recipe_sha256": JSONValue("3".replicate(64)),
+        "dependency_lock_sha256": JSONValue("4".replicate(64)),
+        "source_status": JSONValue("clean-before-and-after"),
+        "compiler_executable_name": JSONValue("ldc2"),
+        "compiler_executable_sha256": JSONValue("5".replicate(64)),
+        "compiler_version": JSONValue("LDC test"),
+        "build_command_template": JSONValue(attestedBuildCommand()),
+        "build_flags": JSONValue("release; force; non-interactive"),
+        "build_status": JSONValue(0),
+        "target_sha256": JSONValue("0".replicate(64))]);
+    attested["build_attestation"] = buildAttestation;
+    foreach (ref targetSample; attested["cases"][0]["samples"].array)
+        targetSample["target_binary_sha256"] = "0".replicate(64);
+    auto transitionSample = parseJSON(attested["cases"][0]["samples"][0].toString);
+    attested["manifest_transitions"] = JSONValue([JSONValue([
+        "name": JSONValue("fixture"),
+        "steps": JSONValue([transitionSample])])]);
+    attested["restart_probe"] = JSONValue([
+        "replay": transitionSample, "verified_skip": transitionSample]);
+    JSONValue[] controlSamples;
+    foreach (index; 0 .. 4) {
+        auto variantA = index % 2 == 0;
+        controlSamples ~= JSONValue([
+            "variant": JSONValue(variantA ?
+                "attestation-variant-a" : "attestation-variant-b"),
+            "target_binary_sha256": JSONValue(
+                (variantA ? "a" : "b").replicate(64)),
+            "status": JSONValue(0), "exact_output": JSONValue(true),
+            "fixture_sha256": JSONValue("c".replicate(64)),
+            "output_sha256": JSONValue("d".replicate(64))]);
+    }
+    attested["changed_executable_control"] = JSONValue([
+        "schema": JSONValue("scrubbed-changed-executable-control-v1"),
+        "fixture_sha256": JSONValue("c".replicate(64)),
+        "expected_output_sha256": JSONValue("d".replicate(64)),
+        "compiler_executable_name": JSONValue("ldc2"),
+        "compiler_executable_sha256": JSONValue("e".replicate(64)),
+        "compiler_version": JSONValue("LDC test"),
+        "conclusion": JSONValue("attribution control only; no speed ranking"),
+        "variants": JSONValue([
+            JSONValue(["identity": JSONValue("attestation-variant-a"),
+                "target_sha256": JSONValue("a".replicate(64))]),
+            JSONValue(["identity": JSONValue("attestation-variant-b"),
+                "target_sha256": JSONValue("b".replicate(64))])]),
+        "samples": JSONValue(controlSamples)]);
+    validate(attested);
+    auto invalidAttestation = parseJSON(attested.toString);
+    invalidAttestation["cases"][0]["samples"][1]["target_binary_sha256"] =
+        "9".replicate(64);
+    bool attestationFailed;
+    try { validate(invalidAttestation); }
+    catch (Exception) { attestationFailed = true; }
+    require(attestationFailed, "mixed target sample attribution negative did not fail");
+    invalidAttestation = parseJSON(attested.toString);
+    invalidAttestation["build_attestation"]["build_flags"] = "release";
+    attestationFailed = false;
+    try { validate(invalidAttestation); }
+    catch (Exception) { attestationFailed = true; }
+    require(attestationFailed, "spoofed build flags negative did not fail");
+    invalidAttestation = parseJSON(attested.toString);
+    invalidAttestation["build_attestation"]["compiler_executable_name"] = "cc";
+    attestationFailed = false;
+    try { validate(invalidAttestation); }
+    catch (Exception) { attestationFailed = true; }
+    require(attestationFailed, "spoofed compiler negative did not fail");
+    invalidAttestation = parseJSON(attested.toString);
+    invalidAttestation["build_attestation"]["target_sha256"] = "8".replicate(64);
+    attestationFailed = false;
+    try { validate(invalidAttestation); }
+    catch (Exception) { attestationFailed = true; }
+    require(attestationFailed, "attested target hash mismatch negative did not fail");
+    invalidAttestation = parseJSON(report.toString);
+    invalidAttestation["build_attestation"] = buildAttestation;
+    attestationFailed = false;
+    try { validate(invalidAttestation); }
+    catch (Exception) { attestationFailed = true; }
+    require(attestationFailed, "old schema accepted a build attestation");
+    attestationFailed = false;
+    try { requireCleanStatus(" M benchmarks/pipeline.d"); }
+    catch (Exception) { attestationFailed = true; }
+    require(attestationFailed, "dirty source negative did not fail");
     auto v4 = parseJSON(report.toString);
     v4["schema"] = "scrubbed-pipeline-v4";
     v4["ram_bytes"] = minimumLargeRamBytes;
@@ -951,16 +1336,39 @@ int main(string[] args) {
         if (args.length == 4 && args[1] == "--self-test-snapshot") {
             selfTestSnapshot(args[2], args[3]); return 0;
         }
+        if (args.length == 3 && args[1] == "--self-test-attestation") {
+            auto os = checked(["uname", "-s"]);
+            require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
+            auto root = privateScratch("scrubbed-attestation-test-");
+            scope(exit) rmdirRecurse(root);
+            auto report = changedExecutableControl(args[2], root, os == "Darwin");
+            writeln("changed-executable attribution control passed: ",
+                report["variants"][0]["target_sha256"].str, " ",
+                report["variants"][1]["target_sha256"].str, " fixture ",
+                report["fixture_sha256"].str);
+            return 0;
+        }
         if ((args.length == 4 || args.length == 5) &&
             args[1] == "--compare-dos2unix") {
             compareDos2unix(args[2], args[3], args.length == 5 ? args[4] : "");
             return 0;
         }
-        bool large = args.length == 5 && args[3] == "--large";
-        require(args.length == 2 || args.length == 3 || large,
-            "usage: pipeline SCRUBBED_BINARY [REPORT_JSON [--large TIME_BUDGET_SECONDS]]");
+        bool attestedMode = args.length >= 2 && args[1] == "--attested-build";
+        bool large = (!attestedMode && args.length == 5 && args[3] == "--large") ||
+            (attestedMode && args.length == 6 && args[4] == "--large");
+        bool validSupplied = !attestedMode &&
+            (args.length == 2 || args.length == 3 || large);
+        bool validAttested = attestedMode &&
+            (args.length == 3 || args.length == 4 || large);
+        require(validSupplied || validAttested,
+            "usage: pipeline SCRUBBED_BINARY [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
+            "or pipeline --attested-build CLEAN_SOURCE [REPORT_JSON [--large TIME_BUDGET_SECONDS]]");
+        auto inputTarget = attestedMode ? args[2] : args[1];
+        auto reportPath = attestedMode ?
+            (args.length >= 4 ? args[3] : "") :
+            (args.length >= 3 ? args[2] : "");
         long timeBudgetSeconds;
-        if (large) timeBudgetSeconds = args[4].to!long;
+        if (large) timeBudgetSeconds = args[attestedMode ? 5 : 4].to!long;
         auto os = checked(["uname", "-s"]);
         require(os == "Darwin" || os == "Linux", "BSD/GNU time required");
         auto root = privateScratch("scrubbed-pipeline-");
@@ -972,7 +1380,15 @@ int main(string[] args) {
         JSONValue preflight;
         if (large) preflight = largePreflight(ramBytes, freeBytes,
             timeBudgetSeconds);
-        auto binaryCopy = snapshotExecutable(args[1], root, "scrubbed-snapshot");
+        AttestedExecutable built;
+        ExecutableSnapshot binaryCopy;
+        if (attestedMode) {
+            built = buildAttestedExecutable(inputTarget, root);
+            binaryCopy = built.snapshot;
+        } else {
+            binaryCopy = snapshotExecutable(inputTarget, root, "scrubbed-snapshot");
+        }
+        auto sampleTargetHash = attestedMode ? binaryCopy.sha256 : "";
         JSONValue[] cases;
         JSONValue[] transitions;
         foreach (index, name; large ?
@@ -989,25 +1405,32 @@ int main(string[] args) {
             auto command = [binaryCopy.path, "--input", input, "--output", output,
                 "--filters", "normalize-line-endings,strip-control", "--threads", "1"];
             cases ~= caseRun(name, command, input, output, files, records,
-                os == "Darwin", false);
+                os == "Darwin", false, sampleTargetHash);
             auto manifest = buildPath(root, name ~ ".sqlite");
             command ~= ["--manifest", manifest, "--explain"];
             cases ~= caseRun(name ~ "/manifest", command, input, output,
-                files, records, os == "Darwin", true);
+                files, records, os == "Darwin", true, sampleTargetHash);
             transitions ~= JSONValue(["name": JSONValue(name),
                 "steps": manifestTransitions(command, input, output, files,
-                    records, os == "Darwin")]);
+                    records, os == "Darwin", sampleTargetHash)]);
         }
-        JSONValue report = JSONValue(["schema": JSONValue(large ?
-            "scrubbed-pipeline-v4" : "scrubbed-pipeline-v3")]);
+        JSONValue report = JSONValue(["schema": JSONValue(attestedMode ?
+            (large ? "scrubbed-pipeline-v6" : "scrubbed-pipeline-v5") :
+            (large ? "scrubbed-pipeline-v4" : "scrubbed-pipeline-v3"))]);
         if (large) {
             report["corpus_mode"] = "small-and-large";
             report["large_preflight"] = preflight;
         }
-        report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
+        report["source_sha"] = attestedMode ?
+            built.attestation["source_sha"].str : checked(["git", "rev-parse", "HEAD"]);
         report["binary_sha256"] = binaryCopy.sha256;
         report["binary_identity_policy"] = identityPolicy();
-        report["source_binary_mapping"] = "UNVERIFIED";
+        report["source_binary_mapping"] = attestedMode ? "ATTESTED" : "UNVERIFIED";
+        if (attestedMode) report["build_attestation"] = built.attestation;
+        if (attestedMode)
+            report["changed_executable_control"] = changedExecutableControl(
+                buildPath(inputTarget, "benchmarks", "pipeline_attestation_check.d"),
+                root, os == "Darwin");
         report["harness_sha256"] = hashFile("benchmarks/pipeline.d");
         report["os"] = os ~ " " ~ checked(["uname", "-r"]) ~ " " ~
             checked(["uname", "-m"]);
@@ -1021,16 +1444,19 @@ int main(string[] args) {
             checked(["ldc2", "--version"]).splitLines[0];
         report["harness_reproduction_command"] =
             "ldc2 -O3 -release benchmarks/pipeline.d -of=<path>";
-        report["target_binary_compiler"] = "UNVERIFIED";
-        report["target_binary_build_flags"] = "UNVERIFIED";
+        if (!attestedMode) {
+            report["target_binary_compiler"] = "UNVERIFIED";
+            report["target_binary_build_flags"] = "UNVERIFIED";
+        }
         report["cases"] = JSONValue(cases);
         report["manifest_transitions"] = JSONValue(transitions);
-        report["restart_probe"] = restartProbe(binaryCopy.path, root, os == "Darwin");
+        report["restart_probe"] = restartProbe(binaryCopy.path, root,
+            os == "Darwin", sampleTargetHash);
         validateRestart(report["restart_probe"]);
         verifySnapshot(binaryCopy);
-        report["unsupported"] = unsupportedCases();
+        report["unsupported"] = unsupportedCases(attestedMode);
         validate(report);
-        if (args.length == 3 || large) write(args[2], report.toString ~ "\n");
+        if (reportPath.length) write(reportPath, report.toString ~ "\n");
         else writeln(report.toString);
         return 0;
     } catch (Exception error) {

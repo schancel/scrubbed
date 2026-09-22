@@ -152,6 +152,20 @@ private void policyAndReplay() {
     auto forged = encodeMeasured(measure(space));
     forged[$ - 24 .. $ - 20] = [cast(ubyte)0, 0, 0, 0];
     rejects({ decodeMeasured(forged, space.id, space.contentDigest); });
+
+    // Letter, Cc control, and replacement are disjoint scalar categories.
+    auto letter = ShardDocument(SourceLocator("quality-heldout-v1", "negative", "overlap"),
+        OutputName("overlap"), cast(ubyte[])"a".dup);
+    auto overlap = measure(letter);
+    overlap.controlCount = 1;
+    overlap.replacementCount = 1;
+    auto zeroControls = QualityPolicy(0, 0, partsPerMillion, partsPerMillion);
+    rejects({ decide(overlap, zeroControls); });
+    rejects({ encodeMeasured(overlap); });
+    forged = encodeMeasured(measure(letter));
+    forged[$ - 12 .. $ - 8] = [cast(ubyte)0, 0, 0, 1];
+    forged[$ - 8 .. $ - 4] = [cast(ubyte)0, 0, 0, 1];
+    rejects({ decodeMeasured(forged, letter.id, letter.contentDigest); });
 }
 
 void main() {

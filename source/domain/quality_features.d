@@ -207,6 +207,8 @@ private void checkMeasured(ref const MeasuredFeatures value) {
             value.letterCount <= value.scalarCount &&
             value.controlCount <= value.scalarCount &&
             value.replacementCount <= value.scalarCount &&
+            cast(ulong)value.letterCount + value.controlCount +
+                value.replacementCount <= value.scalarCount &&
             value.lineCount <= value.scalarCount &&
             (value.byteLength == 0 ? value.lineCount == 0 : value.lineCount != 0) &&
             (value.lineCount == 0 ? value.duplicateLineCount == 0 :

@@ -14,8 +14,17 @@ its canonical root plus the one-component output name. It rejects unsafe names,
 root aliases, destination aliases (including hard links), and manifest/output
 collisions before publishing either output. Routes are rechecked after the
 caller-supplied payload callback, which may itself change the filesystem.
-The manifest owns its own path
-policy; callers must keep it open for the duration of `accept`.
+The manifest owns its own path policy; callers must keep it open for the
+duration of `accept`.
+
+Before either plan, the adapter asks F09 to scan all persisted sink states for
+another owner of either canonical path or existing inode. A different document
+or stable sink key reserves that destination even if its row is only planned,
+failed, or uncertain. Revisions of the *same* document and stable sink may
+reuse it with explicit retry. This read-only check uses F09's single-local-
+writer/trusted-directory premise; it is not a multi-writer lock or protection
+against hostile concurrent filesystem replacement. The v1 schema and existing
+single-sink `plan` behavior are unchanged.
 
 Each sink has its own F09 plan, inspection, and commit. F08 publishes each file
 atomically by temporary write, flush, and rename. A failure before publication
@@ -32,8 +41,8 @@ extraction, an S3 implementation, or a CLI selector. A later, separately
 reviewed route will expose the adapter to the shipping binary.
 
 The release-active D checker covers both failure directions before and after
-publication, process-exit/reopen cutpoints, retry, identity, aliases, and
-owner lifetime.
+publication, process-exit/reopen cutpoints, retry, cross-document ownership,
+same-document revisions, identity, aliases, and owner lifetime.
 After `dub test --compiler=ldc2` builds the project SQLite object, run:
 
 ```sh

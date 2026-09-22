@@ -121,6 +121,9 @@ final class IndependentLocalSinks : Sink {
         auto metadataPath = paths.metadata;
         auto contentKey = SinkKey(document.id, inputHash, contentConfigHash, contentSinkKey);
         auto metadataKey = SinkKey(document.id, inputHash, metadataConfigHash, metadataSinkKey);
+        // Include all prior manifest states before either plan or publication.
+        manifest.requireDestinationOwner(contentKey, contentPath);
+        manifest.requireDestinationOwner(metadataKey, metadataPath);
         // Both plans and destination checks finish before either publication.
         manifest.plan(contentKey, contentPath);
         manifest.plan(metadataKey, metadataPath);

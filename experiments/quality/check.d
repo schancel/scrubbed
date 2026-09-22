@@ -496,6 +496,11 @@ private void emptyHeaderRefusal() {
     }
     check(dryRun(shard, features, changed).documents == 0,
         "valid empty feature overlay refused");
+    rejects({ dryRun(shard, features, QualityPolicy.init); });
+    rejects({ visitStoredDecisions(shard, features, QualityPolicy.init,
+        (QualityDecision decision) {}); });
+    check(cast(ubyte[])read(decisions) == prior,
+        "invalid empty-shard policy changed prior decisions");
 }
 
 void main() {

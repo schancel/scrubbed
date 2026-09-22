@@ -116,6 +116,8 @@ private MeasuredFeatures stored(ShardDocument source, JoinedOverlay overlay) {
 /// Replay uses only C01-joined stored measurements, never measure().
 void visitStoredDecisions(string shardPath, string featureOverlayPath,
         QualityPolicy policy, scope void delegate(QualityDecision) visit) {
+    // No decide() call occurs for an empty shard, so validate policy here.
+    policy.canonicalBytes();
     // Validate at overlay-open time: an empty shard yields no stored() calls.
     auto features = new OverlayReader(featureOverlayPath);
     scope(exit) features.closeReader();

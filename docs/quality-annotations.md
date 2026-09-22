@@ -26,7 +26,8 @@ place on failure. A decision destination that aliases its feature input by
 normalized path or existing inode is refused before publication; C01's own
 target checks still reject unsafe symlink and hardlink cases. Feature analyzer
 key/version validation also runs for an empty source shard, before any record
-callback or decision publication.
+callback or decision publication. Policy validation likewise runs even when
+there are no records to decide.
 
 `DryRunReport` counts every document exactly once as KEEP, DROP, or QUARANTINE.
 Reason counts may overlap for DROP and are in `Reason` enum order. All seven

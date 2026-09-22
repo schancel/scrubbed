@@ -88,6 +88,17 @@ private auto decodedCandidate(string text, LegacyEncoding encoding) {
     return legacyBytes(text, encoding).byUTF!(dchar, No.useReplacementDchar);
 }
 
+/// Materialize a candidate that has already passed strict lazy UTF-8 decoding.
+/// The decoded text's UTF-8 bytes are exactly the legacy-byte range, so do not
+/// decode those bytes to dchar and encode them a second time. The public
+/// string boundary still needs owned storage; reserve its known upper bound.
+private string materializeValidatedCandidate(string text, LegacyEncoding encoding) {
+    auto output = appender!string();
+    output.reserve(text.length);
+    foreach (char byteValue; legacyBytes(text, encoding)) output.put(byteValue);
+    return output.data;
+}
+
 private string roundTrip(string text, LegacyEncoding encoding) {
     if (!canEncodeLegacy(text, encoding)) return null;
     try {
@@ -143,97 +154,163 @@ private bool isKaomoji(dchar c) {
     return (c >= 0xD2 && c <= 0xD6) || (c >= 0xD9 && c <= 0xDC) ||
         (c >= 0xF2 && c <= 0xF6) || (c >= 0xF8 && c <= 0xFC) || oneOf!"ŐŌŪŲ°"(c);
 }
-private bool broadSuspicious(dchar c) {
-    return isBad(c) || isLowerAccented(c) || isUpperAccented(c) || isBox(c) ||
-        isStartPunctuation(c) || isEndPunctuation(c) || isCurrency(c) ||
-        isNumericSymbol(c) || isLaw(c);
-}
-private bool lowerish(dchar c) {
-    return isLowerAccented(c) || isLowerCommon(c) || isBox(c) ||
-        isEndPunctuation(c) || isCurrency(c) || isNumericSymbol(c);
-}
 private bool asciiLetter(dchar c) {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
 private bool whitespace(dchar c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
-/// Count unlikely character juxtapositions. This is a conservative subset of
-/// ftfy's badness model, restricted to the encodings scrubbed supports.
-size_t mojibakeBadness(Range)(Range text)
+private enum : uint {
+    catBad = 1 << 0,
+    catLaw = 1 << 1,
+    catCurrency = 1 << 2,
+    catStart = 1 << 3,
+    catEnd = 1 << 4,
+    catNumeric = 1 << 5,
+    catBox = 1 << 6,
+    catUpperAccented = 1 << 7,
+    catLowerAccented = 1 << 8,
+    catUpperCommon = 1 << 9,
+    catLowerCommon = 1 << 10,
+    catKaomoji = 1 << 11,
+}
+
+private uint categories(dchar c) {
+    if (c < 0x80) return 0;
+    uint result;
+    if (isBad(c)) result |= catBad;
+    if (isLaw(c)) result |= catLaw;
+    if (isCurrency(c)) result |= catCurrency;
+    if (isStartPunctuation(c)) result |= catStart;
+    if (isEndPunctuation(c)) result |= catEnd;
+    if (isNumericSymbol(c)) result |= catNumeric;
+    if (isBox(c)) result |= catBox;
+    if (isUpperAccented(c)) result |= catUpperAccented;
+    if (isLowerAccented(c)) result |= catLowerAccented;
+    if (isUpperCommon(c)) result |= catUpperCommon;
+    if (isLowerCommon(c)) result |= catLowerCommon;
+    if (isKaomoji(c)) result |= catKaomoji;
+    return result;
+}
+
+private bool has(uint value, uint category) { return (value & category) != 0; }
+private bool broad(uint value) {
+    return has(value, catBad | catLowerAccented | catUpperAccented | catBox |
+        catStart | catEnd | catCurrency | catNumeric | catLaw);
+}
+private bool lowerish(uint value) {
+    return has(value, catLowerAccented | catLowerCommon | catBox | catEnd |
+        catCurrency | catNumeric);
+}
+
+private struct PlausibilityAnalysis {
+    size_t badness;
+    long penalties;
+}
+
+/// Traverse the decoded scalars once. `includePenalties` lets the public
+/// badness-only entry point compile out the unrelated plausibility checks,
+/// while full candidate scoring no longer decodes every scalar twice.
+private PlausibilityAnalysis analyzePlausibility(bool includePenalties, Range)(Range text)
 if (isInputRange!Range) {
     dchar previous = dchar.init;
     dchar current = dchar.init;
+    uint previousCategories;
+    uint currentCategories;
     size_t seen;
-    size_t result;
+    PlausibilityAnalysis result;
 
     // Consume the UTF-8 string as a range without materializing UTF-32.
     foreach (dchar next; text) {
-        if (next >= 0x80 && next <= 0x9F) result++;
+        const nextCategories = categories(next);
+        if (next >= 0x80 && next <= 0x9F) result.badness++;
+        static if (includePenalties) {
+            if ((next < 0x20 && next != '\n' && next != '\r' && next != '\t') ||
+                next == 0x7F) result.penalties -= 20;
+            // A replacement character is damaged text, but a characteristic
+            // three-character UTF-8 rendering of it is worse and can be
+            // repaired without inventing any additional information.
+            if (next == 0xFFFD) result.penalties -= 50;
+            if ((next >= 0xE000 && next <= 0xF8FF) ||
+                (next >= 0xF0000 && next <= 0xFFFFD) ||
+                (next >= 0x100000 && next <= 0x10FFFD))
+                result.penalties -= 20;
+        }
         // Every adjacency/trigram rule needs a non-ASCII current or next
         // character. Skip the expensive Unicode membership predicates for
         // the overwhelmingly common ASCII-to-ASCII transitions.
         if (seen >= 1 && (current >= 0x80 || next >= 0x80)) {
             const c = current;
             const n = next;
-            if ((c == 'œ' || c == 'Œ') && !asciiLetter(n)) result++;
-            if ((broadSuspicious(c) && isBad(n)) || (isBad(c) && broadSuspicious(n)) ||
-                (lowerish(c) && isUpperAccented(n)) ||
-                ((isBox(c) || isEndPunctuation(c) || isCurrency(c) || isNumericSymbol(c)) && isLowerAccented(n)) ||
-                ((isLowerAccented(c) || isBox(c) || isEndPunctuation(c)) && isCurrency(n)) ||
-                (isUpperAccented(c) && (isNumericSymbol(n) || isLaw(n))) ||
-                ((isCurrency(c) || isNumericSymbol(c) || isBox(c)) && isStartPunctuation(n)) ||
-                (isBox(c) && isKaomoji(n)) || (broadSuspicious(c) && isBox(n)) ||
-                (isBox(c) && isEndPunctuation(n))) result++;
+            if ((c == 'œ' || c == 'Œ') && !asciiLetter(n)) result.badness++;
+            if ((broad(currentCategories) && has(nextCategories, catBad)) ||
+                (has(currentCategories, catBad) && broad(nextCategories)) ||
+                (lowerish(currentCategories) && has(nextCategories, catUpperAccented)) ||
+                (has(currentCategories, catBox | catEnd | catCurrency | catNumeric) &&
+                    has(nextCategories, catLowerAccented)) ||
+                (has(currentCategories, catLowerAccented | catBox | catEnd) &&
+                    has(nextCategories, catCurrency)) ||
+                (has(currentCategories, catUpperAccented) &&
+                    has(nextCategories, catNumeric | catLaw)) ||
+                (has(currentCategories, catCurrency | catNumeric | catBox) &&
+                    has(nextCategories, catStart)) ||
+                (has(currentCategories, catBox) && has(nextCategories, catKaomoji)) ||
+                (broad(currentCategories) && has(nextCategories, catBox)) ||
+                (has(currentCategories, catBox) && has(nextCategories, catEnd)))
+                result.badness++;
 
-            if (oneOf!"ÂÃÎÐ"(c) && oneOf!"€œŠš¢£Ÿž ­®©°·»‘‚“„•‹”›™–—´"(n)) result++;
-            if (c == '×' && oneOf!"²³"(n)) result++;
-            if (c == 'à' && oneOf!"²µ¹¼½¾"(n)) result++;
-            if (c == 'Ã' && (n == 0xA0 || n == '¡')) result++;
+            if (oneOf!"ÂÃÎÐ"(c) && oneOf!"€œŠš¢£Ÿž ­®©°·»‘‚“„•‹”›™–—´"(n)) result.badness++;
+            if (c == '×' && oneOf!"²³"(n)) result.badness++;
+            if (c == 'à' && oneOf!"²µ¹¼½¾"(n)) result.badness++;
+            if (c == 'Ã' && (n == 0xA0 || n == '¡')) result.badness++;
             if ((c == 'Ã' || c == 'Â') && n == ' ' &&
-                (seen == 1 || asciiLetter(previous) || whitespace(previous))) result++;
-            if (isUpperAccented(c) && n == '°') result++;
+                (seen == 1 || asciiLetter(previous) || whitespace(previous))) result.badness++;
+            if (has(currentCategories, catUpperAccented) && n == '°') result.badness++;
 
             if (seen >= 2) {
                 const p = previous;
-                if (asciiLetter(p) && (isLowerCommon(c) || isUpperCommon(c)) && isBad(n)) result++;
-                if (oneOf!"ØÙ"(p) && broadSuspicious(c) && oneOf!"ØÙ"(n)) result++;
-                if (oneOf!"ВГРС"(p) && broadSuspicious(c) && oneOf!"ВГРС"(n)) result++;
-                if (oneOf!"ΒΓΞΟ"(p) && broadSuspicious(c) && oneOf!"ΒΓΞΟ"(n)) result++;
-                if (p >= 'a' && p <= 'z' && isUpperAccented(c) &&
-                    (isStartPunctuation(n) || isCurrency(n))) result++;
-                if ((isUpperAccented(p) || isLowerAccented(p)) &&
-                    (isStartPunctuation(c) || isEndPunctuation(c)) && asciiLetter(n)) result++;
-                if ((isLowerAccented(p) || isUpperAccented(p) || isCurrency(p) ||
-                     isNumericSymbol(p) || isBox(p) || isLaw(p)) &&
-                    isEndPunctuation(c) && isStartPunctuation(n)) result++;
-                if ((isLowerAccented(p) || isUpperAccented(p) || isCurrency(p) ||
-                     isNumericSymbol(p) || isBox(p) || isLaw(p)) &&
-                    isStartPunctuation(c) && isNumericSymbol(n)) result++;
+                if (asciiLetter(p) &&
+                    has(currentCategories, catLowerCommon | catUpperCommon) &&
+                    has(nextCategories, catBad)) result.badness++;
+                if (oneOf!"ØÙ"(p) && broad(currentCategories) && oneOf!"ØÙ"(n)) result.badness++;
+                if (oneOf!"ВГРС"(p) && broad(currentCategories) && oneOf!"ВГРС"(n)) result.badness++;
+                if (oneOf!"ΒΓΞΟ"(p) && broad(currentCategories) && oneOf!"ΒΓΞΟ"(n)) result.badness++;
+                if (p >= 'a' && p <= 'z' && has(currentCategories, catUpperAccented) &&
+                    has(nextCategories, catStart | catCurrency)) result.badness++;
+                if (has(previousCategories, catUpperAccented | catLowerAccented) &&
+                    has(currentCategories, catStart | catEnd) && asciiLetter(n)) result.badness++;
+                if (has(previousCategories, catLowerAccented | catUpperAccented |
+                        catCurrency | catNumeric | catBox | catLaw) &&
+                    has(currentCategories, catEnd) && has(nextCategories, catStart))
+                    result.badness++;
+                if (has(previousCategories, catLowerAccented | catUpperAccented |
+                        catCurrency | catNumeric | catBox | catLaw) &&
+                    has(currentCategories, catStart) && has(nextCategories, catNumeric))
+                    result.badness++;
             }
         }
         previous = current;
+        previousCategories = currentCategories;
         current = next;
+        currentCategories = nextCategories;
         seen++;
     }
-    if (seen > 0 && (current == 'œ' || current == 'Œ')) result++;
+    if (seen > 0 && (current == 'œ' || current == 'Œ')) result.badness++;
     return result;
+}
+
+/// Count unlikely character juxtapositions. This is a conservative subset of
+/// ftfy's badness model, restricted to the encodings scrubbed supports.
+size_t mojibakeBadness(Range)(Range text)
+if (isInputRange!Range) {
+    return analyzePlausibility!false(text).badness;
 }
 
 /// Higher means more plausible. Mojibake evidence dominates; unsafe controls,
 /// replacement characters, and private-use codepoints receive extra penalties.
 long plausibilityScore(Range)(Range text)
-if (isForwardRange!Range) {
-    long score = -100L * cast(long) mojibakeBadness(text.save);
-    foreach (dchar c; text) {
-        if ((c < 0x20 && c != '\n' && c != '\r' && c != '\t') || c == 0x7F) score -= 20;
-        // A replacement character is damaged text, but a characteristic
-        // three-character UTF-8 rendering of it is worse and can be repaired
-        // without inventing any additional information.
-        if (c == 0xFFFD) score -= 50;
-        if ((c >= 0xE000 && c <= 0xF8FF) || (c >= 0xF0000 && c <= 0xFFFFD) ||
-            (c >= 0x100000 && c <= 0x10FFFD)) score -= 20;
-    }
-    return score;
+if (isInputRange!Range) {
+    const analysis = analyzePlausibility!true(text);
+    return -100L * cast(long) analysis.badness + analysis.penalties;
 }
 
 private struct MojibakeOptions {
@@ -337,7 +414,7 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
                 end = next;
                 const span = text[at .. end];
                 if (!scoreCandidate(span, encoding, decodedScore)) continue;
-                const intermediate = decodedCandidate(span, encoding).to!string;
+                const intermediate = materializeValidatedCandidate(span, encoding);
                 foreach (nextEncoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
                     if ((nextEncoding == LegacyEncoding.latin1 && !options.useLatin1) ||
                         (nextEncoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
@@ -355,8 +432,12 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
             }
         }
         if (bestGain > 0) {
+            // Preserve the allocation-free unchanged path, but give the first
+            // real repair enough capacity for the overwhelmingly common case
+            // where UTF-8 mojibake shrinks or retains the input byte length.
+            if (copiedUntil == 0) output.reserve(text.length);
             output.put(text[copiedUntil .. at]);
-            output.put(decodedCandidate(text[at .. bestEnd], bestEncoding).to!string);
+            output.put(materializeValidatedCandidate(text[at .. bestEnd], bestEncoding));
             copiedUntil = bestEnd;
             at = bestEnd;
         } else {
@@ -370,7 +451,19 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
     return output.data;
 }
 
+private bool allASCII(string text) {
+    // Byte iteration is sufficient: every non-ASCII UTF-8 sequence has at
+    // least one high bit. Keep this admission scan out of the variable-width
+    // Unicode decoder; compiler/codegen choices are measured separately.
+    foreach (char byteValue; text)
+        if ((cast(ubyte) byteValue & 0x80) != 0) return false;
+    return true;
+}
+
 private string repairMojibake(string text, MojibakeOptions options) {
+    // An ASCII buffer is already an exact fixed point for both supported
+    // round trips. This also keeps ordinary mmap-backed documents borrowed.
+    if (allASCII(text)) return text;
     foreach (pass; 0 .. options.maxPasses) {
         LegacyEncoding winner;
         bool haveWinner;
@@ -403,7 +496,7 @@ private string repairMojibake(string text, MojibakeOptions options) {
 
         // Candidate scoring above is lazy and does not allocate candidate
         // output buffers. Materialize only the winner for the next pass.
-        text = decodedCandidate(text, winner).to!string;
+        text = materializeValidatedCandidate(text, winner);
     }
     return text;
 }

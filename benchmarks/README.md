@@ -97,7 +97,11 @@ The first A00 table above is historical, not the current repair speed. A
 September 2026 sampling profile of the `-O3` repair path showed repeated
 runtime UTF-8 decoding of scorer membership literals as the dominant cost.
 The scorer now rejects ASCII-only adjacencies and converts its non-ASCII
-membership sets to Unicode scalars at compile time. The pinned ftfy correctness
+membership sets to Unicode scalars at compile time. A second profile pass now
+returns immediately for ASCII fixed points, computes badness and penalties in
+one traversal, classifies each non-ASCII scalar once, and materializes an
+already-validated legacy-byte Voldemort range directly instead of decoding and
+re-encoding it. The pinned ftfy correctness
 gate still passes 39/39 supported repairs and preserves 48/48 encoding-negative
 cases; the held-out per-fix gate also passes.
 
@@ -116,8 +120,11 @@ ldc2 -O3 -release benchmarks/mojibake_scale.d -of=/tmp/scrubbed-mojibake-scale
 /tmp/scrubbed-mojibake-scale "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy"
 ```
 
-One Apple M4 / macOS 26.6.2 sample, with exact output in all six runs, measured
-scrubbed at 0.420–0.429 s and ftfy at 4.656–4.909 s. This establishes a win
+One Apple M4 / macOS 26.6.2 follow-up sample, with exact output in all six
+runs, measured scrubbed at 0.152–0.156 s and ftfy at 3.698–4.076 s. The
+immediately preceding binary measured 0.346–0.374 s in a separate run on the
+same host; that before/after observation is not an interleaved statistical
+comparison. This establishes a win
 on this repetitive single-file task only; it does not establish speed or
 quality parity for varied, mixed-encoding corpora, HTML extraction, or
 terabyte-scale pipelines. The small A00 fixture is now near the BSD `time`
@@ -144,7 +151,7 @@ logic and inputs:
 Build and run it from the repository root:
 
 ```sh
-ldc2 -O -release -enable-inlining -Isource \
+ldc2 -O3 -release -enable-inlining -Isource \
   benchmarks/mojibake_ranges.d source/filters/mojibake.d source/pipeline.d \
   -of=/tmp/scrubbed-mojibake-benchmark
 /tmp/scrubbed-mojibake-benchmark
@@ -154,17 +161,18 @@ On an Apple M4 with LDC 1.43.0, two consecutive runs produced these ranges:
 
 | Workload | Old eager | Current lazy | Old allocation | Eager + guard allocation | Lazy allocation |
 |---|---:|---:|---:|---:|---:|
-| Clean ASCII | 121–125 µs/call | 119–125 µs/call | 102.4 B/call | 0 B/call | 0 B/call |
-| Clean Unicode | 142–147 µs/call | 128–135 µs/call | 329.6 B/call | 0 B/call | 0 B/call |
-| One-layer damage | 217–226 µs/call | 210–220 µs/call | 300 B/call | 98 B/call | 60 B/call |
-| Multilayer damage | 1.14–1.19 ms/call | 1.14–1.18 ms/call | 816 B/call | 616 B/call | 392 B/call |
+| Clean ASCII | 542–655 ns/call | 7.3–7.5 ns/call | 102.4 B/call | 0 B/call | 0 B/call |
+| Clean Unicode | 2.93–2.95 µs/call | 204–205 ns/call | 329.6 B/call | 0 B/call | 0 B/call |
+| One-layer damage | 2.74–2.76 µs/call | 470–482 ns/call | 300 B/call | 98 B/call | 62 B/call |
+| Multilayer damage | 6.75–6.96 µs/call | 4.37–4.38 µs/call | 816 B/call | 616 B/call | 304 B/call |
 
 These are short-input microbenchmarks, not the Phase 5 document-tree throughput
 benchmark. The score-zero guard, not the range representation, accounts for
-the clean-input drop to zero allocation. Against that guarded control, lazy
-candidates save roughly 36–39% on the damaged workloads shown here. Timing is
-close enough on damaged text that it should be treated as tied pending larger
-runs.
+the clean-input drop to zero allocation. The ASCII fixed-point scan explains
+the additional clean-ASCII timing drop. Direct validated-range materialization
+reduces damaged-input allocation, while single-pass cached classification
+reduces scorer time. These tiny inputs are useful regression evidence, not a
+document-throughput claim; use the full-process scale check above for that.
 
 ## Text comparison: pinned ftfy fixtures
 

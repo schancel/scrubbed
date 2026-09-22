@@ -5,9 +5,11 @@ import domain.document : Document, OutputName, SourceLocator;
 import effects.local_manifest : LocalManifest, SinkKey, SinkState,
     configDigest, inputDigest;
 import std.algorithm.searching : canFind;
+import std.array : replicate;
 import std.conv : to, octal;
-import std.file : copy, exists, mkdir, read, readText, remove, rmdirRecurse, symlink,
+import std.file : copy, exists, mkdir, read, readText, remove, rename, rmdirRecurse, symlink,
     tempDir, write;
+import std.format : format;
 import std.json : parseJSON;
 import std.path : buildPath;
 import std.process : execute;
@@ -41,8 +43,9 @@ private string html = `<html><head><title>Fallback</title>` ~
     `</head><body>Alpha` ~ "\r\n" ~ `Beta</body></html>`;
 
 void main(string[] args) {
-    need(args.length == 2 || (args.length == 3 && args[2] == "--cap"),
-        "expected shipping binary path and optional --cap");
+    need(args.length == 2 || (args.length == 3 &&
+        (args[2] == "--cap" || args[2] == "--name-cap")),
+        "expected shipping binary path and optional cap mode");
     auto canonicalTemp = realpath(tempDir().toStringz, null);
     need(canonicalTemp !is null, "temporary directory resolution");
     scope(exit) free(canonicalTemp);
@@ -50,6 +53,56 @@ void main(string[] args) {
         "scrubbed-metadata-route-" ~ randomUUID().toString);
     mkdir(root);
     scope(exit) rmdirRecurse(root);
+    if (args.length == 3 && args[2] == "--name-cap") {
+        auto inputRoot = buildPath(root, "name-input");
+        auto contentRoot = buildPath(root, "name-content");
+        auto metadataRoot = buildPath(root, "name-metadata");
+        auto boundaryDb = buildPath(root, "boundary.db");
+        mkdir(inputRoot); mkdir(contentRoot); mkdir(metadataRoot);
+        auto part = replicate("a", 190).idup;
+        auto nested = buildPath(inputRoot, part);
+        mkdir(nested);
+        nested = buildPath(nested, part);
+        mkdir(nested);
+        nested = buildPath(nested, part);
+        mkdir(nested);
+        string name(size_t i, bool shortLast) {
+            return format!"%05d"(i) ~ replicate("x", shortLast ? 89 : 90) ~ ".html";
+        }
+        enum count = 24_929;
+        enum fullNameBytes = 3 * 190 + 3 + 100;
+        need((count - 1) * fullNameBytes + fullNameBytes - 1 == 16 * 1024 * 1024,
+            "name-byte fixture arithmetic");
+        foreach (i; 0 .. count)
+            write(buildPath(nested, name(i, i == count - 1)),
+                cast(const(ubyte)[]) [cast(ubyte) 0xff]);
+        auto boundary = execute([args[1], "route-metadata", "--input", inputRoot,
+            "--content-output", contentRoot, "--metadata-output", metadataRoot,
+            "--manifest", boundaryDb]);
+        need(boundary.status == 1 && exists(boundaryDb) &&
+            !exists(buildPath(contentRoot, part)),
+            "exact 16 MiB names were not admitted and quarantined");
+        auto oldLast = buildPath(nested, name(count - 1, true));
+        auto newLast = buildPath(nested, name(count - 1, false));
+        rename(oldLast, newLast);
+        auto plusContent = buildPath(root, "plus-content");
+        auto plusMetadata = buildPath(root, "plus-metadata");
+        auto plusDb = buildPath(root, "plus.db");
+        mkdir(plusContent); mkdir(plusMetadata);
+        auto plus = execute([args[1], "route-metadata", "--input", inputRoot,
+            "--content-output", plusContent, "--metadata-output", plusMetadata,
+            "--manifest", plusDb]);
+        need(plus.status == 2 && plus.output == "scrubbed: route-refused\n" &&
+            !exists(plusDb) && !exists(buildPath(plusContent, part)) &&
+            !exists(buildPath(plusMetadata, part)),
+            "16 MiB + 1 name bytes did not refuse before publication");
+        rusage usage;
+        need(getrusage(RUSAGE_CHILDREN, &usage) == 0 &&
+            usage.ru_opaque[0] < 512L * 1024 * 1024,
+            "name cap child exceeded 512 MiB RSS ceiling");
+        writeln("metadata route name cap check: exact 16 MiB admitted; +1 refused");
+        return;
+    }
     if (args.length == 3) {
         auto inputRoot = buildPath(root, "cap-input");
         auto contentRoot = buildPath(root, "cap-content");

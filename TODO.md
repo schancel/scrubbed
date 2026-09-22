@@ -313,6 +313,11 @@ is useful, but it is not sufficient on its own.
       revision-bound C01 policy overlay stores compact typed audit and output
       digest without transformed content (`docs/pii-policy-overlay.md`). CLI
       publication remains separate; this is not complete de-identification.
+- [~] Mix from annotation policies (C08/#40). A pure, deterministic policy
+      selects only C02 KEEP and C04 representatives for seeded sampling, with
+      typed exclusion and missing-annotation reasons (`docs/mix-policy.md`).
+      C01 revision-bound joining and durable versioned export remain open;
+      the current module does not read shards or publish an output artifact.
 - [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
       adapter and explicit paired-dash `run`/`repair` mode preserve untouched
       JSON values semantically, derive stable caller-key/line IDs, cap records,

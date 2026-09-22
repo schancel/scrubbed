@@ -12,7 +12,7 @@ Run the Stage 2 checker against a release executable built with
 --compiler=ldc2 --force`:
 
 ```sh
-ldc2 -O3 -release -Isource \
+ldc2 -O3 -release -d-version=FailurePolicyHarness -Isource \
   source/domain/document.d source/content/pieces.d \
   source/effects/atomic_piece_sink.d source/effects/sqlite_ffi.d \
   source/effects/local_manifest.d source/effects/failure_journal.d \
@@ -36,6 +36,12 @@ per raw sink value and reused across reopen.
 `FailureJournal` is the exclusive v2 state owner; the v1 `LocalManifest`
 rejects its version. Its fixed-code failure append, exact-key outstanding
 transition, and sink-state transition share one FULL-synchronous transaction.
+`beginPublication(key)` must be acknowledged before the caller writes sink
+bytes. The durable `publication_intent` row survives a failed postpublication
+commit; on reopen the journal conservatively materializes it as an uncertain
+fixed-code event and outstanding key. A successful verified commit removes the
+intent in its state/event transaction. Calling `commitPublished` without a
+durable intent is refused.
 The handle fails closed after a begin/write/commit/read-back acknowledgment
 failure. Planned retry keeps outstanding; only verified publication records
 retry success and clears that key. Inspect invalidation records uncertainty.

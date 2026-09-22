@@ -46,7 +46,8 @@ CREATE TABLE error_event(
     'policy','resource','scheduler','log','inspect','retry')),
  code TEXT NOT NULL CHECK(code IN ('read-failed','decode-failed','filter-failed',
     'sink-write-failed','manifest-failed','policy-failed','resource-failed',
-    'scheduler-failed','log-failed','inspect-invalidated','retry-succeeded')),
+    'scheduler-failed','log-failed','inspect-invalidated',
+    'sink-publication-interrupted','retry-succeeded')),
  state TEXT NOT NULL CHECK(state IN ('failed','uncertain','committed')),
  retry_of TEXT REFERENCES error_event(event_id),
  time_utc_ms INTEGER NOT NULL
@@ -65,6 +66,16 @@ CREATE TABLE outstanding(
  PRIMARY KEY(document_id,input_sha256,config_sha256,sink_key),
  CHECK((origin='legacy-v1' AND event_id IS NULL AND run_id IS NULL AND time_utc_ms IS NULL) OR
        (origin='event' AND event_id IS NOT NULL AND run_id IS NOT NULL AND time_utc_ms IS NOT NULL))
+) WITHOUT ROWID;
+CREATE TABLE publication_intent(
+ document_id TEXT NOT NULL,
+ input_sha256 BLOB NOT NULL CHECK(length(input_sha256)=32),
+ config_sha256 BLOB NOT NULL CHECK(length(config_sha256)=32),
+ sink_key TEXT NOT NULL,
+ started_utc_ms INTEGER NOT NULL,
+ PRIMARY KEY(document_id,input_sha256,config_sha256,sink_key),
+ FOREIGN KEY(document_id,input_sha256,config_sha256,sink_key)
+ REFERENCES sink_state(document_id,input_sha256,config_sha256,sink_key)
 ) WITHOUT ROWID;
 PRAGMA application_id=1396920898;
 PRAGMA user_version=2;
@@ -159,12 +170,29 @@ private string uuid() {
     return UUID(bytes).toString;
 }
 
+private bool canonicalUuid4(string value) {
+    if (value.length != 36 || value[8] != '-' || value[13] != '-' ||
+        value[18] != '-' || value[23] != '-' || value[14] != '4' ||
+        (value[19] != '8' && value[19] != '9' && value[19] != 'a' &&
+         value[19] != 'b')) return false;
+    foreach (i, digit; value) {
+        if (i == 8 || i == 13 || i == 18 || i == 23) continue;
+        if (!((digit >= '0' && digit <= '9') ||
+            (digit >= 'a' && digit <= 'f'))) return false;
+    }
+    return true;
+}
+
 private string ensureSinkId(Database db, string raw) {
     auto lookup = db.prepare("SELECT sink_id FROM sink_identity WHERE raw_sink=?1");
     scope(exit) sqlite3_finalize(lookup);
     bindText(lookup, 1, raw);
     auto rc = sqlite3_step(lookup);
-    if (rc == SQLITE_ROW) return columnText(lookup, 0);
+    if (rc == SQLITE_ROW) {
+        auto id = columnText(lookup, 0);
+        need(canonicalUuid4(id), "repair-needed");
+        return id;
+    }
     need(rc == SQLITE_DONE, "identity-read-failed");
     foreach (_; 0 .. 16) {
         auto candidate = uuid();
@@ -238,7 +266,8 @@ private string reserveStage(string target) {
 private void checkV2Shape(Database db) {
     checkSchema(db, v2Schema, "invalid-v2-schema");
     need(db.scalar(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
-        ('sink_state','sink_identity','error_event','outstanding')`) == 4,
+        ('sink_state','sink_identity','error_event','outstanding',
+         'publication_intent')`) == 5,
         "missing-v2-table");
     need(db.scalar(`SELECT count(*) FROM sqlite_master WHERE type='trigger'`) == 0,
         "unexpected-trigger");
@@ -269,6 +298,16 @@ private void checkV2Shape(Database db) {
         "repair-needed");
     need(db.scalar("SELECT count(*) FROM pragma_foreign_key_check") == 0,
         "repair-needed");
+    need(db.scalar(`SELECT count(*) FROM publication_intent p LEFT JOIN sink_state s USING
+        (document_id,input_sha256,config_sha256,sink_key)
+        WHERE s.document_id IS NULL OR s.state!='planned'`) == 0,
+        "repair-needed");
+    auto identities = db.prepare("SELECT sink_id FROM sink_identity");
+    scope(exit) sqlite3_finalize(identities);
+    int rc;
+    while ((rc = sqlite3_step(identities)) == SQLITE_ROW)
+        need(canonicalUuid4(columnText(identities, 0)), "repair-needed");
+    need(rc == SQLITE_DONE, "identity-read-failed");
 }
 
 /// Create a fresh v2 database explicitly. Neither constructor nor v1 reader
@@ -286,6 +325,7 @@ void createV2(string newPath) {
     auto db = new Database(stage, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
     db.exec("PRAGMA journal_mode=WAL");
     db.exec("PRAGMA synchronous=FULL");
+    db.exec("PRAGMA foreign_keys=ON");
     db.exec("BEGIN IMMEDIATE");
     db.exec(v2Schema);
     db.exec("COMMIT");
@@ -318,12 +358,14 @@ final class FailureJournal {
         try {
             need(sqlite3_libversion().fromStringz == "3.53.4", "wrong-sqlite-version");
             checkVersion(db, 2);
+            db.exec("PRAGMA foreign_keys=ON");
             checkV2Shape(db);
             db.exec("PRAGMA journal_mode=WAL");
             db.exec("PRAGMA synchronous=FULL");
             need(db.textScalar("PRAGMA journal_mode") == "wal" &&
                 db.scalar("PRAGMA synchronous") == 2, "durability-mode-unavailable");
             this.runId = uuid();
+            recoverIntents();
         } catch (Throwable failure) { db.close(); throw failure; }
     }
     void close() { if (db !is null) db.close(); db = null; }
@@ -361,7 +403,9 @@ final class FailureJournal {
         scope(exit) sqlite3_finalize(s);
         bindText(s, 1, raw);
         need(sqlite3_step(s) == SQLITE_ROW, "repair-needed");
-        return columnText(s, 0);
+        auto id = columnText(s, 0);
+        need(canonicalUuid4(id), "repair-needed");
+        return id;
     }
     private void safeDestination(string destination) {
         auto selected = resolvedName(destination);
@@ -422,6 +466,117 @@ final class FailureJournal {
         done(s);
         need(sqlite3_changes(db.handle) == 1, "missing-sink-state");
     }
+    private bool hasIntent(SinkKey key) {
+        auto s = db.prepare(`SELECT count(*) FROM publication_intent WHERE document_id=?1 AND
+            input_sha256=?2 AND config_sha256=?3 AND sink_key=?4`);
+        scope(exit) sqlite3_finalize(s);
+        bindKey(s, key);
+        need(sqlite3_step(s) == SQLITE_ROW, "intent-read-failed");
+        return sqlite3_column_int64(s, 0) == 1;
+    }
+    private void deleteIntent(SinkKey key) {
+        auto s = db.prepare(`DELETE FROM publication_intent WHERE document_id=?1 AND
+            input_sha256=?2 AND config_sha256=?3 AND sink_key=?4`);
+        scope(exit) sqlite3_finalize(s);
+        bindKey(s, key);
+        done(s);
+    }
+    /// Call and acknowledge before writing any output bytes. Until success is
+    /// committed, a restart conservatively treats this intent as uncertainty.
+    void beginPublication(SinkKey key) {
+        live();
+        auto row = lookup(key);
+        need(!row.isNull && row.get.state == SinkState.planned && !hasIntent(key),
+            "publication-requires-plan");
+        safeDestination(row.get.destination);
+        transaction({
+            auto s = db.prepare(`INSERT INTO publication_intent VALUES(?1,?2,?3,?4,?5)`);
+            scope(exit) sqlite3_finalize(s);
+            bindKey(s, key);
+            bindLong(s, 5, nowUtcMs());
+            done(s);
+        });
+        try { need(hasIntent(key), "ack-failed"); }
+        catch (Throwable failure) { poisoned = true; throw failure; }
+    }
+    private void recoverIntents() {
+        while (true) {
+            string document, raw;
+            ubyte[32] input, config;
+            bool finished;
+            {
+                auto s = db.prepare(`SELECT document_id,input_sha256,config_sha256,sink_key
+                    FROM publication_intent LIMIT 1`);
+                scope(exit) sqlite3_finalize(s);
+                auto rc = sqlite3_step(s);
+                finished = rc == SQLITE_DONE;
+                if (!finished) {
+                    need(rc == SQLITE_ROW, "intent-read-failed");
+                    document = columnText(s, 0);
+                    input = columnDigest(s, 1);
+                    config = columnDigest(s, 2);
+                    raw = columnText(s, 3);
+                }
+            }
+            if (finished) { checkV2Shape(db); return; }
+            auto eventId = uuid();
+            auto at = nowUtcMs();
+            transaction({
+                auto event = db.prepare(`INSERT INTO error_event(event_id,run_id,document_id,
+                    input_sha256,config_sha256,sink_id,phase,code,state,retry_of,time_utc_ms)
+                    SELECT ?1,?2,?3,?4,?5,i.sink_id,'sink',
+                    'sink-publication-interrupted','uncertain',NULL,?7
+                    FROM sink_identity i WHERE i.raw_sink=?6`);
+                scope(exit) sqlite3_finalize(event);
+                bindText(event, 1, eventId);
+                bindText(event, 2, runId);
+                bindText(event, 3, document);
+                bindDigest(event, 4, input);
+                bindDigest(event, 5, config);
+                bindText(event, 6, raw);
+                bindLong(event, 7, at);
+                done(event);
+                need(sqlite3_changes(db.handle) == 1, "repair-needed");
+                auto state = db.prepare(`UPDATE sink_state SET state='uncertain',
+                    output_sha256=NULL,attempt=attempt+1,updated_utc_ms=?5
+                    WHERE document_id=?1 AND input_sha256=?2 AND config_sha256=?3
+                    AND sink_key=?4 AND state='planned'`);
+                scope(exit) sqlite3_finalize(state);
+                bindText(state, 1, document);
+                bindDigest(state, 2, input);
+                bindDigest(state, 3, config);
+                bindText(state, 4, raw);
+                bindLong(state, 5, at);
+                done(state);
+                need(sqlite3_changes(db.handle) == 1, "repair-needed");
+                auto outstanding = db.prepare(`INSERT INTO outstanding VALUES(
+                    ?1,?2,?3,?4,(SELECT sink_id FROM sink_identity WHERE raw_sink=?4),
+                    'uncertain','event',?5,?6,?7)
+                    ON CONFLICT(document_id,input_sha256,config_sha256,sink_key)
+                    DO UPDATE SET state='uncertain',origin='event',
+                    event_id=excluded.event_id,run_id=excluded.run_id,
+                    time_utc_ms=excluded.time_utc_ms`);
+                scope(exit) sqlite3_finalize(outstanding);
+                bindText(outstanding, 1, document);
+                bindDigest(outstanding, 2, input);
+                bindDigest(outstanding, 3, config);
+                bindText(outstanding, 4, raw);
+                bindText(outstanding, 5, eventId);
+                bindText(outstanding, 6, runId);
+                bindLong(outstanding, 7, at);
+                done(outstanding);
+                auto clear = db.prepare(`DELETE FROM publication_intent WHERE
+                    document_id=?1 AND input_sha256=?2 AND config_sha256=?3 AND sink_key=?4`);
+                scope(exit) sqlite3_finalize(clear);
+                bindText(clear, 1, document);
+                bindDigest(clear, 2, input);
+                bindDigest(clear, 3, config);
+                bindText(clear, 4, raw);
+                done(clear);
+                need(sqlite3_changes(db.handle) == 1, "repair-needed");
+            });
+        }
+    }
     private string outstandingEvent(SinkKey key) {
         auto s = db.prepare(`SELECT event_id FROM outstanding WHERE document_id=?1 AND
             input_sha256=?2 AND config_sha256=?3 AND sink_key=?4`);
@@ -463,6 +618,11 @@ final class FailureJournal {
     }
     /// One fixed-code event and exact-key state transition, acknowledged as a unit.
     void recordFailure(SinkKey key, string phase, string code, bool sinkTouched) {
+        need(phase != "inspect", "inspect-event-reserved");
+        recordFailureInternal(key, phase, code, sinkTouched);
+    }
+    private void recordFailureInternal(SinkKey key, string phase, string code,
+            bool sinkTouched) {
         live();
         bool generic = phase == "read" || phase == "decode" || phase == "filter" ||
             phase == "manifest" || phase == "policy" || phase == "resource" ||
@@ -473,9 +633,12 @@ final class FailureJournal {
             "invalid-event-code");
         auto prior = lookup(key);
         need(!prior.isNull, "plan-required");
+        need(prior.get.state != SinkState.committed || phase == "inspect",
+            "committed-requires-inspect");
         // A previous possibly published output is still uncertain even when
         // the current attempt fails before touching the sink.
-        auto state = sinkTouched || prior.get.state == SinkState.uncertain ||
+        auto state = sinkTouched || hasIntent(key) ||
+            prior.get.state == SinkState.uncertain ||
             outstandingState(key) == "uncertain" ?
             SinkState.uncertain : SinkState.failed;
         auto eventId = uuid();
@@ -496,6 +659,7 @@ final class FailureJournal {
             bindText(s, 8, runId);
             bindLong(s, 9, at);
             done(s);
+            deleteIntent(key);
         });
         try {
             need(lookup(key).get.state == state && outstandingEvent(key) == eventId,
@@ -508,6 +672,7 @@ final class FailureJournal {
         auto prior = lookup(key);
         need(!prior.isNull && prior.get.state != SinkState.committed,
             "retry-invalid-state");
+        need(!hasIntent(key), "publication-in-progress");
         safeDestination(prior.get.destination);
         auto hadOutstanding = hasOutstanding(key);
         transaction({ updateState(key, SinkState.planned, false, ubyte[32].init); });
@@ -521,6 +686,7 @@ final class FailureJournal {
         auto prior = lookup(key);
         need(!prior.isNull && prior.get.state == SinkState.planned,
             "commit-requires-plan");
+        need(hasIntent(key), "publication-intent-required");
         need(prior.get.destination == resolvedName(destination), "destination-changed");
         safeDestination(destination);
         need(exists(destination) && hashFile(destination) == expected,
@@ -542,9 +708,11 @@ final class FailureJournal {
             done(s);
             need(sqlite3_changes(db.handle) == (hadOutstanding ? 1 : 0),
                 "outstanding-mismatch");
+            deleteIntent(key);
         });
         try {
-            need(lookup(key).get.state == SinkState.committed && !hasOutstanding(key),
+            need(lookup(key).get.state == SinkState.committed &&
+                !hasOutstanding(key) && !hasIntent(key),
                 "ack-failed");
             if (hadOutstanding) {
                 auto s = db.prepare("SELECT count(*) FROM error_event WHERE event_id=?1");
@@ -574,7 +742,7 @@ final class FailureJournal {
             !isSymlink(row.destination) && isFile(row.destination) &&
             hashFile(row.destination) == row.outputSha256)
             return Inspection.verifiedCommitted;
-        recordFailure(key, "inspect", "inspect-invalidated", true);
+        recordFailureInternal(key, "inspect", "inspect-invalidated", true);
         return Inspection.retryRequired;
     }
     long eventCount() { live(); return db.scalar("SELECT count(*) FROM error_event"); }
@@ -591,6 +759,8 @@ void copyV1ToV2(string sourcePath, string newPath) {
     safeRegularOrAbsent(source ~ "-wal");
     safeRegularOrAbsent(source ~ "-shm");
     rejectHardlink(source);
+    foreach (suffix; ["-wal", "-shm"])
+        if (exists(source ~ suffix)) rejectHardlink(source ~ suffix);
     foreach (suffix; ["", "-wal", "-shm"]) {
         safeRegularOrAbsent(target ~ suffix);
         need(!exists(target ~ suffix), "destination-exists");

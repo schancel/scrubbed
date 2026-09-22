@@ -8,7 +8,7 @@ import effects.failure_journal : FailureJournal, copyV1ToV2, createV2;
 import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
 import std.array : split;
-import std.file : exists, mkdir, remove, rmdirRecurse, tempDir, write;
+import std.file : exists, mkdir, read, remove, rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.process : execute;
 import std.string : toStringz;
@@ -148,6 +148,7 @@ private void checkV2(string root) {
     need(id.length == 36 && id != a.sink, "opaque public sink identity");
     journal.retry(a);
     need(journal.hasOutstanding(a), "planned retry erased outstanding");
+    journal.beginPublication(a);
     write(pathA, "recovered");
     journal.commitPublished(a, pathA,
         outputDigest(cast(const(ubyte)[]) "recovered"));
@@ -160,6 +161,10 @@ private void checkV2(string root) {
     need(reopened.publicSinkId(a.sink) == id &&
         reopened.hasOutstanding(b) && !reopened.hasOutstanding(a) &&
         reopened.eventCount() == 3, "reopen changed identity or journal");
+    expectRefusal(reopened.recordFailure(a, "filter", "filter-failed", false),
+        "committed row downgraded without inspect or retry");
+    need(reopened.lookup(a).get.state == SinkState.committed &&
+        reopened.eventCount() == 3, "rejected committed downgrade changed history");
     write(pathA, "tampered");
     need(reopened.inspect(a) == Inspection.retryRequired &&
         reopened.lookup(a).get.state == SinkState.uncertain &&
@@ -207,6 +212,7 @@ private void checkCopy(string root) {
     auto id = journal.publicSinkId(failed.sink);
     journal.retry(failed);
     need(journal.hasOutstanding(failed), "legacy baseline cleared before publication");
+    journal.beginPublication(failed);
     write(failedOutput, "now-published");
     journal.commitPublished(failed, failedOutput,
         outputDigest(cast(const(ubyte)[]) "now-published"));
@@ -268,6 +274,80 @@ private void checkCopyRefusals(string root) {
         sqlite3_close(held) == SQLITE_OK, "release busy fixture");
     need(count(sourcePath, "SELECT count(*) FROM sink_state") == 1,
         "copy refusal changed v1 rows");
+
+    auto walSource = buildPath(root, "wal-hardlink-v1.db");
+    auto live = new LocalManifest(walSource);
+    live.plan(key("wal-hardlink"), buildPath(root, "wal-hardlink-output"));
+    auto wal = walSource ~ "-wal";
+    need(exists(wal), "WAL hardlink fixture missing");
+    auto walAlias = buildPath(root, "wal-hardlink-alias");
+    need(link(wal.toStringz, walAlias.toStringz) == 0,
+        "create WAL hardlink fixture");
+    auto before = read(walAlias);
+    auto refused = buildPath(root, "wal-hardlink-copy.db");
+    expectRefusal(copyV1ToV2(walSource, refused), "WAL hardlink accepted");
+    need(!exists(refused) && read(walAlias) == before,
+        "WAL hardlink refusal mutated external alias");
+    remove(walAlias);
+    live.close();
+}
+
+private void checkForgedIdentity(string root) {
+    auto db = buildPath(root, "forged-id.db");
+    createV2(db);
+    auto journal = new FailureJournal(db);
+    auto secret = key("F13_SECRET_TOKEN");
+    journal.plan(secret, buildPath(root, "forged-id-output"));
+    journal.close();
+    rawExec(db, "UPDATE sink_identity SET sink_id=raw_sink");
+    expectRefusal(new FailureJournal(db),
+        "planned-only forged raw sink identity accepted on reopen");
+}
+
+private void checkPublicationFaults(string root) {
+    foreach (point; ["begin", "write", "commit", "ack"]) {
+        auto db = buildPath(root, "publication-" ~ point ~ ".db");
+        createV2(db);
+        auto k = key("publication-" ~ point);
+        auto output = buildPath(root, "publication-output-" ~ point);
+        auto journal = new FailureJournal(db);
+        journal.plan(k, output);
+        write(output, "published");
+        expectRefusal(journal.commitPublished(k, output,
+            outputDigest(cast(const(ubyte)[]) "published")),
+            "publication without durable intent accepted");
+        journal.beginPublication(k);
+        write(db ~ ".fault-v2-" ~ point, "");
+        expectRefusal(journal.commitPublished(k, output,
+            outputDigest(cast(const(ubyte)[]) "published")),
+            "postpublication commit fault accepted " ~ point);
+        expectRefusal(journal.plan(key("later-" ~ point),
+            buildPath(root, "later-publication-" ~ point)),
+            "postpublication fault did not fail-stop " ~ point);
+        remove(db ~ ".fault-v2-" ~ point);
+        journal.close();
+        auto reopened = new FailureJournal(db);
+        bool committed = point == "ack";
+        need(reopened.lookup(k).get.state ==
+            (committed ? SinkState.committed : SinkState.uncertain) &&
+            reopened.hasOutstanding(k) == !committed &&
+            reopened.eventCount() == (committed ? 0 : 1) &&
+            count(db, "SELECT count(*) FROM publication_intent") == 0,
+            "postpublication restart lost uncertainty " ~ point);
+        reopened.close();
+    }
+    auto db = buildPath(root, "publication-recorded-failure.db");
+    createV2(db);
+    auto journal = new FailureJournal(db);
+    auto k = key("publication-recorded-failure");
+    journal.plan(k, buildPath(root, "publication-recorded-output"));
+    journal.beginPublication(k);
+    journal.recordFailure(k, "sink", "sink-write-failed", false);
+    need(journal.lookup(k).get.state == SinkState.uncertain &&
+        journal.hasOutstanding(k) &&
+        count(db, "SELECT count(*) FROM publication_intent") == 0,
+        "durable publication intent was downgraded by non-touched failure");
+    journal.close();
 }
 
 private void checkFaults(string root) {
@@ -324,12 +404,43 @@ private void checkCrash(string self, string root) {
     }
 }
 
+private void checkPublicationCrash(string self, string root) {
+    foreach (point; ["commit", "ack"]) {
+        auto db = buildPath(root, "publication-kill-" ~ point ~ ".db");
+        createV2(db);
+        auto result = execute([self, "--kill-publication-child", db,
+            buildPath(root, "publication-kill-output-" ~ point), point]);
+        need(result.status == 73, "publication kill fixture did not exit at " ~ point);
+        remove(db ~ ".fault-v2-kill-" ~ point);
+        auto journal = new FailureJournal(db);
+        bool committed = point == "ack";
+        auto k = key("publication-kill-sink");
+        need(journal.lookup(k).get.state ==
+            (committed ? SinkState.committed : SinkState.uncertain) &&
+            journal.hasOutstanding(k) == !committed &&
+            count(db, "SELECT count(*) FROM publication_intent") == 0,
+            "publication kill/restart lost uncertainty " ~ point);
+        journal.close();
+    }
+}
+
 int main(string[] args) {
     if (args.length == 5 && args[1] == "--kill-child") {
         auto journal = new FailureJournal(args[2]);
         journal.plan(key("kill-sink"), args[3]);
         write(args[2] ~ ".fault-v2-kill-" ~ args[4], "");
         journal.recordFailure(key("kill-sink"), "sink", "sink-write-failed", true);
+        return 1;
+    }
+    if (args.length == 5 && args[1] == "--kill-publication-child") {
+        auto journal = new FailureJournal(args[2]);
+        auto k = key("publication-kill-sink");
+        journal.plan(k, args[3]);
+        journal.beginPublication(k);
+        write(args[3], "published");
+        write(args[2] ~ ".fault-v2-kill-" ~ args[4], "");
+        journal.commitPublished(k, args[3],
+            outputDigest(cast(const(ubyte)[]) "published"));
         return 1;
     }
     need(args.length == 2, "usage: check <FailurePolicyHarness release executable>");
@@ -341,7 +452,10 @@ int main(string[] args) {
     checkV2(root);
     checkCopy(root);
     checkCopyRefusals(root);
+    checkForgedIdentity(root);
     checkFaults(root);
+    checkPublicationFaults(root);
     checkCrash(args[0], root);
+    checkPublicationCrash(args[0], root);
     return 0;
 }

@@ -6,6 +6,7 @@ import effects.local_manifest : SinkKey, SinkState, SinkRecord, Inspection,
     validateKey, resolvedName, safeRegularOrAbsent, sameInode, hashFile, nowUtcMs,
     v1Schema;
 import effects.atomic_piece_sink : OutputPolicyViolation;
+import domain.document : DocumentId;
 import std.file : exists, isFile, isSymlink, remove;
 import std.string : fromStringz, toStringz, indexOf;
 import std.uuid : UUID;
@@ -183,6 +184,30 @@ private string columnText(sqlite3_stmt* s, int at) {
     auto value = sqlite3_column_text(s, at);
     need(value !is null, "invalid-text");
     return value.fromStringz.idup;
+}
+/// Visitor-only read: the shared legacy text reader intentionally remains
+/// unchanged, but a retry target must never be shortened at an embedded NUL.
+private string targetText(sqlite3_stmt* s, int at, int maxBytes) {
+    enum sqliteText = 3;
+    need(sqlite3_column_type(s, at) == sqliteText,
+        "invalid-outstanding-target");
+    auto length = sqlite3_column_bytes(s, at);
+    need(length > 0 && length <= maxBytes, "invalid-outstanding-target");
+    auto value = sqlite3_column_text(s, at);
+    need(value !is null, "invalid-outstanding-target");
+    auto bytes = value[0 .. cast(size_t)length];
+    need(bytes.indexOf('\0') < 0, "invalid-outstanding-target");
+    return bytes.idup;
+}
+private ubyte[32] targetDigest(sqlite3_stmt* s, int at) {
+    enum sqliteBlob = 4;
+    need(sqlite3_column_type(s, at) == sqliteBlob &&
+        sqlite3_column_bytes(s, at) == 32, "invalid-outstanding-target");
+    auto bytes = cast(const(ubyte)*)sqlite3_column_blob(s, at);
+    need(bytes !is null, "invalid-outstanding-target");
+    ubyte[32] result;
+    result[] = bytes[0 .. 32];
+    return result;
 }
 private ubyte[32] columnDigest(sqlite3_stmt* s, int at) {
     need(sqlite3_column_bytes(s, at) == 32, "invalid-digest");
@@ -405,6 +430,7 @@ final class FailureJournal {
     private Database db;
     private string databasePath;
     private bool poisoned;
+    private bool visitingTargets;
     private string runId;
 
     this(string path) {
@@ -429,8 +455,15 @@ final class FailureJournal {
             recoverIntents();
         } catch (Throwable failure) { db.close(); throw failure; }
     }
-    void close() { if (db !is null) db.close(); db = null; }
-    private void live() { need(db !is null && !poisoned, "fail-stop"); }
+    void close() {
+        need(!visitingTargets, "target-visitor-active");
+        if (db !is null) db.close();
+        db = null;
+    }
+    private void live() {
+        need(!visitingTargets, "target-visitor-active");
+        need(db !is null && !poisoned, "fail-stop");
+    }
     private void transaction(void delegate() operation) {
         live();
         try {
@@ -815,6 +848,37 @@ final class FailureJournal {
         bindKey(s, key);
         need(sqlite3_step(s) == SQLITE_ROW, "outstanding-read-failed");
         return sqlite3_column_int64(s, 0) == 1;
+    }
+    /// Streams the current retry targets in canonical full-key order. The
+    /// callback receives private internal identity; callers must not render
+    /// its raw sink label or retain rows unless they accept that memory cost.
+    /// Opening the journal may already have recovered interrupted intents;
+    /// this visitor itself does not write journal state.
+    void visitOutstandingTargets(scope void delegate(SinkKey) visit) {
+        live();
+        need(visit !is null, "missing-target-visitor");
+        visitingTargets = true;
+        scope(exit) visitingTargets = false;
+        auto s = db.prepare(`SELECT document_id,input_sha256,config_sha256,sink_key
+            FROM outstanding ORDER BY document_id COLLATE BINARY,
+            input_sha256,config_sha256,sink_key COLLATE BINARY`);
+        scope(exit) sqlite3_finalize(s);
+        int rc;
+        while ((rc = sqlite3_step(s)) == SQLITE_ROW) {
+            SinkKey key;
+            try {
+                key.document = DocumentId.fromCanonicalText(targetText(s, 0, 73));
+                key.inputSha256 = targetDigest(s, 1);
+                key.configSha256 = targetDigest(s, 2);
+                key.sink = targetText(s, 3, v2SinkLabelMaxBytes);
+                validateKey(key);
+                validV2SinkLabel(key.sink);
+            } catch (Exception ignored) {
+                throw new Exception("failure journal: invalid-outstanding-target");
+            }
+            visit(key);
+        }
+        need(rc == SQLITE_DONE, "outstanding-target-read-failed");
     }
     Inspection inspect(SinkKey key) {
         live();

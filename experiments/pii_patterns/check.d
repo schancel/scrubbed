@@ -85,6 +85,10 @@ private void punctuationBoundaries() {
             "space-separated numeric card extension rejected");
         check(scan("4111-1111-1111-1111-" ~ "12345"[0 .. length]).length == 0,
             "hyphen-separated numeric card extension rejected");
+        check(scan("4111-1111-1111-1111 " ~ "12345"[0 .. length]).length == 0,
+            "hyphen-grouped card with space numeric extension rejected");
+        check(scan("4111 1111 1111 1111-" ~ "12345"[0 .. length]).length == 0,
+            "space-grouped card with hyphen numeric extension rejected");
     }
     check(scan("4111 1111 1111 1111").length == 1,
         "standalone grouped card retained");

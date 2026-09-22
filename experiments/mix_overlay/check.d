@@ -13,6 +13,7 @@ import effects.mix_overlay : MixVisitReport, visitMixDecisions;
 import effects.quality_overlay : decisionAnalyzerKey, decisionAnalyzerVersion,
     decisionFieldKey, encodeDecisionValue;
 import std.algorithm.sorting : sort;
+import std.conv : to;
 import std.file : mkdir, rmdirRecurse, tempDir;
 import std.path : buildPath;
 import std.stdio : writeln;
@@ -129,6 +130,41 @@ private size_t fds() {
     size_t count;
     foreach (fd; 0 .. 256) if (fcntl(fd, F_GETFD) >= 0) ++count;
     return count;
+}
+
+private void largeStreaming(string root, QualityPolicy quality, MixPolicy mix) {
+    static assert(MixVisitReport.sizeof == 64,
+        "mix report must contain only fixed-width counts");
+    auto shard = buildPath(root, "large-shard");
+    auto qualityPath = buildPath(root, "large-quality");
+    auto dedupPath = buildPath(root, "large-dedup");
+    ShardDocument[] records;
+    foreach (number; 0 .. 4096)
+        records ~= document("large-" ~ number.to!string, "x");
+    writeShard(shard, records);
+    writeQuality(qualityPath, shard, records, quality);
+    writeExactDedupOverlays([DedupShard(shard, dedupPath)]);
+    auto beforeRss = rssBytes();
+    auto beforeFds = fds();
+    foreach (_; 0 .. 2) {
+        ulong callbacks;
+        ulong[7] observed;
+        auto report = visitMixDecisions(shard, qualityPath, dedupPath,
+            quality, mix, (const(ShardDocument) source, MixDecision decision) {
+                check(source.id == decision.id && source.content.length == 1,
+                    "large callback association");
+                ++callbacks;
+                ++observed[cast(size_t)decision.reason];
+            });
+        check(callbacks == 4096 && report.total == callbacks &&
+            report.counts == observed &&
+            report.counts[MixReason.selected] == 1 &&
+            report.counts[MixReason.duplicate] == 4095,
+            "large streaming counts/determinism");
+    }
+    check(fds() == beforeFds, "large streaming file descriptor leak");
+    check(rssBytes() - beforeRss < 32UL * 1024 * 1024,
+        "large streaming resident-set growth exceeded 32 MiB");
 }
 
 void main() {
@@ -270,8 +306,10 @@ void main() {
         quality, all, (const(ShardDocument), MixDecision) {}).total == 0,
         "empty joined shard");
 
+    largeStreaming(root, quality, all);
+
     check(fds() == beforeFds, "file descriptor leak");
     check(rssBytes() - beforeRss < 64UL * 1024 * 1024,
         "resident-set growth exceeded 64 MiB");
-    writeln("mix overlay: joined/missing/stale/version/orphan/malformed/empty/prefix/RSS/FD passed");
+    writeln("mix overlay: joined/missing/stale/version/orphan/malformed/empty/prefix/4096/RSS/FD passed");
 }

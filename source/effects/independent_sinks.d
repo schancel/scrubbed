@@ -110,20 +110,15 @@ final class IndependentLocalSinks : Sink {
     override void accept(StageEvent event) {
         if (event.kind != EventKind.emitted) return;
         auto document = event.payload.document;
-        auto name = checkedName(document);
-        // Resolve both routes again: root aliases introduced after construction
-        // must be refused before either output is published.
-        auto contentDir = checkedRoot(contentRoot);
-        auto metadataDir = checkedRoot(metadataRoot);
-        if (contentDir == metadataDir)
-            throw new OutputPolicyViolation("independent sink roots alias");
-        auto contentPath = buildPath(contentDir, name);
-        auto metadataPath = buildPath(metadataDir, name);
-        if (contentPath == metadataPath || sameInode(contentPath, metadataPath))
-            throw new OutputPolicyViolation("independent sink destinations collide");
+        // A provider is arbitrary caller code: it can replace a root with a
+        // symlink or create a hard link after the first validation.
+        destinations(document);
         auto data = payloads(event);
         enforce(data.content !is null && data.metadata !is null,
             "both independent sink payloads required");
+        auto paths = destinations(document);
+        auto contentPath = paths.content;
+        auto metadataPath = paths.metadata;
         auto contentKey = SinkKey(document.id, inputHash, contentConfigHash, contentSinkKey);
         auto metadataKey = SinkKey(document.id, inputHash, metadataConfigHash, metadataSinkKey);
         // Both plans and destination checks finish before either publication.
@@ -137,6 +132,24 @@ final class IndependentLocalSinks : Sink {
             if (first is null) first = new IndependentSinkFailure(metadataSinkKey, failure);
         }
         if (first !is null) throw first;
+    }
+
+    private struct Destinations {
+        string content;
+        string metadata;
+    }
+
+    private Destinations destinations(Document document) {
+        auto name = checkedName(document);
+        auto contentDir = checkedRoot(contentRoot);
+        auto metadataDir = checkedRoot(metadataRoot);
+        if (contentDir == metadataDir)
+            throw new OutputPolicyViolation("independent sink roots alias");
+        auto contentPath = buildPath(contentDir, name);
+        auto metadataPath = buildPath(metadataDir, name);
+        if (contentPath == metadataPath || sameInode(contentPath, metadataPath))
+            throw new OutputPolicyViolation("independent sink destinations collide");
+        return Destinations(contentPath, metadataPath);
     }
 
     private void deliver(SinkKey key, string path, Content content) {

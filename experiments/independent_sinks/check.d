@@ -11,7 +11,7 @@ import stages.contract : PassMode, ResourceDeclaration, StageDeclaration,
     StageDecision, StageDocument, StageEvent;
 import core.sys.posix.sys.wait : waitpid;
 import core.sys.posix.unistd : _exit, fork, link;
-import std.file : exists, mkdir, read, rmdirRecurse, symlink, tempDir, write;
+import std.file : exists, mkdir, read, rmdir, rmdirRecurse, symlink, tempDir, write;
 import std.path : buildPath;
 import std.string : toStringz;
 import std.uuid : randomUUID;
@@ -74,7 +74,7 @@ private SinkKey key(string sink) {
 }
 
 private void run(Paths p, bool retry, string faultSink = "", string faultPhase = "",
-    bool crash = false) {
+    bool crash = false, string providerAlias = "") {
     scope manifest = new LocalManifest(p.db);
     auto source = new OneSource;
     source.record = SourceRecord(document(), new DocumentViewOwner([cast(ubyte)'x']));
@@ -85,6 +85,14 @@ private void run(Paths p, bool retry, string faultSink = "", string faultPhase =
         (StageEvent event) {
             require(event.payload.document.id == document().id, "identity changed");
             require(event.payload.document.outputName.text == "record", "name changed");
+            if (providerAlias == "hardlink") {
+                write(p.contentFile, "prior");
+                require(link(p.contentFile.toStringz, p.metadataFile.toStringz) == 0,
+                    "provider hardlink fixture failed");
+            } else if (providerAlias == "root-symlink") {
+                rmdir(p.metadataRoot);
+                symlink(p.contentRoot, p.metadataRoot);
+            }
             return IndependentPayloads(event.payload.content,
                 new Content([ContentPiece.own(cast(const(ubyte)[]) "metadata") ]));
         }, retry);
@@ -194,6 +202,17 @@ void main() {
     expectFailure({ run(collision, true); });
     require(cast(const(ubyte)[]) read(collision.contentFile) ==
         cast(const(ubyte)[]) "prior", "collision replaced an output");
+    auto providerHardlinkRoot = buildPath(root, "provider-hardlink");
+    mkdir(providerHardlinkRoot);
+    auto providerHardlink = paths(providerHardlinkRoot);
+    expectFailure({ run(providerHardlink, true, "", "", false, "hardlink"); });
+    require(cast(const(ubyte)[]) read(providerHardlink.contentFile) ==
+        cast(const(ubyte)[]) "prior", "provider hardlink replaced output");
+    auto providerSymlinkRoot = buildPath(root, "provider-symlink");
+    mkdir(providerSymlinkRoot);
+    auto providerSymlink = paths(providerSymlinkRoot);
+    expectFailure({ run(providerSymlink, true, "", "", false, "root-symlink"); });
+    require(!exists(providerSymlink.contentFile), "provider root alias published output");
     import std.stdio : writeln;
     writeln("independent sinks release checks passed");
 }

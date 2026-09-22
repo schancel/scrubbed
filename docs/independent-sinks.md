@@ -12,7 +12,9 @@ input digest, separate configuration digests, and a retry decision. The adapter
 uses stable keys `local-content:v1` and `local-metadata:v1`. Each output path is
 its canonical root plus the one-component output name. It rejects unsafe names,
 root aliases, destination aliases (including hard links), and manifest/output
-collisions before publishing either output. The manifest owns its own path
+collisions before publishing either output. Routes are rechecked after the
+caller-supplied payload callback, which may itself change the filesystem.
+The manifest owns its own path
 policy; callers must keep it open for the duration of `accept`.
 
 Each sink has its own F09 plan, inspection, and commit. F08 publishes each file

@@ -273,18 +273,18 @@ is useful, but it is not sufficient on its own.
       effects-only v2 SQLite journal now supports fixed-code events, exact-key
       outstanding state, durable publication intent/recovery, stable opaque
       public sink IDs, and explicit offline copy from v1
-      (`docs/error-events.md`). The shipping CLI still uses v1; v2 CLI
-      activation and JSONL export have not shipped. The accepted export
-      contract uses a SHA-256 sidecar and fail-closed verification across
-      the non-atomic file pair; Stage 3a is blocked on a v2 private-key
-      resource-bound decision before its reviewed exporter can land. CLI
-      activation remains a separately reviewed successor.
+      (`docs/error-events.md`). Opt-in bounded JSONL history/outstanding
+      export and SHA-256 sidecar verification have landed; each file is
+      atomically replaced, but the pair is not atomic. V2 sink labels are
+      limited to 256 UTF-8 bytes while legacy v1 retains longer keys. The
+      shipping CLI still uses v1; explicit v2 CLI activation remains a
+      separately reviewed successor.
 - [~] Route independent local content and metadata sinks (W05/#29). An
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity
-      (`docs/independent-sinks.md`). There is no CLI selector or metadata
-      extraction. Deterministic extraction stages are the primary planned
-      metadata source (#28); the CLI successor will mirror input-relative
+      (`docs/independent-sinks.md`). A deterministic HTML metadata stage
+      now supplies title/author/date/URL candidates with evidence (#28),
+      but there is no CLI selector yet. The CLI successor will mirror input-relative
       paths under both output roots, with paired input optional. Direct
       llama.cpp-backed extraction remains separately scoped (#65).
 - [~] Store immutable source documents and keyed analyzer overlays. A

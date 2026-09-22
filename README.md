@@ -229,7 +229,11 @@ The first whole-CLI baseline was sobering: on one synthetic 4,096-line
 mojibake input, scrubbed took roughly 3 seconds versus roughly 0.16 seconds
 for pinned ftfy. Profiling exposed a scorer hot path; after optimizing it, a
 separate `-O3` exact-output run on 131,072 repeated mojibake lines measured
-scrubbed at 0.420–0.429 s versus ftfy at 4.656–4.909 s. That is a task-specific
+scrubbed at 0.152–0.156 s versus ftfy at 3.698–4.076 s after a second
+profile-guided source pass. That pass added an ASCII fixed-point scan, folded
+plausibility into one Unicode traversal, classified each scalar once, and
+materialized an already-validated legacy-byte range without decoding and
+re-encoding it. That is a task-specific
 result, not a broad corpus speed claim; see [benchmark details](benchmarks/README.md).
 A newer [quality-gated local pipeline harness](docs/benchmark-pipeline.md)
 adds small-tree first/skip/retry runs, a real planned-row kill/restart probe,

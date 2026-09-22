@@ -211,7 +211,10 @@ issue. This file remains the status record for implemented work.
       the scorer now rejects ASCII-only adjacency and compares compile-time
       Unicode scalar sets. Pinned ftfy and held-out correctness gates pass.
       A new D full-process exact-output check on 131,072 repeated lines gives
-      one local `-O3` result of 0.420–0.429 s versus ftfy's 4.656–4.909 s.
+      one local `-O3` follow-up result of 0.152–0.156 s versus ftfy's
+      3.698–4.076 s. The follow-up uses a byte-level ASCII fixed-point scan,
+      one-pass plausibility analysis, one classification mask per scalar, and
+      direct materialization of the validated legacy-byte Voldemort range.
       This is not varied-corpus or TB-scale throughput evidence.
 - [ ] Broaden the comparison beyond ftfy/trafilatura where functionality
       overlaps: pin relevant alternative tool versions and options by task
@@ -232,8 +235,9 @@ issue. This file remains the status record for implemented work.
 - [~] Allocation benchmark: `benchmarks/mojibake_ranges.d` compares the
       reconstructed eager implementation, eager plus the clean-input guard,
       and lazy candidates using GC allocation counters. The independent guard
-      explains clean-input zero allocation; ranges save about 36-39% versus
-      the guarded control on the damaged short-input workloads. Extend this to
+      explains clean-input zero allocation; the current lazy/direct-byte path
+      saves about 37-51% versus the guarded control on the damaged short-input
+      workloads. Extend this to
       mmap input, fused transforms, and representative full documents.
 - [x] Make the cross-thread failure counter atomic and return nonzero when
       any file fails.

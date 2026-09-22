@@ -148,12 +148,18 @@ int runCommands(string[] argv) {
     if (argv.length > 1 && (argv[1] == "errors-init" ||
         argv[1] == "errors-copy" || argv[1] == "errors-export" ||
         argv[1] == "errors-verify")) {
-        if (argv.length == 3 && (argv[2] == "--help" || argv[2] == "-h")) {
-            Commands help;
-            auto result = CLI!(parserConfig, Commands).parseArgs(help, argv[1 .. $]);
-            return result.exitCode;
-        }
+        foreach (arg; argv[2 .. $])
+            if (arg == "--help" || arg == "-h") {
+                Commands help;
+                auto result = CLI!(parserConfig, Commands).parseArgs(help,
+                    [argv[1], "--help"]);
+                return result.exitCode;
+            }
         return runErrorCommand(argv[1], argv[2 .. $]);
+    }
+    if (argv.length > 1 && argv[1].startsWith("errors-")) {
+        stderr.writeln("scrubbed: errors-invalid-arguments");
+        return 2;
     }
     // Generated setup scripts invoke the executable directly with --bash or
     // --fish, so these entry points must use the same argparse completer.

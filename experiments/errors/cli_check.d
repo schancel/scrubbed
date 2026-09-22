@@ -36,6 +36,20 @@ private void check(string root, string binary, bool crashHarness) {
     auto o = buildPath(root, "outstanding.jsonl");
     need(call(["--help"], 0).canFind("errors-init"), "top-level help");
     need(call(["errors-init", "--help"], 0).canFind("--journal"), "verb help");
+    auto helpPath = buildPath(root, "help-only.db");
+    need(call(["errors-init", "--journal", helpPath, "--help"], 0)
+        .canFind("--journal") && !exists(helpPath), "help after value mutated");
+    need(call(["errors-init", "--journal=" ~ helpPath, "--help"], 0)
+        .canFind("--journal") && !exists(helpPath), "equals-form help mutated");
+    need(call(["errors-copy", "--from-v1", "F13_SECRET_TOKEN",
+        "--journal", helpPath, "-h"], 0).canFind("--from-v1") &&
+        !exists(helpPath), "copy help after value mutated");
+    need(call(["errors-export", "--journal", "F13_SECRET_TOKEN",
+        "--help"], 0).canFind("--errors-jsonl"), "export help");
+    need(call(["errors-verify", "--errors-jsonl", "F13_SECRET_TOKEN",
+        "--help"], 0).canFind("--errors-jsonl"), "verify help");
+    need(call(["errors-init=F13_SECRET_TOKEN"], 2) ==
+        "scrubbed: errors-invalid-arguments\n", "malformed verb diagnostic");
     need(call(["completion", "complete", "--bash", "--", "errors"], 0)
         .canFind("errors-verify"), "completion verbs");
     auto source = buildPath(root, "input.txt");
@@ -49,12 +63,18 @@ private void check(string root, string binary, bool crashHarness) {
         readText(explicitOutput), "v1 no-verb/run equivalence");
     call(["errors-init", "--journal", db], 0, true);
     need(exists(db), "journal not created");
-    call(["errors-init", "--journal", db], 2);
-    call(["errors-init", "--journal",
-        buildPath(root, "missing", "F13_SECRET_TOKEN")], 2);
-    call(["errors-export", "--journal", db], 2);
-    call(["errors-verify"], 2);
-    call(["errors-verify", "--errors-jsonl", h, "--bogus", "F13_SECRET_TOKEN"], 2);
+    need(call(["errors-init", "--journal", db], 2) ==
+        "scrubbed: errors-operation-refused\n", "existing journal diagnostic");
+    need(call(["errors-init", "--journal",
+        buildPath(root, "missing", "F13_SECRET_TOKEN")], 2) ==
+        "scrubbed: errors-operation-refused\n", "path refusal diagnostic");
+    need(call(["errors-export", "--journal", db], 2) ==
+        "scrubbed: errors-invalid-arguments\n", "missing destination diagnostic");
+    need(call(["errors-verify"], 2) ==
+        "scrubbed: errors-invalid-arguments\n", "verify syntax diagnostic");
+    need(call(["errors-verify", "--errors-jsonl", h, "--bogus",
+        "F13_SECRET_TOKEN"], 2) == "scrubbed: errors-invalid-arguments\n",
+        "unknown option diagnostic");
 
     auto doc = DocumentId.from(SourceLocator("cli", "set", "one"));
     auto input = inputDigest(cast(const(ubyte)[])"F13_SOURCE_BYTES");
@@ -70,7 +90,8 @@ private void check(string root, string binary, bool crashHarness) {
     call(["errors-verify", "--errors-jsonl", h, "--outstanding-jsonl", o], 0, true);
     auto side = readText(h ~ ".sha256");
     remove(h ~ ".sha256");
-    call(["errors-verify", "--errors-jsonl", h], 2);
+    need(call(["errors-verify", "--errors-jsonl", h], 2) ==
+        "scrubbed: errors-operation-refused\n", "missing sidecar diagnostic");
     write(h ~ ".sha256", side);
     foreach (path; [h, o, h ~ ".sha256", o ~ ".sha256"])
         foreach (secret; ["F13_SECRET_TOKEN", "F13_SOURCE_BYTES",

@@ -1,0 +1,7 @@
+id	format	split	case	path	sha256	license	provenance
+pdf-training	pdf	training	text	fixtures/pdf-training.pdf	e171835dccfc98be094ce9601087d1526110c99aa88fb83b57dd3c5937167f5e	CC0-1.0	generate_fixtures.d@issue-67
+pdf-heldout-layout	pdf	heldout	layout	fixtures/pdf-heldout-layout.pdf	6adea7ec29f5d91d5f1f3032c01ec71c133255dab9ecc0393ccdf205b2655b76	CC0-1.0	generate_fixtures.d@issue-67
+pdf-malformed	pdf	heldout	malformed	fixtures/pdf-malformed.pdf	8403d6e5008818ca0021d49eb7af1e7ed6262c92890c7cdb9ddd10ce283a25b6	CC0-1.0	generate_fixtures.d@issue-67
+docx-training	docx	training	text	fixtures/docx-training.docx	2c3dbba5ffd834175d0b7e9153a3deb9d1607a4152308f869eda7cac6d6fe94f	CC0-1.0	generate_fixtures.d@issue-67
+docx-heldout-layout	docx	heldout	layout	fixtures/docx-heldout-layout.docx	6cecc29ec03d9f5e2acbd6eb068f1eda20e5e6483446a22b014cd905d829ab9a	CC0-1.0	generate_fixtures.d@issue-67
+docx-malformed	docx	heldout	malformed	fixtures/docx-malformed.docx	e1c3ac05d6710d0c81089e2b89fd78ae5be2209d32acb9a7a0033ea16a5a7b9c	CC0-1.0	generate_fixtures.d@issue-67

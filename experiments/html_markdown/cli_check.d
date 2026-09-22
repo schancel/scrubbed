@@ -2,11 +2,14 @@
 module experiments.html_markdown.cli_check;
 
 import std.algorithm.searching : canFind;
-import std.file : exists, mkdir, readText, rmdirRecurse, symlink, tempDir, write;
+import std.conv : to;
+import std.file : SpanMode, dirEntries, exists, getSize, mkdir, readText, rmdirRecurse,
+    symlink, tempDir, write;
 import std.path : buildPath;
 import std.process : execute;
 import std.stdio : writeln;
 import std.uuid : randomUUID;
+import core.sys.posix.sys.stat : chmod;
 import core.sys.posix.unistd : link;
 import std.string : toStringz;
 
@@ -66,6 +69,21 @@ int main(string[] args) {
     need(readText(output) == "UTF16\n", "unsupported charset replaced output");
     auto prior = readText(output);
 
+    // Many nested long ordered-list markers multiply the indentation on br.
+    // The admitted raw input stays small while rendered output exceeds 4 MiB.
+    string expanded;
+    foreach (_; 0 .. 55) expanded ~= "<ol start='9223372036854775807'><li>";
+    foreach (_; 0 .. 4_000) expanded ~= "<br>x";
+    foreach (_; 0 .. 55) expanded ~= "</li></ol>";
+    need(expanded.length < 64 * 1024, "output-limit input exceeded raw cap");
+    write(input, expanded);
+    auto expansion = execute([executable, "extract", "--input", input,
+        "--output", output, "--format", "markdown"]);
+    need(expansion.status == 1 && expansion.output.canFind("outputLimit"),
+        "expanded input did not quarantine: " ~ expansion.output ~
+        " output bytes=" ~ getSize(output).to!string);
+    need(readText(output) == prior, "output limit replaced prior output");
+
     write(input, cast(const(ubyte)[])"<p>A\0B</p>");
     expect(executable, input, output, "markdown", 1, "binaryControl@");
     need(readText(output) == prior, "NUL quarantine replaced output");
@@ -116,17 +134,20 @@ int main(string[] args) {
     need(readText(buildPath(destination, "b.html.md")) == "B\n",
         "directory quarantine replaced prior output");
 
-    // A destination failure cannot leave a partial published file.
+    // Preflight accepts this existing plain directory and file. The sink's
+    // exclusive temporary open then fails, preserving the prior destination.
     auto blocked = buildPath(root, "blocked");
     mkdir(blocked);
-    write(buildPath(blocked, "a.html.md"), "prior\n");
-    auto badDirectory = buildPath(blocked, "b.html.md");
-    mkdir(badDirectory);
-    write(buildPath(tree, "b.html"), "<p>B</p>");
-    expect(executable, tree, blocked, "markdown", 2, "FATAL");
-    auto first = readText(buildPath(blocked, "a.html.md"));
-    need((first == "prior\n" || first == "A\n") && exists(badDirectory),
-        "destination failure left partial output");
+    auto blockedOutput = buildPath(blocked, "prior.md");
+    write(blockedOutput, "prior\n");
+    write(input, "<p>new</p>");
+    need(chmod(blocked.toStringz, 0x16D) == 0, "make destination read-only");
+    scope(exit) chmod(blocked.toStringz, 0x1ED);
+    expect(executable, input, blockedOutput, "markdown", 2,
+        "cannot create atomic output temporary");
+    need(readText(blockedOutput) == "prior\n", "sink-open failure replaced prior output");
+    foreach (entry; dirEntries(blocked, SpanMode.shallow))
+        need(!entry.name.canFind(".scrubbed-"), "sink-open failure left temporary");
 
     writeln("markdown CLI check: release binary structure, safety, naming, quarantine, atomicity pass");
     return 0;

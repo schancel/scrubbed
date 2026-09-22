@@ -80,8 +80,9 @@ ldc2 -O -release -of=.dub/html-markdown-cli-check experiments/html_markdown/cli_
 ```
 
 The actual-binary check covers exact Markdown output, malformed/unsafe input,
-file and directory naming, quarantine, aliases, and destination failure. The
-existing HTML parser CLI checker pins unchanged `tree-json` bytes and unknown
-format behavior. The converter's 4 MiB output cap is also caught by the stage
-as `outputLimit`; no admitted CLI fixture currently reaches it under the
-stricter raw/tree observation caps.
+file and directory naming, quarantine, aliases, and a read-only-directory
+sink-open failure with prior output and no temporary file. Nested ordered lists
+with long `start` markers and repeated line breaks expand an admitted input
+past 4 MiB; the stage reports `outputLimit` and preserves the prior output.
+The existing HTML parser CLI checker pins unchanged `tree-json` bytes and
+unknown-format behavior.

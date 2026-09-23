@@ -818,6 +818,7 @@ private final class DurableDocumentFailure : Exception {
     string code;
     string sink;
     bool fatal;
+    Exception original;
     this(DurableRootKey key, string status, string code, string sink,
             Exception cause, bool fatal = false) {
         super(cause.msg);
@@ -826,7 +827,38 @@ private final class DurableDocumentFailure : Exception {
         this.code = code;
         this.sink = sink;
         this.fatal = fatal;
+        this.original = cause;
     }
+}
+
+private struct DispatchFailureFacts {
+    bool found;
+    DetectionOutcomeV1 outcome;
+    string phase;
+    string code;
+    string reason;
+}
+
+/// Recover the same dispatch failure through each shipping transport wrapper.
+private DispatchFailureFacts dispatchFailureFacts(Throwable failure) {
+    if (failure is null) return DispatchFailureFacts.init;
+    if (auto dispatch = cast(DispatchExecutionFailureV1)failure) {
+        auto phase = dispatch.phase == "refine" ? "inspect" :
+            dispatch.phase == "extract" ? "decode" : "filter";
+        auto code = phase == "inspect" ? "inspect-invalidated" :
+            phase == "decode" ? "decode-failed" : "filter-failed";
+        return DispatchFailureFacts(true, dispatch.outcome, phase, code,
+            dispatch.original is null ? dispatch.msg : dispatch.original.msg);
+    }
+    if (auto effect = cast(EffectFailure)failure) {
+        auto facts = dispatchFailureFacts(effect.original);
+        if (facts.found) return facts;
+    }
+    if (auto durable = cast(DurableDocumentFailure)failure) {
+        auto facts = dispatchFailureFacts(durable.original);
+        if (facts.found) return facts;
+    }
+    return dispatchFailureFacts(failure.next);
 }
 
 private ubyte[32] durableContentDigest(Content content) {
@@ -1352,23 +1384,14 @@ int runApp(string[] args) {
                 auto relative = inputIsDir ? relativePath(file, inputPath) : ".";
                 auto id = DocumentId.from(SourceLocator("local-files:v1",
                     inputPath, relative));
-                auto phase = "filter";
-                auto code = "filter-failed";
-                auto dispatchFailure = cast(DispatchExecutionFailureV1)error;
-                if (effectFailure !is null)
-                    dispatchFailure = cast(DispatchExecutionFailureV1)
-                        effectFailure.original;
-                if (dispatchFailure !is null) {
-                    phase = dispatchFailure.phase == "refine" ? "inspect" :
-                        dispatchFailure.phase == "extract" ? "decode" : "filter";
-                    code = phase == "inspect" ? "inspect-invalidated" :
-                        phase == "decode" ? "decode-failed" : "filter-failed";
-                }
+                auto dispatchFailure = dispatchFailureFacts(error);
                 writeln("EXPLAIN\t", canonicalDispatchFailureRecordV1(
                     runtimePlan.identity, id,
-                    dispatchFailure is null ? DetectionOutcomeV1.unknown :
-                        dispatchFailure.outcome,
-                    phase, code, error.msg));
+                    dispatchFailure.found ? dispatchFailure.outcome :
+                        DetectionOutcomeV1.unknown,
+                    dispatchFailure.found ? dispatchFailure.phase : "filter",
+                    dispatchFailure.found ? dispatchFailure.code : "filter-failed",
+                    dispatchFailure.found ? dispatchFailure.reason : error.msg));
                 if (explain) pending.remove(file);
             }
             if (errorJournalPath.length) {

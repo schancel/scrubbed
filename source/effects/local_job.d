@@ -146,7 +146,7 @@ private final class LocalSource : Source {
                 "input changed size after admission: " ~ filename);
             owner = new DocumentViewOwner(new ubyte[0]);
         } else owner = openMappedFile(filename, expectedBytes);
-        record = SourceRecord(document, owner);
+        record = SourceRecord(document, owner, null, filename);
         return true;
     }
 }

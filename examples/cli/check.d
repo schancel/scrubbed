@@ -4,12 +4,13 @@ module cli_check;
 import std.algorithm.searching : canFind;
 import std.array : replicate;
 import std.conv : to;
+import std.digest.sha : sha256Of;
 import std.file : SpanMode, dirEntries, exists, mkdir, readText, rmdirRecurse,
     symlink, tempDir, write;
 import std.json : parseJSON;
 import std.path : baseName, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
-import std.string : split, splitLines, startsWith;
+import std.string : replace, split, splitLines, startsWith;
 import std.uuid : randomUUID;
 
 private void check(bool condition, string label) {
@@ -40,6 +41,18 @@ private Captured withInput(string[] command, string input) {
     foreach (line; pipes.stderr.byLineCopy) result.error ~= line ~ "\n";
     result.status = pipes.pid.wait();
     return result;
+}
+
+private string dispatchRecord(Captured result) {
+    string record;
+    foreach (line; (result.output ~ result.error).splitLines()) {
+        if (!line.startsWith("EXPLAIN\t{")) continue;
+        check(!record.length, "exactly one dispatch explain record");
+        record = line["EXPLAIN\t".length .. $];
+    }
+    check(record.length != 0, "dispatch explain record present");
+    parseJSON(record);
+    return record;
 }
 
 int main(string[] args) {
@@ -142,6 +155,88 @@ int main(string[] args) {
         dispatch.output.canFind("job: job:v4:") &&
         dispatch.output.canFind("EXPLAIN\t{\"schema\":\"scrubbed.dispatch.v1\"") &&
         !dispatch.output.canFind(input), "shipping dispatch v4 config/explain");
+
+    // Both local transports must expose the same structured dispatch failure,
+    // even though a non-durable worker failure remains exit 2 and a recorded
+    // durable root failure remains exit 1.
+    auto cappedConfig = buildPath(root, "dispatch-cap4.json");
+    write(cappedConfig, readText("scrubbed.dispatch.example.json").replace(
+        `"max-output-bytes":268435456`, `"max-output-bytes":4`));
+    auto cappedInput = buildPath(root, "capped.txt");
+    write(cappedInput, "hello");
+    auto cappedDirectOutput = buildPath(root, "capped-direct.txt");
+    auto cappedDirect = separately([exe, "run", "--input", cappedInput,
+        "--output", cappedDirectOutput, "--threads", "1", "--explain",
+        "--config", cappedConfig]);
+    auto cappedDurableOutput = buildPath(root, "capped-durable.txt");
+    auto cappedDurable = separately([exe, "run", "--input", cappedInput,
+        "--output", cappedDurableOutput, "--threads", "1", "--explain",
+        "--config", cappedConfig, "--manifest",
+        buildPath(root, "capped.db")]);
+    auto directFailureRecord = dispatchRecord(cappedDirect);
+    auto durableFailureRecord = dispatchRecord(cappedDurable);
+    check(cappedDirect.status == 2 && cappedDurable.status == 1 &&
+        directFailureRecord == durableFailureRecord &&
+        parseJSON(directFailureRecord)["outcome"].str == "plain-text" &&
+        parseJSON(directFailureRecord)["phase"].str == "decode" &&
+        parseJSON(directFailureRecord)["code"].str == "decode-failed" &&
+        !exists(cappedDirectOutput) && !exists(cappedDurableOutput),
+        "durable/direct dispatch failure record parity and exits");
+
+    // Filename hints are non-authoritative, but must reach detection through
+    // both local transports so warnings and all other explain metadata agree.
+    auto hintedInput = buildPath(root, "hinted.html");
+    write(hintedInput, "hello");
+    auto hintedDirectOutput = buildPath(root, "hinted-direct.txt");
+    auto hintedDirect = separately([exe, "run", "--input", hintedInput,
+        "--output", hintedDirectOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json"]);
+    auto hintedDurableOutput = buildPath(root, "hinted-durable.txt");
+    auto hintedDurable = separately([exe, "run", "--input", hintedInput,
+        "--output", hintedDurableOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json", "--manifest",
+        buildPath(root, "hinted.db")]);
+    auto hintedRecord = dispatchRecord(hintedDirect);
+    check(hintedDirect.status == 0 && hintedDurable.status == 0 &&
+        hintedRecord == dispatchRecord(hintedDurable) &&
+        hintedRecord.canFind(`"warning_codes":["untrusted-hint-conflicts-with-content"]`) &&
+        sha256Of(cast(const(ubyte)[])readText(hintedDirectOutput)) ==
+            sha256Of(cast(const(ubyte)[])readText(hintedDurableOutput)),
+        "durable/direct misleading HTML hint and output hash parity");
+
+    auto textControl = buildPath(root, "control.txt");
+    write(textControl, "hello");
+    auto textDirect = separately([exe, "run", "--input", textControl,
+        "--output", buildPath(root, "text-direct.txt"), "--threads", "1",
+        "--explain", "--config", "scrubbed.dispatch.example.json"]);
+    auto textDurable = separately([exe, "run", "--input", textControl,
+        "--output", buildPath(root, "text-durable.txt"), "--threads", "1",
+        "--explain", "--config", "scrubbed.dispatch.example.json",
+        "--manifest", buildPath(root, "text.db")]);
+    auto textRecord = dispatchRecord(textDirect);
+    check(textDirect.status == 0 && textDurable.status == 0 &&
+        textRecord == dispatchRecord(textDurable) &&
+        textRecord.canFind(`"warning_codes":[]`),
+        "durable/direct text hint control parity");
+
+    auto htmlControl = buildPath(root, "genuine.html");
+    write(htmlControl, "<!doctype html><html><body>hello</body></html>");
+    auto htmlDirectOutput = buildPath(root, "html-direct.txt");
+    auto htmlDirect = separately([exe, "run", "--input", htmlControl,
+        "--output", htmlDirectOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json"]);
+    auto htmlDurableOutput = buildPath(root, "html-durable.txt");
+    auto htmlDurable = separately([exe, "run", "--input", htmlControl,
+        "--output", htmlDurableOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json", "--manifest",
+        buildPath(root, "html.db")]);
+    auto htmlRecord = dispatchRecord(htmlDirect);
+    check(htmlDirect.status == 1 && htmlDurable.status == 1 &&
+        htmlRecord == dispatchRecord(htmlDurable) &&
+        parseJSON(htmlRecord)["outcome"].str == "html" &&
+        htmlRecord.canFind(`"warning_codes":[]`) &&
+        !exists(htmlDirectOutput) && !exists(htmlDurableOutput),
+        "durable/direct genuine HTML control parity");
     auto rejectedDispatch = separately([exe, "run", "--input", input,
         "--output", buildPath(root, "mixed.txt"), "--config",
         "scrubbed.dispatch.example.json", "--filters", "strip-control"]);

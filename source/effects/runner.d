@@ -18,6 +18,10 @@ import std.exception : enforce;
 struct SourceRecord {
     Document document;
     DocumentViewOwner owner;
+    /// Untrusted source hints carried to dispatch detection. They never
+    /// override byte evidence and are ignored by v3 execution.
+    string declaredMediaType;
+    string fileName;
 }
 
 interface Source {
@@ -298,7 +302,8 @@ private void closeRecord(DocumentViewOwner owner, bool primaryFailed,
     }
 }
 
-private alias RecordTransform = StageEvent[] delegate(StageDocument);
+private alias RecordTransform = StageEvent[] delegate(StageDocument,
+    string declaredMediaType, string fileName);
 
 /// Run the shared effect lifetime and delivery policy around a record
 /// transform. One input decision is fully delivered before fetching another.
@@ -353,7 +358,8 @@ private RunResult runEffectRecords(Source source, Parser parser, Sink sink,
             return result;
         }
         StageEvent[] events;
-        try events = transform(StageDocument(record.document, content));
+        try events = transform(StageDocument(record.document, content),
+            record.declaredMediaType, record.fileName);
         catch (Exception error) {
             primaryFailed = true;
             throw new EffectFailure(EffectPhase.stage, result.completed, 0,
@@ -381,7 +387,7 @@ RunResult runEffects(Source source, Parser parser, Sink sink,
         scope CancellationCheck isCancelled = null) {
     enforce(transform !is null, "stage transform is required");
     return runEffectRecords(source, parser, sink,
-        (StageDocument input) {
+        (StageDocument input, string ignoredMediaType, string ignoredFileName) {
             return runStage([input], stage, transform).events;
         }, isCancelled);
 }
@@ -393,7 +399,9 @@ RunResult runEffects(Source source, Parser parser, Sink sink,
         scope CancellationCheck isCancelled = null) {
     job.identity; // Reject an uninitialized plan before touching the source.
     return runEffectRecords(source, parser, sink,
-        (StageDocument input) => runCompiledJob(input, job), isCancelled);
+        (StageDocument input, string ignoredMediaType, string ignoredFileName) =>
+            runCompiledJob(input, job),
+        isCancelled);
 }
 
 alias RuntimeExecutionObserverV1 = void delegate(
@@ -406,8 +414,9 @@ RunResult runEffects(Source source, Parser parser, Sink sink,
         scope CancellationCheck isCancelled = null) {
     plan.identity; // Reject an uninitialized plan before touching the source.
     return runEffectRecords(source, parser, sink,
-        (StageDocument input) {
-            auto execution = runRuntimePlanV1(input, plan);
+        (StageDocument input, string declaredMediaType, string fileName) {
+            auto execution = runRuntimePlanV1(input, plan,
+                declaredMediaType, fileName);
             if (observe !is null) observe(execution);
             return execution.events;
         }, isCancelled);

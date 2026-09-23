@@ -593,3 +593,57 @@ field as incorrect. Malformed saved HTML is reported in a separate invalid
 bucket and excluded from quality denominators, with failure rate reported;
 zero denominators yield `null`, never 100%. Pin the dataset and policy before
 any cross-tool comparison. No HTML extractor or trafilatura parity is claimed.
+
+## SHA-256 backend-only evidence
+
+`sha256_backend_check.d` exercises the private incremental facade introduced
+for #185 without migrating any production caller. The frozen base is
+`c46abf30872ffd213801babd442835aaa15d692f`: 75 `SHA256`/`sha256Of`
+occurrences in 21 production modules. The committed evidence records each
+module's source hash and preserves representative document, child, and v3 job
+identity fixtures. No file outside `source/crypto`, this harness, this README,
+and the evidence JSON changes in this landing.
+
+Build and run the release-active checks from the repository root:
+
+```sh
+ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
+  benchmarks/sha256_backend_check.d source/crypto/sha256.d \
+  source/crypto/sha256_arm64.d source/crypto/sha256_x86_64.d \
+  -of=/tmp/scrubbed-sha256-backend-check
+/tmp/scrubbed-sha256-backend-check --self-test
+/tmp/scrubbed-sha256-backend-check --long-test
+/tmp/scrubbed-sha256-backend-check --report benchmarks/sha256-backend-evidence.json
+/tmp/scrubbed-sha256-backend-check --check-report benchmarks/sha256-backend-evidence.json
+```
+
+The self-test checks authoritative empty/`abc`/long-message vectors, Phobos
+equivalence, every alignment 0..31, boundary and one-byte chunking, repeatable
+`start`, refusal after `finish`, forced-unavailable refusal, eight concurrent
+instances, the frozen caller inventory, and `/usr/bin/shasum` as a separate
+system oracle. The long test streams 4,296,015,890 logical bytes through both
+the selected facade and Phobos without allocating that logical input.
+
+The ARM compression function alone has LDC `@target("sha2")`; runtime Darwin
+`sysctl` or Linux `getauxval` detection happens once before automatic
+selection. The x86 function alone has `@target("sha")`; normal x86 builds use
+`core.cpuid.hasSha` before selection. Unsupported forced backends fail before
+their compression function is called. Scalar is always compiled and
+forceable, and digest state belongs to each facade instance.
+
+On the recorded Apple M4 host, ARM execution and disassembly prove
+`sha256h`, `sha256h2`, `sha256su0`, and `sha256su1`. The D source also
+cross-compiles to x86-64 Mach-O and Linux objects whose disassembly contains
+32 `sha256rnds2` instructions. Rosetta's exposed x86 CPUID has no SHA feature,
+so x86 execution is `BLOCKED_EXTERNAL_HOST_CPUID_HAS_NO_SHA`, not passed or
+substituted. A capable native x86-64 host must run the same KAT/chunk/alignment
+suite before production migration.
+
+`sha256-backend-evidence.json` contains five interleaved scalar/selected
+samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,
+and instruction counts. These timings are descriptive: cache and frequency
+state are uncontrolled, and this backend-only landing makes no production or
+full-CLI speed claim. #184 owns removal of redundant durable work. Production
+SHA call-site migration remains prohibited until #184 is integrated and both
+architecture backends have passed execution, equivalence, instruction, and
+combined full-CLI/durable gates.

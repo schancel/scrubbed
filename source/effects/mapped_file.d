@@ -31,6 +31,20 @@ DocumentViewOwner openMappedFile(string filename) {
     return new DocumentViewOwner(lease.bytes(), &lease.close);
 }
 
+/// Open exactly the bytes admitted by an outer bounded scheduler. Checking on
+/// both sides of the mapping prevents a growth race from extending a fixed
+/// reservation; callers still own the policy for concurrent in-place writes.
+DocumentViewOwner openMappedFile(string filename, ulong expectedBytes) {
+    enforce(expectedBytes != 0, "cannot map an empty file");
+    enforce(getSize(filename) == expectedBytes,
+        "input changed size after admission: " ~ filename);
+    auto lease = new MappingLease(filename);
+    scope (failure) lease.close();
+    enforce(lease.bytes.length == expectedBytes && getSize(filename) == expectedBytes,
+        "input changed size after admission: " ~ filename);
+    return new DocumentViewOwner(lease.bytes(), &lease.close);
+}
+
 unittest {
     import core.memory : GC;
     import std.exception : assertThrown;

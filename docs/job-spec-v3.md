@@ -1,9 +1,9 @@
 # Canonical job specification v3
 
-The v3 job specification is the common typed model for the future `run` CLI
-and persistent JSON configuration. It exists in code now, but the shipping CLI
-does not accept this format yet. The switch is a later reviewed slice of #148;
-today's `--filters` and v1 JSON behavior remains unchanged.
+The v3 job specification is the common typed model for `run` composition
+tokens and persistent JSON configuration. The shipping CLI accepts it for
+ordinary local file/tree processing. JSONL and manifest/error-journal routes
+remain deferred and reject v3 before reading input or mutating output.
 
 ```json
 {
@@ -65,9 +65,9 @@ following `--filter-option` tokens attach to that filter. Option values use
 cannot acquire the same identity by inference. Shell quoting is needed only
 when a value itself contains shell metacharacters or whitespace.
 
-The parser and registry compiler are pure and tested, but these are not advertised
-shipping flags yet. Argparse help and the JSON file route will move together
-when the execution switch is ready; neither surface will own a second model.
+Argparse advertises these shipping flags and preserves their original
+interleaved order for the pure parser. The JSON route and tokens compile to the
+same model; neither surface owns a second grammar.
 
 ## Compatibility lowering and scope
 

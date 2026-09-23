@@ -33,6 +33,7 @@ final class BoundedInput {
     private TaskPool pool;
     private InputLimits limits;
     private InputCounts counts;
+    private size_t nextDescriptorSequence;
     private bool cancelled;
     private Throwable fatalFailure;
     private void delegate(string, ulong) process;
@@ -77,6 +78,7 @@ final class BoundedInput {
             mutex.unlock();
             return false;
         }
+        auto sequence = counts.submitted;
         ++counts.queuedDocuments;
         counts.reservedBytes += bytes;
         ++counts.submitted;
@@ -87,10 +89,10 @@ final class BoundedInput {
         mutex.unlock();
 
         if (pool is null) {
-            execute(path, bytes);
+            execute(path, bytes, sequence);
         } else {
             try {
-                auto work = task!executeTask(this, path, bytes);
+                auto work = task!executeTask(this, path, bytes, sequence);
                 pool.put(work);
             } catch (Exception error) {
                 mutex.lock();
@@ -105,15 +107,21 @@ final class BoundedInput {
         return true;
     }
 
-    private static void executeTask(BoundedInput self, string path, ulong bytes) {
-        self.execute(path, bytes);
+    private static void executeTask(BoundedInput self, string path, ulong bytes,
+            size_t sequence) {
+        self.execute(path, bytes, sequence);
     }
 
-    private void execute(string path, ulong bytes) {
+    private void execute(string path, ulong bytes, size_t sequence) {
         mutex.lock();
         --counts.queuedDocuments;
         changed.notifyAll();
-        while (!cancelled && counts.workerDescriptors == limits.workerDescriptors)
+        // std.parallelism dequeues FIFO, but several dequeued tasks race before
+        // this descriptor gate. Preserve submission order here so a later
+        // canonical file cannot consume a scarce descriptor while waiting for
+        // an earlier file's ordered publication turn.
+        while (!cancelled && (sequence != nextDescriptorSequence ||
+                counts.workerDescriptors == limits.workerDescriptors))
             changed.wait();
         if (cancelled) {
             counts.reservedBytes -= bytes;
@@ -123,8 +131,10 @@ final class BoundedInput {
             return;
         }
         ++counts.workerDescriptors;
+        ++nextDescriptorSequence;
         if (counts.workerDescriptors > counts.peakWorkerDescriptors)
             counts.peakWorkerDescriptors = counts.workerDescriptors;
+        changed.notifyAll();
         mutex.unlock();
 
         bool success;
@@ -215,6 +225,20 @@ unittest {
         assert(result.peakQueuedDocuments <= 2 && result.peakReservedBytes <= 7 &&
             result.peakWorkerDescriptors <= 1);
     }
+
+    string[] acquisitionOrder;
+    auto orderMutex = new Mutex;
+    auto ordered = new BoundedInput(InputLimits(8, 8, 1), 4,
+        (string path, ulong bytes) {
+            orderMutex.lock();
+            acquisitionOrder ~= path;
+            orderMutex.unlock();
+        },
+        (string path, Throwable error) { assert(0, error.msg); });
+    foreach (i; 0 .. 64) assert(ordered.submit(i.to!string, 1));
+    auto orderedCounts = ordered.finish();
+    assert(orderedCounts.succeeded == 64 && acquisitionOrder.length == 64);
+    foreach (i, path; acquisitionOrder) assert(path == i.to!string);
 
     auto release = new Semaphore(0);
     auto held = new BoundedInput(InputLimits(2, 4, 1), 3,

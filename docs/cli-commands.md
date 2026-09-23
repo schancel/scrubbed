@@ -15,9 +15,23 @@ scrubbed clean --input input.txt --output clean.txt --validate
 scrubbed --list-filters
 ```
 
-`extract` (alias `x`) appears in generated help but is not implemented.
-Executing it exits 2 with `scrubbed: extract is not yet available` on stderr
-and creates no output. No extraction format is processed yet.
+Ordinary local file/tree runs also accept ordered v3 composition:
+
+```sh
+scrubbed run -i input.txt -o clean.txt \
+  --stage clean=text-transform --filter normalize-line-endings
+scrubbed run -i input.txt -o clean.txt --config job-v3.json
+```
+
+Composition tokens are mutually exclusive with `--filters` and `--config`.
+Equivalent v3 tokens and JSON compile once to the same job. JSONL and
+manifest/error-journal routes reject v3 as not migrated in Stage 5a.
+
+`extract` (alias `x`) exports a bounded selected HTML parse tree or Markdown.
+It requires `--input`, `--output`, and `--format=tree-json|markdown`; the
+format-specific extraction limits and provenance behavior are documented in
+the HTML parser and Markdown guides. This command is separate from the Stage
+5a local text-composition route above.
 
 The built-in argparse completer supplies command and option **names only**;
 it does not complete paths, filter names or argument values. Generate setup

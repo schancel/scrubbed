@@ -643,6 +643,14 @@ instead distinguishes CPUID without SHA-NI from executed-and-passed SHA-NI. A
 capable native x86-64 host must run the same KAT/chunk/alignment suite before
 production migration.
 
+The `SHA-256 native backends` GitHub Actions workflow runs the same
+release-active harness on GitHub-hosted `ubuntu-24.04` x86-64 and
+`ubuntu-24.04-arm` arm64 runners. `--native-report` refuses scalar fallback:
+the x86 job must expose and select SHA-NI, while the ARM job must expose and
+select ARMv8 SHA2. Each job also runs the multi-GiB logical stream and uploads
+a sanitized, source- and binary-bound architecture report. Workflow actions
+and LDC 1.43.0 are pinned; the workflow has read-only repository permission.
+
 `sha256-backend-evidence.json` contains five interleaved scalar/selected
 samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,
 and instruction counts. The validator re-derives the host identity and

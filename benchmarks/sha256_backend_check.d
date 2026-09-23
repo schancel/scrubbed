@@ -278,6 +278,49 @@ private void longTest() {
         cast(ulong)chunkBytes * iterations + tail.length, " bytes");
 }
 
+private void writeNativeReport(string path) {
+    selfTest;
+    auto os = commandValue(["/usr/bin/uname", "-s"], "operating system");
+    auto release = commandValue(["/usr/bin/uname", "-r"], "OS release");
+    auto architecture = commandValue(["/usr/bin/uname", "-m"], "architecture");
+    string expectedBackend;
+    version (AArch64) {
+        enforce(architecture == "aarch64" || architecture == "arm64",
+            "native ARM runner architecture mismatch");
+        enforce(sha256BackendAvailable(Sha256Backend.armSha2),
+            "native ARM runner does not expose SHA2");
+        expectedBackend = "armv8-sha2";
+    } else version (X86_64) {
+        enforce(architecture == "x86_64",
+            "native x86 runner architecture mismatch");
+        enforce(sha256BackendAvailable(Sha256Backend.x86ShaNi),
+            "native x86 runner does not expose SHA-NI");
+        expectedBackend = "x86-sha-ni";
+    } else static assert(false, "unsupported native SHA-256 evidence architecture");
+    enforce(sha256BackendName(selectedSha256Backend) == expectedBackend,
+        "automatic SHA-256 backend did not select native hardware");
+    JSONValue report;
+    report["schema"] = "scrubbed-sha256-native-backend-v1";
+    report["os"] = os;
+    report["os_release"] = release;
+    report["architecture"] = architecture;
+    report["selected_backend"] = expectedBackend;
+    report["hardware_execution"] = "SUPPORTED_AND_PASSED";
+    report["compiler"] = expectedCompiler;
+    report["frontend"] = cast(long)__VERSION__;
+    report["harness_binary_sha256"] = sourceHash(thisExePath);
+    JSONValue sources;
+    foreach (source; ["source/crypto/sha256.d", "source/crypto/sha256_arm64.d",
+            "source/crypto/sha256_x86_64.d", "benchmarks/sha256_backend_check.d"])
+        sources[source] = sourceHash(source);
+    report["source_sha256"] = sources;
+    write(path, report.toString(JSONOptions.doNotEscapeSlashes));
+    auto reopened = parseJSON(readText(path));
+    enforce(reopened.toString == report.toString,
+        "native SHA-256 report reopen mismatch");
+    writeln("wrote native SHA-256 evidence: ", path);
+}
+
 private struct BenchmarkRow {
     string role;
     string backend;
@@ -561,7 +604,10 @@ int main(string[] args) {
     if (args.length == 3 && args[1] == "--check-report") {
         validateReport(args[2]); writeln("sha256 backend report valid"); return 0;
     }
+    if (args.length == 3 && args[1] == "--native-report") {
+        writeNativeReport(args[2]); return 0;
+    }
     writeln("usage: sha256_backend_check --self-test|--long-test|" ~
-        "--report PATH|--check-report PATH");
+        "--report PATH|--check-report PATH|--native-report PATH");
     return 2;
 }

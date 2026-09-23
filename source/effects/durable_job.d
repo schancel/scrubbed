@@ -17,7 +17,9 @@ import std.file : exists, isFile, isSymlink, remove;
 import std.path : absolutePath, buildNormalizedPath;
 import std.string : fromStringz, indexOf, toStringz;
 import std.uuid : UUID;
-import core.sys.posix.sys.stat : stat, stat_t;
+import core.sys.posix.fcntl : O_NOFOLLOW, O_RDONLY, open;
+import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t, S_ISLNK;
+import core.sys.posix.unistd : close, pread;
 
 enum DurableKind { manifest, journal }
 enum DurableEventState : string {
@@ -57,6 +59,53 @@ struct DurableEventRecord {
 }
 
 private enum applicationId = 1396920898;
+version (unittest) private __gshared size_t aliasRowsInspected;
+
+private uint headerU32(const(ubyte)[] header, size_t offset) {
+    return (cast(uint)header[offset] << 24) |
+        (cast(uint)header[offset + 1] << 16) |
+        (cast(uint)header[offset + 2] << 8) | header[offset + 3];
+}
+
+private bool pathIsSymlink(string path) {
+    stat_t info;
+    return lstat(path.toStringz, &info) == 0 && S_ISLNK(info.st_mode);
+}
+
+// Refuse recognized predecessor formats before SQLite can perform recovery or
+// checkpoint work. This deliberately reads only documented fixed header fields.
+private void preflightDatabaseHeader(string path, DurableKind kind) {
+    auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
+    need(fd >= 0, "header-open-failed");
+    scope(exit) need(close(fd) == 0, "header-close-failed");
+    stat_t before, after;
+    ubyte[100] first, second;
+    need(fstat(fd, &before) == 0 && before.st_size >= first.length,
+        "invalid-database-header");
+    need(pread(fd, first.ptr, first.length, 0) == first.length &&
+        pread(fd, second.ptr, second.length, 0) == second.length &&
+        fstat(fd, &after) == 0 && first[] == second[] &&
+        before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
+        before.st_size == after.st_size, "unstable-database-header");
+    immutable ubyte[16] magic = cast(immutable(ubyte)[])"SQLite format 3\0";
+    auto pageSize = (cast(uint)first[16] << 8) | first[17];
+    if (pageSize == 1) pageSize = 65_536;
+    need(first[0 .. 16] == magic[] &&
+        (first[18] == 1 || first[18] == 2) &&
+        (first[19] == 1 || first[19] == 2) &&
+        pageSize >= 512 && pageSize <= 65_536 &&
+        (pageSize & (pageSize - 1)) == 0 &&
+        first[20] == 0 && first[21] == 64 && first[22] == 32 && first[23] == 32 &&
+        headerU32(first, 44) == 4, "invalid-database-header");
+    auto application = headerU32(first, 68);
+    auto version_ = headerU32(first, 60);
+    if (application == applicationId && kind == DurableKind.manifest && version_ == 1)
+        throw new Exception("durable job: manifest-v1-requires-fresh-v2");
+    if (application == applicationId && kind == DurableKind.journal && version_ == 2)
+        throw new Exception("durable job: journal-v2-requires-fresh-v3");
+    need(application == applicationId && version_ ==
+        (kind == DurableKind.manifest ? 2 : 3), "incompatible-database-header");
+}
 private enum commonSchema = `
 CREATE TABLE root_state(
  document_id TEXT NOT NULL,
@@ -408,19 +457,15 @@ final class DurableJobLedger {
             need(kind == DurableKind.manifest, "explicit-create-required");
             createFresh(databasePath, DurableKind.manifest);
         }
+        preflightDatabaseHeader(databasePath, kind);
         db = new Database(databasePath, SQLITE_OPEN_READWRITE);
         try {
             need(sqlite3_libversion().fromStringz == "3.53.4", "wrong-sqlite-version");
             auto storedApplication = db.scalar("PRAGMA application_id");
             auto storedVersion = db.scalar("PRAGMA user_version");
-            if (storedApplication == applicationId &&
-                    kind == DurableKind.manifest && storedVersion == 1)
-                throw new Exception(
-                    "durable job: manifest-v1-requires-fresh-v2");
-            if (storedApplication == applicationId &&
-                    kind == DurableKind.journal && storedVersion == 2)
-                throw new Exception(
-                    "durable job: journal-v2-requires-fresh-v3");
+            need(storedApplication == applicationId && storedVersion ==
+                (kind == DurableKind.manifest ? 2 : 3),
+                "database-header-changed-after-preflight");
             db.exec("PRAGMA foreign_keys=ON");
             validateShape(db, kind);
             db.exec("PRAGMA journal_mode=WAL");
@@ -508,6 +553,7 @@ final class DurableJobLedger {
             "invalid-event-shape");
         if (event.hasOutput) {
             need(event.destination.length != 0, "missing-destination");
+            need(!pathIsSymlink(event.destination), "symlink-destination");
             safeRegularOrAbsent(event.destination, true);
             auto selected = canonicalDestination(event.destination);
             need(selected == event.destination, "noncanonical-destination");
@@ -532,7 +578,7 @@ final class DurableJobLedger {
         need(rootExists(key), "root-plan-required");
         auto setDigest = eventSetDigest(events);
         foreach (ref event; events) validateEvent(event);
-        auto root = db.prepare(`SELECT event_count,event_set_sha256 FROM root_state WHERE
+        auto root = db.prepare(`SELECT event_count,event_set_sha256,state FROM root_state WHERE
             document_id=?1 AND input_sha256=?2 AND config_sha256=?3`);
         scope(exit) sqlite3_finalize(root);
         bindRoot(root, key);
@@ -556,6 +602,7 @@ final class DurableJobLedger {
             }
             return;
         }
+        need(columnText(root, 2) == "planned", "root-not-planned");
         transaction({
             foreach (ref event; events) {
                 if (event.hasOutput) {
@@ -568,18 +615,21 @@ final class DurableJobLedger {
                     need(sqlite3_step(owner) == SQLITE_ROW &&
                         sqlite3_column_int64(owner, 0) == 0,
                         "destination-owned-by-another-event");
-                    auto aliases = db.prepare(`SELECT destination,final_document_id,sink_key
-                        FROM final_event WHERE destination IS NOT NULL`);
-                    scope(exit) sqlite3_finalize(aliases);
-                    while (true) {
-                        auto rc = sqlite3_step(aliases);
-                        if (rc == SQLITE_DONE) break;
-                        need(rc == SQLITE_ROW, "destination-owner-read-failed");
-                        auto priorDestination = columnText(aliases, 0);
-                        auto sameOwner = columnText(aliases, 1) == event.document.text &&
-                            columnText(aliases, 2) == event.sink;
-                        need(sameOwner || !sameInode(event.destination, priorDestination),
-                            "destination-owned-by-another-event");
+                    if (exists(event.destination)) {
+                        auto aliases = db.prepare(`SELECT destination,final_document_id,sink_key
+                            FROM final_event WHERE destination IS NOT NULL`);
+                        scope(exit) sqlite3_finalize(aliases);
+                        while (true) {
+                            auto rc = sqlite3_step(aliases);
+                            if (rc == SQLITE_DONE) break;
+                            need(rc == SQLITE_ROW, "destination-owner-read-failed");
+                            version (unittest) ++aliasRowsInspected;
+                            auto priorDestination = columnText(aliases, 0);
+                            auto sameOwner = columnText(aliases, 1) == event.document.text &&
+                                columnText(aliases, 2) == event.sink;
+                            need(sameOwner || !sameInode(event.destination, priorDestination),
+                                "destination-owned-by-another-event");
+                        }
                     }
                 }
                 auto sql = event.hasReason && event.hasOutput ? "" :
@@ -645,6 +695,27 @@ final class DurableJobLedger {
     }
     DurableAction prepare(DurableRootKey key, size_t ordinal, bool retry) {
         auto row = readEvent(key, ordinal);
+        if (row.plan.hasOutput) {
+            need(!pathIsSymlink(row.plan.destination), "symlink-destination");
+            safeRegularOrAbsent(row.plan.destination, true);
+            if (exists(row.plan.destination)) {
+                auto aliases = db.prepare(`SELECT destination,final_document_id,sink_key
+                    FROM final_event WHERE
+                    destination IS NOT NULL AND NOT(document_id=?1 AND
+                    input_sha256=?2 AND config_sha256=?3 AND ordinal=?4)`);
+                scope(exit) sqlite3_finalize(aliases);
+                bindRoot(aliases, key); bindLong(aliases, 4, cast(long)ordinal);
+                while (true) {
+                    auto rc = sqlite3_step(aliases);
+                    if (rc == SQLITE_DONE) break;
+                    need(rc == SQLITE_ROW, "destination-owner-read-failed");
+                    auto sameOwner = columnText(aliases, 1) == row.plan.document.text &&
+                        columnText(aliases, 2) == row.plan.sink;
+                    need(sameOwner || !sameInode(row.plan.destination, columnText(aliases, 0)),
+                        "destination-owned-by-another-event");
+                }
+            }
+        }
         if (row.state == DurableEventState.acknowledged) return DurableAction.skip;
         if (row.state == DurableEventState.committed) {
             if (row.plan.hasOutput && exists(row.plan.destination) &&
@@ -799,24 +870,41 @@ final class DurableJobLedger {
     }
     void completeRoot(DurableRootKey key) {
         live();
-        auto s = db.prepare(`SELECT count(*) FROM final_event WHERE
-            document_id=?1 AND input_sha256=?2 AND config_sha256=?3 AND
-            state NOT IN ('committed','acknowledged')`);
-        scope(exit) sqlite3_finalize(s);
-        bindRoot(s, key);
-        need(sqlite3_step(s) == SQLITE_ROW && sqlite3_column_int64(s, 0) == 0,
-            "root-events-incomplete");
         transaction({
+            auto shape = db.prepare(`SELECT state,event_count,event_set_sha256,
+                (SELECT count(*) FROM final_event f WHERE f.document_id=r.document_id
+                    AND f.input_sha256=r.input_sha256 AND f.config_sha256=r.config_sha256),
+                (SELECT count(*) FROM final_event f WHERE f.document_id=r.document_id
+                    AND f.input_sha256=r.input_sha256 AND f.config_sha256=r.config_sha256
+                    AND f.state NOT IN ('committed','acknowledged'))
+                FROM root_state r WHERE document_id=?1 AND input_sha256=?2 AND config_sha256=?3`);
+            scope(exit) sqlite3_finalize(shape);
+            bindRoot(shape, key);
+            need(sqlite3_step(shape) == SQLITE_ROW, "missing-root");
+            auto state = columnText(shape, 0);
+            need(sqlite3_column_type(shape, 1) != SQLITE_NULL &&
+                sqlite3_column_int64(shape, 1) > 0 &&
+                sqlite3_column_type(shape, 2) != SQLITE_NULL &&
+                sqlite3_column_int64(shape, 1) == sqlite3_column_int64(shape, 3),
+                "root-event-shape-incomplete");
+            need(sqlite3_column_int64(shape, 4) == 0, "root-events-incomplete");
+            if (state == "complete") return;
+            need(state == "planned", "root-not-planned");
             auto update = db.prepare(`UPDATE root_state SET state='complete',updated_utc_ms=?4
-                WHERE document_id=?1 AND input_sha256=?2 AND config_sha256=?3`);
+                WHERE document_id=?1 AND input_sha256=?2 AND config_sha256=?3
+                AND state='planned' AND event_count IS NOT NULL
+                AND event_set_sha256 IS NOT NULL`);
             scope(exit) sqlite3_finalize(update);
             bindRoot(update, key); bindLong(update, 4, nowUtcMs()); done(update);
             need(sqlite3_changes(db.handle) == 1, "missing-root");
             if (kind == DurableKind.journal) {
                 string[] recoveredRootSinks;
                 auto outstandingRows = db.prepare(`SELECT sink_key FROM outstanding WHERE
-                    document_id=?1 AND input_sha256=?2 AND config_sha256=?3`);
+                    document_id=?1 AND input_sha256=?2 AND config_sha256=?3 AND
+                    (sink_key=?4 OR sink_key IN (SELECT sink_key FROM final_event WHERE
+                        document_id=?1 AND input_sha256=?2 AND config_sha256=?3))`);
                 bindRoot(outstandingRows, key);
+                bindText(outstandingRows, 4, derivedSink("root", key.document, 0));
                 while (true) {
                     auto rc = sqlite3_step(outstandingRows);
                     if (rc == SQLITE_DONE) break;
@@ -826,10 +914,7 @@ final class DurableJobLedger {
                 sqlite3_finalize(outstandingRows);
                 foreach (sink; recoveredRootSinks)
                     appendRetrySuccess(key, sink);
-                auto clear = db.prepare(`DELETE FROM outstanding WHERE document_id=?1 AND
-                    input_sha256=?2 AND config_sha256=?3`);
-                scope(exit) sqlite3_finalize(clear);
-                bindRoot(clear, key); done(clear);
+                foreach (sink; recoveredRootSinks) clearOutstanding(key, sink);
             }
         });
     }
@@ -851,6 +936,16 @@ final class DurableJobLedger {
         auto s = db.prepare(sql);
         scope(exit) sqlite3_finalize(s);
         bindText(s, 1, document.text); bindDigest(s, 2, config);
+        auto rc = sqlite3_step(s);
+        need(rc == SQLITE_ROW || rc == SQLITE_DONE, "outstanding-read-failed");
+        return rc == SQLITE_ROW;
+    }
+    bool hasOutstanding(DocumentId document) {
+        live();
+        need(kind == DurableKind.journal, "outstanding-unavailable");
+        auto s = db.prepare(`SELECT 1 FROM outstanding WHERE document_id=?1 LIMIT 1`);
+        scope(exit) sqlite3_finalize(s);
+        bindText(s, 1, document.text);
         auto rc = sqlite3_step(s);
         need(rc == SQLITE_ROW || rc == SQLITE_DONE, "outstanding-read-failed");
         return rc == SQLITE_ROW;
@@ -883,7 +978,8 @@ final class DurableJobLedger {
 version (unittest) {
     import std.array : replicate;
     import std.exception : assertThrown;
-    import std.file : mkdir, remove, rmdirRecurse, tempDir, write;
+    import std.file : exists, getAttributes, mkdir, read, remove,
+        rmdirRecurse, setAttributes, tempDir, write;
     import std.path : buildPath;
     import std.uuid : randomUUID;
     import core.sys.posix.sys.stat : stat, stat_t;
@@ -979,5 +1075,82 @@ version (unittest) {
         assert(stat(first.toStringz, &after) == 0 &&
             before.st_dev == after.st_dev && before.st_ino == after.st_ino);
         ledger.close();
+    }
+
+    unittest { // Root-last shape and fresh-tree ownership cost.
+        auto root = buildPath(tempDir, "durable-shape-" ~ randomUUID.toString);
+        mkdir(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+        DurableIdentity identity;
+        identity.jobIdentity = "job:v3:" ~ replicate("6", 64);
+        identity.digest = reasonDigest("shape-identity");
+        auto path = buildPath(root, "manifest.db");
+        auto document = DocumentId.fromCanonicalText("doc:v1:" ~ replicate("7", 64));
+        DurableRootKey key = DurableRootKey(document, reasonDigest("shape-input"), identity.digest);
+        auto ledger = new DurableJobLedger(path, DurableKind.manifest, identity);
+        ledger.planRoot(key);
+        assertThrown(ledger.completeRoot(key));
+        ledger.close(); // refusal leaves the planned root usable
+        ledger = new DurableJobLedger(path, DurableKind.manifest, identity);
+        DurableEventPlan[300] events;
+        foreach (ordinal, ref event; events) {
+            event.ordinal = ordinal; event.kind = "emitted"; event.document = document;
+            event.outputName = ordinal.to!string; event.sink = "sink:" ~ ordinal.to!string;
+            event.destination = buildPath(root, "fresh-" ~ ordinal.to!string);
+            event.hasOutput = true; event.outputSha256 = reasonDigest(event.outputName);
+        }
+        aliasRowsInspected = 0;
+        ledger.planEvents(key, events[]);
+        assert(aliasRowsInspected == 0); // absent paths do not produce N(N-1)/2 inode probes
+        ledger.close();
+
+        auto malformed = buildPath(root, "malformed.db");
+        ledger = new DurableJobLedger(malformed, DurableKind.manifest, identity);
+        ledger.planRoot(key); ledger.close();
+        auto raw = new Database(malformed, SQLITE_OPEN_READWRITE);
+        raw.exec("UPDATE root_state SET state='complete'"); raw.close();
+        ledger = new DurableJobLedger(malformed, DurableKind.manifest, identity);
+        assertThrown(ledger.completeRoot(key));
+        assertThrown(ledger.planEvents(key, events[0 .. 1]));
+        ledger.close();
+    }
+
+    unittest { // Legacy refusal must not run SQLite recovery or checkpointing.
+        foreach (kind; [DurableKind.manifest, DurableKind.journal])
+        foreach (wal; [false, true]) foreach (readOnly; [false, true]) {
+            auto root = buildPath(tempDir, "durable-preflight-" ~ randomUUID.toString);
+            mkdir(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+            auto path = buildPath(root, "legacy.db");
+            auto seed = new Database(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE);
+            seed.exec("CREATE TABLE fixture(value INTEGER);INSERT INTO fixture VALUES(1);");
+            seed.exec("PRAGMA application_id=1396920898;PRAGMA user_version=" ~
+                (kind == DurableKind.manifest ? "1" : "2"));
+            seed.close();
+            auto writer = new Database(path, SQLITE_OPEN_READWRITE);
+            writer.exec(wal ? "PRAGMA journal_mode=WAL" : "PRAGMA journal_mode=DELETE");
+            writer.exec("BEGIN IMMEDIATE;INSERT INTO fixture VALUES(2)");
+            ubyte[][string] before;
+            uint[string] modes;
+            auto suffixes = wal ? ["", "-wal", "-shm"] : ["", "-journal"];
+            foreach (suffix; suffixes) {
+                if (suffix.length && !exists(path ~ suffix)) continue;
+                before[suffix] = cast(ubyte[])read(path ~ suffix);
+                modes[suffix] = getAttributes(path ~ suffix);
+                if (readOnly) setAttributes(path ~ suffix, modes[suffix] & ~cast(uint)146);
+            }
+            DurableIdentity identity;
+            identity.jobIdentity = "job:v3:" ~ replicate("8", 64);
+            identity.digest = reasonDigest("preflight");
+            auto expected = kind == DurableKind.manifest ?
+                "manifest-v1-requires-fresh-v2" : "journal-v2-requires-fresh-v3";
+            bool refused;
+            try new DurableJobLedger(path, kind, identity);
+            catch (Exception failure) { refused = failure.msg.indexOf(expected) >= 0; }
+            assert(refused);
+            foreach (suffix, bytes; before) {
+                assert(exists(path ~ suffix) && cast(ubyte[])read(path ~ suffix) == bytes);
+                if (readOnly) setAttributes(path ~ suffix, modes[suffix]);
+            }
+            writer.exec("ROLLBACK"); writer.close();
+        }
     }
 }

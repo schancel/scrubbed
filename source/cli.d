@@ -1710,7 +1710,7 @@ int runApp(string[] args) {
                 auto relative = inputIsDir ? relativePath(file, inputPath) : ".";
                 auto id = DocumentId.from(SourceLocator("local-files:v1",
                     inputPath, relative));
-                if (!durableLedger.hasOutstanding(id, configHash)) return;
+                if (!durableLedger.hasOutstanding(id)) return;
             }
             if (explain) pending.add(file);
             if (!durableRoute) publication.assign(file);

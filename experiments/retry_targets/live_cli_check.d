@@ -1,14 +1,13 @@
-/// Release-active actual-binary proof for local targeted v2 retry.
+/// Release-active actual-binary proof for local targeted journal-v3 retry.
 module experiments.retry_targets.live_cli_check;
 
-import effects.failure_journal : FailureJournal;
-import effects.local_manifest : SinkKey, inputDigest;
+import effects.local_manifest : SinkKey, SinkRecord, SinkState, inputDigest;
 import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
 import std.array : replicate;
 import std.conv : to;
-import std.file : exists, getSize, mkdir, read, readText, remove, rmdirRecurse,
-    tempDir, write;
+import std.file : exists, getSize, mkdir, read, readText, remove,
+    rmdirRecurse, tempDir, write;
 import std.path : buildPath;
 import std.process : execute, spawnProcess, tryWait, wait;
 import std.string : toStringz;
@@ -37,6 +36,119 @@ private ulong inode(string path) {
     return cast(ulong)info.st_ino;
 }
 
+private string columnString(sqlite3_stmt* statement, int column) {
+    auto value = sqlite3_column_text(statement, column);
+    auto bytes = sqlite3_column_bytes(statement, column);
+    need(value !is null, "unexpected null text");
+    return cast(string)value[0 .. bytes].dup;
+}
+
+// The shipping journal is v3. Keep this checker independent of predecessor
+// mutation APIs: observations are read-only, and the one unrelated-target
+// fixture is inserted directly as test data.
+private final class FailureJournal {
+    private sqlite3* db;
+    private SinkKey pending;
+    this(string path) {
+        need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READWRITE,
+            null) == SQLITE_OK, "journal open");
+    }
+    void close() { need(sqlite3_close(db) == SQLITE_OK, "journal close"); db = null; }
+    long eventCount() {
+        sqlite3_stmt* s;
+        need(sqlite3_prepare_v2(db, "SELECT count(*) FROM error_event".toStringz,
+            -1, &s, null) == SQLITE_OK && sqlite3_step(s) == SQLITE_ROW,
+            "event count");
+        auto result = sqlite3_column_int64(s, 0);
+        need(sqlite3_finalize(s) == SQLITE_OK, "event count finalize");
+        return result;
+    }
+    void visitOutstandingTargets(scope void delegate(SinkKey) visitor) {
+        sqlite3_stmt* s;
+        enum sql = `SELECT document_id,input_sha256,config_sha256,sink_key
+            FROM outstanding ORDER BY document_id,input_sha256,config_sha256,sink_key`;
+        need(sqlite3_prepare_v2(db, sql.toStringz, -1, &s, null) == SQLITE_OK,
+            "outstanding prepare");
+        scope(exit) need(sqlite3_finalize(s) == SQLITE_OK, "outstanding finalize");
+        while (sqlite3_step(s) == SQLITE_ROW) {
+            SinkKey key;
+            key.document = typeof(key.document).fromCanonicalText(columnString(s, 0));
+            need(sqlite3_column_bytes(s, 1) == 32 && sqlite3_column_bytes(s, 2) == 32,
+                "outstanding digest");
+            key.inputSha256[] = (cast(const(ubyte)*)sqlite3_column_blob(s, 1))[0 .. 32];
+            key.configSha256[] = (cast(const(ubyte)*)sqlite3_column_blob(s, 2))[0 .. 32];
+            key.sink = columnString(s, 3);
+            visitor(key);
+        }
+    }
+    import std.typecons : Nullable, nullable;
+    Nullable!SinkRecord lookup(SinkKey key) {
+        sqlite3_stmt* s;
+        enum sql = `SELECT o.state,coalesce(f.destination,''),coalesce(f.attempt,0),
+            o.time_utc_ms FROM outstanding o LEFT JOIN final_event f ON
+            f.document_id=o.document_id AND f.input_sha256=o.input_sha256 AND
+            f.config_sha256=o.config_sha256 AND f.sink_key=o.sink_key WHERE
+            o.document_id=?1 AND o.input_sha256=?2 AND o.config_sha256=?3 AND o.sink_key=?4`;
+        need(sqlite3_prepare_v2(db, sql.toStringz, -1, &s, null) == SQLITE_OK,
+            "lookup prepare");
+        scope(exit) need(sqlite3_finalize(s) == SQLITE_OK, "lookup finalize");
+        bindKey(s, key);
+        auto rc = sqlite3_step(s);
+        if (rc == SQLITE_DONE) return Nullable!SinkRecord.init;
+        need(rc == SQLITE_ROW, "lookup step");
+        SinkRecord result;
+        result.key = key; result.destination = columnString(s, 1);
+        result.state = columnString(s, 0) == "uncertain" ?
+            SinkState.uncertain : SinkState.failed;
+        result.attempt = sqlite3_column_int64(s, 2);
+        result.updatedUtcMs = sqlite3_column_int64(s, 3);
+        return nullable(result);
+    }
+    bool hasOutstanding(SinkKey key) { return !lookup(key).isNull; }
+    void plan(SinkKey key, string ignored) { pending = key; }
+    void recordFailure(SinkKey key, string phase, string code, bool touched) {
+        need(key == pending, "fixture plan mismatch");
+        auto id = randomUUID.toString;
+        auto event = randomUUID.toString;
+        auto run = randomUUID.toString;
+        sqlite3_stmt* s;
+        need(sqlite3_prepare_v2(db, `INSERT OR IGNORE INTO sink_identity VALUES(?1,?2)`.toStringz,
+            -1, &s, null) == SQLITE_OK, "identity prepare");
+        need(sqlite3_bind_text(s, 1, key.sink.toStringz, -1, null) == SQLITE_OK &&
+            sqlite3_bind_text(s, 2, id.toStringz, -1, null) == SQLITE_OK &&
+            sqlite3_step(s) == SQLITE_DONE && sqlite3_finalize(s) == SQLITE_OK,
+            "identity insert");
+        need(sqlite3_prepare_v2(db, `INSERT INTO error_event VALUES(NULL,?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,1)`.toStringz,
+            -1, &s, null) == SQLITE_OK, "event prepare");
+        need(sqlite3_bind_text(s,1,event.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,2,run.toStringz,-1,null)==SQLITE_OK, "event ids");
+        need(sqlite3_bind_text(s,3,key.document.text.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_blob(s,4,key.inputSha256.ptr,32,null)==SQLITE_OK &&
+            sqlite3_bind_blob(s,5,key.configSha256.ptr,32,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,6,id.toStringz,-1,null)==SQLITE_OK, "event key");
+        need(sqlite3_bind_text(s,7,phase.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,8,code.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,9,(touched ? "uncertain" : "failed").toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_step(s)==SQLITE_DONE && sqlite3_finalize(s)==SQLITE_OK, "event insert");
+        need(sqlite3_prepare_v2(db, `INSERT INTO outstanding VALUES(?1,?2,?3,?4,?5,?6,'event',?7,?8,1)`.toStringz,
+            -1, &s, null) == SQLITE_OK, "fixture outstanding prepare");
+        bindKey(s, key);
+        need(sqlite3_bind_text(s,5,id.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,6,(touched ? "uncertain" : "failed").toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,7,event.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,8,run.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_step(s)==SQLITE_DONE && sqlite3_finalize(s)==SQLITE_OK,
+            "fixture outstanding insert");
+    }
+    private void bindKey(sqlite3_stmt* s, SinkKey key, int first = 1) {
+        need(sqlite3_bind_text(s,first,key.document.text.toStringz,-1,null)==SQLITE_OK &&
+            sqlite3_bind_blob(s,first+1,key.inputSha256.ptr,32,null)==SQLITE_OK &&
+            sqlite3_bind_blob(s,first+2,key.configSha256.ptr,32,null)==SQLITE_OK &&
+            sqlite3_bind_text(s,first+3,key.sink.toStringz,-1,null)==SQLITE_OK,
+            "bind key");
+    }
+}
+
 private long historyCount(string path, SinkKey key) {
     sqlite3* db;
     need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READONLY,
@@ -58,6 +170,17 @@ private long historyCount(string path, SinkKey key) {
             null) == SQLITE_OK &&
         sqlite3_step(statement) == SQLITE_ROW, "history query step");
     return sqlite3_column_int64(statement, 0);
+}
+
+private void createLegacyJournalV2(string path) {
+    sqlite3* db;
+    need(sqlite3_open_v2(path.toStringz, &db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, null) == SQLITE_OK,
+        "legacy journal create");
+    need(sqlite3_exec(db, `CREATE TABLE fixture(value INTEGER);
+        INSERT INTO fixture VALUES(2);PRAGMA application_id=1396920898;
+        PRAGMA user_version=2;`.toStringz, null, null, null) == SQLITE_OK &&
+        sqlite3_close(db) == SQLITE_OK, "legacy journal close");
 }
 
 private void checkResources(string binary, string root) {
@@ -154,7 +277,7 @@ void main(string[] args) {
     size_t checks;
     string call(string binary, string[] command, int status) {
         auto result = execute([binary] ~ command);
-        need(result.status == status, "exit " ~ command[0] ~ " got " ~
+        need(result.status == status, "exit " ~ command.to!string ~ " got " ~
             result.status.to!string ~ " expected " ~ status.to!string ~
             " output=" ~ result.output);
         foreach (secret; ["TARGET_SOURCE_SECRET", "TARGET_PATH_SECRET",
@@ -164,6 +287,20 @@ void main(string[] args) {
         return result.output;
     }
     auto binary = args[1];
+    auto refusedInput = buildPath(root, "legacy-v2-input.txt");
+    auto refusedOutput = buildPath(root, "legacy-v2-output.txt");
+    auto refusedDb = buildPath(root, "legacy-v2.db");
+    write(refusedInput, "legacy v2 refusal");
+    createLegacyJournalV2(refusedDb);
+    auto refusedBefore = cast(ubyte[])read(refusedDb);
+    auto refusal = execute([binary, "run", "--input", refusedInput,
+        "--output", refusedOutput, "--error-journal", refusedDb]);
+    need(refusal.status == 2 &&
+        refusal.output.canFind("journal-v2-requires-fresh-v3") &&
+        cast(ubyte[])read(refusedDb) == refusedBefore &&
+        !exists(refusedDb ~ "-wal") && !exists(refusedDb ~ "-shm"),
+        "journal v2 actual-binary byte-preserving refusal");
+    ++checks;
     auto input = buildPath(root, "TARGET_PATH_SECRET-input");
     auto output = buildPath(root, "output");
     auto db = buildPath(root, "journal.db");
@@ -336,6 +473,25 @@ void main(string[] args) {
         historyCount(revisionsDb, olderRevision) == olderHistory,
         "older-only mismatch changed old event or state");
     journal.close();
+    auto symlinkInput = buildPath(root, "symlink-hazard.txt");
+    auto symlinkOutput = buildPath(root, "symlink-hazard-output.txt");
+    auto symlinkDb = buildPath(root, "symlink-hazard.db");
+    auto symlinkBase = ["run", "--input", symlinkInput, "--output",
+        symlinkOutput, "--error-journal", symlinkDb, "--threads", "1"];
+    write(symlinkInput, "symlink hazard");
+    call(binary, ["errors-init", "--journal", symlinkDb], 0);
+    call(binary, symlinkBase, 0);
+    write(symlinkOutput, "tampered");
+    call(binary, symlinkBase, 1);
+    remove(symlinkOutput);
+    auto outsideHazard = buildPath(root, "outside-hazard.txt");
+    write(outsideHazard, "outside stays");
+    need(symlink(outsideHazard.toStringz, symlinkOutput.toStringz) == 0,
+        "output symlink fixture");
+    call(binary, symlinkBase ~ ["--error-retry", "--error-targeted"], 2);
+    need(readText(outsideHazard) == "outside stays", "output symlink preserved");
+    remove(symlinkOutput);
+
     auto hazardInput = buildPath(root, "hazard-input");
     auto hazardOutput = buildPath(root, "hazard-output");
     auto hazardDb = buildPath(root, "hazard.db");
@@ -343,20 +499,14 @@ void main(string[] args) {
     write(buildPath(hazardInput, "x.txt"), "x");
     write(buildPath(hazardInput, "y.txt"), "y");
     auto hazardBase = ["run", "--input", hazardInput,
-        "--output", hazardOutput, "--error-journal", hazardDb];
+        "--output", hazardOutput, "--error-journal", hazardDb, "--threads", "1"];
     call(binary, ["errors-init", "--journal", hazardDb], 0);
     call(binary, hazardBase, 0);
     auto hazardX = buildPath(hazardOutput, "x.txt");
     auto hazardY = buildPath(hazardOutput, "y.txt");
+    remove(buildPath(hazardInput, "y.txt")); // isolate the exact hazard target
     write(hazardX, "tampered");
     call(binary, hazardBase, 1);
-    remove(hazardX);
-    auto outsideHazard = buildPath(root, "outside-hazard.txt");
-    write(outsideHazard, "outside stays");
-    need(symlink(outsideHazard.toStringz, hazardX.toStringz) == 0,
-        "output symlink fixture");
-    call(binary, hazardBase ~ ["--error-retry", "--error-targeted"], 2);
-    need(readText(outsideHazard) == "outside stays", "output symlink preserved");
     remove(hazardX);
     need(link(hazardY.toStringz, hazardX.toStringz) == 0,
         "output hardlink fixture");

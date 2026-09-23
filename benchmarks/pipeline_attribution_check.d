@@ -1040,21 +1040,29 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
     }
     if (trace["status"].str == "SUPPORTED") {
         auto sample = trace["sample"];
-        need(sample["pid_binary_bound"].boolean &&
-            sample["accepted_stacks"].integer >= minimumStacks &&
-            sample["sanitized_sha256"].str == sanitizedSampleDigest(sample) &&
-            ((!sample["sample_path_redacted"].boolean &&
+        need(sample["pid_binary_bound"].boolean,
+            "supported stack sample lacks PID/binary binding");
+        need(sample["accepted_stacks"].integer >= minimumStacks,
+            "supported stack sample has fewer than 100 stacks");
+        need(sample["sanitized_sha256"].str == sanitizedSampleDigest(sample),
+            "supported stack sanitized digest differs");
+        need(((!sample["sample_path_redacted"].boolean &&
                 sample["path_binding_semantics"].str ==
                 "canonical sampled path plus exact direct-child PID and launched binary hash") ||
              (sample["sample_path_redacted"].boolean &&
                 sample["path_binding_semantics"].str ==
-                "Darwin sample privacy-redacted root/basename plus exact direct-child PID and launched binary hash")) &&
-            digest(trace["raw_private_sha256"].str) &&
-            sample["inclusive_top"].array.length > 0 &&
-            sample["inclusive_top"].array.length <= 20 &&
-            sample["leaf_top"].array.length > 0 && sample["leaf_top"].array.length <= 20 &&
-            sample["dominant_leaf_component"].str.length,
-            "invalid supported stack sample");
+                "Darwin sample privacy-redacted root/basename plus exact direct-child PID and launched binary hash")),
+            "supported stack path binding semantics differ");
+        need(digest(trace["raw_private_sha256"].str),
+            "supported stack raw digest is invalid");
+        need(sample["inclusive_top"].array.length > 0 &&
+            sample["inclusive_top"].array.length <= 20,
+            "supported stack inclusive top cardinality differs");
+        need(sample["leaf_top"].array.length > 0 &&
+            sample["leaf_top"].array.length <= 20,
+            "supported stack leaf top cardinality differs");
+        need(sample["dominant_leaf_component"].str.length != 0,
+            "supported stack dominant component is empty");
         foreach (collection; [sample["inclusive_top"], sample["leaf_top"]])
             foreach (symbol; collection.array)
                 need(symbol["symbol"].str.length && symbol["image"].str.length &&
@@ -1359,6 +1367,9 @@ private void selfTest() {
         "failed exact output accepted");
     mustRejectTrace(trace, (ref JSONValue t) { t["process_exit_code"] = 1L; },
         "failed process accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
+        t["sample"]["dominant_leaf_component"] = "";
+    }, "empty dominant component accepted");
     JSONValue[] sequence;
     foreach (rep; 0 .. repetitions) {
         auto item = parseJSON(trace.toString);
@@ -1373,7 +1384,7 @@ private void selfTest() {
         "mixed trace repetition indexes accepted");
     mustThrow(() { noLeak(`{"symbol":"/Users/private/name"}`); },
         "published private path accepted");
-    writeln("canonical attribution self-test passed (22 release-active negatives)");
+    writeln("canonical attribution self-test passed (23 release-active negatives)");
 }
 
 private void selfTestLiveSample(string self) {

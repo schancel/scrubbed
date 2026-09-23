@@ -28,11 +28,21 @@ dub test --compiler=ldc2
 dub build --build=release --compiler=ldc2
 ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
 /tmp/scrubbed-pipeline --self-test
+/tmp/scrubbed-pipeline --self-test-attestation \
+  benchmarks/pipeline_attestation_check.d
+/tmp/scrubbed-pipeline --self-test-build-isolation "$(pwd)"
+ldc2 -O3 -release benchmarks/pipeline_build_attestation_check.d \
+  -of=/tmp/scrubbed-pipeline-build-attestation-check
+/tmp/scrubbed-pipeline-build-attestation-check \
+  /tmp/scrubbed-pipeline "$(pwd)"
 /tmp/scrubbed-pipeline --self-test-snapshot "$(pwd)/scrubbed" \
   /tmp/dos2unix-7.5.7/dos2unix
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" > /tmp/scrubbed-pipeline-result.json
 # To preserve a publication-safe raw sample in the repository instead:
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" benchmarks/pipeline-sample.json
+# From a clean checkout, build and time only harness-attested target bytes:
+/tmp/scrubbed-pipeline --attested-build "$(pwd)" \
+  /tmp/scrubbed-pipeline-attested.json
 ```
 
 The self-test runs in release mode. It rejects missing required metadata,
@@ -47,6 +57,12 @@ The separate release snapshot self-test copies dos2unix into an owned
 disposable path, atomically replaces that original path with an invalid
 executable after the first comparator sample, and requires the later sample
 and published hash to remain bound to the pre-timing snapshot.
+The D-only attestation self-test builds two task-equivalent line-ending targets
+from `pipeline_attestation_check.d`. Their executable hashes must differ, their
+exact output must match, and the A/B/A/B samples must each carry the hash of
+the executable actually run. It release-actively rejects a modified post-build
+target, a changed snapshot, mixed sample attribution, and false exact-output
+status. This is an attribution control, not a speed comparison.
 
 The timing runner is paired with the pre-existing release-active, actual-binary
 manifest boundary check. Run it on the *same shipping executable* before
@@ -54,7 +70,8 @@ accepting a manifest timing report:
 
 ```sh
 ldc2 -O3 -release -Isource experiments/manifest_cli/check.d \
-  source/domain/document.d source/effects/sqlite_ffi.d \
+  source/domain/document.d source/content/pieces.d \
+  source/effects/atomic_piece_sink.d source/effects/sqlite_ffi.d \
   source/effects/local_manifest.d third_party/sqlite/sqlite3.o \
   -of=/tmp/scrubbed-manifest-cli-check
 /tmp/scrubbed-manifest-cli-check "$(pwd)/scrubbed"
@@ -107,6 +124,63 @@ unverified. All snapshots are removed with the benchmark's own scratch tree.
 The filter digest hashes the selected filter string, not the
 manifest's entire effective canonical configuration (which also includes
 output route, binary and other policy bytes).
+
+The opt-in `--attested-build` path emits version 5 for the small corpus and
+version 6 for `--large`. It refuses tracked or untracked source changes,
+records the exact source commit/tree and SHA-256 of its Git archive, then
+extracts that already-hashed archive into UUID-named, user-private scratch.
+The release build runs only there; ignored caller `.dub`, native-object, and
+target artifacts are neither copied nor consumed. DUB resolution uses a
+private `DUB_HOME` and `--cache=local` beneath the private extracted source.
+
+Build attestation v4 records hashes of `dub.json`, `dub.selections.json`, the
+resolved compiler and DUB executables, their versions, and the complete
+versioned argparse recipe/input set named by DUB's release build description.
+LDC and DUB are invoked only through private read-only snapshots and their
+hashes are verified again after the build, so same-path replacement of the
+original executable cannot change the described or compiled target.
+It also records the fixed native pre-build command digest and exact identities
+(name, role, per-executable version or explicit `UNAVAILABLE`, and executable SHA-256) of the ambient `cc`, `ar`, and
+`ranlib` selectors; their `xcrun`-selected Clang/archive executables; and
+`cmake` and the `xcrun`-selected Make executable. Selector shims and the selected `ar` binary expose no usable
+per-executable version query, so their rows say `UNAVAILABLE`; a separate
+versioned archive-suite record
+names the exact `ranlib-writer -V` evidence command and binds its output to
+that ranlib executable's SHA-256. It is never presented as an `ar` version.
+The closure also hashes, honestly versions, pins, and re-verifies the
+`xcrun`-selected final linker. `COMPILER_PATH` points to its private `ld`
+symlink, and an attested-compiler `-###` trace must select that exact path
+before the release build. The private commands invoke the selected executables
+directly. The material tools are
+resolved before building, exposed through a
+private pinned-tool directory and fixed system PATH, and accompanied by exact
+`CC`, `AR`, and `RANLIB` environment values. Their identities are verified
+again after compilation. The selected macOS SDK version/build is recorded and
+its exact root is supplied privately through `SDKROOT`; the report omits that
+host path. The Lexbor CMake cache must name the attested C
+compiler, archive tools, and pinned make executable. A D-only negative swaps
+ambient PATH to executable poison tools, including `ld`, after resolution and
+requires the private build and emitted attestation to remain bound to the
+resolved set. A separate D-only same-path replacement control proves the
+private LDC/DUB snapshots remain executable and hash-bound after their source
+paths change.
+The argparse input digest is likewise verified after compilation. The supported DUB
+1.42.0 target path is derived from the described root `targetPath` plus
+`targetFileName`, required to remain the private relative path `scrubbed`, and
+verified before snapshotting. The D-only build-attestation check poisons caller
+ignored artifacts, mutates a private argparse source to prove digest change and
+rejection, exercises target discovery, and requires actual v5 report
+publication. Attestation v2 and inconsistent v3 records are rejected.
+
+The target is hashed, copied to a read-only snapshot, and accepted only when
+the built-target and snapshot hashes match. Every timed case, manifest
+transition, replay, and skip in v5/v6 carries that target hash. The embedded
+changed-executable control retains both distinct variant hashes and raw A/B/A/B
+sample attribution. Supplied binaries remain v3/v4 and explicitly
+`UNVERIFIED`; adding an attestation to an old schema, spoofing compiler/flags,
+or mixing a sample hash causes rejection. Reports contain only path tokens and
+hashes, never checkout or scratch paths.
+
 On Linux, the D harness reads `model name`, `Hardware`, or `Processor` from
 `/proc/cpuinfo` and `MemTotal` in `kB` from `/proc/meminfo`. If either cannot
 be parsed, it exits nonzero without publishing a report; it never records a
@@ -128,9 +202,10 @@ is made from these runs.
 The current generated corpus is small and repetitive: each layout contains
 32,768 records, 786,432 bytes (0.75 MiB) of input. It is an integration and
 methodology baseline, not a representative document corpus. The benchmark
-times changed input/filter selection/output route and post-kill replay, but
-does not time changed executable bytes. The paired release gate above checks
-all of those correctness paths. Peak open-FD/GC and actual read/write byte
+times changed input/filter selection/output route and post-kill replay.
+Attested reports additionally run the separate task-equivalent
+changed-executable attribution control, but make no ranking from its timings.
+Peak open-FD/GC and actual read/write byte
 counters and a safely completed greater-than-RAM
 case remain unsupported. On the observed Apple M4 host, `sysctl -n hw.memsize`
 reported 17,179,869,184 bytes (16 GiB) RAM and `df -k .` reported

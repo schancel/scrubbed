@@ -411,7 +411,9 @@ The D parser binds the current Darwin analysis header, process PID, canonical
 binary path, and settings; accepts at least 100 call-graph thread-root stacks;
 and publishes at most 20 inclusive and leaf symbols/images. Absolute paths and
 addresses are removed. Original private output and the committed sanitized
-payload are separately hashed. Leaf stacks are accounted exactly across
+payload are separately hashed. The sanitized digest uses a fixed-order,
+length-prefixed semantic encoding rather than JSON object or floating-point
+serialization; a JSON round-trip is a release-active control. Leaf stacks are accounted exactly across
 kernel, system, runtime, project, and unresolved partitions, with counts and
 fractions. All three repetitions and their accepted-stack and diagnostic-wall
 median/range remain visible. A named component is stable only when it is the

@@ -313,15 +313,26 @@ private string partition(SymbolCount item) {
 }
 
 private string sanitizedSampleDigest(JSONValue value) {
-    auto payload = JSONValue([
-        "accepted_stacks": value["accepted_stacks"],
-        "inclusive_top": value["inclusive_top"],
-        "leaf_top": value["leaf_top"],
-        "dominant_leaf_component": value["dominant_leaf_component"],
-        "sample_path_redacted": value["sample_path_redacted"],
-        "path_binding_semantics": value["path_binding_semantics"],
-        "partitions": value["partitions"]]);
-    return hashBytes(cast(const(ubyte)[])payload.toString);
+    SHA256 result;
+    digestPart(result, value["accepted_stacks"].integer.to!string);
+    digestPart(result, value["dominant_leaf_component"].str);
+    digestPart(result, value["sample_path_redacted"].boolean ? "true" : "false");
+    digestPart(result, value["path_binding_semantics"].str);
+    foreach (name; ["inclusive_top", "leaf_top"]) {
+        auto rows = value[name].array;
+        digestPart(result, name);
+        digestPart(result, rows.length.to!string);
+        foreach (row; rows) {
+            digestPart(result, row["symbol"].str);
+            digestPart(result, row["image"].str);
+            digestPart(result, row["count"].integer.to!string);
+        }
+    }
+    foreach (name; ["kernel", "system", "runtime", "project", "unresolved"]) {
+        digestPart(result, name);
+        digestPart(result, value["partitions"][name]["count"].integer.to!string);
+    }
+    return toHexString(result.finish()).to!string;
 }
 
 private JSONValue parseSample(string raw, long expectedPid, string binary) {
@@ -1284,6 +1295,9 @@ private void selfTest() {
     need(parsed["inclusive_top"].array.length == 1 &&
         parsed["leaf_top"].array.length == 1,
         "valid sample top-symbol parser control failed");
+    need(parsed["sanitized_sha256"].str ==
+            sanitizedSampleDigest(parseJSON(parsed.toString)),
+        "sanitized sample digest is not JSON-round-trip stable");
     mustThrow(() { parseSample(raw, 124, "/bin/sleep"); }, "wrong PID accepted");
     mustThrow(() { parseSample(raw.replace("Path: /bin/sleep", "Path: /bin/date"),
         123, "/bin/sleep"); }, "wrong binary accepted");
@@ -1370,6 +1384,9 @@ private void selfTest() {
     mustRejectTrace(trace, (ref JSONValue t) {
         t["sample"]["dominant_leaf_component"] = "";
     }, "empty dominant component accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
+        t["sample"]["leaf_top"][0]["symbol"] = "replacement";
+    }, "changed sanitized symbol accepted");
     JSONValue[] sequence;
     foreach (rep; 0 .. repetitions) {
         auto item = parseJSON(trace.toString);
@@ -1384,7 +1401,7 @@ private void selfTest() {
         "mixed trace repetition indexes accepted");
     mustThrow(() { noLeak(`{"symbol":"/Users/private/name"}`); },
         "published private path accepted");
-    writeln("canonical attribution self-test passed (23 release-active negatives)");
+    writeln("canonical attribution self-test passed (24 release-active negatives)");
 }
 
 private void selfTestLiveSample(string self) {

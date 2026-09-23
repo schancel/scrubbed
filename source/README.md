@@ -41,8 +41,8 @@ ordered composition tokens, and predecessor filter-only forms lower to the
 same typed stages, ordered filters, and scalar options; canonical bytes own a
 stable `job:v3:` identity. Stable stage-instance IDs are distinct from
 registered implementation names. This subtree has no registry or I/O import,
-and ordinary local file/tree shipping consumes v3 through the compiled effects
-bridge; JSONL and durable routes remain deferred.
+and ordinary local file/tree plus selected-field JSONL shipping consume v3
+through compiled effects bridges; durable routes remain deferred.
 
 [`composition/`](composition/README.md) compiles that model through injected
 stage and filter registries without importing concrete implementations. It
@@ -54,8 +54,8 @@ every compiled stage, retaining terminal decisions, split order and immediate
 parent provenance, and returns only final/terminal events. The effects runner
 can now apply that compiled job once per typed source record, synchronously
 deliver its ordered final events, and close the transferred content owner. The
-ordinary local file/tree shipping is wired; later slices own JSONL and durable
-routes.
+ordinary local file/tree and selected-field JSONL shipping are wired; later
+slices own durable routes.
 
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`
@@ -68,8 +68,8 @@ for its CP1252 mapping helper.
 facade for logical `SourceLocator`/`DocumentId` identity, distinct `OutputName`,
 and owner-checked zero-copy byte views with explicit selected-range copying.
 It supplies stable line-ordinal IDs to JSONL CLI mode and root-relative IDs
-to opt-in local manifest file/tree mode. The document-stage pipeline does not
-use it yet. Its
+to local file/tree processing. Compiled JSONL and ordinary local execution use
+this facade; retained durable predecessors do not. Its
 canonical key format and lifetime rule are in the
 [architecture map](../docs/architecture.md); transport-specific source keys
 and content/job stages are not implemented here.
@@ -146,6 +146,10 @@ untouched fields. The command adapter now routes explicit paired `--input -`
 and `--output -` `run`/`repair` mode through them, with caller-provided stable
 namespace/source keys and line-ordinal `DocumentId`s. There is no JSONL
 checkpoint or graceful signal cancellation.
+[`effects/jsonl_job.d`](effects/jsonl_job.d) is the narrow selected-field
+facade over `effects.runner`: it assigns the field as `OutputName`, transfers
+one checked content owner, copies the sole mapped result synchronously, and
+refuses rejection, quarantine, or fanout without emitting the current record.
 
 [`effects/local_manifest.d`](effects/local_manifest.d) is a standalone,
 versioned local SQLite sink ledger with independent per-sink states and bounded

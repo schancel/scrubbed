@@ -1,8 +1,8 @@
 # Current architecture
 
 Scrubbed is a D executable, not a supported library API. Its v3 job model is
-the shipping format for ordinary local file/tree processing; JSONL and durable
-routes remain on their predecessor path.
+the shipping format for ordinary local file/tree and selected-field JSONL
+processing; durable routes remain on their predecessor path.
 The [source guide](../source/README.md) describes the current boundary, and
 the [filter guide](../source/filters/README.md) is the shortest path to adding
 one transform.
@@ -22,6 +22,7 @@ content.pieces -> domain.document (checked borrowed content)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
 stages.config -> stages.registry -> stages.contract (unwired v2 config API)
 effects.local_job -> effects.runner, mapped_file, atomic_piece_sink
+effects.jsonl_job -> effects.runner, effects.jsonl_stream
 ```
 
 Keep orchestration and filesystem effects in `cli`, chain composition in

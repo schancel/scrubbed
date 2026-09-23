@@ -10,8 +10,26 @@ import std.utf : validate;
 alias ReadBytes = size_t delegate(ubyte[] destination);
 alias WriteBytes = void delegate(const(ubyte)[] bytes);
 alias TextTransform = string delegate(string field, string text, DocumentId id);
+alias DocumentTransform = string delegate(string field, string text,
+    SourceLocator source);
 
-enum JsonlFailureKind { inputLimit, malformedJson, invalidText, outputLimit, reader, writer }
+enum JsonlFailureKind {
+    inputLimit, malformedJson, invalidText, outputLimit, reader, writer,
+    rejected, quarantined, unsupportedFanout,
+}
+
+enum JsonlDecisionKind { rejected, quarantined, unsupportedFanout }
+
+/// A selected-field adapter can report a typed document decision without
+/// teaching the JSON framing layer how that decision was produced.
+final class JsonlDecisionFailure : Exception {
+    JsonlDecisionKind kind;
+
+    this(JsonlDecisionKind kind, string detail) {
+        super(detail);
+        this.kind = kind;
+    }
+}
 
 final class JsonlFailure : Exception {
     JsonlFailureKind kind;
@@ -41,6 +59,18 @@ struct JsonlLimits {
 size_t processJsonl(ReadBytes read, WriteBytes write, string datasetNamespace,
     string sourceKey, const(string)[] fields, TextTransform transform,
     JsonlLimits limits) {
+    if (transform is null)
+        throw new Exception("JSONL callbacks and byte caps must be configured");
+    return processJsonlDocuments(read, write, datasetNamespace, sourceKey, fields,
+        (string field, string text, SourceLocator source) =>
+            transform(field, text, DocumentId.from(source)), limits);
+}
+
+/// Variant for typed document execution. The line locator is constructed once
+/// at the framing boundary and remains the selected field's document identity.
+size_t processJsonlDocuments(ReadBytes read, WriteBytes write,
+    string datasetNamespace, string sourceKey, const(string)[] fields,
+    DocumentTransform transform, JsonlLimits limits) {
     if (read is null || write is null || transform is null || !limits.rawLineBytes ||
         !limits.outputRecordBytes)
         throw new Exception("JSONL callbacks and byte caps must be configured");
@@ -94,10 +124,10 @@ size_t processJsonl(ReadBytes read, WriteBytes write, string datasetNamespace,
 
 private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
     WriteBytes write, string datasetNamespace, string sourceKey,
-    const(string)[] fields, TextTransform transform, JsonlLimits limits) {
+    const(string)[] fields, DocumentTransform transform, JsonlLimits limits) {
     if (raw.length && raw[$ - 1] == '\r') raw = raw[0 .. $ - 1];
-    auto id = DocumentId.from(SourceLocator(datasetNamespace, sourceKey,
-        ordinal.to!string));
+    auto source = SourceLocator(datasetNamespace, sourceKey, ordinal.to!string);
+    auto id = DocumentId.from(source);
     if (raw.length > limits.rawLineBytes)
         throw new JsonlFailure(JsonlFailureKind.inputLimit, ordinal, id, completed,
             false, "JSONL raw line exceeds byte cap");
@@ -120,13 +150,28 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
             throw new JsonlFailure(JsonlFailureKind.invalidText, ordinal, id,
                 completed, false, "selected field is not text: " ~ field);
         try {
-            auto changed = transform(field, found.str, id);
+            auto changed = transform(field, found.str, source);
             validate(changed);
             if (changed.length > limits.outputRecordBytes)
                 throw new JsonlFailure(JsonlFailureKind.outputLimit, ordinal, id,
                     completed, false, "transformed text exceeds output cap");
             *found = JSONValue(changed);
         } catch (JsonlFailure error) { throw error; }
+        catch (JsonlDecisionFailure error) {
+            JsonlFailureKind kind;
+            final switch (error.kind) {
+            case JsonlDecisionKind.rejected:
+                kind = JsonlFailureKind.rejected;
+                break;
+            case JsonlDecisionKind.quarantined:
+                kind = JsonlFailureKind.quarantined;
+                break;
+            case JsonlDecisionKind.unsupportedFanout:
+                kind = JsonlFailureKind.unsupportedFanout;
+                break;
+            }
+            throw new JsonlFailure(kind, ordinal, id, completed, false, error.msg);
+        }
         catch (Exception error) {
             throw new JsonlFailure(JsonlFailureKind.invalidText, ordinal, id,
                 completed, false, "selected text rejected: " ~ error.msg);

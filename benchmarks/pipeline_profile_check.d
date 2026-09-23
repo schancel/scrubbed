@@ -18,6 +18,7 @@ import std.datetime.stopwatch : StopWatch;
 import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read,
     readText, remove, rmdirRecurse, tempDir, write;
 import std.json : JSONType, JSONValue, parseJSON;
+import std.math : isFinite;
 import std.path : baseName, buildPath, relativePath;
 import std.process : Config, execute, spawnProcess, wait;
 import std.stdio : File, writeln;
@@ -50,6 +51,10 @@ private enum fixtureTablePin = "34B08DAEE0547466C0EEF809A0A1BEDBDC4FEE26BEABE23F
 private enum legacyConfigPin = "0F02941A34B68AC9CD86760C8B6F66F8EF9A4F08D16A02ABBE194EB719B7A0F4";
 private enum scalarConfigPin = "C985D95C6C2B8B13C2354BEDE8649D1557A13C4E211E647F804787E002C10ED1";
 private enum mixedConfigPin = "FC1829939C5EC9347EFBD576978F3EBE017F069C525157FDCC626E8842EBD7FB";
+private enum selectorTreePin = "1CA96072CB1A056D38EC6A95E52C17D4ADF46BE3293740307A0A0DB98964662D";
+private enum selectorConcatPin = "30B29564DC4C991F3BB7EC53F0269FE09E76FA617897F81A4E545E1DB43B3BE2";
+private enum selectorIdentityPin = "job:v3:c985d95c6c2b8b13c2354bede8649d1557a13c4e211e647f804787e002c10ed1";
+private enum harnessBuildRecipe = "ldc2 -O3 -release <PROFILE_SOURCE> -of=<STANDARD_TMP>/scrubbed-pipeline-profile-check";
 private enum inputConcatPin = "4538A0B393E57FA6EBEE19A7C40FC50E1F6D00FFAE80C8B2424645B8C8938B3C";
 private enum scalarConcatPin = "078DEB0171237F42A344DBA9BBCA6124647F514EED7BD5D7AD6D2C68418826B7";
 private enum mixedConcatPin = "870D401642B372263AED96C938DE8B2E1E1A466DDCEFA193085889435665A069";
@@ -548,6 +553,10 @@ private JSONValue selectorFreeze(string binary, string binaryHash, string input,
             "canonical_identity": JSONValue(current)]);
         rmdirRecurse(output);
     }
+    need(expected.treeHash == selectorTreePin &&
+        expected.concatenatedHash == selectorConcatPin &&
+        identity == selectorIdentityPin,
+        "selector freeze fixture/config identity drift");
     return JSONValue(["input_bytes": JSONValue(8L * 1024 * 1024),
         "expected_tree_sha256": JSONValue(expected.treeHash),
         "expected_concatenated_sha256": JSONValue(expected.concatenatedHash),
@@ -852,6 +861,14 @@ private JSONValue runProfile(string binary, JSONValue attestation,
     auto binaryHash = hashFile(binary);
     auto harnessHash = hashFile(harnessPath);
     validateAttestation(attestation, binaryHash);
+    auto compilerPath = execute(["which", "ldc2"]);
+    auto compilerVersion = execute(["ldc2", "--version"]);
+    need(compilerPath.status == 0 && compilerVersion.status == 0 &&
+        hashFile(compilerPath.output.strip) ==
+            attestation["compiler_executable_sha256"].str &&
+        compilerVersion.output.splitLines.length != 0 &&
+        compilerVersion.output.splitLines[0] == attestation["compiler_version"].str,
+        "documented profile checker compiler closure differs from build attestation");
     auto capacity = preflight(root, budget);
     auto v1 = buildPath(root, "scalar-v1.json");
     auto scalarV3 = buildPath(root, "scalar-v3.json");
@@ -945,6 +962,10 @@ private JSONValue runProfile(string binary, JSONValue attestation,
         "binary_sha256": JSONValue(binaryHash),
         "harness_sha256": JSONValue(harnessHash),
         "harness_executable_name": JSONValue(harnessExecutableName),
+        "harness_build_recipe": JSONValue(harnessBuildRecipe),
+        "harness_compiler_executable_sha256":
+            attestation["compiler_executable_sha256"],
+        "harness_compiler_version": attestation["compiler_version"],
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "fixture_record_bytes": JSONValue(recordBytes),
         "fixture_record_count": JSONValue(recordCount),
@@ -1011,6 +1032,42 @@ private string expectedStatusDigest(size_t files, string status) {
     return toHexString(value.finish()).to!string;
 }
 
+private void validateMeasuredSample(JSONValue sample, string binaryHash,
+        string outputTree, long outputBytes) {
+    auto wall = sample["wall_seconds"].floating;
+    auto user = sample["user_seconds"].floating;
+    auto system = sample["system_seconds"].floating;
+    auto fdPeak = sample["sampled_peak_fd_lower_bound"].integer;
+    auto fdSamples = sample["fd_poll_samples"].integer;
+    auto fdErrors = sample["fd_poll_errors"].integer;
+    auto rusageSamples = sample["rusage_v4_samples"].integer;
+    auto rusageErrors = sample["rusage_v4_errors"].integer;
+    need(sample["exit_code"].integer == 0 && sample["signal"].integer == 0 &&
+        sample["exact_output"].boolean && isFinite(wall) && wall > 0 &&
+        isFinite(user) && user >= 0 && isFinite(system) && system >= 0 &&
+        sample["peak_rss_bytes"].integer > 0 &&
+        sample["target_binary_sha256"].str == binaryHash &&
+        sample["input_bytes"].integer == corpusBytes &&
+        sample["output_bytes"].integer == outputBytes &&
+        sample["output_tree_sha256"].str == outputTree &&
+        digest(sample["log_sha256"].str) &&
+        sample["fd_metric_semantics"].str == "sampled lower bound; not exact peak" &&
+        sample["fd_poll_interval_milliseconds"].integer == fdPollMilliseconds &&
+        fdPeak > 0 && fdSamples > 0 && fdErrors >= 0 &&
+        rusageSamples >= 0 && rusageErrors >= 0 &&
+        fdSamples + fdErrors == rusageSamples + rusageErrors,
+        "invalid measured sample resource/domain evidence");
+    auto io = sample["disk_io"];
+    if (io["status"].str == "SUPPORTED")
+        need(rusageSamples > 0 && io["bytes_read"].integer >= 0 &&
+            io["bytes_written"].integer >= 0 && io["semantics"].str ==
+                "Darwin proc_pid_rusage RUSAGE_INFO_V4 disk-I/O bytes; last successful live-child sample; not syscall bytes",
+            "supported disk metric lacks valid rusage/domain semantics");
+    else need(io["status"].str == "UNSUPPORTED" && rusageSamples == 0 &&
+        io["reason"].str.length != 0,
+        "unsupported disk metric has substituted or inconsistent evidence");
+}
+
 private void validateReport(JSONValue report, string expectedHarness = "",
         string expectedBinary = "") {
     need(report.type == JSONType.object && report["schema"].str == schema &&
@@ -1019,6 +1076,7 @@ private void validateReport(JSONValue report, string expectedHarness = "",
         digest(report["fixture_table_sha256"].str) &&
         report["fixture_table_sha256"].str == fixtureTablePin &&
         report["harness_executable_name"].str == harnessExecutableName &&
+        report["harness_build_recipe"].str == harnessBuildRecipe &&
         report["fixture_record_bytes"].integer == recordBytes &&
         report["fixture_record_count"].integer == recordCount,
         "not a complete canonical CLI profile report");
@@ -1027,6 +1085,11 @@ private void validateReport(JSONValue report, string expectedHarness = "",
     if (expectedBinary.length) need(report["binary_sha256"].str == expectedBinary,
         "binary drift");
     validateAttestation(report["build_attestation"], report["binary_sha256"].str);
+    need(report["harness_compiler_executable_sha256"].str ==
+            report["build_attestation"]["compiler_executable_sha256"].str &&
+        report["harness_compiler_version"].str ==
+            report["build_attestation"]["compiler_version"].str,
+        "profile checker compiler closure differs from attested tool closure");
     need(report["config_sha256"]["legacy_v1_sha256"].str == legacyConfigPin &&
         report["config_sha256"]["scalar_v3_sha256"].str == scalarConfigPin &&
         report["config_sha256"]["mixed_v3_sha256"].str == mixedConfigPin,
@@ -1045,11 +1108,10 @@ private void validateReport(JSONValue report, string expectedHarness = "",
     need(report["selector_freeze"]["selectors"].array.length == 5,
         "incomplete selector freeze");
     auto canonical = report["selector_freeze"]["canonical_identity"].str;
-    need(canonical.startsWith("job:v3:") && canonical.length == 71 &&
-        digestLength(canonical[7 .. $], 64) &&
+    need(canonical == selectorIdentityPin &&
         report["selector_freeze"]["input_bytes"].integer == 8L * 1024 * 1024 &&
-        digest(report["selector_freeze"]["expected_tree_sha256"].str) &&
-        digest(report["selector_freeze"]["expected_concatenated_sha256"].str),
+        report["selector_freeze"]["expected_tree_sha256"].str == selectorTreePin &&
+        report["selector_freeze"]["expected_concatenated_sha256"].str == selectorConcatPin,
         "invalid selector-freeze identity or input");
     auto selectorNames = ["default", "filters", "v1-json", "v3-json", "tokens"];
     foreach (index, selector; report["selector_freeze"]["selectors"].array) {
@@ -1116,6 +1178,9 @@ private void validateReport(JSONValue report, string expectedHarness = "",
             auto expectedTree = item["workload"].str == "mixed" ?
                 layout["mixed_expected_tree_sha256"].str :
                 layout["scalar_expected_tree_sha256"].str;
+            auto expectedBytes = item["workload"].str == "mixed" ?
+                layout["mixed_expected_bytes"].integer :
+                layout["scalar_expected_bytes"].integer;
             need(item["workload"].str == workloadOrder[itemIndex] &&
                 item["selector"].str == selectorOrder[itemIndex] &&
                 samples.length == 5, "ordinary Cartesian matrix differs");
@@ -1125,17 +1190,8 @@ private void validateReport(JSONValue report, string expectedHarness = "",
                 need(index == samplePosition && (index in seen) is null,
                     "ordinary sample indexes are not exactly 0..4");
                 seen[index] = true;
-                need(sample["exit_code"].integer == 0 && sample["signal"].integer == 0 &&
-                    sample["exact_output"].boolean && sample["wall_seconds"].floating > 0 &&
-                    sample["peak_rss_bytes"].integer > 0 &&
-                    sample["target_binary_sha256"].str == report["binary_sha256"].str &&
-                    sample["output_tree_sha256"].str == expectedTree &&
-                    sample["fd_metric_semantics"].str == "sampled lower bound; not exact peak",
-                    "invalid ordinary sample");
-                auto io = sample["disk_io"];
-                need(io["status"].str == "SUPPORTED" ||
-                    (io["status"].str == "UNSUPPORTED" && io["reason"].str.length),
-                    "unsupported disk metric represented as zero/substitute");
+                validateMeasuredSample(sample, report["binary_sha256"].str,
+                    expectedTree, expectedBytes);
             }
         }
         foreach (routeIndex, route; layout["durable"].array) {
@@ -1146,12 +1202,10 @@ private void validateReport(JSONValue report, string expectedHarness = "",
                     "durable pair indexes are not exactly 0..2");
                 foreach (phase; ["first", "skip"]) {
                     auto expectedStatus = phase == "first" ? "changed" : "skipped";
-                    need(pair[phase]["exit_code"].integer == 0 &&
-                        pair[phase]["phase"].str == phase &&
-                        pair[phase]["exact_output"].boolean &&
-                        pair[phase]["output_tree_sha256"].str ==
-                            layout["mixed_expected_tree_sha256"].str &&
-                        pair[phase]["target_binary_sha256"].str == report["binary_sha256"].str &&
+                    validateMeasuredSample(pair[phase], report["binary_sha256"].str,
+                        layout["mixed_expected_tree_sha256"].str,
+                        layout["mixed_expected_bytes"].integer);
+                    need(pair[phase]["phase"].str == phase &&
                         pair[phase]["explain_statuses"]["file_count"].integer == fileCount &&
                         pair[phase]["explain_statuses"]["expected_status"].str == expectedStatus &&
                         pair[phase]["explain_statuses"]["status_by_file_sha256"].str ==
@@ -1242,6 +1296,16 @@ private void mustReject(JSONValue good, void delegate(ref JSONValue) mutate,
     need(rejected, message);
 }
 
+private void mustRejectMeasuredBoth(JSONValue good,
+        void delegate(ref JSONValue) mutate, string message) {
+    mustReject(good, (ref JSONValue report) {
+        mutate(report["layouts"][0]["ordinary"][0]["result"]["samples"][0]);
+    }, "ordinary " ~ message);
+    mustReject(good, (ref JSONValue report) {
+        mutate(report["layouts"][0]["durable"][0]["pairs"][0]["first"]);
+    }, "durable " ~ message);
+}
+
 private JSONValue syntheticAttestation(string hash) {
     auto names = ["cc-driver", "cc-compiler", "ar-driver", "ar-writer",
         "ranlib-driver", "ranlib-writer", "linker", "cmake", "make"];
@@ -1310,6 +1374,12 @@ private JSONValue syntheticReport() {
         "signal": JSONValue(0L), "exact_output": JSONValue(true),
         "wall_seconds": JSONValue(1.0), "user_seconds": JSONValue(0.5),
         "system_seconds": JSONValue(0.1), "peak_rss_bytes": JSONValue(1L),
+        "input_bytes": JSONValue(corpusBytes), "output_bytes": JSONValue(scalarCorpusBytes),
+        "log_sha256": JSONValue(hash),
+        "sampled_peak_fd_lower_bound": JSONValue(1L),
+        "fd_poll_interval_milliseconds": JSONValue(fdPollMilliseconds),
+        "fd_poll_samples": JSONValue(1L), "fd_poll_errors": JSONValue(0L),
+        "rusage_v4_samples": JSONValue(0L), "rusage_v4_errors": JSONValue(1L),
         "target_binary_sha256": JSONValue(hash),
         "output_tree_sha256": JSONValue(hash),
         "fd_metric_semantics": JSONValue("sampled lower bound; not exact peak"),
@@ -1326,8 +1396,8 @@ private JSONValue syntheticReport() {
             "selector": JSONValue(selector),
             "result": JSONValue(["samples": JSONValue(itemSamples)])]);
     }
-    auto phase = JSONValue(["exit_code": JSONValue(0L), "exact_output": JSONValue(true),
-        "target_binary_sha256": JSONValue(hash), "output_tree_sha256": JSONValue(hash)]);
+    auto phase = parseJSON(sample.toString);
+    phase["output_bytes"] = mixedCorpusBytes;
     JSONValue[] pairs;
     foreach (i; 0 .. 3) {
         auto first = parseJSON(phase.toString), skip = parseJSON(phase.toString);
@@ -1356,9 +1426,12 @@ private JSONValue syntheticReport() {
         "mixed_expected_concatenated_sha256": JSONValue(mixedConcatPin),
         "ordinary": JSONValue(ordinaryItems), "durable": JSONValue([manifest, journal])]);
     foreach (ref item; layout["ordinary"].array)
-        foreach (ref row; item["result"]["samples"].array)
+        foreach (ref row; item["result"]["samples"].array) {
             row["output_tree_sha256"] = item["workload"].str == "mixed" ?
                 mixedTreePins["many-small"] : scalarTreePins["many-small"];
+            row["output_bytes"] = item["workload"].str == "mixed" ?
+                mixedCorpusBytes : scalarCorpusBytes;
+        }
     foreach (ref route; layout["durable"].array)
         foreach (ref pair; route["pairs"].array) {
             pair["first"]["output_tree_sha256"] = mixedTreePins["many-small"];
@@ -1374,9 +1447,12 @@ private JSONValue syntheticReport() {
     layout2["input_files"] = fewFiles; layout2["scalar_expected_files"] = fewScalar;
     layout2["mixed_expected_files"] = fewMixed;
     foreach (ref item; layout2["ordinary"].array)
-        foreach (ref row; item["result"]["samples"].array)
+        foreach (ref row; item["result"]["samples"].array) {
             row["output_tree_sha256"] = item["workload"].str == "mixed" ?
                 mixedTreePins["few-large"] : scalarTreePins["few-large"];
+            row["output_bytes"] = item["workload"].str == "mixed" ?
+                mixedCorpusBytes : scalarCorpusBytes;
+        }
     foreach (route; layout2["durable"].array) foreach (ref pair; route["pairs"].array) {
         pair["first"]["output_tree_sha256"] = mixedTreePins["few-large"];
         pair["skip"]["output_tree_sha256"] = mixedTreePins["few-large"];
@@ -1386,10 +1462,11 @@ private JSONValue syntheticReport() {
         pair["skip"]["explain_statuses"]["status_by_file_sha256"] = expectedStatusDigest(8, "skipped");
     }
     JSONValue[] selectors;
-    auto canonical = "job:v3:" ~ "A".replicate(64);
+    auto canonical = selectorIdentityPin;
     foreach (i; 0 .. 5) selectors ~= JSONValue([
         "selector": JSONValue(["default", "filters", "v1-json", "v3-json", "tokens"][i]),
-        "tree_sha256": JSONValue(hash), "concatenated_sha256": JSONValue(hash),
+        "tree_sha256": JSONValue(selectorTreePin),
+        "concatenated_sha256": JSONValue(selectorConcatPin),
         "identity_semantics": JSONValue(i >= 3 ? "CANONICAL_JOB_IDENTITY" : "NOT_EXPOSED"),
         "canonical_identity": JSONValue(i >= 3 ? canonical : "NOT_EXPOSED")]);
     auto unsupportedMetric = unsupported("not available");
@@ -1406,6 +1483,9 @@ private JSONValue syntheticReport() {
         "schema": JSONValue(schema), "source_binary_mapping": JSONValue("ATTESTED"),
         "binary_sha256": JSONValue(hash), "harness_sha256": JSONValue(hash),
         "harness_executable_name": JSONValue(harnessExecutableName),
+        "harness_build_recipe": JSONValue(harnessBuildRecipe),
+        "harness_compiler_executable_sha256": JSONValue(hash),
+        "harness_compiler_version": JSONValue("LDC test"),
         "fixture_table_sha256": JSONValue(fixtureTablePin), "fixture_record_bytes": JSONValue(recordBytes),
         "fixture_record_count": JSONValue(recordCount),
         "config_sha256": JSONValue(["legacy_v1_sha256": JSONValue(legacyConfigPin),
@@ -1417,8 +1497,9 @@ private JSONValue syntheticReport() {
             "required_scratch_bytes": JSONValue(corpusBytes * 48),
             "declared_budget_seconds": JSONValue(minimumBudget)]),
         "selector_freeze": JSONValue(["input_bytes": JSONValue(8L * 1024 * 1024),
-            "expected_tree_sha256": JSONValue(hash), "expected_concatenated_sha256": JSONValue(hash),
-            "canonical_identity": JSONValue(canonical),
+            "expected_tree_sha256": JSONValue(selectorTreePin),
+            "expected_concatenated_sha256": JSONValue(selectorConcatPin),
+            "canonical_identity": JSONValue(selectorIdentityPin),
             "selectors": JSONValue(selectors)]),
         "layouts": JSONValue([layout, layout2]),
         "profiles": JSONValue(["syscall_bytes": unsupportedMetric,
@@ -1480,6 +1561,24 @@ private void selfTest() {
     mustReject(good, (ref JSONValue r) { r["selector_freeze"]["selectors"][0]["concatenated_sha256"] = "B".replicate(64); }, "selector concat divergence accepted");
     mustReject(good, (ref JSONValue r) { r["selector_freeze"]["canonical_identity"] = "job:v3:"; }, "empty selector digest accepted");
     mustReject(good, (ref JSONValue r) { r["selector_freeze"]["selectors"][3]["identity_semantics"] = "NOT_EXPOSED"; }, "selector semantics drift accepted");
+    mustReject(good, (ref JSONValue r) {
+        auto replacement = "B".replicate(64);
+        r["selector_freeze"]["expected_tree_sha256"] = replacement;
+        foreach (ref selector; r["selector_freeze"]["selectors"].array)
+            selector["tree_sha256"] = replacement;
+    }, "coordinated selector tree replacement accepted");
+    mustReject(good, (ref JSONValue r) {
+        auto replacement = "B".replicate(64);
+        r["selector_freeze"]["expected_concatenated_sha256"] = replacement;
+        foreach (ref selector; r["selector_freeze"]["selectors"].array)
+            selector["concatenated_sha256"] = replacement;
+    }, "coordinated selector concatenation replacement accepted");
+    mustReject(good, (ref JSONValue r) {
+        auto replacement = "job:v3:" ~ "b".replicate(64);
+        r["selector_freeze"]["canonical_identity"] = replacement;
+        foreach (index; 3 .. 5)
+            r["selector_freeze"]["selectors"][index]["canonical_identity"] = replacement;
+    }, "coordinated selector canonical identity replacement accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["workload"] = "mixed"; }, "ordinary workload Cartesian drift accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["selector"] = "tokens"; }, "ordinary selector Cartesian drift accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["result"]["samples"].array.length = 4; }, "partial samples accepted");
@@ -1500,8 +1599,50 @@ private void selfTest() {
     mustReject(good, (ref JSONValue r) { r["profiles"]["sample"]["runs"][0]["layout"] = "few-large"; }, "sample layout order drift accepted");
     mustReject(good, (ref JSONValue r) { r["profiles"]["sample"]["runs"][0]["tool"] = "sample"; }, "sample tool drift accepted");
     mustReject(good, (ref JSONValue r) { r["profiles"]["sample"]["status"] = "SUPPORTED"; }, "forged sample aggregate support accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["exit_code"] = 1L; },
+        "nonzero exit accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["signal"] = 9L; },
+        "signal accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["wall_seconds"] = 0.0; },
+        "nonpositive wall accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["user_seconds"] = double.nan; },
+        "nonfinite CPU accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["system_seconds"] = -0.1; },
+        "negative CPU accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["input_bytes"] = 1L; },
+        "wrong input bytes accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["output_bytes"] = 1L; },
+        "wrong output bytes accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["peak_rss_bytes"] = 0L; },
+        "nonpositive RSS accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["sampled_peak_fd_lower_bound"] = 0L; },
+        "invalid FD lower bound accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["fd_poll_samples"] = 0L; },
+        "invalid FD sample count accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["fd_poll_errors"] = -1L; },
+        "negative FD errors accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["fd_poll_interval_milliseconds"] = 11L; },
+        "wrong FD interval accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["fd_metric_semantics"] = "exact"; },
+        "wrong FD semantics accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["rusage_v4_errors"] = -1L; },
+        "negative rusage errors accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) { s["rusage_v4_samples"] = 1L; },
+        "inconsistent rusage totals accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) {
+        s["rusage_v4_samples"] = 1L; s["rusage_v4_errors"] = 0L;
+        s["disk_io"] = JSONValue(["status": JSONValue("SUPPORTED"),
+            "bytes_read": JSONValue(-1L), "bytes_written": JSONValue(0L),
+            "semantics": JSONValue("Darwin proc_pid_rusage RUSAGE_INFO_V4 disk-I/O bytes; last successful live-child sample; not syscall bytes")]);
+    }, "negative supported disk bytes accepted");
+    mustRejectMeasuredBoth(good, (ref JSONValue s) {
+        s["rusage_v4_samples"] = 1L; s["rusage_v4_errors"] = 0L;
+        s["disk_io"] = JSONValue(["status": JSONValue("SUPPORTED"),
+            "bytes_read": JSONValue(0L), "bytes_written": JSONValue(0L),
+            "semantics": JSONValue("syscall bytes")]);
+    }, "bogus supported disk semantics accepted");
     mustReject(good, (ref JSONValue r) { r["cache_semantics"] = "/Users/person/private"; }, "path leakage accepted");
-    writeln("canonical profile self-test passed (65 release-active negatives)");
+    writeln("canonical profile self-test passed (102 release-active negatives)");
 }
 
 private void selfTestLive(string binary) {

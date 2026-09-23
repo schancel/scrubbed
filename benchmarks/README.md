@@ -54,6 +54,11 @@ ldc2 -O3 -release benchmarks/pipeline_resource_check.d \
   benchmarks/pipeline-canonical-profile.json
 ```
 
+The checker command above is the exact identity recipe: do not add compiler
+flags or change the output basename. The run verifies the resolved `ldc2`
+hash and version against the attested build-tool closure, and `--check` binds
+the resulting Mach-O hash to the report.
+
 The report binds source/compiler/dependency/build attestation, executed binary,
 harness, frozen record table, configs, input and expected file sets, and every
 timed output. Darwin `wait4` supplies direct-child wall/CPU/RSS accounting. FD
@@ -63,6 +68,9 @@ compile-time disk-field offsets and a guarded live layout canary, and retain
 their kernel and last-success semantics. DTrace/dtruss, xctrace
 allocations, D GC profiling, and `/usr/bin/sample` are calibrated separately;
 failed controls are structured `UNSUPPORTED`, never zero or a substitute.
+The strict checker also rejects nonfinite or negative timing/CPU values,
+signals, byte-count drift, invalid RSS/FD/rusage domains, and fabricated disk
+support for every ordinary and durable measurement.
 
 ## Fused scalar-filter microbenchmark
 

@@ -304,7 +304,9 @@ An untimed 8 MiB freeze requires exact output equality for default selection,
 explicit `--filters`, equivalent v1 JSON, canonical v3 JSON, and ordered v3
 tokens. The canonical v3 identity must match wherever that identity is
 exposed; predecessor selectors are recorded as `NOT_EXPOSED`, not assigned a
-fabricated identity. The 128 MiB ordinary matrix covers scalar
+fabricated identity. The expected selector tree, concatenated content, and
+canonical v3 identity are literal independently frozen pins, so coordinated
+replacement of expected and observed values is rejected. The 128 MiB ordinary matrix covers scalar
 `normalize-line-endings,strip-control` and mixed
 `uncurl-quotes,fix-mojibake,decode-html-entities,normalize-line-endings,strip-control`
 workloads through both v3 JSON and ordered tokens on both layouts. Options are
@@ -348,14 +350,17 @@ substitute.
 
 The checker executable basename is literally
 `scrubbed-pipeline-profile-check` in the bridge and documented commands, so a
-documented rebuild reproduces the report-bound Mach-O identity.
-`pipeline_profile_check --self-test` release-actively rejects 65 mutations,
+documented `ldc2 -O3 -release` rebuild with no additional flags reproduces the
+report-bound Mach-O identity. The run also binds the resolved compiler hash
+and version to the attested compiler closure.
+`pipeline_profile_check --self-test` release-actively rejects 102 mutations,
 including every material build-attestation axis, fixture/config/binary/harness
 drift, unequal or swapped layouts, selector set/order/identity/output drift,
 incomplete or reordered samples, durable route/pair/status drift, unsupported
 metrics represented as zero, forged sample aggregates, sampled FDs represented
-as exact, GC represented as total allocation, unsafe capacity arithmetic, and
-local path leakage.
+as exact, GC represented as total allocation, unsafe capacity arithmetic,
+nonfinite/negative resource domains for both ordinary and durable samples,
+bogus supported disk semantics, and local path leakage.
 `--self-test-live` checks the authored records, direct-PID measurement, and
 complete manifest-v2 and journal-v3 filename bindings on small actual shipping
 invocations before the capacity-gated run. `--check`

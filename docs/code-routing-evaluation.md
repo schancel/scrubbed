@@ -10,9 +10,12 @@ maintenance budget.
 
 The evaluated candidate recognizes exactly one closed, lowercase `d`,
 `python`, or `json` Markdown fence when nonempty prose occurs both before and
-after it. It records that span as routing metadata; it does not alter the input
-or production behavior. The baseline keeps only the generic whole-document
-view. Both modes receive the same bytes.
+after it. The closing delimiter must have at least as many backticks as the
+opener, then only optional spaces or tabs before the line ending. The entire
+delimiter line is consumed before testing the trailing prose. It records the
+code span as routing metadata; it does not alter the input or production
+behavior. The baseline keeps only the generic whole-document view. Both modes
+receive the same bytes.
 
 ## Evidence
 
@@ -22,8 +25,12 @@ annotation, synthetic license marker, selection token, and fixture rights are
 recorded in `experiments/code_routing/fixtures/manifest.tsv`. SPDX-like strings
 inside fixtures are test content, not license grants.
 
-The release-active D checker recomputes the fixture hashes and all recorded
-measurements. Results are:
+The release-active D checker strictly parses the exact manifest schema and
+booleans, binds each supported language/route/syntax annotation combination,
+then checks the declared annotation against the fixture bytes and classified
+span. Its mutation controls reject schema, boolean, language, syntax, and
+coherent language-plus-syntax substitutions. It also recomputes the fixture
+hashes and all recorded measurements. Results are:
 
 - Classification: 3/3 expected mixed prose/code inputs routed; 0/5 negative
   inputs falsely routed.
@@ -41,12 +48,12 @@ measurements. Results are:
 The recorded optimized benchmark performs 10,000 passes over the same eight
 inputs per mode (80,000 fixture evaluations). Its input digest is
 `73916a5bc81b5b327b6e30a340ddbd109eeaf09d425962bfe5c90733798a1643`.
-The baseline observation was 5.125451900 seconds and 3,489,792 bytes peak RSS;
-the candidate observation was 7.271006600 seconds and 3,538,944 bytes peak
-RSS. On this single local run, the candidate was about 42% slower and used
-49,152 more peak-RSS bytes (about 1.4%). These are reproducibility observations,
-not generalized performance estimates; the candidate path also computes the
-experiment's hashes, integrity checks, and metadata.
+The baseline observation was 2.390242400 seconds and 3,522,560 bytes peak RSS;
+the candidate observation was 2.935136900 seconds and 3,522,560 bytes peak
+RSS. On this single local run, the candidate was about 23% slower and had the
+same observed peak RSS. These are reproducibility observations, not generalized
+performance estimates; the candidate path also computes the experiment's
+hashes, integrity checks, and metadata.
 
 ## Maintenance cost and limits
 
@@ -55,9 +62,12 @@ aliases, nested or multiple fences, prose classification, and syntax-specific
 integrity. The current checks are intentionally small heuristics, not language
 parsers: braces inside strings or comments and richer Markdown constructs are
 outside their claims. The fixture set is tiny and synthetic, contains no
-production corpus, and exercises only triple-backtick lowercase language
-labels. Negative cases cover inline code, a prose license marker, code-only
-input, an unclosed fence, a non-code fence, and multiple fences.
+production corpus, and its frozen fixtures exercise only triple-backtick
+lowercase language labels. Release-active controls additionally exercise valid
+longer delimiter runs, a closing run shorter than its opener, an invalid
+closing-line suffix, and a longer valid close without trailing prose. Negative
+fixture cases cover inline code, a prose license marker, code-only input, an
+unclosed fence, a non-code fence, and multiple fences.
 
 Given those limits, the perfect fixture classification and proxy result do not
 justify the additional runtime and maintenance surface. This package adds no

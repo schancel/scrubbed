@@ -1,9 +1,10 @@
 /// Release-active checker for the isolated code-routing feasibility evidence.
 module check;
 
-import evaluation : Fixture, Measurement, classify, loadManifest, measureAll;
+import evaluation : Fixture, Measurement, classify, loadManifest, measure,
+    measureAll, parseManifest;
 import std.algorithm : all, count, filter;
-import std.array : array;
+import std.array : array, replace;
 import std.conv : to;
 import std.exception : enforce;
 import std.file : readText;
@@ -78,6 +79,49 @@ private void negativeControls()
         "non-code fence must not route");
     enforce(!classify("before\n```d\nint x;\n```\nmiddle\n```d\nint y;\n```\nafter").routed,
         "multiple fences must not route");
+    enforce(!classify("before\n```d\nint x;\n````\n").routed,
+        "four-tick close without following prose must not route");
+    enforce(!classify("before\n```d\nint x;\n```garbage\nafter").routed,
+        "closing fence garbage suffix must not route");
+    enforce(classify("before\n```d\nint x;\n```` \t\nafter").routed,
+        "longer closing run plus spaces/tabs must route");
+    enforce(classify("before\n````d\nint x;\n````\nafter").routed,
+        "matching four-tick fences must route");
+    enforce(!classify("before\n````d\nint x;\n```\nafter").routed,
+        "closing run shorter than opener must not route");
+}
+
+private void expectReject(scope void delegate() operation, string label)
+{
+    bool rejected;
+    try
+        operation();
+    catch (Exception)
+        rejected = true;
+    enforce(rejected, label);
+}
+
+private void manifestNegativeControls(string root)
+{
+    const manifest = readText(buildPath(root, "fixtures", "manifest.tsv"));
+    expectReject(() { parseManifest(manifest.replace("\tyes\t", "\ttrue\t")); },
+        "manifest boolean mutation must be rejected");
+    expectReject(() { parseManifest(manifest.replace("syntax-annotation",
+        "syntax")); }, "manifest schema mutation must be rejected");
+    expectReject(() { parseManifest(manifest.replace(
+        "\td\tyes\tbalanced-braces-parens-semicolon\t",
+        "\tpython\tyes\tbalanced-braces-parens-semicolon\t")); },
+        "manifest language mutation must be rejected");
+    expectReject(() { parseManifest(manifest.replace(
+        "balanced-braces-parens-semicolon", "unknown-syntax")); },
+        "manifest syntax mutation must be rejected");
+
+    const coherentMutation = manifest.replace(
+        "\td\tyes\tbalanced-braces-parens-semicolon\t",
+        "\tpython\tyes\tbalanced-parens-colon-indent\t");
+    auto fixtures = parseManifest(coherentMutation);
+    expectReject(() { measure(root, fixtures[0]); },
+        "coherent language/syntax mutation must not match fixture bytes");
 }
 
 int main(string[] arguments)
@@ -114,6 +158,7 @@ int main(string[] arguments)
         inputDigest ~= fixture.sha256;
     import evaluation : hashBytes;
     checkBenchmark(root, hashBytes(cast(const(ubyte)[]) inputDigest));
+    manifestNegativeControls(root);
     negativeControls();
     writeln("PASS: 8 fixtures, 3/3 true routes, 0/5 false routes, ",
         "3/3 proxy selections, hashes/integrity/licenses/outside bytes checked");

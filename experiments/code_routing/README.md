@@ -6,9 +6,16 @@ under CC0-1.0; strings resembling SPDX identifiers inside fixtures are test
 content, not license grants.
 
 The candidate rule routes exactly one closed `d`, `python`, or `json` fenced
-span only when nonempty prose occurs before and after it. Baseline handling
-retains the generic whole document. Candidate handling records a code span but
-also leaves every input byte unchanged.
+span only when nonempty prose occurs before and after it. A closing delimiter
+must be a backtick run at least as long as the opener followed only by optional
+spaces or tabs and the line ending. Baseline handling retains the generic whole
+document. Candidate handling records a code span but also leaves every input
+byte unchanged.
+
+The release checker treats the manifest as evidence, not commentary: its exact
+schema, strict booleans, language/route/syntax vocabulary, fixture hashes, and
+the declared syntax property of each fixture are checked. Mutation controls
+prove that changing those fields cannot silently preserve a passing result.
 
 Build and run the release-active checker from the repository root:
 

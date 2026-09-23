@@ -2,7 +2,8 @@
 module pipeline;
 
 import core.sys.posix.signal : kill, SIGKILL;
-import core.sys.posix.sys.stat : chmod, S_IRUSR, S_IXUSR, S_IRWXU;
+import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IXUSR, S_IRWXU;
+import core.sys.posix.unistd : link;
 import core.thread : Thread;
 import std.algorithm.searching : canFind, endsWith, startsWith;
 import std.algorithm.sorting : sort;
@@ -38,6 +39,9 @@ private struct ExecutableSnapshot {
 private struct AttestedExecutable {
     ExecutableSnapshot snapshot;
     JSONValue attestation;
+    ExecutableSnapshot compiler;
+    string privateSource;
+    string[string] buildEnvironment;
 }
 
 private struct ControlVariant {
@@ -48,9 +52,8 @@ private struct ControlVariant {
 
 private string privateScratch(string prefix) {
     auto root = buildPath(tempDir, prefix ~ randomUUID.toString);
-    mkdirRecurse(root);
-    require(chmod(root.toStringz, S_IRWXU) == 0,
-        "cannot restrict benchmark scratch directory");
+    require(mkdir(root.toStringz, S_IRWXU) == 0,
+        "cannot create private benchmark scratch directory");
     return root;
 }
 
@@ -66,6 +69,19 @@ private ExecutableSnapshot snapshotExecutable(string source, string root,
 private void verifySnapshot(ExecutableSnapshot snapshot) {
     require(hashFile(snapshot.path) == snapshot.sha256,
         "executable snapshot changed during benchmark");
+}
+
+private void publishExclusive(string destination, string text) {
+    auto temporary = destination ~ ".tmp-" ~ randomUUID.toString;
+    scope(exit) if (exists(temporary)) remove(temporary);
+    write(temporary, text);
+    require(readText(temporary) == text,
+        "temporary report reopen differs");
+    parseJSON(text);
+    require(link(temporary.toStringz, destination.toStringz) == 0,
+        "cannot publish report without overwriting an existing path");
+    remove(temporary);
+    require(readText(destination) == text, "published report reopen differs");
 }
 
 private ExecutableSnapshot snapshotExpectedExecutable(string source, string root,
@@ -753,7 +769,9 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "build_status": JSONValue(0),
         "target_sha256": JSONValue(targetHash)]);
     validateAttestation(attestation, snapshot.sha256);
-    return AttestedExecutable(snapshot, attestation);
+    return AttestedExecutable(snapshot, attestation,
+        ExecutableSnapshot(prepared.compiler, prepared.compilerHash),
+        prepared.privateSource, prepared.environment);
 }
 
 private void validateBuildProvenance(JSONValue report, bool comparator,
@@ -1763,6 +1781,15 @@ private void selfTest() {
     try { validateAttributionBuildSource(sourceAttestation, "f".replicate(40)); }
     catch (Exception) { failed = true; }
     require(failed, "self-consistent wrong attribution source negative did not fail");
+    auto publicationRoot = privateScratch("scrubbed-publication-self-test-");
+    scope(exit) rmdirRecurse(publicationRoot);
+    auto publicationPath = buildPath(publicationRoot, "report.json");
+    publishExclusive(publicationPath, "{\"schema\":\"first\"}\n");
+    failed = false;
+    try publishExclusive(publicationPath, "{\"schema\":\"replacement\"}\n");
+    catch (Exception) { failed = true; }
+    require(failed && parseJSON(readText(publicationPath))["schema"].str ==
+        "first", "exclusive report publication negative did not fail");
     writeln("pipeline release self-test passed");
 }
 
@@ -1952,58 +1979,108 @@ private void validateAttributionBuildSource(JSONValue attestation,
 
 int main(string[] args) {
     try {
-        if (args.length == 6 && args[1] == "--attested-coordination") {
+        if (args.length == 7 && args[1] == "--attested-coordination") {
+            require(!exists(args[6]),
+                "coordination report already exists");
+            require(digestField(args[3], 40) && digestField(args[5], 40) &&
+                args[3] != args[5],
+                "coordination source revisions must be distinct full commits");
+            auto baselineHead = checked(
+                ["git", "-C", args[2], "rev-parse", "HEAD^{commit}"]);
+            auto candidateHead = checked(
+                ["git", "-C", args[4], "rev-parse", "HEAD^{commit}"]);
+            require(baselineHead == args[3] && candidateHead == args[5],
+                "coordination source root differs from expected revision");
+            require(execute(["git", "-C", args[4], "merge-base",
+                "--is-ancestor", args[3], args[5]]).status == 0,
+                "coordination baseline is not an ancestor of candidate");
+            auto expectedHarnessSource = buildPath(args[4], "benchmarks",
+                "coordination_profile.d");
+            auto expectedHarnessSourceHash = hashFile(expectedHarnessSource);
             auto root = privateScratch("scrubbed-attested-coordination-");
             scope(exit) rmdirRecurse(root);
             auto baselineRoot = buildPath(root, "baseline-build");
             auto candidateRoot = buildPath(root, "candidate-build");
-            mkdirRecurse(baselineRoot);
-            mkdirRecurse(candidateRoot);
-            require(chmod(baselineRoot.toStringz, S_IRWXU) == 0 &&
-                chmod(candidateRoot.toStringz, S_IRWXU) == 0,
-                "cannot restrict coordination build scratch");
+            require(mkdir(baselineRoot.toStringz, S_IRWXU) == 0 &&
+                mkdir(candidateRoot.toStringz, S_IRWXU) == 0,
+                "cannot create private coordination build scratch");
             auto baseline = buildAttestedExecutable(args[2], baselineRoot);
-            auto candidate = buildAttestedExecutable(args[3], candidateRoot);
+            auto candidate = buildAttestedExecutable(args[4], candidateRoot);
             validateAttestation(baseline.attestation, baseline.snapshot.sha256);
             validateAttestation(candidate.attestation, candidate.snapshot.sha256);
-            auto harness = snapshotExecutable(args[4], root,
+            require(baseline.attestation["source_sha"].str == args[3] &&
+                candidate.attestation["source_sha"].str == args[5],
+                "attested coordination source revision differs");
+            auto harnessSource = buildPath(candidate.privateSource, "benchmarks",
+                "coordination_profile.d");
+            auto harnessSourceHash = hashFile(harnessSource);
+            require(harnessSourceHash == expectedHarnessSourceHash &&
+                hashFile(expectedHarnessSource) == expectedHarnessSourceHash,
+                "coordination harness source changed during attested build");
+            auto harnessTarget = buildPath(root, "coordination-profile-built");
+            auto harnessBuild = execute([candidate.compiler.path, "-O3", "-release",
+                harnessSource, "-of=" ~ harnessTarget],
+                candidate.buildEnvironment);
+            require(harnessBuild.status == 0,
+                "coordination harness build failed: " ~ harnessBuild.output);
+            verifySnapshot(candidate.compiler);
+            auto harness = snapshotExecutable(harnessTarget, root,
                 "scrubbed-coordination-profile");
-            auto baselineAttestationPath = buildPath(root,
-                "baseline-attestation-report.json");
-            auto candidateAttestationPath = buildPath(root,
-                "candidate-attestation-report.json");
-            auto baselineReport = JSONValue([
-                "source_binary_mapping": JSONValue("ATTESTED"),
-                "binary_sha256": JSONValue(baseline.snapshot.sha256),
-                "build_attestation": baseline.attestation]);
-            auto candidateReport = JSONValue([
-                "source_binary_mapping": JSONValue("ATTESTED"),
-                "binary_sha256": JSONValue(candidate.snapshot.sha256),
-                "build_attestation": candidate.attestation]);
-            write(baselineAttestationPath, baselineReport.toString ~ "\n");
-            write(candidateAttestationPath, candidateReport.toString ~ "\n");
-            auto result = execute([harness.path, "--compare",
-                baseline.snapshot.path, baselineAttestationPath,
-                candidate.snapshot.path, candidateAttestationPath, args[5]]);
+            auto stagedReportPath = buildPath(root,
+                "coordination-measurement.json");
+            auto result = execute([harness.path, "--measure-comparison",
+                baseline.snapshot.path, candidate.snapshot.path,
+                stagedReportPath]);
             verifySnapshot(baseline.snapshot);
             verifySnapshot(candidate.snapshot);
             verifySnapshot(harness);
             require(result.status == 0,
                 "attested coordination harness failed: " ~ result.output);
-            auto report = parseJSON(readText(args[5]));
+            auto stagedText = readText(stagedReportPath);
+            auto report = parseJSON(stagedText);
+            auto targetBaseline = report["target_baseline_median_wall_us"].integer;
+            auto targetCandidate = report["target_candidate_median_wall_us"].integer;
+            auto requiredImprovement = targetBaseline / 10 +
+                (targetBaseline % 10 != 0 ? 1 : 0);
+            auto controlsPass = report["controls_within_five_percent"].boolean;
+            auto recomputedThresholds = report["target_wins"].integer >= 4 &&
+                targetBaseline > 0 && targetCandidate >= 0 &&
+                targetCandidate < targetBaseline &&
+                targetBaseline - targetCandidate >= requiredImprovement &&
+                report["target_candidate_median_queue_ns"].integer <
+                    report["target_baseline_median_queue_ns"].integer &&
+                controlsPass;
             require(report["schema"].str ==
-                    "scrubbed.coordination-scheduler-comparison.v2" &&
+                    "scrubbed.coordination-scheduler-measurement.v2" &&
                 report["version"].integer == 2 &&
-                report["source_binary_mapping"].str == "ATTESTED" &&
                 report["baseline_binary_sha256"].str ==
                     baseline.snapshot.sha256 &&
                 report["candidate_binary_sha256"].str ==
                     candidate.snapshot.sha256 &&
-                report["baseline_build_attestation"]["source_sha"].str ==
-                    baseline.attestation["source_sha"].str &&
-                report["candidate_build_attestation"]["source_sha"].str ==
-                    candidate.attestation["source_sha"].str,
-                "coordination report lost attested source/build identity");
+                report["harness_sha256"].str == harness.sha256 &&
+                !report["production_candidate_authorized"].boolean &&
+                report["decision"].str ==
+                    "MEASUREMENT_ONLY_REQUIRES_PIPELINE_ATTESTATION" &&
+                report["thresholds_satisfied"].boolean == recomputedThresholds,
+                "coordination measurement validation failed");
+            report["schema"] = "scrubbed.coordination-scheduler-comparison.v2";
+            report["measurement_schema"] =
+                "scrubbed.coordination-scheduler-measurement.v2";
+            report["source_binary_mapping"] = "ATTESTED";
+            report["expected_baseline_source_sha"] = args[3];
+            report["expected_candidate_source_sha"] = args[5];
+            report["baseline_build_attestation"] = baseline.attestation;
+            report["candidate_build_attestation"] = candidate.attestation;
+            report["measurement_harness_source_sha256"] = harnessSourceHash;
+            report["measurement_harness_compiler_sha256"] =
+                candidate.compiler.sha256;
+            report["production_candidate_authorized"] = recomputedThresholds;
+            report["decision"] = recomputedThresholds ?
+                "AUTHORIZED_BOUNDED_WORKER_AVAILABILITY" :
+                "REJECTED_THRESHOLD_NOT_MET";
+            auto finalText = report.toString ~ "\n";
+            parseJSON(finalText);
+            publishExclusive(args[6], finalText);
             writeln(result.output.strip);
             return 0;
         }
@@ -2100,7 +2177,7 @@ int main(string[] args) {
         require(validSupplied || validAttested,
             "usage: pipeline SCRUBBED_BINARY [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
             "or pipeline --attested-build CLEAN_SOURCE [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
-            "or pipeline --attested-coordination CLEAN_BASE_SOURCE CLEAN_CANDIDATE_SOURCE COORDINATION_HARNESS REPORT_JSON; " ~
+            "or pipeline --attested-coordination CLEAN_BASE_SOURCE EXPECTED_BASE_SHA CLEAN_CANDIDATE_SOURCE EXPECTED_CANDIDATE_SHA REPORT_JSON; " ~
             "or pipeline --attested-profile CLEAN_SOURCE PROFILE_HARNESS REPORT_JSON TIME_BUDGET_SECONDS; " ~
             "or pipeline --attested-attribution CLEAN_SOURCE ATTRIBUTION_HARNESS CANONICAL_PROFILE REPORT_JSON TIME_BUDGET_SECONDS");
         auto inputTarget = attestedMode ? args[2] : args[1];

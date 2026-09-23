@@ -5,7 +5,8 @@ import core.atomic : atomicLoad, atomicStore;
 import core.stdc.errno : EINTR, errno;
 import core.sys.posix.signal : SIGKILL;
 import core.sys.posix.sys.resource : rusage;
-import core.sys.posix.sys.stat : chmod, S_IRUSR, S_IWUSR, S_IXUSR, S_IRWXU;
+import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IWUSR, S_IXUSR,
+    S_IRWXU;
 import core.sys.posix.unistd : link;
 import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED;
 import core.thread : Thread;
@@ -13,7 +14,6 @@ import core.time : msecs;
 import std.algorithm.sorting : sort;
 import std.algorithm.searching : canFind;
 import std.array : appender;
-import std.ascii : isHexDigit;
 import std.conv : to;
 import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.digest : LetterCase, toHexString;
@@ -24,7 +24,7 @@ import std.file : SpanMode, copy, dirEntries, exists, getAttributes, isFile,
 import std.format : format;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.path : absolutePath, buildPath, relativePath;
-import std.process : execute, kill, spawnProcess;
+import std.process : environment, execute, kill, spawnProcess;
 import std.stdio : File, writeln;
 import std.string : splitLines, strip, toStringz;
 import std.uuid : randomUUID;
@@ -79,9 +79,8 @@ private struct ExecutableSnapshot { string path, digest; }
 
 private string privateScratch(string prefix) {
     auto root = buildPath(tempDir, prefix ~ randomUUID.toString);
-    mkdirRecurse(root);
-    need(chmod(root.toStringz, S_IRWXU) == 0,
-        "cannot restrict benchmark scratch directory");
+    need(mkdir(root.toStringz, S_IRWXU) == 0,
+        "cannot create private benchmark scratch directory");
     return root;
 }
 
@@ -117,40 +116,6 @@ private void publishReport(string reportPath, string text) {
         "cannot publish report without overwriting an existing path");
     remove(temporary);
     need(readText(reportPath) == text ~ "\n", "report reopen differs");
-}
-
-private bool isDigest(string value, size_t length) {
-    if (value.length != length) return false;
-    foreach (c; value) if (!c.isHexDigit) return false;
-    return true;
-}
-
-private JSONValue loadBuildAttestation(string reportPath,
-        string expectedBinaryDigest) {
-    need(isFile(reportPath) && !isSymlink(reportPath),
-        "build attestation report must be a regular non-symlink file");
-    auto sourceReport = parseJSON(readText(reportPath));
-    need(sourceReport["source_binary_mapping"].str == "ATTESTED" &&
-        sourceReport["binary_sha256"].str == expectedBinaryDigest,
-        "build attestation report does not bind the supplied binary");
-    auto attestation = sourceReport["build_attestation"];
-    need(attestation["schema"].str == "scrubbed-build-attestation-v4" &&
-        attestation["target_sha256"].str == expectedBinaryDigest &&
-        attestation["source_status"].str == "clean-before-and-after" &&
-        attestation["build_status"].integer == 0 &&
-        attestation["compiler_executable_name"].str == "ldc2" &&
-        attestation["compiler_version"].str.length > 0 &&
-        attestation["build_flags"].str ==
-            "release; force; non-interactive; cache=local" &&
-        isDigest(attestation["source_sha"].str, 40) &&
-        isDigest(attestation["source_tree_id"].str, 40) &&
-        isDigest(attestation["source_archive_sha256"].str, 64) &&
-        isDigest(attestation["dub_recipe_sha256"].str, 64) &&
-        isDigest(attestation["dependency_lock_sha256"].str, 64) &&
-        isDigest(attestation["compiler_executable_sha256"].str, 64) &&
-        isDigest(attestation["dub_executable_sha256"].str, 64),
-        "build attestation is incomplete or inconsistent");
-    return attestation;
 }
 
 private string commandOutput(string[] command) {
@@ -281,7 +246,8 @@ private JSONValue invoke(string binary, string input, string output,
     auto stdoutFile = File(stdoutPath, "wb");
     auto stderrFile = File(stderrPath, "wb");
     string[] command = instrumented ? ["/usr/bin/env",
-        "SCRUBBED_COORDINATION_METRICS_V2=" ~ metricsPath, binary] : [binary];
+        "SCRUBBED_COORDINATION_METRICS_V2=" ~ metricsPath, binary] :
+        ["/usr/bin/env", "-u", "SCRUBBED_COORDINATION_METRICS_V2", binary];
     if (instrumented && ordinal == 0) command ~= "--DRT-gcopt=profile:2";
     command ~= ["run", "--input", input, "--output", output, "--config", config,
         "--threads", threads.to!string, "--max-open-inputs", threads.to!string];
@@ -446,6 +412,7 @@ private void validateMetrics(ref JSONValue sample, size_t expectedFiles,
     need(phases["descriptor_wait"]["units"].integer == expectedBytes &&
         phases["descriptor_hold"]["units"].integer == expectedBytes &&
         phases["transform"]["units"].integer == expectedBytes &&
+        phases["transform"]["nanoseconds"].integer > 0 &&
         phases["ordered_result_wait"]["units"].integer == 0 &&
         phases["atomic_publication"]["units"].integer > 0,
         "transform byte accounting differs");
@@ -492,6 +459,25 @@ private void runSelfTest(string harnessPath) {
     }
     need(cleanupFailureObserved, "post-spawn cleanup injection differed");
 
+    auto environmentProbe = buildPath(root, "environment-probe");
+    write(environmentProbe,
+        "#!/bin/sh\n" ~
+        "test -z \"$SCRUBBED_COORDINATION_METRICS_V2\" || exit 7\n" ~
+        "echo 'done. environment clean'\n");
+    need(chmod(environmentProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
+        "cannot make environment probe executable");
+    auto priorMetricsEnvironment =
+        environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
+    scope(exit) {
+        if (priorMetricsEnvironment.length)
+            environment["SCRUBBED_COORDINATION_METRICS_V2"] =
+                priorMetricsEnvironment;
+        else environment.remove("SCRUBBED_COORDINATION_METRICS_V2");
+    }
+    environment["SCRUBBED_COORDINATION_METRICS_V2"] = "ambient-must-not-leak";
+    invoke(environmentProbe, root, root, root, 1, 1, root, false,
+        fileDigest(environmentProbe));
+
     enum validMetrics = `{"user_us":1000,"system_us":1000,"metrics":{` ~
         `"schema":"scrubbed.coordination-metrics.v2","version":2,` ~
         `"wall_nanoseconds":1000,` ~
@@ -533,6 +519,12 @@ private void runSelfTest(string harnessPath) {
     try validateMetrics(invalid, 1, 1);
     catch (Exception) { invalidRejected = true; }
     need(invalidRejected, "unexpected metrics field was accepted");
+    invalid = parseJSON(validMetrics);
+    invalid["metrics"]["phases"]["transform"]["nanoseconds"] = 0;
+    invalidRejected = false;
+    try validateMetrics(invalid, 1, 1);
+    catch (Exception) { invalidRejected = true; }
+    need(invalidRejected, "zero transform CPU duration was accepted");
     auto reportPath = buildPath(root, "atomic-report.json");
     publishReport(reportPath, `{"schema":"self-test"}`);
     need(parseJSON(readText(reportPath))["schema"].str == "self-test",
@@ -544,47 +536,35 @@ private void runSelfTest(string harnessPath) {
         parseJSON(readText(reportPath))["schema"].str == "self-test",
         "report publication overwrote an existing path");
 
-    auto attestationPath = buildPath(root, "build-attestation.json");
-    enum digest40 = "0000000000000000000000000000000000000000";
-    enum digest64 = "0000000000000000000000000000000000000000000000000000000000000000";
-    auto attestationReport = JSONValue([
-        "source_binary_mapping": JSONValue("ATTESTED"),
-        "binary_sha256": JSONValue(trueDigest),
-        "build_attestation": JSONValue([
-            "schema": JSONValue("scrubbed-build-attestation-v4"),
-            "target_sha256": JSONValue(trueDigest),
-            "source_status": JSONValue("clean-before-and-after"),
-            "build_status": JSONValue(0),
-            "compiler_executable_name": JSONValue("ldc2"),
-            "compiler_version": JSONValue("self-test"),
-            "build_flags": JSONValue(
-                "release; force; non-interactive; cache=local"),
-            "source_sha": JSONValue(digest40),
-            "source_tree_id": JSONValue(digest40),
-            "source_archive_sha256": JSONValue(digest64),
-            "dub_recipe_sha256": JSONValue(digest64),
-            "dependency_lock_sha256": JSONValue(digest64),
-            "compiler_executable_sha256": JSONValue(digest64),
-            "dub_executable_sha256": JSONValue(digest64)])]);
-    write(attestationPath, attestationReport.toString);
-    loadBuildAttestation(attestationPath, trueDigest);
-    attestationReport["build_attestation"]["target_sha256"] = digest64;
-    write(attestationPath, attestationReport.toString);
-    bool mismatchedAttestationRejected;
-    try loadBuildAttestation(attestationPath, trueDigest);
-    catch (Exception) { mismatchedAttestationRejected = true; }
-    need(mismatchedAttestationRejected,
-        "mismatched source-to-binary attestation was accepted");
+    need(withinFivePercent(100_000, 105_000) &&
+        !withinFivePercent(100_000, 105_001) &&
+        !withinFivePercent(100_000, 105_009) &&
+        !withinFivePercent(1, long.max) &&
+        withinFivePercent(long.max, long.max),
+        "exact five-percent control boundary differs");
+    need(atLeastTenPercentFaster(100, 90) &&
+        !atLeastTenPercentFaster(101, 91) &&
+        !atLeastTenPercentFaster(long.max, long.max),
+        "exact ten-percent target boundary differs");
+
     writeln("coordination profile self-test: ok");
 }
 
 private long[] values(JSONValue[] samples, size_t threads, string field) {
     long[] result;
-    foreach (sample; samples)
-        if (sample["threads"].integer == threads)
-            result ~= field == "cpu_us" ?
-                sample["user_us"].integer + sample["system_us"].integer :
-                sample[field].integer;
+    foreach (sample; samples) if (sample["threads"].integer == threads) {
+        if (field != "cpu_us") {
+            auto value = sample[field].integer;
+            need(value >= 0, "comparison sample value is negative");
+            result ~= value;
+        } else {
+            auto user = sample["user_us"].integer;
+            auto system = sample["system_us"].integer;
+            need(user >= 0 && system >= 0 && user <= long.max - system,
+                "comparison CPU value is invalid");
+            result ~= user + system;
+        }
+    }
     result.sort();
     return result;
 }
@@ -599,47 +579,57 @@ private long sampleValue(JSONValue[] samples, size_t threads,
         size_t ordinal, string field) {
     foreach (sample; samples)
         if (sample["threads"].integer == threads &&
-                sample["ordinal"].integer == ordinal)
-            return field == "cpu_us" ?
-                sample["user_us"].integer + sample["system_us"].integer :
-                sample[field].integer;
+                sample["ordinal"].integer == ordinal) {
+            if (field != "cpu_us") {
+                auto value = sample[field].integer;
+                need(value >= 0, "comparison sample value is negative");
+                return value;
+            }
+            auto user = sample["user_us"].integer;
+            auto system = sample["system_us"].integer;
+            need(user >= 0 && system >= 0 && user <= long.max - system,
+                "comparison CPU value is invalid");
+            return user + system;
+        }
     throw new Exception("comparison sample missing");
+}
+
+private bool withinFivePercent(long baseline, long candidate) {
+    need(baseline > 0 && candidate >= 0,
+        "comparison control values must be nonnegative with positive baseline");
+    return candidate <= baseline || candidate - baseline <= baseline / 20;
+}
+
+private bool atLeastTenPercentFaster(long baseline, long candidate) {
+    need(baseline > 0 && candidate >= 0,
+        "comparison target values must be nonnegative with positive baseline");
+    if (candidate >= baseline) return false;
+    auto requiredImprovement = baseline / 10 + (baseline % 10 != 0 ? 1 : 0);
+    return baseline - candidate >= requiredImprovement;
 }
 
 private bool pairedMedianWithinFivePercent(JSONValue[] baseline,
         JSONValue[] candidate, size_t threads, string field) {
-    long[] ratiosBasisPoints;
+    size_t passing;
     foreach (round; 0 .. runs) {
         auto base = sampleValue(baseline, threads, round, field);
         auto changed = sampleValue(candidate, threads, round, field);
-        need(base > 0, "comparison control baseline must be positive");
-        ratiosBasisPoints ~= changed * 10_000 / base;
+        if (withinFivePercent(base, changed)) ++passing;
     }
-    ratiosBasisPoints.sort();
-    return ratiosBasisPoints[runs / 2] <= 10_500;
+    return passing > runs / 2;
 }
 
 private void runComparison(string[] args) {
     auto baseline = absolutePath(args[2]);
-    auto baselineAttestationPath = absolutePath(args[3]);
-    auto candidate = absolutePath(args[4]);
-    auto candidateAttestationPath = absolutePath(args[5]);
-    auto reportPath = absolutePath(args[6]);
-    need(exists(baseline) && exists(candidate) &&
-        exists(baselineAttestationPath) && exists(candidateAttestationPath) &&
-        !exists(reportPath),
-        "comparison binary/attestation missing or report exists");
+    auto candidate = absolutePath(args[3]);
+    auto reportPath = absolutePath(args[4]);
+    need(exists(baseline) && exists(candidate) && !exists(reportPath),
+        "comparison binary missing or measurement exists");
     need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
     auto root = privateScratch("scrubbed-coordination-compare-");
     scope(exit) if (exists(root)) rmdirRecurse(root);
     auto baselineSnapshot = snapshotExecutable(baseline, root, "baseline");
     auto candidateSnapshot = snapshotExecutable(candidate, root, "candidate");
-    auto baselineAttestation = loadBuildAttestation(
-        baselineAttestationPath, baselineSnapshot.digest);
-    auto candidateAttestation = loadBuildAttestation(
-        candidateAttestationPath, candidateSnapshot.digest);
-    auto baselineAttestationDigest = fileDigest(baselineAttestationPath);
-    auto candidateAttestationDigest = fileDigest(candidateAttestationPath);
     baseline = baselineSnapshot.path;
     candidate = candidateSnapshot.path;
     auto harnessDigest = fileDigest(absolutePath(args[0]));
@@ -730,11 +720,11 @@ private void runComparison(string[] args) {
         candidateWait ~= sample["metrics"]["phases"][waitField]["nanoseconds"].integer;
     baselineWait.sort(); candidateWait.sort();
     auto waitFalls = candidateWait[runs / 2] < baselineWait[runs / 2];
-    auto authorized = targetWins >= 4 &&
-        targetCandidateWall * 100 <= targetBaselineWall * 90 &&
+    auto thresholdsSatisfied = targetWins >= 4 &&
+        atLeastTenPercentFaster(targetBaselineWall, targetCandidateWall) &&
         waitFalls && controlsPass;
     auto report = JSONValue([
-        "schema": JSONValue("scrubbed.coordination-scheduler-comparison.v2"),
+        "schema": JSONValue("scrubbed.coordination-scheduler-measurement.v2"),
         "version": JSONValue(2),
         "host_os": JSONValue(commandOutput(["uname", "-s"])),
         "host_architecture": JSONValue(commandOutput(["uname", "-m"])),
@@ -742,29 +732,22 @@ private void runComparison(string[] args) {
             ["sysctl", "-n", "machdep.cpu.brand_string"])),
         "baseline_binary_sha256": JSONValue(baselineSnapshot.digest),
         "candidate_binary_sha256": JSONValue(candidateSnapshot.digest),
-        "baseline_attestation_report_sha256": JSONValue(
-            baselineAttestationDigest),
-        "candidate_attestation_report_sha256": JSONValue(
-            candidateAttestationDigest),
-        "baseline_build_attestation": baselineAttestation,
-        "candidate_build_attestation": candidateAttestation,
-        "source_binary_mapping": JSONValue("ATTESTED"),
         "harness_sha256": JSONValue(harnessDigest),
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "config_sha256": JSONValue(configPin),
         "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
         "control_method": JSONValue(
-            "median paired candidate-to-baseline ratio <= 1.05"),
+            "at least three of five exact paired candidate values <= 105% of baseline"),
         "target_wins": JSONValue(cast(long)targetWins),
         "target_baseline_median_wall_us": JSONValue(targetBaselineWall),
         "target_candidate_median_wall_us": JSONValue(targetCandidateWall),
         "target_baseline_median_queue_ns": JSONValue(baselineWait[runs / 2]),
         "target_candidate_median_queue_ns": JSONValue(candidateWait[runs / 2]),
         "controls_within_five_percent": JSONValue(controlsPass),
-        "production_candidate_authorized": JSONValue(authorized),
-        "decision": JSONValue(authorized ?
-            "AUTHORIZED_BOUNDED_WORKER_AVAILABILITY" :
-            "REJECTED_THRESHOLD_NOT_MET"),
+        "thresholds_satisfied": JSONValue(thresholdsSatisfied),
+        "production_candidate_authorized": JSONValue(false),
+        "decision": JSONValue(
+            "MEASUREMENT_ONLY_REQUIRES_PIPELINE_ATTESTATION"),
         "baseline_attribution": JSONValue(baselineAttribution),
         "candidate_attribution": JSONValue(candidateAttribution),
         "layouts": JSONValue(layoutReports)]);
@@ -773,11 +756,8 @@ private void runComparison(string[] args) {
     parseJSON(text);
     verifySnapshot(baselineSnapshot);
     verifySnapshot(candidateSnapshot);
-    need(fileDigest(baselineAttestationPath) == baselineAttestationDigest &&
-        fileDigest(candidateAttestationPath) == candidateAttestationDigest,
-        "build attestation report changed during benchmark");
     publishReport(reportPath, text);
-    writeln("coordination comparison: wrote ", reportPath);
+    writeln("coordination measurement: wrote ", reportPath);
 }
 
 private void runDisabledMetricsOverhead(string[] args) {
@@ -839,7 +819,7 @@ private void runDisabledMetricsOverhead(string[] args) {
         "config_sha256": JSONValue(configPin),
         "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
         "control_method": JSONValue(
-            "median paired candidate-to-baseline ratio <= 1.05"),
+            "at least three of five exact paired candidate values <= 105% of baseline"),
         "metrics_environment": JSONValue("absent for every child"),
         "disabled_metrics_overhead_accepted": JSONValue(accepted),
         "baseline_samples": JSONValue(baselineSamples),
@@ -1009,10 +989,10 @@ private void runAttribution(string[] args) {
 
 void main(string[] args) {
     need(args.length == 2 || args.length == 3 || args.length == 4 ||
-        args.length == 5 || args.length == 7,
+        args.length == 5,
         "usage: coordination_profile <release-binary> <report> | " ~
-        "--compare <baseline-binary> <baseline-attestation-report> " ~
-        "<candidate-binary> <candidate-attestation-report> <report> | " ~
+        "--measure-comparison <baseline-binary> <candidate-binary> " ~
+        "<private-measurement> | " ~
         "--size-order <release-binary> <report> | " ~
         "--disabled-overhead <baseline-binary> <candidate-binary> <report> | " ~
         "--self-test");
@@ -1021,7 +1001,8 @@ void main(string[] args) {
     else if (args.length == 5 && args[1] == "--disabled-overhead")
         runDisabledMetricsOverhead(args);
     else if (args.length == 4 && args[1] == "--size-order") runSizeOrder(args);
-    else if (args.length == 7 && args[1] == "--compare") runComparison(args);
+    else if (args.length == 5 && args[1] == "--measure-comparison")
+        runComparison(args);
     else if (args.length == 3) runAttribution(args);
     else need(false, "arguments do not select a supported mode");
 }

@@ -92,26 +92,28 @@ before `finish()` begins.
 ```sh
 ldc2 -O3 -release benchmarks/pipeline.d \
   -of=/tmp/scrubbed-pipeline
-ldc2 -O3 -release benchmarks/coordination_profile.d \
-  -of=/tmp/scrubbed-coordination-profile
 /tmp/scrubbed-pipeline --attested-coordination \
-  /path/to/clean-base-source /path/to/clean-candidate-source \
-  /tmp/scrubbed-coordination-profile \
+  /path/to/clean-base-source BASE_COMMIT_SHA \
+  /path/to/clean-candidate-source CANDIDATE_COMMIT_SHA \
   benchmarks/coordination-scheduler-evidence.json
 ```
 
 The pipeline harness builds both clean source revisions through the existing
-private attested-build closure; the comparison refuses binaries whose hashes
-do not match those v4 build attestations and embeds both complete attestations
-in its v2 report. The coordination harness alternates base/candidate order for
+private attested-build closure, requires the exact distinct commits and
+base-to-candidate ancestry, and compiles the measurement harness from the
+attested candidate source with the snapshotted compiler. The measurement
+harness can only write a non-authoritative report inside pipeline-private
+scratch. The pipeline re-derives the gate, embeds both complete v4 build
+attestations, and exclusively publishes the final v2 report. It alternates
+base/candidate order for
 five pairs at threads 1/2/4
 on both frozen layouts, exact-gates every output, and separately interleaves
 five instrumented many-small four-thread pairs. It authorizes production only
 when at least four pairs improve, the target median wall improvement is at
 least 10%, attributed queue residence falls, and single-thread plus all
-few-large wall/CPU/RSS/FD median paired ratios avoid regressions above 5%.
-Pairing prevents host drift across the long run from mismatching unrelated raw
-medians.
+few-large wall/CPU/RSS/FD controls have at least three of five exact paired
+candidate values within 5% of baseline. Pairing prevents host drift across the
+long run from mismatching unrelated raw medians.
 
 The retained v1 JSON records the original pre-review run: five of five target
 pairs improved, many-small four-thread wall fell 13.8%, and queue residence

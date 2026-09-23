@@ -65,6 +65,132 @@ StageResult runCompiledStage(StageDocument[] inputs,
     return result;
 }
 
+version (MaterializationWorkProbe) {
+    import pipeline : OutputStorageRelation, classifyOutputStorage;
+
+    struct ExecutorBoundaryWorkV1 {
+        ulong calls;
+        ulong inputBytes;
+        ulong outputBytes;
+        ulong logicalCopiedBytes;
+        ulong gcAllocatedBytes;
+        ulong aliasedOutputCalls;
+        ulong overlappingOutputCalls;
+        ulong distinctOutputCalls;
+        ulong aliasedOutputBytes;
+        ulong overlappingOutputBytes;
+        ulong distinctOutputBytes;
+    }
+
+    private void recordOutputRelation(ref ExecutorBoundaryWorkV1 work,
+            string input, string output) pure {
+        final switch (classifyOutputStorage(input, output)) {
+        case OutputStorageRelation.borrowed:
+            ++work.aliasedOutputCalls;
+            work.aliasedOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.overlaps:
+            ++work.overlappingOutputCalls;
+            work.overlappingOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.distinct:
+            ++work.distinctOutputCalls;
+            work.distinctOutputBytes += output.length;
+            break;
+        }
+    }
+
+    struct ExecutorMaterializationWorkV1 {
+        ExecutorBoundaryWorkV1 contentToUtf8;
+        ExecutorBoundaryWorkV1 filterExecution;
+        ExecutorBoundaryWorkV1 filterResultToOwnedPiece;
+        ulong emittedFilterApplications;
+        ulong terminalFilterSkips;
+    }
+
+    private string materializeUtf8Measured(Content input,
+            ref ExecutorMaterializationWorkV1 work) {
+        import core.memory : GC;
+
+        auto inputBytes = input.size;
+        auto before = GC.allocatedInCurrentThread;
+        auto result = materializeUtf8(input);
+        auto after = GC.allocatedInCurrentThread;
+        enforce(after >= before, "executor GC counter moved backwards");
+        ++work.contentToUtf8.calls;
+        work.contentToUtf8.inputBytes += inputBytes;
+        work.contentToUtf8.outputBytes += result.length;
+        work.contentToUtf8.logicalCopiedBytes += result.length;
+        work.contentToUtf8.gcAllocatedBytes += after - before;
+        return result;
+    }
+
+    private Content applyFiltersMeasured(Content input,
+            const ref CompiledStage stage,
+            ref ExecutorMaterializationWorkV1 work) {
+        import core.memory : GC;
+
+        enforce(input !is null, "stage content is required");
+        if (stage.filterNames.length == 0) return input;
+        auto text = materializeUtf8Measured(input, work);
+        auto beforeFilter = GC.allocatedInCurrentThread;
+        auto filtered = stage.runFilters(text);
+        auto afterFilter = GC.allocatedInCurrentThread;
+        enforce(afterFilter >= beforeFilter,
+            "executor GC counter moved backwards");
+        ++work.filterExecution.calls;
+        work.filterExecution.inputBytes += text.length;
+        work.filterExecution.outputBytes += filtered.length;
+        work.filterExecution.gcAllocatedBytes += afterFilter - beforeFilter;
+        recordOutputRelation(work.filterExecution, text, filtered);
+
+        auto beforeOwn = GC.allocatedInCurrentThread;
+        auto result = ownedText(filtered);
+        auto afterOwn = GC.allocatedInCurrentThread;
+        enforce(afterOwn >= beforeOwn, "executor GC counter moved backwards");
+        ++work.filterResultToOwnedPiece.calls;
+        work.filterResultToOwnedPiece.inputBytes += filtered.length;
+        work.filterResultToOwnedPiece.outputBytes += result.size;
+        work.filterResultToOwnedPiece.logicalCopiedBytes += filtered.length;
+        work.filterResultToOwnedPiece.gcAllocatedBytes += afterOwn - beforeOwn;
+        return result;
+    }
+
+    /// Exact execution twin with fixed-size caller-owned work evidence.
+    StageResult runCompiledStageMeasured(StageDocument[] inputs,
+            const ref CompiledStage stage,
+            ref ExecutorMaterializationWorkV1 work) {
+        auto placement = stage.filterPlacement;
+        auto names = stage.filterNames;
+        enforce(placement != FilterPlacement.none || names.length == 0,
+            "stage without filter placement has filters");
+
+        auto configured = stage.transform;
+        StageTransform transform = (StageDocument input) => configured(input);
+        if (placement == FilterPlacement.before && names.length) {
+            transform = (StageDocument input) {
+                input.content = applyFiltersMeasured(input.content, stage, work);
+                ++work.emittedFilterApplications;
+                return configured(input);
+            };
+        }
+
+        auto result = runStage(inputs, instanceDeclaration(stage), transform);
+        if (placement == FilterPlacement.after && names.length) {
+            foreach (ref event; result.events) {
+                if (event.kind == EventKind.emitted) {
+                    event.payload.content = applyFiltersMeasured(
+                        event.payload.content, stage, work);
+                    ++work.emittedFilterApplications;
+                } else {
+                    ++work.terminalFilterSkips;
+                }
+            }
+        }
+        return result;
+    }
+}
+
 version (unittest) {
     import domain.document : Document, OutputName;
     import stages.contract : StageDecision;

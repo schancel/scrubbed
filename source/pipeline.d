@@ -304,8 +304,134 @@ struct Pipeline {
         return text;
     }
 
+    version (MaterializationWorkProbe) {
+        /// Run the unchanged filter decisions with caller-owned boundary
+        /// accounting. Ordinary builds contain neither this entry point nor
+        /// the GC/counter branches.
+        string runMeasured(string text, ref PipelineMaterializationWorkV1 work) const {
+            import core.memory : GC;
+
+            size_t index;
+            while (index < stages.length) {
+                if (stages[index].streaming.push !is null) {
+                    StreamingFilter[maxFusedStages] fused;
+                    size_t fusedLength;
+                    while (index < stages.length &&
+                           stages[index].streaming.push !is null &&
+                           fusedLength < maxFusedStages) {
+                        fused[fusedLength++] = stages[index].streaming;
+                        ++index;
+                    }
+                    auto input = text;
+                    auto inputBytes = input.length;
+                    auto before = GC.allocatedInCurrentThread;
+                    text = fusedStreamingRange(text,
+                        fused[0 .. fusedLength]).to!string;
+                    auto after = GC.allocatedInCurrentThread;
+                    enforce(after >= before,
+                        "pipeline GC counter moved backwards");
+                    auto boundary = &work.fusedScalar;
+                    ++boundary.calls;
+                    boundary.inputBytes += inputBytes;
+                    boundary.outputBytes += text.length;
+                    boundary.logicalMaterializedBytes += text.length;
+                    boundary.gcAllocatedBytes += after - before;
+                    recordOutputRelation(*boundary, input, text);
+                    continue;
+                }
+                auto stage = stages[index++];
+                auto input = text;
+                auto before = GC.allocatedInCurrentThread;
+                text = stage.configured.isValid
+                    ? stage.configured(text) : stage.plain(text);
+                auto after = GC.allocatedInCurrentThread;
+                enforce(after >= before,
+                    "pipeline GC counter moved backwards");
+                auto boundary = &work.wholeTextFilter;
+                ++boundary.calls;
+                boundary.inputBytes += input.length;
+                boundary.outputBytes += text.length;
+                boundary.gcAllocatedBytes += after - before;
+                recordOutputRelation(*boundary, input, text);
+            }
+            return text;
+        }
+    }
+
     const(string)[] names() const {
         return stageNames;
+    }
+}
+
+version (MaterializationWorkProbe) {
+    enum OutputStorageRelation : ubyte { borrowed, overlaps, distinct }
+
+    /// Classify byte-storage relationships without ordering unrelated
+    /// pointers. Integer intervals also make partial overlap explicit. An
+    /// empty output borrows when its pointer is anywhere from the input start
+    /// through its one-past-the-end address; two identical empty slices borrow.
+    OutputStorageRelation classifyOutputStorage(string input,
+            string output) pure {
+        auto inputStart = cast(size_t)input.ptr;
+        auto outputStart = cast(size_t)output.ptr;
+        if (input.length == 0)
+            return output.length == 0 && outputStart == inputStart
+                ? OutputStorageRelation.borrowed
+                : OutputStorageRelation.distinct;
+        if (input.length > size_t.max - inputStart)
+            return OutputStorageRelation.distinct;
+        auto inputEnd = inputStart + input.length;
+        if (output.length == 0)
+            return outputStart >= inputStart && outputStart <= inputEnd
+                ? OutputStorageRelation.borrowed
+                : OutputStorageRelation.distinct;
+        if (output.length > size_t.max - outputStart)
+            return outputStart >= inputStart && outputStart < inputEnd
+                ? OutputStorageRelation.overlaps
+                : OutputStorageRelation.distinct;
+        auto outputEnd = outputStart + output.length;
+        if (outputStart >= inputStart && outputEnd <= inputEnd)
+            return OutputStorageRelation.borrowed;
+        if (outputStart < inputEnd && inputStart < outputEnd)
+            return OutputStorageRelation.overlaps;
+        return OutputStorageRelation.distinct;
+    }
+
+    struct PipelineBoundaryWorkV1 {
+        ulong calls;
+        ulong inputBytes;
+        ulong outputBytes;
+        ulong logicalMaterializedBytes;
+        ulong gcAllocatedBytes;
+        ulong aliasedOutputCalls;
+        ulong overlappingOutputCalls;
+        ulong distinctOutputCalls;
+        ulong aliasedOutputBytes;
+        ulong overlappingOutputBytes;
+        ulong distinctOutputBytes;
+    }
+
+    struct PipelineMaterializationWorkV1 {
+        PipelineBoundaryWorkV1 fusedScalar;
+        PipelineBoundaryWorkV1 wholeTextFilter;
+    }
+
+    private void recordOutputRelation(ref PipelineBoundaryWorkV1 work,
+            string input, string output) pure {
+        final switch (classifyOutputStorage(input, output)) {
+        case OutputStorageRelation.borrowed:
+            ++work.aliasedOutputCalls;
+            work.aliasedOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.overlaps:
+            ++work.overlappingOutputCalls;
+            work.overlappingOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.distinct:
+            ++work.distinctOutputCalls;
+            work.distinctOutputBytes += output.length;
+            break;
+        }
     }
 }
 

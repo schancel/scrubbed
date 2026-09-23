@@ -137,6 +137,52 @@ unavailable attribution; none authorizes a production edit in this slice.
 Current-revision diagnostic times are never merged with or directly compared
 to the historical canonical timing samples.
 
+## Materialization-boundary work evidence
+
+`materialization_work.d` is the evidence-only first landing for #183. Its
+fixed-size counters are caller-owned and exist only in a
+`MaterializationWorkProbe` build; the ordinary executable contains neither the
+probe APIs nor counter/GC branches. The JSON identifies the executable and
+embeds and hashes each instrumented source plus its harness; execution refuses
+a checkout that differs from those compiled-in texts. It also embeds and
+hashes the frozen #59 canonical profile and attribution inputs without editing
+or reinterpreting them. It deliberately reports
+that no representation change is authorized: there is no boundary-removal
+candidate or five-pair full-process threshold comparison in this landing.
+
+```sh
+ldc2 -i -O3 -release -d-version=MaterializationWorkProbe -Isource -J. \
+  benchmarks/materialization_work.d -of=/tmp/scrubbed-materialization-work
+/tmp/scrubbed-materialization-work --self-test
+/tmp/scrubbed-materialization-work
+```
+
+The self-test compares ordinary and measured execution, checks strict invalid
+UTF-8 exceptions, independent concurrent counters, split identity/order,
+terminal reject/quarantine filter skipping, post-owner-close retained output, exact atomic
+sink bytes and failure non-publication, identical/prefix/suffix/interior/empty
+borrowed and distinct filter outputs in both measured paths, three accounting
+mutants, and a 4 MiB allocation-heavy positive control. GC numbers are D
+runtime current-thread allocation evidence, not total process or native
+allocation.
+
+| Boundary | Current ownership/lifetime rule | Payload work and status |
+|---|---|---|
+| mapped view -> borrowed `ContentPiece` | Descriptor retains a checked `DocumentViewOwner`; even an empty borrow fails after close. | No payload copy; mandatory zero-copy admission seam. |
+| `Content` descriptor snapshot/edit/split | Descriptor arrays may be copied, but every borrow still requires its live owner; split children may share immutable input. | No payload copy. Sharing is mandatory for current split/lineage semantics. |
+| `Content` -> UTF-8 string | `composition.executor` appends pieces into a growing GC-owned byte array, validates it, and exposes the resulting owning string before the public filter ABI. | One logical payload copy; mandatory while filters accept `string`; allocation can exceed final payload bytes while the array grows. |
+| fused scalar run | Up to 16 consecutive caller-owned transducers borrow the input string and materialize one owning result. | One result materialization per fused run; longer runs intentionally form another bounded barrier. |
+| whole-text filter | The pure public filter may return the identical input, a borrowed prefix/suffix/interior/empty subslice, a partially overlapping slice, or distinct GC-owned storage. The probe uses integer byte intervals rather than ordering unrelated pointers and records borrowed/overlap/distinct calls and bytes without retaining mutable state. | Borrowed subslices are not materializations; partial overlaps are never reported as distinct. Distinct algorithm-owned work is not removable by orchestration evidence alone. |
+| filter result -> owned `ContentPiece` | `ContentPiece.own` duplicates the result so no caller/appender/scratch slice escapes and output survives source-owner close. | A second logical payload copy and the leading future candidate, but not authorized here. |
+| final-event split/map descriptors | Events retain `Content` references synchronously; after-filters independently own each emitted result. | Unfiltered sharing is payload-copy-free; filtered siblings currently repeat the explicit barriers. |
+| atomic piece sink | A 64 KiB caller-local buffer is consumed synchronously, fsynced, and renamed; no chunk escapes and no full-output join occurs. | One logical stream copy into bounded syscall storage; required by the current atomic sink. |
+
+The frozen #59 scalar/mixed many-small and few-large reports remain the
+full-process timing/RSS/D-GC baseline and are not edited or reinterpreted here.
+Any later single-boundary candidate must run the accepted interleaved five-pair
+gate against those exact hashes and meet the #183 improvement/regression
+thresholds before production authorization.
+
 ## Fused scalar-filter microbenchmark
 
 `fused_filters.d` compares the former separately materialized

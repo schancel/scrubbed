@@ -31,6 +31,14 @@ int main(string[] args) {
                     report["binary_sha256"].str ||
                 !digest(report["binary_sha256"].str, 64) ||
                 !digest(report["harness_sha256"].str, 64) ||
+                report["harness_executable_name"].str !=
+                    "scrubbed-pipeline-profile-check" ||
+                report["preflight"]["derived_fixture_footprint_bytes"].integer !=
+                    134_217_728L * 12 ||
+                report["preflight"]["required_scratch_bytes"].integer !=
+                    134_217_728L * 48 ||
+                report["preflight"]["scratch_free_bytes"].integer <
+                    134_217_728L * 48 ||
                 report["selector_freeze"]["selectors"].array.length != 5 ||
                 report["layouts"].array.length != 2)
                 throw new Exception("not a complete canonical CLI profile");
@@ -55,8 +63,10 @@ int main(string[] args) {
                                 "sampled lower bound; not exact peak")
                             throw new Exception("invalid canonical sample");
                 }
-                foreach (route; layout["durable"].array)
-                    if (route["pairs"].array.length != 3)
+                foreach (routeIndex, route; layout["durable"].array)
+                    if (route["kind"].str !=
+                            (routeIndex == 0 ? "manifest-v2" : "journal-v3") ||
+                        route["pairs"].array.length != 3)
                         throw new Exception("incomplete durable profile pairs");
                 writeln(expectedName, ": input=", layout["input_bytes"].integer,
                     " ordinary-cases=4 x 5 durable-routes=2 x 3 pairs");

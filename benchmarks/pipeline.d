@@ -1946,7 +1946,7 @@ int main(string[] args) {
             auto built = buildAttestedExecutable(args[2], root);
             validateAttestation(built.attestation, built.snapshot.sha256);
             auto harness = snapshotExecutable(args[3], root,
-                "pipeline-profile-check");
+                "scrubbed-pipeline-profile-check");
             auto attestationPath = buildPath(root, "build-attestation.json");
             write(attestationPath, built.attestation.toString ~ "\n");
             auto result = execute([harness.path, "--run", built.snapshot.path,

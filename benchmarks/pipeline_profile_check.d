@@ -21,7 +21,7 @@ import std.json : JSONType, JSONValue, parseJSON;
 import std.path : baseName, buildPath, relativePath;
 import std.process : Config, execute, spawnProcess, wait;
 import std.stdio : File, writeln;
-import std.string : indexOf, lastIndexOf, split, splitLines, strip;
+import std.string : endsWith, indexOf, lastIndexOf, split, splitLines, startsWith, strip;
 import std.uuid : randomUUID;
 
 version (OSX) {
@@ -36,16 +36,32 @@ private enum schema = "scrubbed-cli-profile-v1";
 private enum recordBytes = 256L;
 private enum recordCount = 524_288L;
 private enum corpusBytes = recordBytes * recordCount;
+private enum scalarCorpusBytes = 134_086_656L;
+private enum mixedCorpusBytes = 132_579_328L;
 private enum minimumScratch = 2L * 1024 * 1024 * 1024;
 private enum minimumRam = 2L * 1024 * 1024 * 1024;
 private enum minimumBudget = 1_800L;
 private enum fdPollMilliseconds = 10L;
 private enum procPidListFds = 1;
 private enum rusageInfoV4 = 4;
+private enum harnessExecutableName = "scrubbed-pipeline-profile-check";
+private enum unavailableToolVersion = "UNAVAILABLE";
 private enum fixtureTablePin = "34B08DAEE0547466C0EEF809A0A1BEDBDC4FEE26BEABE23F4478BBDAFFF0727E";
 private enum legacyConfigPin = "0F02941A34B68AC9CD86760C8B6F66F8EF9A4F08D16A02ABBE194EB719B7A0F4";
 private enum scalarConfigPin = "C985D95C6C2B8B13C2354BEDE8649D1557A13C4E211E647F804787E002C10ED1";
 private enum mixedConfigPin = "FC1829939C5EC9347EFBD576978F3EBE017F069C525157FDCC626E8842EBD7FB";
+private enum inputConcatPin = "4538A0B393E57FA6EBEE19A7C40FC50E1F6D00FFAE80C8B2424645B8C8938B3C";
+private enum scalarConcatPin = "078DEB0171237F42A344DBA9BBCA6124647F514EED7BD5D7AD6D2C68418826B7";
+private enum mixedConcatPin = "870D401642B372263AED96C938DE8B2E1E1A466DDCEFA193085889435665A069";
+private immutable string[string] inputTreePins = [
+    "many-small": "5B5D9E66435A5BC705152EB88C551046BE0AA37B51F4FA42A038683AAFB51167",
+    "few-large": "A69113BEE8E66CE349C620BD122821F4D0719ABC2263A143E8AA0264CF030548"];
+private immutable string[string] scalarTreePins = [
+    "many-small": "69CDDA2CC549BC8D25A47536A98C45AAA74211EC563DEC0B8E0943C1A1E43BF5",
+    "few-large": "6013483B2883A00408833C17E0B5517213062D3DAA2AED3B1B4470D67CCD9FC0"];
+private immutable string[string] mixedTreePins = [
+    "many-small": "3ED0A176AA89B8B9428FD3F937042EE45781C6FF3546069BB7CF92A4FA6D9529",
+    "few-large": "9AAC92A1892B67FCADCAD16E98917446B8077ABB0F8B6826810E5767EACB6DDC"];
 
 private void need(bool okay, string message) {
     if (!okay) throw new Exception(message);
@@ -72,6 +88,28 @@ private bool digest(string value) {
         if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') ||
               (c >= 'a' && c <= 'f'))) return false;
     return true;
+}
+
+private bool digestLength(string value, size_t length) {
+    if (value.length != length) return false;
+    foreach (c; value)
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') ||
+              (c >= 'a' && c <= 'f'))) return false;
+    return true;
+}
+
+private string attestedBuildCommand() {
+    return "git archive <source-sha> -> <private-source>; " ~
+        "private read-only dub describe/build --root=<private-source> " ~
+        "--build=release --compiler=<private-read-only-ldc2> " ~
+        "--force --non-interactive --cache=local with private DUB_HOME";
+}
+
+private string nativeEnvironmentTemplate() {
+    return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
+        "CC=<attested-selected-clang>; AR=<attested-ar>; " ~
+        "RANLIB=<attested-ranlib>; COMPILER_PATH=<private-pinned-tools>; " ~
+        "SDKROOT=<xcrun-selected-sdk>";
 }
 
 private string scratch() {
@@ -249,6 +287,29 @@ private struct RusageV4 {
     ulong diskRead, diskWrite;
     ulong[9] qosAndBilling;
     ulong logicalWrites, lifetimeMaxFootprint, instructions, cycles;
+    ulong billedEnergy, servicedEnergy, intervalMaxPhysFootprint, runnableTime;
+}
+
+static assert(RusageV4.sizeof == 296,
+    "Darwin rusage_info_v4 ABI must include fields through ri_runnable_time");
+static assert(RusageV4.diskRead.offsetof == 144 &&
+    RusageV4.diskWrite.offsetof == 152,
+    "Darwin rusage_info_v4 disk counters moved");
+
+private void validateLiveRusageLayout() {
+    struct GuardedRusage {
+        ulong before = 0x13579BDF2468ACE0UL;
+        RusageV4 value;
+        ulong after = 0x0ECA8642FDB97531UL;
+    }
+    GuardedRusage guarded;
+    import core.sys.posix.unistd : getpid;
+    auto status = proc_pid_rusage(getpid(), rusageInfoV4, &guarded.value);
+    need(status == 0 &&
+        guarded.before == 0x13579BDF2468ACE0UL &&
+        guarded.after == 0x0ECA8642FDB97531UL &&
+        guarded.value.startAbs != 0 && guarded.value.residentSize != 0,
+        "live Darwin rusage_info_v4 ABI canary/layout control failed");
 }
 
 private double seconds(ref const typeof(rusage.init.ru_utime) value) {
@@ -352,7 +413,10 @@ private string explainIdentity(string log) {
         if (marker < 0) continue;
         auto rest = line[marker + 7 .. $];
         auto end = rest.indexOf('\t');
-        auto value = end < 0 ? rest : rest[0 .. end];
+        auto encoded = end < 0 ? rest : rest[0 .. end];
+        need(parseJSON(encoded).type == JSONType.string,
+            "canonical identity is not a JSON string");
+        auto value = parseJSON(encoded).str;
         if (!identity.length) identity = value;
         need(identity == value, "selector emitted mixed canonical identities");
     }
@@ -362,7 +426,8 @@ private string explainIdentity(string log) {
 
 private JSONValue runOnce(string binary, string binaryHash, string input,
         string output, string selector, string config, bool mixed,
-        string root, bool explain = false, string[] durable = []) {
+        string root, bool explain = false, string[] durable = [],
+        size_t statusFiles = 0, string expectedStatus = "") {
     if (exists(output)) rmdirRecurse(output);
     auto log = buildPath(root, "run-" ~ randomUUID.toString ~ ".log");
     auto command = [binary, "--input", input, "--output", output] ~
@@ -371,9 +436,51 @@ private JSONValue runOnce(string binary, string binaryHash, string input,
     if (explain) command ~= "--explain";
     auto result = measured(command, log, binaryHash);
     result["log_sha256"] = hashFile(log);
-    result["canonical_identity"] = explain ? explainIdentity(readText(log)) : "NOT_EXPOSED";
+    auto logText = readText(log);
+    result["canonical_identity"] = explain ? explainIdentity(logText) : "NOT_EXPOSED";
+    if (statusFiles) result["explain_statuses"] =
+        explainStatuses(logText, statusFiles, expectedStatus);
     remove(log);
     return result;
+}
+
+private JSONValue explainStatuses(string output, size_t files,
+        string expectedStatus) {
+    string[string] byFile;
+    foreach (line; output.splitLines) {
+        if (!line.startsWith("EXPLAIN\tinput=")) continue;
+        auto fields = line.split("\t");
+        need(fields.length >= 3, "malformed EXPLAIN record");
+        string filename;
+        foreach (i; 0 .. files) {
+            auto candidate = "doc-" ~ i.to!string ~ ".txt";
+            if (fields[1].endsWith(candidate ~ "\"")) {
+                need(filename.length == 0, "ambiguous EXPLAIN input");
+                filename = candidate;
+            }
+        }
+        need(filename.length && (filename in byFile) is null,
+            "unknown or duplicate EXPLAIN input");
+        string status;
+        foreach (field; fields) if (field.startsWith("status=")) {
+            need(status.length == 0, "duplicate EXPLAIN status");
+            status = field[7 .. $];
+        }
+        need(status == expectedStatus, "unexpected EXPLAIN status");
+        byFile[filename] = status;
+    }
+    need(byFile.length == files, "missing EXPLAIN input status");
+    SHA256 statusDigest;
+    foreach (i; 0 .. files) {
+        auto filename = "doc-" ~ i.to!string ~ ".txt";
+        need((filename in byFile) !is null, "missing keyed EXPLAIN input");
+        digestPart(statusDigest, filename);
+        digestPart(statusDigest, byFile[filename]);
+    }
+    return JSONValue(["file_count": JSONValue(cast(long)files),
+        "expected_status": JSONValue(expectedStatus),
+        "status_by_file_sha256": JSONValue(
+            toHexString(statusDigest.finish()).to!string)]);
 }
 
 private JSONValue selectorFreeze(string binary, string binaryHash, string input,
@@ -394,12 +501,19 @@ private JSONValue selectorFreeze(string binary, string binaryHash, string input,
             if (!identity.length) identity = current;
             need(current == identity, "selector canonical identity divergence");
         } else need(current == "NOT_EXPOSED", "legacy selector invented canonical identity");
+        auto actual = identifyTree(output);
+        auto semantics = exposesCanonicalIdentity ?
+            "CANONICAL_JOB_IDENTITY" : "NOT_EXPOSED";
         results ~= JSONValue(["selector": JSONValue(name),
-            "tree_sha256": JSONValue(identifyTree(output).treeHash),
+            "tree_sha256": JSONValue(actual.treeHash),
+            "concatenated_sha256": JSONValue(actual.concatenatedHash),
+            "identity_semantics": JSONValue(semantics),
             "canonical_identity": JSONValue(current)]);
         rmdirRecurse(output);
     }
     return JSONValue(["input_bytes": JSONValue(8L * 1024 * 1024),
+        "expected_tree_sha256": JSONValue(expected.treeHash),
+        "expected_concatenated_sha256": JSONValue(expected.concatenatedHash),
         "canonical_identity": JSONValue(identity), "selectors": JSONValue(results)]);
 }
 
@@ -474,7 +588,7 @@ private JSONValue durableCase(string binary, string binaryHash, string input,
         auto durable = journal ? ["--error-journal", database, "--explain"] :
             ["--manifest", database, "--explain"];
         auto first = runOnce(binary, binaryHash, input, output, "config", config,
-            true, root, false, durable);
+            true, root, false, durable, expected.files.array.length, "changed");
         need(first["exit_code"].integer == 0, "durable first publication failed");
         exactTree(output, expected);
         // Preserve destination/database for the verified skip.
@@ -484,6 +598,8 @@ private JSONValue durableCase(string binary, string binaryHash, string input,
         auto skip = measured(command, log, binaryHash);
         auto logText = readText(log);
         skip["log_sha256"] = hashFile(log);
+        skip["explain_statuses"] = explainStatuses(logText,
+            expected.files.array.length, "skipped");
         remove(log);
         need(skip["exit_code"].integer == 0 && logText.canFind("status=skipped"),
             "durable verified skip failed");
@@ -497,8 +613,8 @@ private JSONValue durableCase(string binary, string binaryHash, string input,
         skip["output_bytes"] = actual.bytes;
         first["output_tree_sha256"] = actual.treeHash;
         skip["output_tree_sha256"] = actual.treeHash;
-        first["phase"] = "first-publication";
-        skip["phase"] = "verified-skip";
+        first["phase"] = "first";
+        skip["phase"] = "skip";
         pairs ~= JSONValue(["pair_index": JSONValue(cast(long)pair),
             "first": first, "skip": skip]);
         rmdirRecurse(output);
@@ -515,6 +631,15 @@ private JSONValue unsupported(string reason) {
 
 private JSONValue sampleProbe(string binary, string input, string output,
         string config, string root, string layout, TreeIdentity expected) {
+    JSONValue unavailable(string reason) {
+        return JSONValue(["status": JSONValue("UNSUPPORTED"),
+            "reason": JSONValue(reason), "layout": JSONValue(layout),
+            "pid_binary_bound": JSONValue(false),
+            "sample_count": JSONValue(0L),
+            "tool": JSONValue("/usr/bin/sample"),
+            "duration_seconds": JSONValue(2L),
+            "interval_milliseconds": JSONValue(10L)]);
+    }
     if (exists(output)) rmdirRecurse(output);
     scope(exit) if (exists(output)) rmdirRecurse(output);
     auto childLog = File(buildPath(root, "sample-child-" ~ layout ~ ".log"), "wb");
@@ -533,10 +658,10 @@ private JSONValue sampleProbe(string binary, string input, string output,
     clock.stop();
     childLog.close();
     if (childStatus != 0 || !exists(output))
-        return unsupported("instrumented single-thread mixed child failed");
+        return unavailable("instrumented single-thread mixed child failed");
     exactTree(output, expected);
     if (sampled.status != 0 || !exists(rawPath))
-        return unsupported("/usr/bin/sample exact-PID control failed");
+        return unavailable("/usr/bin/sample exact-PID control failed");
     auto raw = readText(rawPath);
     auto pidMarker = "[" ~ pid.to!string ~ "]";
     auto bound = raw.canFind(pidMarker) &&
@@ -552,7 +677,7 @@ private JSONValue sampleProbe(string binary, string input, string output,
         }
     }
     if (!bound || count < 2)
-        return unsupported("/usr/bin/sample output lacked exact PID/binary binding or enough samples");
+        return unavailable("/usr/bin/sample output lacked exact PID/binary binding or enough samples");
     return JSONValue(["status": JSONValue("SUPPORTED"),
         "layout": JSONValue(layout), "pid_binary_bound": JSONValue(true),
         "sample_count": JSONValue(count), "raw_sha256": JSONValue(hashFile(rawPath)),
@@ -610,12 +735,79 @@ private JSONValue probes(string binary, string input, string output,
 }
 
 private void validateAttestation(JSONValue attestation, string binaryHash) {
-    need(attestation["schema"].str == "scrubbed-build-attestation-v4" &&
-        attestation["target_sha256"].str == binaryHash &&
-        digest(attestation["source_archive_sha256"].str) &&
-        digest(attestation["argparse_inputs_sha256"].str) &&
-        digest(attestation["native_prebuild_commands_sha256"].str),
-        "profile target is not bound to build-attestation-v4");
+    need(attestation["schema"].str == "scrubbed-build-attestation-v4",
+        "build attestation schema");
+    foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
+            "dub_recipe_sha256", "dependency_lock_sha256",
+            "compiler_executable_sha256", "dub_executable_sha256",
+            "argparse_recipe_sha256", "argparse_inputs_sha256",
+            "native_prebuild_commands_sha256", "target_sha256"])
+        need(digestLength(attestation[key].str,
+            key == "source_sha" || key == "source_tree_id" ? 40 : 64),
+            "invalid attestation digest " ~ key);
+    need(attestation["source_status"].str == "clean-before-and-after" &&
+        attestation["source_materialization"].str ==
+            "hashed Git archive extracted into private scratch" &&
+        attestation["compiler_executable_name"].str == "ldc2" &&
+        attestation["compiler_version"].str.length &&
+        !attestation["compiler_version"].str.canFind('/') &&
+        !attestation["compiler_version"].str.canFind('\\') &&
+        attestation["dub_version"].str.startsWith("DUB version 1.42.0,") &&
+        !attestation["dub_version"].str.canFind('/') &&
+        attestation["primary_tool_policy"].str ==
+            "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
+        attestation["dependency_cache_policy"].str ==
+            "private DUB_HOME and --cache=local under private source" &&
+        attestation["argparse_name"].str == "argparse" &&
+        attestation["argparse_version"].str == "2.0.2" &&
+        attestation["argparse_input_files"].integer > 1 &&
+        attestation["native_prebuild_command_count"].integer == 5 &&
+        attestation["native_environment_template"].str == nativeEnvironmentTemplate() &&
+        attestation["sdk_version"].str.length &&
+        attestation["sdk_build_version"].str.length &&
+        !attestation["sdk_version"].str.canFind('/') &&
+        !attestation["sdk_build_version"].str.canFind('/') &&
+        attestation["native_tool_policy"].str ==
+            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified" &&
+        attestation["linker_selection"].str ==
+            "COMPILER_PATH private ld selected by attested compiler -### trace" &&
+        attestation["target_relative_path"].str == "scrubbed" &&
+        attestation["target_discovery"].str ==
+            "DUB 1.42.0 describe root targetPath plus targetFileName" &&
+        attestation["build_command_template"].str == attestedBuildCommand() &&
+        attestation["build_flags"].str ==
+            "release; force; non-interactive; cache=local" &&
+        attestation["build_status"].integer == 0 &&
+        attestation["target_sha256"].str == binaryHash,
+        "inconsistent build attestation");
+    auto names = ["cc-driver", "cc-compiler", "ar-driver", "ar-writer",
+        "ranlib-driver", "ranlib-writer", "linker", "cmake", "make"];
+    auto roles = ["ambient cc command selector",
+        "selected C compiler for SQLite, Lexbor, and zstd",
+        "ambient ar command selector", "selected static archive writer",
+        "ambient ranlib command selector", "selected static archive index writer",
+        "selected final executable linker", "Lexbor build generator",
+        "Lexbor and zstd build executor"];
+    need(attestation["native_tools"].array.length == names.length,
+        "native build tool closure is incomplete");
+    foreach (index, tool; attestation["native_tools"].array)
+        need(tool["name"].str == names[index] && tool["role"].str == roles[index] &&
+            digest(tool["sha256"].str) && tool["version"].str.length &&
+            (index == 0 || index == 2 || index == 3 || index == 4 ?
+                tool["version"].str == unavailableToolVersion :
+                tool["version"].str != unavailableToolVersion) &&
+            !tool["version"].str.canFind('/') && !tool["version"].str.canFind('\\'),
+            "invalid native build tool attestation");
+    auto archive = attestation["archive_suite_evidence"];
+    need(archive["schema"].str == "scrubbed-archive-suite-evidence-v1" &&
+        archive["evidence_tool_name"].str == "ranlib-writer" &&
+        archive["evidence_tool_sha256"].str ==
+            attestation["native_tools"][5]["sha256"].str &&
+        archive["evidence_arguments"].array.length == 1 &&
+        archive["evidence_arguments"][0].str == "-V" &&
+        archive["version"].str == attestation["native_tools"][5]["version"].str &&
+        archive["version"].str != unavailableToolVersion,
+        "archive suite evidence is not bound to exact evidence tool");
 }
 
 private JSONValue runProfile(string binary, JSONValue attestation,
@@ -667,9 +859,11 @@ private JSONValue runProfile(string binary, JSONValue attestation,
             "input_concatenated_sha256": JSONValue(inputIdentity.concatenatedHash),
             "input_files": inputIdentity.files,
             "scalar_expected_tree_sha256": JSONValue(scalarExpected.treeHash),
+            "scalar_expected_bytes": JSONValue(scalarExpected.bytes),
             "scalar_expected_concatenated_sha256": JSONValue(scalarExpected.concatenatedHash),
             "scalar_expected_files": scalarExpected.files,
             "mixed_expected_tree_sha256": JSONValue(mixedExpected.treeHash),
+            "mixed_expected_bytes": JSONValue(mixedExpected.bytes),
             "mixed_expected_concatenated_sha256": JSONValue(mixedExpected.concatenatedHash),
             "mixed_expected_files": mixedExpected.files,
             "ordinary": ordinary, "durable": durable]);
@@ -713,6 +907,7 @@ private JSONValue runProfile(string binary, JSONValue attestation,
         "source_binary_mapping": JSONValue("ATTESTED"),
         "binary_sha256": JSONValue(binaryHash),
         "harness_sha256": JSONValue(harnessHash),
+        "harness_executable_name": JSONValue(harnessExecutableName),
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "fixture_record_bytes": JSONValue(recordBytes),
         "fixture_record_count": JSONValue(recordCount),
@@ -737,12 +932,14 @@ private void noLeak(string serialized) {
         need(!serialized.canFind(token), "publication report leaks host/path identity");
 }
 
-private void validateFileSet(JSONValue files, size_t count) {
+private TreeIdentity validateFileSet(JSONValue files, size_t count) {
     need(files.array.length == count, "file set size differs");
     bool[string] expected;
     foreach (index; 0 .. count)
         expected["doc-" ~ index.to!string ~ ".txt"] = true;
     bool[string] seen;
+    long bytes;
+    SHA256 tree;
     foreach (item; files.array) {
         auto path = item["path"].str;
         need((path in expected) !is null && (path in seen) is null &&
@@ -750,6 +947,31 @@ private void validateFileSet(JSONValue files, size_t count) {
             "file set path/hash differs");
         seen[path] = true;
     }
+    string[] names;
+    foreach (index; 0 .. count) names ~= "doc-" ~ index.to!string ~ ".txt";
+    names.sort();
+    foreach (path; names) {
+        JSONValue item;
+        foreach (candidate; files.array)
+            if (candidate["path"].str == path) { item = candidate; break; }
+        bytes += item["bytes"].integer;
+        digestPart(tree, path);
+        digestPart(tree, item["bytes"].integer.to!string);
+        digestPart(tree, item["sha256"].str);
+    }
+    TreeIdentity result;
+    result.bytes = bytes;
+    result.treeHash = toHexString(tree.finish()).to!string;
+    return result;
+}
+
+private string expectedStatusDigest(size_t files, string status) {
+    SHA256 value;
+    foreach (i; 0 .. files) {
+        digestPart(value, "doc-" ~ i.to!string ~ ".txt");
+        digestPart(value, status);
+    }
+    return toHexString(value.finish()).to!string;
 }
 
 private void validateReport(JSONValue report, string expectedHarness = "",
@@ -759,6 +981,7 @@ private void validateReport(JSONValue report, string expectedHarness = "",
         digest(report["binary_sha256"].str) && digest(report["harness_sha256"].str) &&
         digest(report["fixture_table_sha256"].str) &&
         report["fixture_table_sha256"].str == fixtureTablePin &&
+        report["harness_executable_name"].str == harnessExecutableName &&
         report["fixture_record_bytes"].integer == recordBytes &&
         report["fixture_record_count"].integer == recordCount,
         "not a complete canonical CLI profile report");
@@ -772,20 +995,39 @@ private void validateReport(JSONValue report, string expectedHarness = "",
         report["config_sha256"]["mixed_v3_sha256"].str == mixedConfigPin,
         "missing or drifted config hash");
     auto capacity = report["preflight"];
+    auto derived = checkedMultiply(corpusBytes, 12, "report derived footprint");
+    auto required = checkedMultiply(derived, 4, "report scratch headroom");
     need(capacity["checked_before_fixture_creation"].boolean &&
         capacity["physical_ram_bytes"].integer >= minimumRam &&
         capacity["scratch_free_bytes"].integer >= minimumScratch &&
+        capacity["scratch_free_bytes"].integer >= required &&
         capacity["declared_budget_seconds"].integer >= minimumBudget &&
-        capacity["required_scratch_bytes"].integer ==
-            checkedMultiply(capacity["derived_fixture_footprint_bytes"].integer, 4,
-                "report headroom"), "unsafe or incomplete preflight");
+        capacity["derived_fixture_footprint_bytes"].integer == derived &&
+        capacity["required_scratch_bytes"].integer == required,
+        "unsafe or incomplete preflight");
     need(report["selector_freeze"]["selectors"].array.length == 5,
         "incomplete selector freeze");
     auto canonical = report["selector_freeze"]["canonical_identity"].str;
-    foreach (selector; report["selector_freeze"]["selectors"].array)
-        need(selector["canonical_identity"].str == canonical ||
-            selector["canonical_identity"].str == "NOT_EXPOSED",
-            "selector identity divergence");
+    need(canonical.startsWith("job:v3:") && canonical.length == 71 &&
+        digestLength(canonical[7 .. $], 64) &&
+        report["selector_freeze"]["input_bytes"].integer == 8L * 1024 * 1024 &&
+        digest(report["selector_freeze"]["expected_tree_sha256"].str) &&
+        digest(report["selector_freeze"]["expected_concatenated_sha256"].str),
+        "invalid selector-freeze identity or input");
+    auto selectorNames = ["default", "filters", "v1-json", "v3-json", "tokens"];
+    foreach (index, selector; report["selector_freeze"]["selectors"].array) {
+        auto exposed = index >= 3;
+        need(selector["selector"].str == selectorNames[index] &&
+            selector["tree_sha256"].str ==
+                report["selector_freeze"]["expected_tree_sha256"].str &&
+            selector["concatenated_sha256"].str ==
+                report["selector_freeze"]["expected_concatenated_sha256"].str &&
+            selector["identity_semantics"].str ==
+                (exposed ? "CANONICAL_JOB_IDENTITY" : "NOT_EXPOSED") &&
+            selector["canonical_identity"].str ==
+                (exposed ? canonical : "NOT_EXPOSED"),
+            "selector set/order/output/identity semantics differ");
+    }
     need(report["layouts"].array.length == 2 &&
         report["layouts"][0]["name"].str == "many-small" &&
         report["layouts"][1]["name"].str == "few-large" &&
@@ -798,13 +1040,22 @@ private void validateReport(JSONValue report, string expectedHarness = "",
         "missing, swapped, or unequal layouts");
     foreach (layout; report["layouts"].array) {
         auto fileCount = layout["name"].str == "many-small" ? 4096 : 8;
-        validateFileSet(layout["input_files"], fileCount);
-        validateFileSet(layout["scalar_expected_files"], fileCount);
-        validateFileSet(layout["mixed_expected_files"], fileCount);
+        auto inputSet = validateFileSet(layout["input_files"], fileCount);
+        auto scalarSet = validateFileSet(layout["scalar_expected_files"], fileCount);
+        auto mixedSet = validateFileSet(layout["mixed_expected_files"], fileCount);
+        auto layoutName = layout["name"].str;
         need(layout["input_bytes"].integer == corpusBytes &&
-            digest(layout["input_concatenated_sha256"].str) &&
-            digest(layout["scalar_expected_concatenated_sha256"].str) &&
-            digest(layout["mixed_expected_concatenated_sha256"].str) &&
+            inputSet.bytes == corpusBytes && inputSet.treeHash == inputTreePins[layoutName] &&
+            layout["input_tree_sha256"].str == inputTreePins[layoutName] &&
+            layout["input_concatenated_sha256"].str == inputConcatPin &&
+            scalarSet.bytes == layout["scalar_expected_bytes"].integer &&
+            scalarSet.treeHash == scalarTreePins[layoutName] &&
+            layout["scalar_expected_tree_sha256"].str == scalarTreePins[layoutName] &&
+            layout["scalar_expected_concatenated_sha256"].str == scalarConcatPin &&
+            mixedSet.bytes == layout["mixed_expected_bytes"].integer &&
+            mixedSet.treeHash == mixedTreePins[layoutName] &&
+            layout["mixed_expected_tree_sha256"].str == mixedTreePins[layoutName] &&
+            layout["mixed_expected_concatenated_sha256"].str == mixedConcatPin &&
             layout["input_files"].array.length == fileCount &&
             layout["scalar_expected_files"].array.length ==
                 layout["input_files"].array.length &&
@@ -812,17 +1063,30 @@ private void validateReport(JSONValue report, string expectedHarness = "",
                 layout["input_files"].array.length &&
             layout["ordinary"].array.length == 4 &&
             layout["durable"].array.length == 2,
-            "incomplete layout profile matrix");
-        foreach (item; layout["ordinary"].array) {
+            "incomplete layout profile matrix: " ~ layoutName ~ " input-tree=" ~
+                inputSet.treeHash ~ "/" ~ layout["input_tree_sha256"].str ~
+                " scalar-tree=" ~ scalarSet.treeHash ~ "/" ~ layout["scalar_expected_tree_sha256"].str ~
+                " mixed-tree=" ~ mixedSet.treeHash ~ "/" ~ layout["mixed_expected_tree_sha256"].str ~ " input=" ~
+                layout["input_files"].array.length.to!string ~ " scalar=" ~
+                layout["scalar_expected_files"].array.length.to!string ~ " mixed=" ~
+                layout["mixed_expected_files"].array.length.to!string ~ " ordinary=" ~
+                layout["ordinary"].array.length.to!string ~ " durable=" ~
+                layout["durable"].array.length.to!string);
+        auto workloadOrder = ["scalar", "mixed", "scalar", "mixed"];
+        auto selectorOrder = ["config", "config", "tokens", "tokens"];
+        foreach (itemIndex, item; layout["ordinary"].array) {
             auto samples = item["result"]["samples"].array;
             auto expectedTree = item["workload"].str == "mixed" ?
                 layout["mixed_expected_tree_sha256"].str :
                 layout["scalar_expected_tree_sha256"].str;
-            need(samples.length == 5, "incomplete or duplicate ordinary samples");
+            need(item["workload"].str == workloadOrder[itemIndex] &&
+                item["selector"].str == selectorOrder[itemIndex] &&
+                samples.length == 5, "ordinary Cartesian matrix differs");
             bool[long] seen;
-            foreach (sample; samples) {
+            foreach (samplePosition, sample; samples) {
                 auto index = sample["sample_index"].integer;
-                need((index in seen) is null, "duplicate sample index");
+                need(index == samplePosition && (index in seen) is null,
+                    "ordinary sample indexes are not exactly 0..4");
                 seen[index] = true;
                 need(sample["exit_code"].integer == 0 && sample["signal"].integer == 0 &&
                     sample["exact_output"].boolean && sample["wall_seconds"].floating > 0 &&
@@ -837,16 +1101,31 @@ private void validateReport(JSONValue report, string expectedHarness = "",
                     "unsupported disk metric represented as zero/substitute");
             }
         }
-        foreach (route; layout["durable"].array) {
-            need(route["pairs"].array.length == 3, "incomplete durable pairs");
-            foreach (pair; route["pairs"].array)
-                foreach (phase; ["first", "skip"])
+        foreach (routeIndex, route; layout["durable"].array) {
+            need(route["kind"].str == (routeIndex == 0 ? "manifest-v2" : "journal-v3") &&
+                route["pairs"].array.length == 3, "durable route/cardinality differs");
+            foreach (pairIndex, pair; route["pairs"].array) {
+                need(pair["pair_index"].integer == pairIndex,
+                    "durable pair indexes are not exactly 0..2");
+                foreach (phase; ["first", "skip"]) {
+                    auto expectedStatus = phase == "first" ? "changed" : "skipped";
                     need(pair[phase]["exit_code"].integer == 0 &&
+                        pair[phase]["phase"].str == phase &&
                         pair[phase]["exact_output"].boolean &&
                         pair[phase]["output_tree_sha256"].str ==
                             layout["mixed_expected_tree_sha256"].str &&
-                        pair[phase]["target_binary_sha256"].str == report["binary_sha256"].str,
-                        "invalid durable sample");
+                        pair[phase]["target_binary_sha256"].str == report["binary_sha256"].str &&
+                        pair[phase]["explain_statuses"]["file_count"].integer == fileCount &&
+                        pair[phase]["explain_statuses"]["expected_status"].str == expectedStatus &&
+                        pair[phase]["explain_statuses"]["status_by_file_sha256"].str ==
+                            expectedStatusDigest(fileCount, expectedStatus),
+                        "invalid durable sample: " ~ layoutName ~ "/" ~
+                            route["kind"].str ~ "/" ~ phase ~ " tree=" ~
+                            pair[phase]["output_tree_sha256"].str ~ " phase=" ~
+                            pair[phase]["phase"].str ~ " count=" ~
+                            pair[phase]["explain_statuses"]["file_count"].integer.to!string);
+                }
+            }
         }
     }
     foreach (name; ["syscall_bytes", "total_process_allocations", "gc_allocations", "sample"]) {
@@ -876,6 +1155,43 @@ private void validateReport(JSONValue report, string expectedHarness = "",
                     "sample profile lacks PID/binary binding");
         }
     }
+    auto sampleProfile = report["profiles"]["sample"];
+    need(sampleProfile["runs"].array.length == layouts.length,
+        "sample aggregate lacks exactly the layout runs");
+    bool allSampleRunsSupported = true;
+    long aggregateCount;
+    SHA256 aggregateDigest;
+    foreach (index, run; sampleProfile["runs"].array) {
+        need(run["layout"].str == layouts[index].name &&
+            run["tool"].str == "/usr/bin/sample" &&
+            run["duration_seconds"].integer == 2 &&
+            run["interval_milliseconds"].integer == 10,
+            "sample run layout/tool/control differs");
+        if (run["status"].str == "SUPPORTED") {
+            need(run["pid_binary_bound"].boolean &&
+                run["sample_count"].integer >= 2 && digest(run["raw_sha256"].str),
+                "supported layout sample lacks binding/count/digest");
+            aggregateCount += run["sample_count"].integer;
+            digestPart(aggregateDigest, run["raw_sha256"].str);
+        } else {
+            need(run["status"].str == "UNSUPPORTED" &&
+                !run["pid_binary_bound"].boolean &&
+                run["sample_count"].integer == 0 && run["reason"].str.length,
+                "unsupported layout sample has substituted evidence");
+            allSampleRunsSupported = false;
+        }
+    }
+    if (allSampleRunsSupported)
+        need(sampleProfile["status"].str == "SUPPORTED" &&
+            sampleProfile["pid_binary_bound"].boolean &&
+            sampleProfile["sample_count"].integer == aggregateCount &&
+            sampleProfile["raw_sha256"].str ==
+                toHexString(aggregateDigest.finish()).to!string,
+            "sample aggregate does not derive from exact layout runs");
+    else need(sampleProfile["status"].str == "UNSUPPORTED" &&
+        sampleProfile["reason"].str ==
+            "one or more layout-specific /usr/bin/sample exact-PID controls failed",
+        "sample aggregate support status is not derived from layout runs");
     noLeak(report.toString);
 }
 
@@ -887,6 +1203,67 @@ private void mustReject(JSONValue good, void delegate(ref JSONValue) mutate,
     try validateReport(bad);
     catch (Exception) rejected = true;
     need(rejected, message);
+}
+
+private JSONValue syntheticAttestation(string hash) {
+    auto names = ["cc-driver", "cc-compiler", "ar-driver", "ar-writer",
+        "ranlib-driver", "ranlib-writer", "linker", "cmake", "make"];
+    auto roles = ["ambient cc command selector",
+        "selected C compiler for SQLite, Lexbor, and zstd",
+        "ambient ar command selector", "selected static archive writer",
+        "ambient ranlib command selector", "selected static archive index writer",
+        "selected final executable linker", "Lexbor build generator",
+        "Lexbor and zstd build executor"];
+    JSONValue[] tools;
+    foreach (i, name; names) tools ~= JSONValue(["name": JSONValue(name),
+        "role": JSONValue(roles[i]), "sha256": JSONValue(hash),
+        "version": JSONValue(i == 0 || i == 2 || i == 3 || i == 4 ?
+            unavailableToolVersion : "tool version")]);
+    return JSONValue(["schema": JSONValue("scrubbed-build-attestation-v4"),
+        "source_sha": JSONValue("A".replicate(40)),
+        "source_tree_id": JSONValue("A".replicate(40)),
+        "source_archive_sha256": JSONValue(hash), "dub_recipe_sha256": JSONValue(hash),
+        "dependency_lock_sha256": JSONValue(hash), "source_status": JSONValue("clean-before-and-after"),
+        "source_materialization": JSONValue("hashed Git archive extracted into private scratch"),
+        "compiler_executable_name": JSONValue("ldc2"), "compiler_executable_sha256": JSONValue(hash),
+        "compiler_version": JSONValue("LDC test"), "dub_executable_sha256": JSONValue(hash),
+        "dub_version": JSONValue("DUB version 1.42.0, test"),
+        "primary_tool_policy": JSONValue("private read-only LDC/DUB snapshots invoked and hash-verified after build"),
+        "dependency_cache_policy": JSONValue("private DUB_HOME and --cache=local under private source"),
+        "argparse_name": JSONValue("argparse"), "argparse_version": JSONValue("2.0.2"),
+        "argparse_recipe_sha256": JSONValue(hash), "argparse_inputs_sha256": JSONValue(hash),
+        "argparse_input_files": JSONValue(2L), "native_prebuild_commands_sha256": JSONValue(hash),
+        "native_prebuild_command_count": JSONValue(5L),
+        "native_environment_template": JSONValue(nativeEnvironmentTemplate()),
+        "native_tool_policy": JSONValue("exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified"),
+        "native_tools": JSONValue(tools),
+        "archive_suite_evidence": JSONValue(["schema": JSONValue("scrubbed-archive-suite-evidence-v1"),
+            "evidence_tool_name": JSONValue("ranlib-writer"), "evidence_tool_sha256": JSONValue(hash),
+            "evidence_arguments": JSONValue([JSONValue("-V")]), "version": JSONValue("tool version")]),
+        "linker_selection": JSONValue("COMPILER_PATH private ld selected by attested compiler -### trace"),
+        "sdk_version": JSONValue("test"), "sdk_build_version": JSONValue("test"),
+        "target_relative_path": JSONValue("scrubbed"),
+        "target_discovery": JSONValue("DUB 1.42.0 describe root targetPath plus targetFileName"),
+        "build_command_template": JSONValue(attestedBuildCommand()),
+        "build_flags": JSONValue("release; force; non-interactive; cache=local"),
+        "build_status": JSONValue(0L), "target_sha256": JSONValue(hash)]);
+}
+
+private JSONValue syntheticFiles(Layout layout, int kind) {
+    SHA256 fileDigest;
+    long fileBytes;
+    foreach (record; 0 .. layout.recordsPerFile) {
+        auto body = kind == 0 ? inputRecord(record) : outputRecord(record, kind == 2);
+        fileDigest.put(cast(const(ubyte)[])body);
+        fileBytes += body.length;
+    }
+    auto hash = toHexString(fileDigest.finish()).to!string;
+    JSONValue[] files;
+    foreach (i; 0 .. layout.files) files ~= JSONValue([
+        "path": JSONValue("doc-" ~ i.to!string ~ ".txt"),
+        "bytes": JSONValue(fileBytes),
+        "sha256": JSONValue(hash)]);
+    return JSONValue(files);
 }
 
 private JSONValue syntheticReport() {
@@ -904,60 +1281,112 @@ private JSONValue syntheticReport() {
     JSONValue[] samples;
     foreach (i; 0 .. 5) { auto copy = parseJSON(sample.toString); copy["sample_index"] = cast(long)i; samples ~= copy; }
     JSONValue[] ordinaryItems;
-    foreach (i; 0 .. 4) ordinaryItems ~= JSONValue([
-        "workload": JSONValue(i % 2 ? "mixed" : "scalar"),
-        "selector": JSONValue(i < 2 ? "config" : "tokens"),
-        "result": JSONValue(["samples": JSONValue(samples)])]);
+    foreach (i; 0 .. 4) {
+        auto itemSamples = parseJSON(JSONValue(samples).toString).array;
+        auto workload = ["scalar", "mixed", "scalar", "mixed"][i];
+        auto selector = ["config", "config", "tokens", "tokens"][i];
+        ordinaryItems ~= JSONValue(["workload": JSONValue(workload),
+            "selector": JSONValue(selector),
+            "result": JSONValue(["samples": JSONValue(itemSamples)])]);
+    }
     auto phase = JSONValue(["exit_code": JSONValue(0L), "exact_output": JSONValue(true),
         "target_binary_sha256": JSONValue(hash), "output_tree_sha256": JSONValue(hash)]);
     JSONValue[] pairs;
-    foreach (i; 0 .. 3) pairs ~= JSONValue(["first": phase, "skip": phase]);
-    auto route = JSONValue(["pairs": JSONValue(pairs)]);
-    JSONValue[] manyFiles;
-    foreach (i; 0 .. 4096) manyFiles ~= JSONValue([
-        "path": JSONValue("doc-" ~ i.to!string ~ ".txt"),
-        "bytes": JSONValue(1L), "sha256": JSONValue(hash)]);
+    foreach (i; 0 .. 3) {
+        auto first = parseJSON(phase.toString), skip = parseJSON(phase.toString);
+        first["phase"] = "first"; skip["phase"] = "skip";
+        first["explain_statuses"] = JSONValue(["file_count": JSONValue(4096L),
+            "expected_status": JSONValue("changed"),
+            "status_by_file_sha256": JSONValue(expectedStatusDigest(4096, "changed"))]);
+        skip["explain_statuses"] = JSONValue(["file_count": JSONValue(4096L),
+            "expected_status": JSONValue("skipped"),
+            "status_by_file_sha256": JSONValue(expectedStatusDigest(4096, "skipped"))]);
+        pairs ~= JSONValue(["pair_index": JSONValue(cast(long)i), "first": first, "skip": skip]);
+    }
+    auto manifest = JSONValue(["kind": JSONValue("manifest-v2"), "pairs": JSONValue(pairs)]);
+    auto journal = JSONValue(["kind": JSONValue("journal-v3"), "pairs": JSONValue(pairs)]);
+    auto manyFiles = syntheticFiles(layouts[0], 0);
+    auto manyScalar = syntheticFiles(layouts[0], 1);
+    auto manyMixed = syntheticFiles(layouts[0], 2);
     auto layout = JSONValue(["name": JSONValue("many-small"),
-        "input_bytes": JSONValue(corpusBytes), "input_concatenated_sha256": JSONValue(hash),
-        "input_files": JSONValue(manyFiles), "scalar_expected_files": JSONValue(manyFiles),
-        "mixed_expected_files": JSONValue(manyFiles),
-        "scalar_expected_tree_sha256": JSONValue(hash),
-        "scalar_expected_concatenated_sha256": JSONValue(hash),
-        "mixed_expected_tree_sha256": JSONValue(hash),
-        "mixed_expected_concatenated_sha256": JSONValue(hash),
-        "ordinary": JSONValue(ordinaryItems), "durable": JSONValue([route, route])]);
-    JSONValue[] fewFiles;
-    foreach (i; 0 .. 8) fewFiles ~= JSONValue([
-        "path": JSONValue("doc-" ~ i.to!string ~ ".txt"),
-        "bytes": JSONValue(1L), "sha256": JSONValue(hash)]);
+        "input_bytes": JSONValue(corpusBytes), "input_tree_sha256": JSONValue(inputTreePins["many-small"]),
+        "input_concatenated_sha256": JSONValue(inputConcatPin), "input_files": manyFiles,
+        "scalar_expected_bytes": JSONValue(scalarCorpusBytes), "scalar_expected_files": manyScalar,
+        "mixed_expected_bytes": JSONValue(mixedCorpusBytes), "mixed_expected_files": manyMixed,
+        "scalar_expected_tree_sha256": JSONValue(scalarTreePins["many-small"]),
+        "scalar_expected_concatenated_sha256": JSONValue(scalarConcatPin),
+        "mixed_expected_tree_sha256": JSONValue(mixedTreePins["many-small"]),
+        "mixed_expected_concatenated_sha256": JSONValue(mixedConcatPin),
+        "ordinary": JSONValue(ordinaryItems), "durable": JSONValue([manifest, journal])]);
+    foreach (ref item; layout["ordinary"].array)
+        foreach (ref row; item["result"]["samples"].array)
+            row["output_tree_sha256"] = item["workload"].str == "mixed" ?
+                mixedTreePins["many-small"] : scalarTreePins["many-small"];
+    foreach (ref route; layout["durable"].array)
+        foreach (ref pair; route["pairs"].array) {
+            pair["first"]["output_tree_sha256"] = mixedTreePins["many-small"];
+            pair["skip"]["output_tree_sha256"] = mixedTreePins["many-small"];
+        }
+    auto fewFiles = syntheticFiles(layouts[1], 0);
+    auto fewScalar = syntheticFiles(layouts[1], 1);
+    auto fewMixed = syntheticFiles(layouts[1], 2);
     auto layout2 = parseJSON(layout.toString); layout2["name"] = "few-large";
-    layout2["input_files"] = JSONValue(fewFiles);
-    layout2["scalar_expected_files"] = JSONValue(fewFiles);
-    layout2["mixed_expected_files"] = JSONValue(fewFiles);
+    layout2["input_tree_sha256"] = inputTreePins["few-large"];
+    layout2["scalar_expected_tree_sha256"] = scalarTreePins["few-large"];
+    layout2["mixed_expected_tree_sha256"] = mixedTreePins["few-large"];
+    layout2["input_files"] = fewFiles; layout2["scalar_expected_files"] = fewScalar;
+    layout2["mixed_expected_files"] = fewMixed;
+    foreach (ref item; layout2["ordinary"].array)
+        foreach (ref row; item["result"]["samples"].array)
+            row["output_tree_sha256"] = item["workload"].str == "mixed" ?
+                mixedTreePins["few-large"] : scalarTreePins["few-large"];
+    foreach (route; layout2["durable"].array) foreach (ref pair; route["pairs"].array) {
+        pair["first"]["output_tree_sha256"] = mixedTreePins["few-large"];
+        pair["skip"]["output_tree_sha256"] = mixedTreePins["few-large"];
+        pair["first"]["explain_statuses"]["file_count"] = 8L;
+        pair["first"]["explain_statuses"]["status_by_file_sha256"] = expectedStatusDigest(8, "changed");
+        pair["skip"]["explain_statuses"]["file_count"] = 8L;
+        pair["skip"]["explain_statuses"]["status_by_file_sha256"] = expectedStatusDigest(8, "skipped");
+    }
     JSONValue[] selectors;
-    foreach (i; 0 .. 5) selectors ~= JSONValue(["canonical_identity": JSONValue("identity")]);
+    auto canonical = "job:v3:" ~ "A".replicate(64);
+    foreach (i; 0 .. 5) selectors ~= JSONValue([
+        "selector": JSONValue(["default", "filters", "v1-json", "v3-json", "tokens"][i]),
+        "tree_sha256": JSONValue(hash), "concatenated_sha256": JSONValue(hash),
+        "identity_semantics": JSONValue(i >= 3 ? "CANONICAL_JOB_IDENTITY" : "NOT_EXPOSED"),
+        "canonical_identity": JSONValue(i >= 3 ? canonical : "NOT_EXPOSED")]);
     auto unsupportedMetric = unsupported("not available");
+    JSONValue[] sampleRuns;
+    foreach (layoutName; ["many-small", "few-large"]) sampleRuns ~= JSONValue([
+        "status": JSONValue("UNSUPPORTED"), "reason": JSONValue("not available"),
+        "layout": JSONValue(layoutName), "pid_binary_bound": JSONValue(false),
+        "sample_count": JSONValue(0L), "tool": JSONValue("/usr/bin/sample"),
+        "duration_seconds": JSONValue(2L), "interval_milliseconds": JSONValue(10L)]);
+    auto sampleMetric = JSONValue(["status": JSONValue("UNSUPPORTED"),
+        "reason": JSONValue("one or more layout-specific /usr/bin/sample exact-PID controls failed"),
+        "runs": JSONValue(sampleRuns)]);
     return JSONValue([
         "schema": JSONValue(schema), "source_binary_mapping": JSONValue("ATTESTED"),
         "binary_sha256": JSONValue(hash), "harness_sha256": JSONValue(hash),
+        "harness_executable_name": JSONValue(harnessExecutableName),
         "fixture_table_sha256": JSONValue(fixtureTablePin), "fixture_record_bytes": JSONValue(recordBytes),
         "fixture_record_count": JSONValue(recordCount),
         "config_sha256": JSONValue(["legacy_v1_sha256": JSONValue(legacyConfigPin),
             "scalar_v3_sha256": JSONValue(scalarConfigPin), "mixed_v3_sha256": JSONValue(mixedConfigPin)]),
-        "build_attestation": JSONValue(["schema": JSONValue("scrubbed-build-attestation-v4"),
-            "target_sha256": JSONValue(hash), "source_archive_sha256": JSONValue(hash),
-            "argparse_inputs_sha256": JSONValue(hash),
-            "native_prebuild_commands_sha256": JSONValue(hash)]),
+        "build_attestation": syntheticAttestation(hash),
         "preflight": JSONValue(["checked_before_fixture_creation": JSONValue(true),
-            "physical_ram_bytes": JSONValue(minimumRam), "scratch_free_bytes": JSONValue(minimumScratch),
-            "derived_fixture_footprint_bytes": JSONValue(1L), "required_scratch_bytes": JSONValue(4L),
+            "physical_ram_bytes": JSONValue(minimumRam), "scratch_free_bytes": JSONValue(6L * 1024 * 1024 * 1024),
+            "derived_fixture_footprint_bytes": JSONValue(corpusBytes * 12),
+            "required_scratch_bytes": JSONValue(corpusBytes * 48),
             "declared_budget_seconds": JSONValue(minimumBudget)]),
-        "selector_freeze": JSONValue(["canonical_identity": JSONValue("identity"),
+        "selector_freeze": JSONValue(["input_bytes": JSONValue(8L * 1024 * 1024),
+            "expected_tree_sha256": JSONValue(hash), "expected_concatenated_sha256": JSONValue(hash),
+            "canonical_identity": JSONValue(canonical),
             "selectors": JSONValue(selectors)]),
         "layouts": JSONValue([layout, layout2]),
         "profiles": JSONValue(["syscall_bytes": unsupportedMetric,
             "total_process_allocations": unsupportedMetric,
-            "gc_allocations": unsupportedMetric, "sample": unsupportedMetric])]);
+            "gc_allocations": unsupportedMetric, "sample": sampleMetric])]);
 }
 
 private void selfTest() {
@@ -965,6 +1394,38 @@ private void selfTest() {
     validateReport(good);
     mustReject(good, (ref JSONValue r) { r["fixture_table_sha256"] = "B"; }, "fixture drift accepted");
     mustReject(good, (ref JSONValue r) { r["build_attestation"]["target_sha256"] = "B".replicate(64); }, "binary drift accepted");
+    mustReject(good, (ref JSONValue r) { r["harness_executable_name"] = "other"; }, "checker basename drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["source_sha"] = "B"; }, "source SHA drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["source_tree_id"] = "B"; }, "source tree drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["source_status"] = "dirty"; }, "source status drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["source_archive_sha256"] = "B"; }, "source archive drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["build_status"] = 1L; }, "build status drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["compiler_executable_name"] = "dmd"; }, "compiler identity drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["compiler_executable_sha256"] = "B"; }, "compiler hash drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["compiler_version"] = "/local/compiler"; }, "compiler version drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["dub_executable_sha256"] = "B"; }, "DUB hash drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["dub_version"] = "DUB other"; }, "DUB identity drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["dub_recipe_sha256"] = "B"; }, "DUB recipe drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["dependency_lock_sha256"] = "B"; }, "dependency lock drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["argparse_version"] = "2.0.3"; }, "argparse drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["argparse_recipe_sha256"] = "B"; }, "argparse recipe drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["argparse_inputs_sha256"] = "B"; }, "argparse inputs drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["native_prebuild_commands_sha256"] = "B"; }, "prebuild hash drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["native_prebuild_command_count"] = 4L; }, "prebuild cardinality drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["native_environment_template"] = "ambient"; }, "native environment drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["native_tool_policy"] = "ambient"; }, "native tool policy drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["native_tools"][0]["name"] = "other"; }, "native tool order drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["native_tools"][1]["sha256"] = "B"; }, "native tool hash drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["native_tools"][1]["version"] = "UNAVAILABLE"; }, "native tool version drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["archive_suite_evidence"]["evidence_tool_sha256"] = "B".replicate(64); }, "archive tool binding drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["linker_selection"] = "ambient"; }, "linker selection drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["sdk_version"] = "/local/sdk"; }, "SDK identity drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["target_relative_path"] = "other"; }, "target discovery drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["target_discovery"] = "other"; }, "target discovery recipe drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["build_command_template"] = "other"; }, "recipe drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["build_flags"] = "debug"; }, "build flags drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["primary_tool_policy"] = "ambient"; }, "primary tool policy drift accepted");
+    mustReject(good, (ref JSONValue r) { r["build_attestation"]["dependency_cache_policy"] = "ambient"; }, "dependency cache policy drift accepted");
     mustReject(good, (ref JSONValue r) { r["harness_sha256"] = "bad"; }, "harness drift accepted");
     auto otherHarness = parseJSON(good.toString);
     otherHarness["harness_sha256"] = "B".replicate(64);
@@ -973,20 +1434,41 @@ private void selfTest() {
     catch (Exception) harnessRejected = true;
     need(harnessRejected, "valid but different harness hash accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["input_concatenated_sha256"] = "B".replicate(64); }, "swapped layout accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["input_files"][0]["bytes"] = 1L; }, "per-file byte drift accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["input_files"][0]["sha256"] = "B".replicate(64); }, "per-file hash drift accepted");
     mustReject(good, (ref JSONValue r) { r["selector_freeze"]["selectors"][0]["canonical_identity"] = "other"; }, "selector divergence accepted");
+    mustReject(good, (ref JSONValue r) { r["selector_freeze"]["input_bytes"] = 1L; }, "selector input size drift accepted");
+    mustReject(good, (ref JSONValue r) { r["selector_freeze"]["selectors"][0]["selector"] = "filters"; }, "selector order drift accepted");
+    mustReject(good, (ref JSONValue r) { r["selector_freeze"]["selectors"][0]["tree_sha256"] = "B".replicate(64); }, "selector tree divergence accepted");
+    mustReject(good, (ref JSONValue r) { r["selector_freeze"]["selectors"][0]["concatenated_sha256"] = "B".replicate(64); }, "selector concat divergence accepted");
+    mustReject(good, (ref JSONValue r) { r["selector_freeze"]["canonical_identity"] = "job:v3:"; }, "empty selector digest accepted");
+    mustReject(good, (ref JSONValue r) { r["selector_freeze"]["selectors"][3]["identity_semantics"] = "NOT_EXPOSED"; }, "selector semantics drift accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["workload"] = "mixed"; }, "ordinary workload Cartesian drift accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["selector"] = "tokens"; }, "ordinary selector Cartesian drift accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["result"]["samples"].array.length = 4; }, "partial samples accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["result"]["samples"][1]["sample_index"] = 0; }, "duplicate samples accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["result"]["samples"][0]["wall_seconds"] = 0.0; }, "zero sample accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["result"]["samples"][0]["output_tree_sha256"] = "B".replicate(64); }, "output hash mismatch accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["durable"][0]["kind"] = "journal-v3"; }, "durable route kind drift accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["durable"][0]["pairs"][0]["pair_index"] = 1L; }, "durable pair index drift accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["durable"][0]["pairs"][0]["first"]["phase"] = "skip"; }, "durable phase drift accepted");
+    mustReject(good, (ref JSONValue r) { r["layouts"][0]["durable"][0]["pairs"][0]["first"]["explain_statuses"]["status_by_file_sha256"] = "B".replicate(64); }, "durable status digest drift accepted");
     mustReject(good, (ref JSONValue r) { r["profiles"]["syscall_bytes"] = JSONValue(["status": JSONValue("SUPPORTED"), "bytes": JSONValue(0L)]); }, "zero substituted unsupported metric accepted");
     mustReject(good, (ref JSONValue r) { r["layouts"][0]["ordinary"][0]["result"]["samples"][0]["fd_metric_semantics"] = "exact peak"; }, "sampled FD represented as exact accepted");
     mustReject(good, (ref JSONValue r) { r["profiles"]["gc_allocations"] = JSONValue(["status": JSONValue("SUPPORTED"), "semantics": JSONValue("total allocations")]); }, "GC represented as total accepted");
     mustReject(good, (ref JSONValue r) { r["preflight"]["required_scratch_bytes"] = long.max; }, "unsafe capacity accepted");
+    mustReject(good, (ref JSONValue r) { r["preflight"]["derived_fixture_footprint_bytes"] =
+        r["preflight"]["derived_fixture_footprint_bytes"].integer + 1; }, "derived capacity drift accepted");
+    mustReject(good, (ref JSONValue r) { r["preflight"]["scratch_free_bytes"] = minimumScratch; }, "insufficient derived headroom accepted");
+    mustReject(good, (ref JSONValue r) { r["profiles"]["sample"]["runs"][0]["layout"] = "few-large"; }, "sample layout order drift accepted");
+    mustReject(good, (ref JSONValue r) { r["profiles"]["sample"]["runs"][0]["tool"] = "sample"; }, "sample tool drift accepted");
+    mustReject(good, (ref JSONValue r) { r["profiles"]["sample"]["status"] = "SUPPORTED"; }, "forged sample aggregate support accepted");
     mustReject(good, (ref JSONValue r) { r["cache_semantics"] = "/Users/person/private"; }, "path leakage accepted");
-    writeln("canonical profile self-test passed (15 release-active negatives)");
+    writeln("canonical profile self-test passed (65 release-active negatives)");
 }
 
 private void selfTestLive(string binary) {
+    validateLiveRusageLayout();
     auto root = scratch();
     scope(exit) if (exists(root)) rmdirRecurse(root);
     auto layout = Layout("live", 1, recordTable.length);
@@ -1022,6 +1504,8 @@ private void selfTestLive(string binary) {
 
 int main(string[] args) {
     try {
+        need(baseName(args[0]) == harnessExecutableName,
+            "profile checker executable basename must be " ~ harnessExecutableName);
         if (args.length == 2 && args[1] == "--self-test") { selfTest(); return 0; }
         if (args.length == 3 && args[1] == "--self-test-live") {
             selfTestLive(args[2]); return 0;

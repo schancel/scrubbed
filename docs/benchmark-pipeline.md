@@ -295,8 +295,10 @@ legacy-v1 config, scalar-v3 config, and mixed-v3 config have literal SHA-256
 pins in the harness. Independently authored expected bytes do not call project
 filters. The same logical stream is partitioned into 4,096 files of 32,768
 bytes and eight files of 16,777,216 bytes. Reports retain exact per-file sets,
-sizes and hashes plus tree and canonical-concatenation hashes; the two layouts
-must have equal concatenated input.
+sizes and hashes plus tree and canonical-concatenation hashes. The checker
+recomputes file counts, bytes, and tree hashes and binds every generated tree
+and concatenation hash to literal fixture identities; the two layouts must
+have equal concatenated input.
 
 An untimed 8 MiB freeze requires exact output equality for default selection,
 explicit `--filters`, equivalent v1 JSON, canonical v3 JSON, and ordered v3
@@ -314,7 +316,9 @@ application-cold with uncontrolled OS cache, never OS-cold.
 The durable mixed matrix uses v3 JSON and shipping serialization. Each layout
 has three independent manifest-v2 first-publication/verified-skip pairs and,
 after explicit `errors-init`, three journal-v3 first/skip pairs. Every status,
-exit, output set, byte count, and hash is gated. Crash/retry timing is outside
+exit, output set, byte count, and hash is gated. Every first and skip EXPLAIN
+stream is parsed by exact filename, required complete, and reduced to a
+deterministic status digest retained in the report. Crash/retry timing is outside
 this profile; the existing manifest/journal correctness gates remain required.
 
 The capacity preflight executes before fixture creation. Checked arithmetic
@@ -329,7 +333,10 @@ bytes are retained. `proc_pidinfo(PROC_PIDLISTFDS)` is polled every 10 ms; the
 result is explicitly `sampled_peak_fd_lower_bound`, with sample/error counts
 and polling interval, never an exact peak. Successful live-child
 `proc_pid_rusage(RUSAGE_INFO_V4)` values are reported as Darwin disk-I/O bytes
-from the last successful sample, never syscall bytes. A noninteractive
+from the last successful sample, never syscall bytes. The harness mirrors the
+complete 296-byte Darwin `rusage_info_v4` through `ri_runnable_time`, proves
+the 144/152 disk-counter offsets at compile time, and runs a guarded live ABI
+canary. A noninteractive
 privilege-free DTrace probe determines whether syscall tracing can proceed.
 An exact-PID xctrace control is attempted before any total-allocation claim.
 D runtime profiling, when recognized, is labelled GC-only and excludes native
@@ -339,11 +346,16 @@ samples. Instrumented runs and their overhead are excluded from timing.
 Unavailable or failed controls are structured `UNSUPPORTED`; zero is never a
 substitute.
 
-`pipeline_profile_check --self-test` release-actively rejects fixture/config,
-binary, and harness drift; unequal/swapped layouts; selector identity drift;
-incomplete, duplicate, or zero samples; output hash mismatch; unsupported
-metrics represented as zero; sampled FDs represented as exact; GC represented
-as total allocation; unsafe capacity arithmetic; and local path leakage.
+The checker executable basename is literally
+`scrubbed-pipeline-profile-check` in the bridge and documented commands, so a
+documented rebuild reproduces the report-bound Mach-O identity.
+`pipeline_profile_check --self-test` release-actively rejects 65 mutations,
+including every material build-attestation axis, fixture/config/binary/harness
+drift, unequal or swapped layouts, selector set/order/identity/output drift,
+incomplete or reordered samples, durable route/pair/status drift, unsupported
+metrics represented as zero, forged sample aggregates, sampled FDs represented
+as exact, GC represented as total allocation, unsafe capacity arithmetic, and
+local path leakage.
 `--self-test-live` checks the authored records and direct-PID measurement on a
 small actual shipping invocation before the capacity-gated run. `--check`
 revalidates the sanitized report and binds it to the checker executable.

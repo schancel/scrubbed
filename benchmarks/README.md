@@ -58,7 +58,9 @@ The report binds source/compiler/dependency/build attestation, executed binary,
 harness, frozen record table, configs, input and expected file sets, and every
 timed output. Darwin `wait4` supplies direct-child wall/CPU/RSS accounting. FD
 evidence is a `proc_pidinfo` sampled lower bound. `proc_pid_rusage` disk bytes
-retain their kernel and last-success semantics. DTrace/dtruss, xctrace
+use the complete 296-byte `rusage_info_v4` ABI through `ri_runnable_time`, with
+compile-time disk-field offsets and a guarded live layout canary, and retain
+their kernel and last-success semantics. DTrace/dtruss, xctrace
 allocations, D GC profiling, and `/usr/bin/sample` are calibrated separately;
 failed controls are structured `UNSUPPORTED`, never zero or a substitute.
 

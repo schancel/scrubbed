@@ -17,7 +17,8 @@ import effects.local_manifest : SinkKey, inputDigest;
 import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
     DurableIdentity, DurableJobLedger, DurableKind, DurableRootKey, deriveDurableIdentity,
     createJournalV3, derivedSink, reasonDigest;
-import effects.dispatch_record : canonicalDispatchFailureRecordV1,
+import effects.dispatch_record : canonicalDispatchCancellationRecordV1,
+    canonicalDispatchFailureRecordV1,
     canonicalDispatchRecordV1;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
@@ -858,7 +859,28 @@ private DispatchFailureFacts dispatchFailureFacts(Throwable failure) {
         auto facts = dispatchFailureFacts(durable.original);
         if (facts.found) return facts;
     }
+    if (auto jsonl = cast(JsonlFailure)failure) {
+        auto facts = dispatchFailureFacts(jsonl.original);
+        if (facts.found) return facts;
+    }
     return dispatchFailureFacts(failure.next);
+}
+
+private DocumentId localDocumentId(string file, string inputPath,
+        bool inputIsDir) {
+    auto relative = inputIsDir ? relativePath(file, inputPath) : ".";
+    return DocumentId.from(SourceLocator("local-files:v1", inputPath, relative));
+}
+
+private void explainDispatchInputProblem(ref RuntimePlanV1 plan,
+        string file, string inputPath, bool inputIsDir, bool canceled) {
+    auto id = localDocumentId(file, inputPath, inputIsDir);
+    auto record = canceled ? canonicalDispatchCancellationRecordV1(
+        plan.identity, id, "source", "canceled", "input-canceled") :
+        canonicalDispatchFailureRecordV1(plan.identity, id,
+            DetectionOutcomeV1.unknown, "source", "input-failed",
+            "input-failed");
+    writeln("EXPLAIN\t", record);
 }
 
 private ubyte[32] durableContentDigest(Content content) {
@@ -1207,6 +1229,7 @@ int runApp(string[] args) {
             stderr.writeln("valid JSONL invocation; no stdin read.");
             return 0;
         }
+        string[] pendingDispatchRecords;
         try {
             const completed = processStandardJsonlDocuments(datasetNamespace,
                 sourceKey, fields,
@@ -1214,22 +1237,43 @@ int runApp(string[] args) {
                     runJsonlField(source, field, text, runtimePlan,
                         (ref RuntimeExecutionV1 execution) {
                             if (explain && execution.hasDispatch)
-                                stderr.writeln("EXPLAIN\t",
-                                    canonicalDispatchRecordV1(execution.dispatch));
+                                pendingDispatchRecords ~=
+                                    canonicalDispatchRecordV1(execution.dispatch);
                         }),
-                JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun);
+                JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun,
+                (SourceLocator committed) {
+                    foreach (record; pendingDispatchRecords)
+                        stderr.writeln("EXPLAIN\t", record);
+                    pendingDispatchRecords = null;
+                });
             stderr.writeln("JSONL done. ", completed, " records processed", dryRun ? "; dry-run, no stdout." : ".");
             return 0;
         } catch (JsonlFailure error) {
             if (explain && runtimePlan.isDispatch &&
+                    (error.kind == JsonlFailureKind.rejected ||
+                        error.kind == JsonlFailureKind.quarantined))
+                foreach (record; pendingDispatchRecords)
+                    stderr.writeln("EXPLAIN\t", record);
+            pendingDispatchRecords = null;
+            if (explain && runtimePlan.isDispatch &&
                     error.kind != JsonlFailureKind.rejected &&
-                    error.kind != JsonlFailureKind.quarantined)
+                    error.kind != JsonlFailureKind.quarantined) {
+                auto dispatchFailure = dispatchFailureFacts(error);
                 stderr.writeln("EXPLAIN\t", canonicalDispatchFailureRecordV1(
                     runtimePlan.identity, error.documentId,
-                    DetectionOutcomeV1.unknown,
-                    error.kind == JsonlFailureKind.writer ? "sink" : "decode",
-                    error.kind == JsonlFailureKind.writer ?
-                        "sink-write-failed" : "decode-failed", error.msg));
+                    dispatchFailure.found ? dispatchFailure.outcome :
+                        DetectionOutcomeV1.unknown,
+                    dispatchFailure.found ? dispatchFailure.phase :
+                        (error.kind == JsonlFailureKind.writer ? "sink" :
+                            error.kind == JsonlFailureKind.outputLimit ?
+                                "resource" : "decode"),
+                    dispatchFailure.found ? dispatchFailure.code :
+                        (error.kind == JsonlFailureKind.writer ?
+                            "sink-write-failed" :
+                            error.kind == JsonlFailureKind.outputLimit ?
+                                "resource-failed" : "decode-failed"),
+                    dispatchFailure.found ? dispatchFailure.reason : error.msg));
+            }
             stderr.writefln("JSONL %s at physical line %s, DocumentId %s: %s; %s prior records %s; current record %s",
                 error.kind, error.line, error.documentId.text, error.msg,
                 error.completedRecords, dryRun ? "processed, no stdout" :
@@ -1381,9 +1425,7 @@ int runApp(string[] args) {
             auto effectFailure = cast(EffectFailure)error;
             auto orderedCanceled = cast(OrderedPublicationCanceled)error;
             if (explain && runtimePlan.isDispatch && orderedCanceled is null) {
-                auto relative = inputIsDir ? relativePath(file, inputPath) : ".";
-                auto id = DocumentId.from(SourceLocator("local-files:v1",
-                    inputPath, relative));
+                auto id = localDocumentId(file, inputPath, inputIsDir);
                 auto dispatchFailure = dispatchFailureFacts(error);
                 writeln("EXPLAIN\t", canonicalDispatchFailureRecordV1(
                     runtimePlan.identity, id,
@@ -1410,9 +1452,13 @@ int runApp(string[] args) {
             }
             if (orderedCanceled !is null) {
                 stderr.writefln("CANCELED %s: %s", file, error.msg);
-                if (explain && !runtimePlan.isDispatch)
-                    explainOne(file, destinationFor(file, inputPath, outputPath,
-                        inputIsDir), chainLabel, "canceled", error.msg);
+                if (explain) {
+                    if (runtimePlan.isDispatch)
+                        explainDispatchInputProblem(runtimePlan, file, inputPath,
+                            inputIsDir, true);
+                    else explainOne(file, destinationFor(file, inputPath,
+                        outputPath, inputIsDir), chainLabel, "canceled", error.msg);
+                }
                 if (explain) pending.remove(file);
                 return;
             }
@@ -1463,7 +1509,10 @@ int runApp(string[] args) {
         } catch (Exception error) {
             if (explain && !admissionCanceled && !errorJournalPath.length) {
                 pending.remove(file);
-                explainOne(file, destinationFor(file, inputPath, outputPath,
+                if (runtimePlan.isDispatch)
+                    explainDispatchInputProblem(runtimePlan, file, inputPath,
+                        inputIsDir, false);
+                else explainOne(file, destinationFor(file, inputPath, outputPath,
                     inputIsDir), chainLabel, "failure", error.msg);
             }
             throw error;
@@ -1480,9 +1529,14 @@ int runApp(string[] args) {
         foreach (entry; entries) {
             if (entry.isSymlink) {
                 auto reason = "refusing symlink in input tree: " ~ entry.name;
-                if (explain && !errorJournalPath.length)
-                    explainOne(entry.name, destinationFor(entry.name, inputPath,
-                        outputPath, inputIsDir), chainLabel, "failure", reason);
+                if (explain && !errorJournalPath.length) {
+                    if (runtimePlan.isDispatch)
+                        explainDispatchInputProblem(runtimePlan, entry.name,
+                            inputPath, inputIsDir, false);
+                    else explainOne(entry.name, destinationFor(entry.name,
+                        inputPath, outputPath, inputIsDir), chainLabel,
+                        "failure", reason);
+                }
                 throw new Exception(reason);
             }
             if (entry.isFile) {
@@ -1503,11 +1557,17 @@ int runApp(string[] args) {
         scheduler.cancel();
         scheduler.finish();
         if (explain && !errorJournalPath.length)
-            foreach (file; pending.drain())
-                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, workerFatalAdmission ? "canceled" : "failure",
-                    workerFatalAdmission ? "canceled after fatal processing failure" :
+            foreach (file; pending.drain()) {
+                if (runtimePlan.isDispatch)
+                    explainDispatchInputProblem(runtimePlan, file, inputPath,
+                        inputIsDir, true);
+                else explainOne(file, destinationFor(file, inputPath, outputPath,
+                    inputIsDir), chainLabel,
+                    workerFatalAdmission ? "canceled" : "failure",
+                    workerFatalAdmission ?
+                        "canceled after fatal processing failure" :
                         "canceled after traversal error");
+            }
         auto workerFatal = scheduler.fatal();
         if (workerFatalAdmission && workerFatal !is null)
             throw new Exception("fatal file processing failure: " ~ workerFatal.msg);
@@ -1516,9 +1576,14 @@ int runApp(string[] args) {
     const counts = scheduler.finish();
     if (scheduler.fatal() !is null) {
         if (explain && !errorJournalPath.length)
-            foreach (file; pending.drain())
-                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, "canceled", "fatal processing failure");
+            foreach (file; pending.drain()) {
+                if (runtimePlan.isDispatch)
+                    explainDispatchInputProblem(runtimePlan, file, inputPath,
+                        inputIsDir, true);
+                else explainOne(file, destinationFor(file, inputPath,
+                    outputPath, inputIsDir), chainLabel, "canceled",
+                    "fatal processing failure");
+            }
         throw new Exception("fatal file processing failure: " ~ scheduler.fatal().msg);
     }
     if (durableLedger !is null) durableLedger.checkpoint();

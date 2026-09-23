@@ -1,8 +1,8 @@
 /// Explicit stdio binding for the standalone synchronous JSONL adapter.
 module effects.stdio_stream;
 
-import effects.jsonl_stream : DocumentTransform, JsonlLimits, TextTransform,
-    processJsonl, processJsonlDocuments;
+import effects.jsonl_stream : DocumentCommit, DocumentTransform, JsonlLimits,
+    TextTransform, processJsonl, processJsonlDocuments;
 import std.conv : to;
 import std.stdio : File, stdin, stdout;
 
@@ -59,7 +59,7 @@ size_t processStandardJsonl(string datasetNamespace, string sourceKey,
 /// Typed-document variant used by canonical compiled-job execution.
 size_t processStandardJsonlDocuments(string datasetNamespace, string sourceKey,
     const(string)[] fields, DocumentTransform transform, JsonlLimits limits,
-    bool dryRun = false) {
+    bool dryRun = false, scope DocumentCommit committed = null) {
     version (Posix) {
         import core.stdc.signal : SIG_IGN, signal;
         import core.sys.posix.signal : SIGPIPE;
@@ -70,5 +70,5 @@ size_t processStandardJsonlDocuments(string datasetNamespace, string sourceKey,
         (const(ubyte)[] bytes) {
             if (!dryRun) { stdout.rawWrite(bytes); stdout.flush(); }
         },
-        datasetNamespace, sourceKey, fields, transform, limits);
+        datasetNamespace, sourceKey, fields, transform, limits, committed);
 }

@@ -182,6 +182,33 @@ int main(string[] args) {
         parseJSON(directFailureRecord)["code"].str == "decode-failed" &&
         !exists(cappedDirectOutput) && !exists(cappedDurableOutput),
         "durable/direct dispatch failure record parity and exits");
+    auto cappedJsonl = withInput([exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "example",
+        "--source-key", "cap4", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "1024", "--config", cappedConfig,
+        "--explain"], `{"text":"hello"}` ~ "\n");
+    auto jsonlFailureRecord = dispatchRecord(cappedJsonl);
+    auto directFailure = parseJSON(directFailureRecord);
+    auto jsonlFailure = parseJSON(jsonlFailureRecord);
+    foreach (field; ["job_identity", "status", "outcome", "action", "phase",
+            "code", "reason_hash"])
+        check(directFailure[field].str == jsonlFailure[field].str,
+            "three-transport dispatch failure parity field " ~ field);
+    check(cappedJsonl.status == 1 && cappedJsonl.output.length == 0,
+        "JSONL dispatch failure has no current-record output");
+
+    auto outputCappedJsonl = withInput([exe, "run", "--input", "-",
+        "--output", "-", "--jsonl-fields", "text", "--dataset-namespace",
+        "example", "--source-key", "cap8", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "8", "--config",
+        "scrubbed.dispatch.example.json", "--explain"],
+        `{"text":"hello"}` ~ "\n");
+    auto outputCappedRecord = parseJSON(dispatchRecord(outputCappedJsonl));
+    check(outputCappedJsonl.status == 1 && outputCappedJsonl.output.length == 0 &&
+        outputCappedRecord["status"].str == "failure" &&
+        outputCappedRecord["phase"].str == "resource" &&
+        outputCappedRecord["code"].str == "resource-failed",
+        "JSONL output cap emits one committed failure record only");
 
     // Filename hints are non-authoritative, but must reach detection through
     // both local transports so warnings and all other explain metadata agree.
@@ -310,5 +337,31 @@ int main(string[] args) {
         foreach (path; visited)
             check(records.get(baseName(path), 0) == 1, "exactly one record for " ~ path);
     }
+    size_t dispatchCanceled;
+    foreach (attempt; 0 .. 5) {
+        auto traversal = separately([exe, "run", "--input", tree,
+            "--output", buildPath(root, "dispatch-tree-output"), "--dry-run",
+            "--explain", "--threads", "4", "--max-queued-docs", "4",
+            "--max-open-inputs", "1", "--config",
+            "scrubbed.dispatch.example.json"]);
+        size_t records;
+        size_t failures;
+        foreach (line; traversal.output.splitLines()) {
+            if (!line.startsWith("EXPLAIN\t")) continue;
+            ++records;
+            check(line.startsWith("EXPLAIN\t{\"schema\":\"scrubbed.dispatch.v1\"") &&
+                !line.canFind(tree) && !line.canFind("dispatch-tree-output") &&
+                !line.canFind("refusing symlink") && !line.canFind("canceled after"),
+                "v4 traversal explain is canonical and content-free");
+            auto record = parseJSON(line["EXPLAIN\t".length .. $]);
+            if (record["status"].str == "canceled") ++dispatchCanceled;
+            if (record["status"].str == "failure") ++failures;
+        }
+        check(traversal.status == 2 && records == visited.length && failures == 1 &&
+            !exists(buildPath(root, "dispatch-tree-output")),
+            "v4 traversal schema/privacy/cardinality attempt " ~ attempt.to!string);
+        if (dispatchCanceled) break;
+    }
+    check(dispatchCanceled > 0, "v4 traversal cancellation record reached");
     return 0;
 }

@@ -84,11 +84,25 @@ string canonicalDispatchRecordV1(ref DispatchExecutionEventV1 event) {
 
 string canonicalDispatchFailureRecordV1(string jobIdentity, DocumentId document,
         DetectionOutcomeV1 outcome, string phase, string code, string reason) {
+    return canonicalDispatchProblemRecordV1(jobIdentity, document, outcome,
+        "failure", phase, code, reason);
+}
+
+string canonicalDispatchCancellationRecordV1(string jobIdentity,
+        DocumentId document, string phase, string code, string reason) {
+    return canonicalDispatchProblemRecordV1(jobIdentity, document,
+        DetectionOutcomeV1.unknown, "canceled", phase, code, reason);
+}
+
+private string canonicalDispatchProblemRecordV1(string jobIdentity,
+        DocumentId document, DetectionOutcomeV1 outcome, string status,
+        string phase, string code, string reason) {
     auto output = appender!string;
     output.put(`{"schema":`); output.put(quote(dispatchRecordSchemaV1));
     output.put(`,"job_identity":`); output.put(quote(jobIdentity));
     output.put(`,"document_id":`); output.put(quote(document.text));
-    output.put(`,"status":"failure","outcome":`);
+    output.put(`,"status":`); output.put(quote(status));
+    output.put(`,"outcome":`);
     output.put(quote(outcomeName(outcome)));
     output.put(`,"action":"failure","detector_version":"unknown","warning_codes":[]`);
     output.put(`,"phase":`); output.put(quote(phase));
@@ -165,4 +179,11 @@ unittest {
         "/secret/path and source bytes");
     assert(failure.length <= maxDispatchRecordBytesV1);
     assert(failure.indexOf("secret") < 0 && failure.indexOf("source bytes") < 0);
+    auto canceled = canonicalDispatchCancellationRecordV1(
+        "job:v4:0000000000000000000000000000000000000000000000000000000000000000",
+        DocumentId.fromCanonicalText(
+            "doc:v1:0000000000000000000000000000000000000000000000000000000000000000"),
+        "source", "canceled", "/secret/canceled/path");
+    assert(canceled.indexOf(`"status":"canceled"`) >= 0 &&
+        canceled.indexOf("secret") < 0 && canceled.length <= maxDispatchRecordBytesV1);
 }

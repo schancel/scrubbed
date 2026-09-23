@@ -41,23 +41,24 @@ struct InputCounts {
 /// Caller-owned, fixed-cardinality coordination evidence. A null reference is
 /// the shipping default and executes no clock reads or metric locking.
 /// Transform nanoseconds are per-worker-thread CPU; other phase durations and
-/// the top-level wall duration use the monotonic elapsed clock.
-enum CoordinationPhaseV1 {
+/// the top-level wall duration use the monotonic elapsed clock. Version 2
+/// distinguishes this CPU meaning from the elapsed transform time emitted by v1.
+enum CoordinationPhaseV2 {
     discovery, sourceStat, ordinalAssignment, admissionWait,
     acceptedWorkerQueue, descriptorWait, descriptorHold, transform,
     orderedResultWait, atomicPublication, shutdownJoin, count
 }
 
-struct CoordinationMetricValueV1 {
+struct CoordinationMetricValueV2 {
     ulong calls;
     ulong units;
     ulong nanoseconds;
 }
 
-final class CoordinationMetricsV1 {
-    private shared ulong[CoordinationPhaseV1.count] calls;
-    private shared ulong[CoordinationPhaseV1.count] units;
-    private shared ulong[CoordinationPhaseV1.count] nanoseconds;
+final class CoordinationMetricsV2 {
+    private shared ulong[CoordinationPhaseV2.count] calls;
+    private shared ulong[CoordinationPhaseV2.count] units;
+    private shared ulong[CoordinationPhaseV2.count] nanoseconds;
     private InputLimits limits;
     private InputCounts counts;
     private long wallStarted;
@@ -81,7 +82,7 @@ final class CoordinationMetricsV1 {
             wallNanoseconds = ticksToNanoseconds(elapsed);
     }
 
-    void record(CoordinationPhaseV1 phase, ulong units = 0,
+    void record(CoordinationPhaseV2 phase, ulong units = 0,
             long started = 0) {
         auto elapsed = started == 0 ? 0L : MonoTime.currTime.ticks - started;
         calls[phase].atomicOp!"+="(1);
@@ -90,7 +91,7 @@ final class CoordinationMetricsV1 {
             nanoseconds[phase].atomicOp!"+="(ticksToNanoseconds(elapsed));
     }
 
-    void recordThreadCpu(CoordinationPhaseV1 phase, ulong units,
+    void recordThreadCpu(CoordinationPhaseV2 phase, ulong units,
             long startedNanoseconds) {
         auto elapsed = threadCpuNanoseconds() - startedNanoseconds;
         calls[phase].atomicOp!"+="(1);
@@ -104,12 +105,12 @@ final class CoordinationMetricsV1 {
             "ordinal_assignment", "admission_wait", "accepted_worker_queue",
             "descriptor_wait", "descriptor_hold", "transform",
             "ordered_result_wait", "atomic_publication", "shutdown_join"];
-        CoordinationMetricValueV1[CoordinationPhaseV1.count] snapshot;
+        CoordinationMetricValueV2[CoordinationPhaseV2.count] snapshot;
         InputLimits capturedLimits;
         InputCounts capturedCounts;
         ulong capturedWall;
-        foreach (index; 0 .. cast(size_t)CoordinationPhaseV1.count)
-            snapshot[index] = CoordinationMetricValueV1(
+        foreach (index; 0 .. cast(size_t)CoordinationPhaseV2.count)
+            snapshot[index] = CoordinationMetricValueV2(
                 calls[index].atomicLoad,
                 units[index].atomicLoad,
                 nanoseconds[index].atomicLoad);
@@ -128,7 +129,7 @@ final class CoordinationMetricsV1 {
             capturedCounts.peakWorkerDescriptors <= capturedLimits.workerDescriptors,
             "coordination metrics peak exceeded configured limit");
         auto result = appender!string;
-        result.put(`{"schema":"scrubbed.coordination-metrics.v1","version":1,`);
+        result.put(`{"schema":"scrubbed.coordination-metrics.v2","version":2,`);
         result.put(`"wall_nanoseconds":`); result.put(capturedWall.to!string);
         result.put(`,"limits":{"queued_documents":`);
         result.put(capturedLimits.queuedDocuments.to!string);
@@ -164,7 +165,7 @@ final class CoordinationMetricsV1 {
     }
 }
 
-long beginCoordinationMetricV1(CoordinationMetricsV1 metrics) {
+long beginCoordinationMetricV2(CoordinationMetricsV2 metrics) {
     return metrics is null ? 0 : MonoTime.currTime.ticks;
 }
 
@@ -172,7 +173,7 @@ private ulong ticksToNanoseconds(long ticks) {
     return cast(ulong)ticksToNSecs(ticks);
 }
 
-long beginCoordinationThreadCpuMetricV1(CoordinationMetricsV1 metrics) {
+long beginCoordinationThreadCpuMetricV2(CoordinationMetricsV2 metrics) {
     return metrics is null ? 0 : threadCpuNanoseconds();
 }
 
@@ -210,13 +211,13 @@ final class BoundedInput {
     private void delegate(string, ulong) process;
     private void delegate(string, Throwable) reportFailure;
     private bool delegate(Throwable) isFatal;
-    private CoordinationMetricsV1 metrics;
+    private CoordinationMetricsV2 metrics;
 
     this(InputLimits limits, size_t threads,
          void delegate(string, ulong) process,
          void delegate(string, Throwable) reportFailure,
          bool delegate(Throwable) isFatal = null,
-         CoordinationMetricsV1 metrics = null) {
+         CoordinationMetricsV2 metrics = null) {
         if (!limits.queuedDocuments || !limits.reservedBytes ||
             !limits.workerDescriptors || !threads)
             throw new Exception("input limits and threads must be positive");
@@ -244,7 +245,7 @@ final class BoundedInput {
 
     /// false means a prior fault or explicit cancellation stopped admission.
     bool submit(string path, ulong bytes) {
-        auto admissionStarted = beginCoordinationMetricV1(metrics);
+        auto admissionStarted = beginCoordinationMetricV2(metrics);
         mutex.lock();
         if (cancelled) {
             mutex.unlock();
@@ -272,9 +273,9 @@ final class BoundedInput {
         mutex.unlock();
 
         if (metrics !is null)
-            metrics.record(CoordinationPhaseV1.admissionWait, bytes,
+            metrics.record(CoordinationPhaseV2.admissionWait, bytes,
                 admissionStarted);
-        auto acceptedAt = beginCoordinationMetricV1(metrics);
+        auto acceptedAt = beginCoordinationMetricV2(metrics);
 
         if (pool is null) {
             execute(path, bytes, sequence, acceptedAt);
@@ -304,9 +305,9 @@ final class BoundedInput {
     private void execute(string path, ulong bytes, size_t sequence,
             long acceptedAt) {
         if (metrics !is null)
-            metrics.record(CoordinationPhaseV1.acceptedWorkerQueue, bytes,
+            metrics.record(CoordinationPhaseV2.acceptedWorkerQueue, bytes,
                 acceptedAt);
-        auto descriptorWaitStarted = beginCoordinationMetricV1(metrics);
+        auto descriptorWaitStarted = beginCoordinationMetricV2(metrics);
         mutex.lock();
         --counts.queuedDocuments;
         changed.notifyAll();
@@ -332,9 +333,9 @@ final class BoundedInput {
         mutex.unlock();
 
         if (metrics !is null)
-            metrics.record(CoordinationPhaseV1.descriptorWait, bytes,
+            metrics.record(CoordinationPhaseV2.descriptorWait, bytes,
                 descriptorWaitStarted);
-        auto descriptorHoldStarted = beginCoordinationMetricV1(metrics);
+        auto descriptorHoldStarted = beginCoordinationMetricV2(metrics);
 
         bool success;
         try {
@@ -351,7 +352,7 @@ final class BoundedInput {
             }
         } finally {
             if (metrics !is null)
-                metrics.record(CoordinationPhaseV1.descriptorHold, bytes,
+                metrics.record(CoordinationPhaseV2.descriptorHold, bytes,
                     descriptorHoldStarted);
             mutex.lock();
             --counts.workerDescriptors;
@@ -386,13 +387,13 @@ final class BoundedInput {
     }
 
     InputCounts finish() {
-        auto started = beginCoordinationMetricV1(metrics);
+        auto started = beginCoordinationMetricV2(metrics);
         if (pool !is null) pool.finish(true);
         mutex.lock();
         auto result = counts;
         mutex.unlock();
         if (metrics !is null) {
-            metrics.record(CoordinationPhaseV1.shutdownJoin, 0, started);
+            metrics.record(CoordinationPhaseV2.shutdownJoin, 0, started);
             metrics.setCounts(result);
         }
         return result;
@@ -412,6 +413,7 @@ unittest {
     import core.sync.semaphore : Semaphore;
     import std.conv : to;
     import core.time : msecs;
+    import std.json : parseJSON;
 
     auto overflowBoundary = long.max / 1_000_000_000L + 1;
     assert(ticksToNanoseconds(overflowBoundary) ==
@@ -422,6 +424,16 @@ unittest {
     auto sleptCpu = threadCpuNanoseconds() - cpuStarted;
     assert(sleptCpu >= 0 && sleptCpu < 50_000_000L,
         "thread CPU clock advanced like wall time while sleeping");
+
+    auto metrics = new CoordinationMetricsV2;
+    metrics.setLimits(InputLimits(1, 1, 1));
+    metrics.setCounts(InputCounts.init);
+    Thread.sleep(1.msecs);
+    metrics.finishWall();
+    auto metricsJson = parseJSON(metrics.json());
+    assert(metricsJson["schema"].str == "scrubbed.coordination-metrics.v2" &&
+        metricsJson["version"].integer == 2 &&
+        metricsJson["wall_nanoseconds"].integer > 0);
 
     auto cappedPool = new BoundedInput(InputLimits(1, 1, 1), 8,
         (string path, ulong bytes) {},

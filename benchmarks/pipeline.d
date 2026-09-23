@@ -1952,6 +1952,61 @@ private void validateAttributionBuildSource(JSONValue attestation,
 
 int main(string[] args) {
     try {
+        if (args.length == 6 && args[1] == "--attested-coordination") {
+            auto root = privateScratch("scrubbed-attested-coordination-");
+            scope(exit) rmdirRecurse(root);
+            auto baselineRoot = buildPath(root, "baseline-build");
+            auto candidateRoot = buildPath(root, "candidate-build");
+            mkdirRecurse(baselineRoot);
+            mkdirRecurse(candidateRoot);
+            require(chmod(baselineRoot.toStringz, S_IRWXU) == 0 &&
+                chmod(candidateRoot.toStringz, S_IRWXU) == 0,
+                "cannot restrict coordination build scratch");
+            auto baseline = buildAttestedExecutable(args[2], baselineRoot);
+            auto candidate = buildAttestedExecutable(args[3], candidateRoot);
+            validateAttestation(baseline.attestation, baseline.snapshot.sha256);
+            validateAttestation(candidate.attestation, candidate.snapshot.sha256);
+            auto harness = snapshotExecutable(args[4], root,
+                "scrubbed-coordination-profile");
+            auto baselineAttestationPath = buildPath(root,
+                "baseline-attestation-report.json");
+            auto candidateAttestationPath = buildPath(root,
+                "candidate-attestation-report.json");
+            auto baselineReport = JSONValue([
+                "source_binary_mapping": JSONValue("ATTESTED"),
+                "binary_sha256": JSONValue(baseline.snapshot.sha256),
+                "build_attestation": baseline.attestation]);
+            auto candidateReport = JSONValue([
+                "source_binary_mapping": JSONValue("ATTESTED"),
+                "binary_sha256": JSONValue(candidate.snapshot.sha256),
+                "build_attestation": candidate.attestation]);
+            write(baselineAttestationPath, baselineReport.toString ~ "\n");
+            write(candidateAttestationPath, candidateReport.toString ~ "\n");
+            auto result = execute([harness.path, "--compare",
+                baseline.snapshot.path, baselineAttestationPath,
+                candidate.snapshot.path, candidateAttestationPath, args[5]]);
+            verifySnapshot(baseline.snapshot);
+            verifySnapshot(candidate.snapshot);
+            verifySnapshot(harness);
+            require(result.status == 0,
+                "attested coordination harness failed: " ~ result.output);
+            auto report = parseJSON(readText(args[5]));
+            require(report["schema"].str ==
+                    "scrubbed.coordination-scheduler-comparison.v2" &&
+                report["version"].integer == 2 &&
+                report["source_binary_mapping"].str == "ATTESTED" &&
+                report["baseline_binary_sha256"].str ==
+                    baseline.snapshot.sha256 &&
+                report["candidate_binary_sha256"].str ==
+                    candidate.snapshot.sha256 &&
+                report["baseline_build_attestation"]["source_sha"].str ==
+                    baseline.attestation["source_sha"].str &&
+                report["candidate_build_attestation"]["source_sha"].str ==
+                    candidate.attestation["source_sha"].str,
+                "coordination report lost attested source/build identity");
+            writeln(result.output.strip);
+            return 0;
+        }
         if (args.length == 7 && args[1] == "--attested-attribution") {
             auto expectedSource = checked(["git", "-C", args[2], "rev-parse", "HEAD"]);
             auto historicalMergeBase = execute(["git", "-C", args[2], "merge-base",
@@ -2045,6 +2100,7 @@ int main(string[] args) {
         require(validSupplied || validAttested,
             "usage: pipeline SCRUBBED_BINARY [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
             "or pipeline --attested-build CLEAN_SOURCE [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
+            "or pipeline --attested-coordination CLEAN_BASE_SOURCE CLEAN_CANDIDATE_SOURCE COORDINATION_HARNESS REPORT_JSON; " ~
             "or pipeline --attested-profile CLEAN_SOURCE PROFILE_HARNESS REPORT_JSON TIME_BUDGET_SECONDS; " ~
             "or pipeline --attested-attribution CLEAN_SOURCE ATTRIBUTION_HARNESS CANONICAL_PROFILE REPORT_JSON TIME_BUDGET_SECONDS");
         auto inputTarget = attestedMode ? args[2] : args[1];

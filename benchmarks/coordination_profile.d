@@ -5,12 +5,15 @@ import core.atomic : atomicLoad, atomicStore;
 import core.stdc.errno : EINTR, errno;
 import core.sys.posix.signal : SIGKILL;
 import core.sys.posix.sys.resource : rusage;
+import core.sys.posix.sys.stat : chmod, S_IRUSR, S_IWUSR, S_IXUSR, S_IRWXU;
+import core.sys.posix.unistd : link;
 import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED;
 import core.thread : Thread;
 import core.time : msecs;
 import std.algorithm.sorting : sort;
 import std.algorithm.searching : canFind;
 import std.array : appender;
+import std.ascii : isHexDigit;
 import std.conv : to;
 import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.digest : LetterCase, toHexString;
@@ -19,11 +22,11 @@ import std.file : SpanMode, copy, dirEntries, exists, getAttributes, isFile,
     isSymlink, mkdirRecurse, read, readText, remove, rmdirRecurse,
     setAttributes, tempDir, write;
 import std.format : format;
-import std.json : JSONValue, parseJSON;
+import std.json : JSONType, JSONValue, parseJSON;
 import std.path : absolutePath, buildPath, relativePath;
 import std.process : execute, kill, spawnProcess;
 import std.stdio : File, writeln;
-import std.string : splitLines, strip;
+import std.string : splitLines, strip, toStringz;
 import std.uuid : randomUUID;
 
 extern(C) int wait4(int pid, int* status, int options, rusage* usage);
@@ -74,18 +77,80 @@ private string fileDigest(string path) {
 
 private struct ExecutableSnapshot { string path, digest; }
 
+private string privateScratch(string prefix) {
+    auto root = buildPath(tempDir, prefix ~ randomUUID.toString);
+    mkdirRecurse(root);
+    need(chmod(root.toStringz, S_IRWXU) == 0,
+        "cannot restrict benchmark scratch directory");
+    return root;
+}
+
 private ExecutableSnapshot snapshotExecutable(string source, string root,
         string label) {
     need(isFile(source) && !isSymlink(source),
         label ~ " binary must be a regular non-symlink file");
     auto destination = buildPath(root, label ~ "-executable");
     copy(source, destination);
-    setAttributes(destination, getAttributes(source));
+    need(chmod(destination.toStringz, S_IRUSR | S_IXUSR) == 0,
+        label ~ " executable snapshot could not be made read-only");
     need(isFile(destination) && !isSymlink(destination),
         label ~ " executable snapshot differs");
     auto digest = fileDigest(destination);
     need(digest == fileDigest(source), label ~ " binary changed while snapshotting");
     return ExecutableSnapshot(destination, digest);
+}
+
+private void verifySnapshot(ref const ExecutableSnapshot snapshot) {
+    need(isFile(snapshot.path) && !isSymlink(snapshot.path) &&
+        fileDigest(snapshot.path) == snapshot.digest,
+        "executable snapshot changed during benchmark");
+}
+
+private void publishReport(string reportPath, string text) {
+    auto temporary = reportPath ~ ".tmp-" ~ randomUUID.toString;
+    scope(exit) if (exists(temporary)) remove(temporary);
+    write(temporary, text ~ "\n");
+    need(readText(temporary) == text ~ "\n",
+        "temporary report reopen differs");
+    parseJSON(readText(temporary));
+    need(link(temporary.toStringz, reportPath.toStringz) == 0,
+        "cannot publish report without overwriting an existing path");
+    remove(temporary);
+    need(readText(reportPath) == text ~ "\n", "report reopen differs");
+}
+
+private bool isDigest(string value, size_t length) {
+    if (value.length != length) return false;
+    foreach (c; value) if (!c.isHexDigit) return false;
+    return true;
+}
+
+private JSONValue loadBuildAttestation(string reportPath,
+        string expectedBinaryDigest) {
+    need(isFile(reportPath) && !isSymlink(reportPath),
+        "build attestation report must be a regular non-symlink file");
+    auto sourceReport = parseJSON(readText(reportPath));
+    need(sourceReport["source_binary_mapping"].str == "ATTESTED" &&
+        sourceReport["binary_sha256"].str == expectedBinaryDigest,
+        "build attestation report does not bind the supplied binary");
+    auto attestation = sourceReport["build_attestation"];
+    need(attestation["schema"].str == "scrubbed-build-attestation-v4" &&
+        attestation["target_sha256"].str == expectedBinaryDigest &&
+        attestation["source_status"].str == "clean-before-and-after" &&
+        attestation["build_status"].integer == 0 &&
+        attestation["compiler_executable_name"].str == "ldc2" &&
+        attestation["compiler_version"].str.length > 0 &&
+        attestation["build_flags"].str ==
+            "release; force; non-interactive; cache=local" &&
+        isDigest(attestation["source_sha"].str, 40) &&
+        isDigest(attestation["source_tree_id"].str, 40) &&
+        isDigest(attestation["source_archive_sha256"].str, 64) &&
+        isDigest(attestation["dub_recipe_sha256"].str, 64) &&
+        isDigest(attestation["dependency_lock_sha256"].str, 64) &&
+        isDigest(attestation["compiler_executable_sha256"].str, 64) &&
+        isDigest(attestation["dub_executable_sha256"].str, 64),
+        "build attestation is incomplete or inconsistent");
+    return attestation;
 }
 
 private string commandOutput(string[] command) {
@@ -202,7 +267,10 @@ private ulong micros(ref const typeof(rusage.init.ru_utime) value) {
 
 private JSONValue invoke(string binary, string input, string output,
         string config, size_t threads, size_t ordinal, string root,
-        bool instrumented, bool injectProbeFailure = false) {
+        bool instrumented, string expectedBinaryDigest,
+        bool injectProbeFailure = false) {
+    need(fileDigest(binary) == expectedBinaryDigest,
+        "executable snapshot changed before invocation");
     auto label = (instrumented ? "attribution-" : "performance-") ~
         threads.to!string ~ "-" ~ ordinal.to!string ~ "-" ~
         randomUUID.toString;
@@ -213,7 +281,7 @@ private JSONValue invoke(string binary, string input, string output,
     auto stdoutFile = File(stdoutPath, "wb");
     auto stderrFile = File(stderrPath, "wb");
     string[] command = instrumented ? ["/usr/bin/env",
-        "SCRUBBED_COORDINATION_METRICS_V1=" ~ metricsPath, binary] : [binary];
+        "SCRUBBED_COORDINATION_METRICS_V2=" ~ metricsPath, binary] : [binary];
     if (instrumented && ordinal == 0) command ~= "--DRT-gcopt=profile:2";
     command ~= ["run", "--input", input, "--output", output, "--config", config,
         "--threads", threads.to!string, "--max-open-inputs", threads.to!string];
@@ -264,7 +332,8 @@ private JSONValue invoke(string binary, string input, string output,
     do waited = wait4(child.processID, &status, 0, &usage);
     while (waited < 0 && errno == EINTR);
     childReaped = waited == child.processID;
-    atomicStore(stopped, true); sampler.join(); timer.stop();
+    timer.stop();
+    atomicStore(stopped, true); sampler.join();
     samplerJoined = true;
     need(waited == child.processID && WIFEXITED(status) && WEXITSTATUS(status) == 0,
         "child failed: " ~ readText(stderrPath));
@@ -288,36 +357,100 @@ private JSONValue invoke(string binary, string input, string output,
         "syscall_status": JSONValue("unsupported-no-exact-child-counter")]);
     if (instrumented) {
         auto metrics = parseJSON(readText(metricsPath));
-        need(metrics["schema"].str == "scrubbed.coordination-metrics.v1",
+        need(metrics["schema"].str == "scrubbed.coordination-metrics.v2",
             "metrics schema differs");
         result["metrics"] = metrics;
     }
+    need(fileDigest(binary) == expectedBinaryDigest,
+        "executable snapshot changed during invocation");
+    return result;
+}
+
+private void requireKeys(ref JSONValue value, string[] expected,
+        string label) {
+    need(value.type == JSONType.object, label ~ " must be an object");
+    need(value.object.length == expected.length,
+        label ~ " field cardinality differs");
+    foreach (key; expected)
+        need((key in value.object) !is null, label ~ " omitted " ~ key);
+}
+
+private long metricInteger(ref JSONValue value, string key, string label) {
+    auto result = value[key].integer;
+    need(result >= 0, label ~ " contains negative " ~ key);
     return result;
 }
 
 private void validateMetrics(ref JSONValue sample, size_t expectedFiles,
         ulong expectedBytes) {
     auto metrics = sample["metrics"];
+    requireKeys(metrics, ["schema", "version", "wall_nanoseconds", "limits",
+        "counts", "phases"], "metrics");
+    need(metrics["schema"].str == "scrubbed.coordination-metrics.v2" &&
+        metrics["version"].integer == 2,
+        "metrics revision differs");
+    need(metricInteger(metrics, "wall_nanoseconds", "metrics") > 0,
+        "metrics wall duration is empty");
+    auto limits = metrics["limits"];
+    requireKeys(limits, ["queued_documents", "reserved_bytes",
+        "worker_descriptors"], "metrics limits");
+    auto queuedLimit = metricInteger(limits, "queued_documents", "limits");
+    auto byteLimit = metricInteger(limits, "reserved_bytes", "limits");
+    auto descriptorLimit = metricInteger(limits, "worker_descriptors", "limits");
+    need(queuedLimit > 0 && byteLimit > 0 && descriptorLimit > 0,
+        "metrics limits must be positive");
     auto counts = metrics["counts"];
+    requireKeys(counts, ["queued_documents", "reserved_bytes",
+        "worker_descriptors", "peak_queued_documents", "peak_reserved_bytes",
+        "peak_worker_descriptors", "submitted", "succeeded", "failed",
+        "skipped"], "metrics counts");
+    foreach (key; ["queued_documents", "reserved_bytes", "worker_descriptors",
+            "peak_queued_documents", "peak_reserved_bytes",
+            "peak_worker_descriptors", "submitted", "succeeded", "failed",
+            "skipped"])
+        metricInteger(counts, key, "counts");
     need(counts["submitted"].integer == expectedFiles &&
         counts["succeeded"].integer == expectedFiles &&
         counts["failed"].integer == 0 && counts["skipped"].integer == 0 &&
         counts["queued_documents"].integer == 0 &&
         counts["reserved_bytes"].integer == 0 &&
-        counts["worker_descriptors"].integer == 0,
+        counts["worker_descriptors"].integer == 0 &&
+        counts["peak_queued_documents"].integer <= queuedLimit &&
+        counts["peak_reserved_bytes"].integer <= byteLimit &&
+        counts["peak_worker_descriptors"].integer <= descriptorLimit,
         "terminal/reservation accounting differs");
     auto phases = metrics["phases"];
-    foreach (name; ["source_stat", "ordinal_assignment", "admission_wait",
+    auto rootPhases = ["source_stat", "ordinal_assignment", "admission_wait",
             "accepted_worker_queue", "descriptor_wait", "descriptor_hold",
-            "transform", "ordered_result_wait", "atomic_publication"])
+            "transform", "ordered_result_wait", "atomic_publication"];
+    requireKeys(phases, ["discovery"] ~ rootPhases ~ ["shutdown_join"],
+        "metrics phases");
+    foreach (name; ["discovery"] ~ rootPhases ~ ["shutdown_join"]) {
+        auto phase = phases[name];
+        requireKeys(phase, ["calls", "units", "nanoseconds"],
+            "metrics phase " ~ name);
+        foreach (key; ["calls", "units", "nanoseconds"])
+            metricInteger(phase, key, "metrics phase " ~ name);
+    }
+    foreach (name; rootPhases)
         need(phases[name]["calls"].integer == expectedFiles,
             name ~ " root count differs");
-    need(phases["accepted_worker_queue"]["units"].integer == expectedBytes &&
+    need(phases["discovery"]["calls"].integer == 1 &&
+        phases["discovery"]["units"].integer == expectedFiles &&
+        phases["source_stat"]["units"].integer == expectedFiles &&
+        phases["ordinal_assignment"]["units"].integer == expectedFiles &&
+        phases["admission_wait"]["units"].integer == expectedBytes &&
+        phases["accepted_worker_queue"]["units"].integer == expectedBytes &&
         phases["accepted_worker_queue"]["nanoseconds"].integer > 0,
         "accepted-worker queue accounting differs");
-    need(phases["transform"]["units"].integer == expectedBytes,
+    need(phases["descriptor_wait"]["units"].integer == expectedBytes &&
+        phases["descriptor_hold"]["units"].integer == expectedBytes &&
+        phases["transform"]["units"].integer == expectedBytes &&
+        phases["ordered_result_wait"]["units"].integer == 0 &&
+        phases["atomic_publication"]["units"].integer > 0,
         "transform byte accounting differs");
-    need(phases["shutdown_join"]["calls"].integer == 1,
+    need(phases["shutdown_join"]["calls"].integer == 1 &&
+        phases["shutdown_join"]["units"].integer == 0,
         "shutdown count differs");
     auto processCpuNanoseconds =
         (sample["user_us"].integer + sample["system_us"].integer) * 1_000;
@@ -327,9 +460,10 @@ private void validateMetrics(ref JSONValue sample, size_t expectedFiles,
 }
 
 private void runSelfTest(string harnessPath) {
-    auto root = buildPath(tempDir, "scrubbed-coordination-self-test-" ~
-        randomUUID.toString);
-    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto root = privateScratch("scrubbed-coordination-self-test-");
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    need((getAttributes(root) & 511) == S_IRWXU,
+        "benchmark scratch permissions differ");
 
     auto mutableExecutable = buildPath(root, "mutable-executable");
     write(mutableExecutable, "#!/bin/sh\nexit 0\n");
@@ -341,17 +475,34 @@ private void runSelfTest(string harnessPath) {
         fileDigest(mutableExecutable) != snapshotDigest,
         "executable snapshot followed mutable source");
 
+    need(chmod(snapshot.path.toStringz, S_IRUSR | S_IWUSR | S_IXUSR) == 0,
+        "cannot make self-test snapshot writable");
+    write(snapshot.path, "changed snapshot\n");
+    bool changedSnapshotRejected;
+    try verifySnapshot(snapshot);
+    catch (Exception) { changedSnapshotRejected = true; }
+    need(changedSnapshotRejected, "changed executable snapshot was accepted");
+
     bool cleanupFailureObserved;
-    try invoke("/usr/bin/true", root, root, root, 1, 0, root, false, true);
+    auto trueDigest = fileDigest("/usr/bin/true");
+    try invoke("/usr/bin/true", root, root, root, 1, 0, root, false,
+        trueDigest, true);
     catch (Exception error) {
         cleanupFailureObserved = error.msg == "injected post-spawn probe failure";
     }
     need(cleanupFailureObserved, "post-spawn cleanup injection differed");
 
     enum validMetrics = `{"user_us":1000,"system_us":1000,"metrics":{` ~
+        `"schema":"scrubbed.coordination-metrics.v2","version":2,` ~
+        `"wall_nanoseconds":1000,` ~
+        `"limits":{"queued_documents":1,"reserved_bytes":1,` ~
+        `"worker_descriptors":1},` ~
         `"counts":{"submitted":1,"succeeded":1,"failed":0,"skipped":0,` ~
-        `"queued_documents":0,"reserved_bytes":0,"worker_descriptors":0},` ~
+        `"queued_documents":0,"reserved_bytes":0,"worker_descriptors":0,` ~
+        `"peak_queued_documents":1,"peak_reserved_bytes":1,` ~
+        `"peak_worker_descriptors":1},` ~
         `"phases":{` ~
+        `"discovery":{"calls":1,"units":1,"nanoseconds":1},` ~
         `"source_stat":{"calls":1,"units":1,"nanoseconds":1},` ~
         `"ordinal_assignment":{"calls":1,"units":1,"nanoseconds":1},` ~
         `"admission_wait":{"calls":1,"units":1,"nanoseconds":1},` ~
@@ -359,7 +510,7 @@ private void runSelfTest(string harnessPath) {
         `"descriptor_wait":{"calls":1,"units":1,"nanoseconds":1},` ~
         `"descriptor_hold":{"calls":1,"units":1,"nanoseconds":1},` ~
         `"transform":{"calls":1,"units":1,"nanoseconds":1},` ~
-        `"ordered_result_wait":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"ordered_result_wait":{"calls":1,"units":0,"nanoseconds":1},` ~
         `"atomic_publication":{"calls":1,"units":1,"nanoseconds":1},` ~
         `"shutdown_join":{"calls":1,"units":0,"nanoseconds":1}}}}`;
     auto valid = parseJSON(validMetrics);
@@ -370,6 +521,60 @@ private void runSelfTest(string harnessPath) {
     try validateMetrics(invalid, 1, 1);
     catch (Exception) { invalidRejected = true; }
     need(invalidRejected, "zeroed comparison attribution was accepted");
+    invalid = parseJSON(validMetrics);
+    invalid["metrics"]["version"] = 999;
+    invalidRejected = false;
+    try validateMetrics(invalid, 1, 1);
+    catch (Exception) { invalidRejected = true; }
+    need(invalidRejected, "mismatched metrics revision was accepted");
+    invalid = parseJSON(validMetrics);
+    invalid["metrics"]["unexpected"] = 1;
+    invalidRejected = false;
+    try validateMetrics(invalid, 1, 1);
+    catch (Exception) { invalidRejected = true; }
+    need(invalidRejected, "unexpected metrics field was accepted");
+    auto reportPath = buildPath(root, "atomic-report.json");
+    publishReport(reportPath, `{"schema":"self-test"}`);
+    need(parseJSON(readText(reportPath))["schema"].str == "self-test",
+        "atomic report publication differed");
+    bool overwriteRejected;
+    try publishReport(reportPath, `{"schema":"replacement"}`);
+    catch (Exception) { overwriteRejected = true; }
+    need(overwriteRejected &&
+        parseJSON(readText(reportPath))["schema"].str == "self-test",
+        "report publication overwrote an existing path");
+
+    auto attestationPath = buildPath(root, "build-attestation.json");
+    enum digest40 = "0000000000000000000000000000000000000000";
+    enum digest64 = "0000000000000000000000000000000000000000000000000000000000000000";
+    auto attestationReport = JSONValue([
+        "source_binary_mapping": JSONValue("ATTESTED"),
+        "binary_sha256": JSONValue(trueDigest),
+        "build_attestation": JSONValue([
+            "schema": JSONValue("scrubbed-build-attestation-v4"),
+            "target_sha256": JSONValue(trueDigest),
+            "source_status": JSONValue("clean-before-and-after"),
+            "build_status": JSONValue(0),
+            "compiler_executable_name": JSONValue("ldc2"),
+            "compiler_version": JSONValue("self-test"),
+            "build_flags": JSONValue(
+                "release; force; non-interactive; cache=local"),
+            "source_sha": JSONValue(digest40),
+            "source_tree_id": JSONValue(digest40),
+            "source_archive_sha256": JSONValue(digest64),
+            "dub_recipe_sha256": JSONValue(digest64),
+            "dependency_lock_sha256": JSONValue(digest64),
+            "compiler_executable_sha256": JSONValue(digest64),
+            "dub_executable_sha256": JSONValue(digest64)])]);
+    write(attestationPath, attestationReport.toString);
+    loadBuildAttestation(attestationPath, trueDigest);
+    attestationReport["build_attestation"]["target_sha256"] = digest64;
+    write(attestationPath, attestationReport.toString);
+    bool mismatchedAttestationRejected;
+    try loadBuildAttestation(attestationPath, trueDigest);
+    catch (Exception) { mismatchedAttestationRejected = true; }
+    need(mismatchedAttestationRejected,
+        "mismatched source-to-binary attestation was accepted");
     writeln("coordination profile self-test: ok");
 }
 
@@ -415,17 +620,26 @@ private bool pairedMedianWithinFivePercent(JSONValue[] baseline,
 }
 
 private void runComparison(string[] args) {
-    auto baseline = absolutePath(args[1]);
-    auto candidate = absolutePath(args[2]);
-    auto reportPath = absolutePath(args[3]);
-    need(exists(baseline) && exists(candidate) && !exists(reportPath),
-        "comparison binary missing or report exists");
+    auto baseline = absolutePath(args[2]);
+    auto baselineAttestationPath = absolutePath(args[3]);
+    auto candidate = absolutePath(args[4]);
+    auto candidateAttestationPath = absolutePath(args[5]);
+    auto reportPath = absolutePath(args[6]);
+    need(exists(baseline) && exists(candidate) &&
+        exists(baselineAttestationPath) && exists(candidateAttestationPath) &&
+        !exists(reportPath),
+        "comparison binary/attestation missing or report exists");
     need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
-    auto root = buildPath(tempDir, "scrubbed-coordination-compare-" ~
-        randomUUID.toString);
-    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto root = privateScratch("scrubbed-coordination-compare-");
+    scope(exit) if (exists(root)) rmdirRecurse(root);
     auto baselineSnapshot = snapshotExecutable(baseline, root, "baseline");
     auto candidateSnapshot = snapshotExecutable(candidate, root, "candidate");
+    auto baselineAttestation = loadBuildAttestation(
+        baselineAttestationPath, baselineSnapshot.digest);
+    auto candidateAttestation = loadBuildAttestation(
+        candidateAttestationPath, candidateSnapshot.digest);
+    auto baselineAttestationDigest = fileDigest(baselineAttestationPath);
+    auto candidateAttestationDigest = fileDigest(candidateAttestationPath);
     baseline = baselineSnapshot.path;
     candidate = candidateSnapshot.path;
     auto harnessDigest = fileDigest(absolutePath(args[0]));
@@ -451,7 +665,8 @@ private void runComparison(string[] args) {
                     (isCandidate ? "-candidate-" : "-baseline-") ~
                     threads.to!string ~ "-" ~ round.to!string);
                 auto sample = invoke(binary, input, output, config, threads,
-                    round, root, false);
+                    round, root, false, isCandidate ?
+                        candidateSnapshot.digest : baselineSnapshot.digest);
                 auto outputId = identify(output);
                 need(outputId.tree == outputTreePins[layout.name],
                     "comparison exact output tree pin differs");
@@ -489,7 +704,8 @@ private void runComparison(string[] args) {
             auto output = buildPath(root, "many-small-attribution-" ~
                 (isCandidate ? "candidate-" : "baseline-") ~ round.to!string);
             auto sample = invoke(binary, input, output, config, 4, round,
-                root, true);
+                root, true, isCandidate ?
+                    candidateSnapshot.digest : baselineSnapshot.digest);
             validateMetrics(sample, layout.files, inputId.bytes);
             auto outputId = identify(output);
             need(outputId.tree == outputTreePins[layout.name],
@@ -518,13 +734,21 @@ private void runComparison(string[] args) {
         targetCandidateWall * 100 <= targetBaselineWall * 90 &&
         waitFalls && controlsPass;
     auto report = JSONValue([
-        "schema": JSONValue("scrubbed.coordination-scheduler-comparison.v1"),
+        "schema": JSONValue("scrubbed.coordination-scheduler-comparison.v2"),
+        "version": JSONValue(2),
         "host_os": JSONValue(commandOutput(["uname", "-s"])),
         "host_architecture": JSONValue(commandOutput(["uname", "-m"])),
         "host_cpu": JSONValue(commandOutput(
             ["sysctl", "-n", "machdep.cpu.brand_string"])),
         "baseline_binary_sha256": JSONValue(baselineSnapshot.digest),
         "candidate_binary_sha256": JSONValue(candidateSnapshot.digest),
+        "baseline_attestation_report_sha256": JSONValue(
+            baselineAttestationDigest),
+        "candidate_attestation_report_sha256": JSONValue(
+            candidateAttestationDigest),
+        "baseline_build_attestation": baselineAttestation,
+        "candidate_build_attestation": candidateAttestation,
+        "source_binary_mapping": JSONValue("ATTESTED"),
         "harness_sha256": JSONValue(harnessDigest),
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "config_sha256": JSONValue(configPin),
@@ -547,8 +771,12 @@ private void runComparison(string[] args) {
     auto text = report.toString;
     need(!text.canFind(root), "comparison report leaked temporary path");
     parseJSON(text);
-    write(reportPath, text ~ "\n");
-    need(readText(reportPath) == text ~ "\n", "comparison report reopen differs");
+    verifySnapshot(baselineSnapshot);
+    verifySnapshot(candidateSnapshot);
+    need(fileDigest(baselineAttestationPath) == baselineAttestationDigest &&
+        fileDigest(candidateAttestationPath) == candidateAttestationDigest,
+        "build attestation report changed during benchmark");
+    publishReport(reportPath, text);
     writeln("coordination comparison: wrote ", reportPath);
 }
 
@@ -559,9 +787,8 @@ private void runDisabledMetricsOverhead(string[] args) {
     need(exists(baseline) && exists(candidate) && !exists(reportPath),
         "overhead binary missing or report exists");
     need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
-    auto root = buildPath(tempDir, "scrubbed-coordination-overhead-" ~
-        randomUUID.toString);
-    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto root = privateScratch("scrubbed-coordination-overhead-");
+    scope(exit) if (exists(root)) rmdirRecurse(root);
     auto baselineSnapshot = snapshotExecutable(baseline, root, "baseline");
     auto candidateSnapshot = snapshotExecutable(candidate, root, "candidate");
     baseline = baselineSnapshot.path;
@@ -583,7 +810,8 @@ private void runDisabledMetricsOverhead(string[] args) {
         auto output = buildPath(root, (isCandidate ? "candidate-" : "baseline-") ~
             threads.to!string ~ "-" ~ round.to!string);
         auto sample = invoke(binary, input, output, config, threads,
-            round, root, false);
+            round, root, false, isCandidate ?
+                candidateSnapshot.digest : baselineSnapshot.digest);
         auto outputId = identify(output);
         need(outputId.tree == outputTreePins[layout.name],
             "overhead exact output tree pin differs");
@@ -619,8 +847,9 @@ private void runDisabledMetricsOverhead(string[] args) {
     auto text = report.toString;
     need(!text.canFind(root), "overhead report leaked temporary path");
     parseJSON(text);
-    write(reportPath, text ~ "\n");
-    need(readText(reportPath) == text ~ "\n", "overhead report reopen differs");
+    verifySnapshot(baselineSnapshot);
+    verifySnapshot(candidateSnapshot);
+    publishReport(reportPath, text);
     writeln("coordination disabled-overhead: wrote ", reportPath);
 }
 
@@ -630,8 +859,8 @@ private void runSizeOrder(string[] args) {
     need(exists(binary) && !exists(reportPath),
         "size-order binary missing or report exists");
     need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
-    auto root = buildPath(tempDir, "scrubbed-size-order-" ~ randomUUID.toString);
-    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto root = privateScratch("scrubbed-size-order-");
+    scope(exit) if (exists(root)) rmdirRecurse(root);
     auto binarySnapshot = snapshotExecutable(binary, root, "shipping");
     binary = binarySnapshot.path;
     auto harnessDigest = fileDigest(absolutePath(args[0]));
@@ -658,7 +887,7 @@ private void runSizeOrder(string[] args) {
             auto output = buildPath(root, variant ~ "-output-" ~
                 threads.to!string ~ "-" ~ round.to!string);
             auto sample = invoke(binary, inputs[variant], output, config, threads,
-                round, root, false);
+                round, root, false, binarySnapshot.digest);
             auto outputId = identify(output);
             if ((variant in expectedOutputTrees) is null) {
                 expectedOutputTrees[variant] = outputId.tree;
@@ -700,8 +929,8 @@ private void runSizeOrder(string[] args) {
     auto text = report.toString;
     need(!text.canFind(root), "size-order report leaked temporary path");
     parseJSON(text);
-    write(reportPath, text ~ "\n");
-    need(readText(reportPath) == text ~ "\n", "size-order report reopen differs");
+    verifySnapshot(binarySnapshot);
+    publishReport(reportPath, text);
     writeln("size-order profile: wrote ", reportPath);
 }
 
@@ -710,8 +939,8 @@ private void runAttribution(string[] args) {
     auto reportPath = absolutePath(args[2]);
     need(exists(binary) && !exists(reportPath), "binary missing or report exists");
     need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
-    auto root = buildPath(tempDir, "scrubbed-coordination-" ~ randomUUID.toString);
-    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto root = privateScratch("scrubbed-coordination-");
+    scope(exit) if (exists(root)) rmdirRecurse(root);
     auto binarySnapshot = snapshotExecutable(binary, root, "shipping");
     binary = binarySnapshot.path;
     auto harnessDigest = fileDigest(absolutePath(args[0]));
@@ -731,7 +960,7 @@ private void runAttribution(string[] args) {
                 (instrumented ? "-attribution-t" : "-performance-t") ~
                 threads.to!string ~ "-r" ~ round.to!string);
             auto sample = invoke(binary, input, output, config, threads, round,
-                root, instrumented);
+                root, instrumented, binarySnapshot.digest);
             auto outputId = identify(output);
             need(outputId.tree == outputTreePins[layout.name],
                 "exact output tree pin differs");
@@ -773,16 +1002,17 @@ private void runAttribution(string[] args) {
     auto text = report.toString;
     need(!text.canFind(root), "report leaked temporary path");
     parseJSON(text);
-    write(reportPath, text ~ "\n");
-    need(readText(reportPath) == text ~ "\n", "report reopen differs");
+    verifySnapshot(binarySnapshot);
+    publishReport(reportPath, text);
     writeln("coordination profile: wrote ", reportPath);
 }
 
 void main(string[] args) {
     need(args.length == 2 || args.length == 3 || args.length == 4 ||
-        args.length == 5,
+        args.length == 5 || args.length == 7,
         "usage: coordination_profile <release-binary> <report> | " ~
-        "<baseline-binary> <candidate-binary> <report> | " ~
+        "--compare <baseline-binary> <baseline-attestation-report> " ~
+        "<candidate-binary> <candidate-attestation-report> <report> | " ~
         "--size-order <release-binary> <report> | " ~
         "--disabled-overhead <baseline-binary> <candidate-binary> <report> | " ~
         "--self-test");
@@ -791,6 +1021,7 @@ void main(string[] args) {
     else if (args.length == 5 && args[1] == "--disabled-overhead")
         runDisabledMetricsOverhead(args);
     else if (args.length == 4 && args[1] == "--size-order") runSizeOrder(args);
-    else if (args.length == 4) runComparison(args);
-    else runAttribution(args);
+    else if (args.length == 7 && args[1] == "--compare") runComparison(args);
+    else if (args.length == 3) runAttribution(args);
+    else need(false, "arguments do not select a supported mode");
 }

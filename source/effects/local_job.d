@@ -8,8 +8,8 @@ import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1,
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentViewOwner;
 import effects.atomic_piece_sink : writeAtomicPieces;
-import effects.bounded_input : CoordinationMetricsV1, CoordinationPhaseV1,
-    beginCoordinationMetricV1, beginCoordinationThreadCpuMetricV1;
+import effects.bounded_input : CoordinationMetricsV2, CoordinationPhaseV2,
+    beginCoordinationMetricV2, beginCoordinationThreadCpuMetricV2;
 import effects.durable_job : DurableMetricPhaseV1, beginDurableMetricV1,
     recordDurableMetricV1;
 import effects.mapped_file : openMappedFile;
@@ -183,7 +183,7 @@ private final class LocalSource : Source {
 private final class LocalParser : Parser {
     size_t expectedBytes;
     ubyte[32]* inputHash;
-    CoordinationMetricsV1 metrics;
+    CoordinationMetricsV2 metrics;
     long* transformStarted;
 
     override Content parse(SourceRecord record) {
@@ -191,7 +191,7 @@ private final class LocalParser : Parser {
             record.owner.view(0, expectedBytes))]);
         *inputHash = contentDigest(content);
         if (metrics !is null)
-            *transformStarted = beginCoordinationThreadCpuMetricV1(metrics);
+            *transformStarted = beginCoordinationThreadCpuMetricV2(metrics);
         return content;
     }
 }
@@ -210,7 +210,7 @@ private final class LocalSink : Sink {
     bool began;
     LocalJobOutcome outcome;
     ubyte[32] inputHash;
-    CoordinationMetricsV1 metrics;
+    CoordinationMetricsV2 metrics;
     long* transformStarted;
     bool* transformRecorded;
     ulong inputBytes;
@@ -218,7 +218,7 @@ private final class LocalSink : Sink {
     override void accept(StageEvent event) {
         if (!began) {
             if (metrics !is null && !*transformRecorded) {
-                metrics.recordThreadCpu(CoordinationPhaseV1.transform, inputBytes,
+                metrics.recordThreadCpu(CoordinationPhaseV2.transform, inputBytes,
                     *transformStarted);
                 *transformRecorded = true;
             }
@@ -230,9 +230,9 @@ private final class LocalSink : Sink {
             auto destination = destinationFor(event);
             admit(destination, event);
             if (!dryRun) {
-                auto publicationStarted = beginCoordinationMetricV1(metrics);
+                auto publicationStarted = beginCoordinationMetricV2(metrics);
                 scope(exit) if (metrics !is null)
-                    metrics.record(CoordinationPhaseV1.atomicPublication,
+                    metrics.record(CoordinationPhaseV2.atomicPublication,
                         event.payload.content.size, publicationStarted);
                 writeAtomicPieces(destination, event.payload.content.pieces());
             }
@@ -286,7 +286,7 @@ LocalJobOutcome runLocalJob(string filename, ulong expectedBytes,
         scope LocalDestination destinationFor,
         scope LocalAdmission admit, scope LocalPublicationBegin begin,
         scope LocalRuntimeBatchV1 observe = null, bool dryRun = false,
-        CoordinationMetricsV1 metrics = null) {
+        CoordinationMetricsV2 metrics = null) {
     enforce(destinationFor !is null && admit !is null && begin !is null,
         "local destination callbacks are required");
     auto source = new LocalSource;
@@ -319,7 +319,7 @@ LocalJobOutcome runLocalJob(string filename, ulong expectedBytes,
             });
     catch (Throwable error) {
         if (metrics !is null && transformStarted != 0 && !transformRecorded)
-            metrics.recordThreadCpu(CoordinationPhaseV1.transform, expectedBytes,
+            metrics.recordThreadCpu(CoordinationPhaseV2.transform, expectedBytes,
                 transformStarted);
         throw error;
     }

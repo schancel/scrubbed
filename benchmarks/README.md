@@ -48,15 +48,17 @@ rm -f benchmarks/coordination-profile-evidence.json
 ```
 
 The performance series does not set the metrics environment or run stack/GC
-probes. The attribution series sets `SCRUBBED_COORDINATION_METRICS_V1`; its
+probes. The attribution series sets `SCRUBBED_COORDINATION_METRICS_V2`; its
 first sample per thread also records a D-GC availability control and attempts
 a one-second `/usr/bin/sample` trace. Darwin `wait4` supplies direct-child CPU
 and peak RSS. FD counts are sampled with `lsof`, and exact child syscall counts
 are explicitly unsupported. OS cache state is uncontrolled and is never
 described as cold. Transform nanoseconds use the executing worker's thread CPU
 clock; the remaining phase durations use a monotonic elapsed clock. The harness
-copies each supplied executable into private scratch before sampling, records
-the snapshot digest up front, and executes only that immutable snapshot.
+uses the v2 metrics schema because v1 recorded transform elapsed time rather
+than worker CPU. It copies each supplied executable into owner-only scratch,
+makes the copy read-only, verifies its digest around every invocation, and
+atomically publishes reports only after final snapshot verification.
 
 On the recorded Apple M4/macOS 26.6.2/LDC 1.43.0 run, uninstrumented median
 wall times in seconds were many-small 8.091/8.115/3.590 and few-large
@@ -79,24 +81,30 @@ allocated and no instrumentation clock or mutex is touched.
 ### Bounded worker-availability candidate
 
 The follow-up comparison fixes the diagnosed producer-phase worker deficit:
-`BoundedInput` now creates the effective
-`min(threads, worker-descriptor-cap)` number of background workers instead of
-reserving one for a producer that only enters the pool during final join. The
-same effective limit remains the processing gate when `finish(true)`
-temporarily enlists its caller, avoiding unusable threads when the descriptor
-cap is lower than `--threads`. A
+`BoundedInput` now makes the configured processing capacity available before
+the producer enters `finish(true)`, while bounding extra workers by admitted
+queue capacity when the descriptor cap is lower than `--threads`. The same
+`min(threads, worker-descriptor-cap)` limit remains the processing gate when
+`finish(true)` temporarily enlists its caller. A
 fail-before unit test requires both configured workers to enter admitted work
 before `finish()` begins.
 
 ```sh
+ldc2 -O3 -release benchmarks/pipeline.d \
+  -of=/tmp/scrubbed-pipeline
 ldc2 -O3 -release benchmarks/coordination_profile.d \
   -of=/tmp/scrubbed-coordination-profile
-/tmp/scrubbed-coordination-profile /path/to/base/scrubbed \
-  /path/to/candidate/scrubbed \
+/tmp/scrubbed-pipeline --attested-coordination \
+  /path/to/clean-base-source /path/to/clean-candidate-source \
+  /tmp/scrubbed-coordination-profile \
   benchmarks/coordination-scheduler-evidence.json
 ```
 
-The harness alternates base/candidate order for five pairs at threads 1/2/4
+The pipeline harness builds both clean source revisions through the existing
+private attested-build closure; the comparison refuses binaries whose hashes
+do not match those v4 build attestations and embeds both complete attestations
+in its v2 report. The coordination harness alternates base/candidate order for
+five pairs at threads 1/2/4
 on both frozen layouts, exact-gates every output, and separately interleaves
 five instrumented many-small four-thread pairs. It authorizes production only
 when at least four pairs improve, the target median wall improvement is at
@@ -105,11 +113,13 @@ few-large wall/CPU/RSS/FD median paired ratios avoid regressions above 5%.
 Pairing prevents host drift across the long run from mismatching unrelated raw
 medians.
 
-The retained JSON records the original pre-review run: five of five target
+The retained v1 JSON records the original pre-review run: five of five target
 pairs improved, many-small four-thread wall fell 13.8%, and queue residence
-fell 15.9%. It is now historical rather than authorizing evidence because it
+fell 15.9%. Its machine-readable decision and authorization fields now fail
+closed as `HISTORICAL_NON_AUTHORIZING`; `historical_decision` preserves what
+the old harness concluded. It is historical rather than authorizing because it
 predates immutable executable snapshots, true transform-CPU accounting,
-strict phase validation, paired control ratios, and the bounded pool repair.
+strict v2 envelope validation, paired control ratios, and the bounded pool repair.
 A controlled idle-host rerun is required before the worker-availability change
 can be integrated; runs observed while unrelated model training was active are
 intentionally not retained.

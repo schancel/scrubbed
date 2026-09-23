@@ -9,8 +9,8 @@ import composition.dispatch_executor : DispatchExecutionFailureV1;
 import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1;
 import core.sync.mutex : Mutex;
 import core.sync.condition : Condition;
-import effects.bounded_input : BoundedInput, CoordinationMetricsV1,
-    CoordinationPhaseV1, InputLimits, beginCoordinationMetricV1;
+import effects.bounded_input : BoundedInput, CoordinationMetricsV2,
+    CoordinationPhaseV2, InputLimits, beginCoordinationMetricV2;
 import effects.jsonl_stream : JsonlFailure, JsonlFailureKind, JsonlLimits;
 import effects.jsonl_job : runJsonlField;
 import effects.stdio_stream : processStandardJsonlDocuments;
@@ -384,7 +384,7 @@ int runExtract(string requestedInput, string requestedOutput,
 private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         string outputRoot, bool inputIsDir, ref RuntimePlanV1 job,
         ulong reservedBytes, bool dryRun, PublicationOrder publication,
-        CoordinationMetricsV1 metrics = null) {
+        CoordinationMetricsV2 metrics = null) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto rootDestination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
     auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
@@ -597,18 +597,18 @@ private final class PublicationOrder {
     private bool[string] destinations;
     private size_t[string] ordinals;
     private size_t assigned;
-    private CoordinationMetricsV1 metrics;
+    private CoordinationMetricsV2 metrics;
 
-    this(CoordinationMetricsV1 metrics = null) {
+    this(CoordinationMetricsV2 metrics = null) {
         this.metrics = metrics;
         mutex = new Mutex;
         changed = new Condition(mutex);
     }
 
     void enter(size_t ordinal) {
-        auto started = beginCoordinationMetricV1(metrics);
+        auto started = beginCoordinationMetricV2(metrics);
         scope(exit) if (metrics !is null)
-            metrics.record(CoordinationPhaseV1.orderedResultWait, 0, started);
+            metrics.record(CoordinationPhaseV2.orderedResultWait, 0, started);
         mutex.lock();
         while (!stopped && ordinal != next) changed.wait();
         if (stopped) {
@@ -655,9 +655,9 @@ private final class PublicationOrder {
     /// The winning failure stops later publication; later failures and
     /// waiters become cancellation outcomes so they cannot replace its cause.
     void fail(size_t ordinal) {
-        auto started = beginCoordinationMetricV1(metrics);
+        auto started = beginCoordinationMetricV2(metrics);
         scope(exit) if (metrics !is null)
-            metrics.record(CoordinationPhaseV1.orderedResultWait, 0, started);
+            metrics.record(CoordinationPhaseV2.orderedResultWait, 0, started);
         mutex.lock();
         while (!stopped && ordinal != next) changed.wait();
         if (stopped) {
@@ -1454,8 +1454,8 @@ int runApp(string[] args) {
             inputIsDir ? outputPath : dirName(outputPath));
     auto pending = explain ? new PendingExplanations : null;
     auto coordinationPath =
-        environment.get("SCRUBBED_COORDINATION_METRICS_V1", "");
-    auto coordination = coordinationPath.length ? new CoordinationMetricsV1 : null;
+        environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
+    auto coordination = coordinationPath.length ? new CoordinationMetricsV2 : null;
     scope(exit) if (coordination !is null) {
         coordination.finishWall();
         write(coordinationPath, coordination.json() ~ "\n");
@@ -1584,9 +1584,9 @@ int runApp(string[] args) {
             }
             if (explain) pending.add(file);
             if (!durableRoute) {
-                auto ordinalStarted = beginCoordinationMetricV1(coordination);
+                auto ordinalStarted = beginCoordinationMetricV2(coordination);
                 scope(exit) if (coordination !is null)
-                    coordination.record(CoordinationPhaseV1.ordinalAssignment,
+                    coordination.record(CoordinationPhaseV2.ordinalAssignment,
                         1, ordinalStarted);
                 publication.assign(file);
             }
@@ -1597,9 +1597,9 @@ int runApp(string[] args) {
                     recordDurableMetricV1(DurableMetricPhaseV1.sourceStat,
                         0, statStarted);
                 auto coordinationStatStarted =
-                    beginCoordinationMetricV1(coordination);
+                    beginCoordinationMetricV2(coordination);
                 scope(exit) if (coordination !is null)
-                    coordination.record(CoordinationPhaseV1.sourceStat, 1,
+                    coordination.record(CoordinationPhaseV2.sourceStat, 1,
                         coordinationStatStarted);
                 bytes = getSize(file);
             }
@@ -1621,7 +1621,7 @@ int runApp(string[] args) {
         }
     }
     void walkCanonical(string directory) {
-        auto discoveryStarted = beginCoordinationMetricV1(coordination);
+        auto discoveryStarted = beginCoordinationMetricV2(coordination);
         auto entries = dirEntries(directory, SpanMode.shallow, false).array;
         auto orderKey = (ref typeof(entries[0]) entry) {
             auto relative = relativePath(entry.name, inputPath);
@@ -1630,7 +1630,7 @@ int runApp(string[] args) {
         };
         sort!((left, right) => orderKey(left) < orderKey(right))(entries);
         if (coordination !is null)
-            coordination.record(CoordinationPhaseV1.discovery,
+            coordination.record(CoordinationPhaseV2.discovery,
                 entries.length, discoveryStarted);
         foreach (entry; entries) {
             if (entry.isSymlink) {

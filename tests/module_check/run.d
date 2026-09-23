@@ -31,5 +31,9 @@ void main(string[] args) {
     expectFailure(args[1], "tests/module_check/forbidden_import", "content.extract", "content may import domain, but not app or cli");
     expectFailure(args[1], "tests/module_check/forbidden_child", "content.extract", "content may import domain, but not app or cli");
     expectFailure(args[1], "tests/module_check/missing_doc", "domain.document", "missing module doc");
-    writeln("module check fixtures: ok (valid selective import, forbidden exact/child imports, missing doc)");
+    expectFailure(args[1], "tests/module_check/forbidden_extraction_effects",
+        "extraction.detector", "must not import effects or concrete I/O");
+    expectFailure(args[1], "tests/module_check/forbidden_extraction_io",
+        "extraction.detector", "must not import effects or concrete I/O");
+    writeln("module check fixtures: ok (valid boundaries, forbidden exact/child/extraction imports, missing doc)");
 }

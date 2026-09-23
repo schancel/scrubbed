@@ -42,6 +42,7 @@ private struct AttestedExecutable {
     ExecutableSnapshot compiler;
     string privateSource;
     string[string] buildEnvironment;
+    NativeTool[] nativeTools;
 }
 
 private struct ControlVariant {
@@ -771,7 +772,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     validateAttestation(attestation, snapshot.sha256);
     return AttestedExecutable(snapshot, attestation,
         ExecutableSnapshot(prepared.compiler, prepared.compilerHash),
-        prepared.privateSource, prepared.environment);
+        prepared.privateSource, prepared.environment, prepared.nativeTools);
 }
 
 private void validateBuildProvenance(JSONValue report, bool comparator,
@@ -1790,6 +1791,19 @@ private void selfTest() {
     catch (Exception) { failed = true; }
     require(failed && parseJSON(readText(publicationPath))["schema"].str ==
         "first", "exclusive report publication negative did not fail");
+    auto coordination = coordinationMeasurementFixture();
+    require(recomputeCoordinationThresholds(coordination),
+        "valid coordination measurement did not satisfy thresholds");
+    auto contradictoryCoordination = parseJSON(coordination.toString);
+    contradictoryCoordination["target_wins"] = 4;
+    failed = false;
+    try recomputeCoordinationThresholds(contradictoryCoordination);
+    catch (Exception) { failed = true; }
+    require(failed,
+        "contradictory coordination summary was accepted");
+    require(coordinationWithinFivePercent(101, 106) &&
+        !coordinationWithinFivePercent(101, 107),
+        "coordination five-percent remainder boundary differs");
     writeln("pipeline release self-test passed");
 }
 
@@ -1977,6 +1991,247 @@ private void validateAttributionBuildSource(JSONValue attestation,
         "attested attribution build source differs from ancestry-checked source");
 }
 
+private enum coordinationRuns = 5;
+private enum coordinationManyInput =
+    "5B5D9E66435A5BC705152EB88C551046BE0AA37B51F4FA42A038683AAFB51167";
+private enum coordinationFewInput =
+    "A69113BEE8E66CE349C620BD122821F4D0719ABC2263A143E8AA0264CF030548";
+private enum coordinationManyOutput =
+    "3ED0A176AA89B8B9428FD3F937042EE45781C6FF3546069BB7CF92A4FA6D9529";
+private enum coordinationFewOutput =
+    "9AAC92A1892B67FCADCAD16E98917446B8077ABB0F8B6826810E5767EACB6DDC";
+
+private long coordinationSampleValue(JSONValue[] samples, long threads,
+        long ordinal, string field) {
+    long result;
+    size_t matches;
+    foreach (sample; samples) if (sample["threads"].integer == threads &&
+            sample["ordinal"].integer == ordinal) {
+        ++matches;
+        if (field == "cpu_us") {
+            auto user = sample["user_us"].integer;
+            auto system = sample["system_us"].integer;
+            require(user >= 0 && system >= 0 && user <= long.max - system,
+                "coordination sample CPU is invalid");
+            result = user + system;
+        } else {
+            result = sample[field].integer;
+            require(result >= 0, "coordination sample value is negative");
+        }
+    }
+    require(matches == 1, "coordination sample identity is not unique");
+    return result;
+}
+
+private long coordinationMedian(JSONValue[] samples, long threads,
+        string field) {
+    long[] ordered;
+    foreach (ordinal; 0 .. coordinationRuns)
+        ordered ~= coordinationSampleValue(samples, threads, ordinal, field);
+    ordered.sort();
+    return ordered[coordinationRuns / 2];
+}
+
+private bool coordinationWithinFivePercent(long baseline, long candidate) {
+    require(baseline > 0 && candidate >= 0,
+        "coordination control values are invalid");
+    return candidate <= baseline || candidate - baseline <= baseline / 20;
+}
+
+private bool coordinationPairedControl(JSONValue[] baseline,
+        JSONValue[] candidate, long threads, string field) {
+    size_t passing;
+    foreach (ordinal; 0 .. coordinationRuns)
+        if (coordinationWithinFivePercent(
+                coordinationSampleValue(baseline, threads, ordinal, field),
+                coordinationSampleValue(candidate, threads, ordinal, field)))
+            ++passing;
+    return passing > coordinationRuns / 2;
+}
+
+private long coordinationQueueValue(JSONValue[] samples, long ordinal) {
+    foreach (sample; samples) if (sample["threads"].integer == 4 &&
+            sample["ordinal"].integer == ordinal) {
+        auto metrics = sample["metrics"];
+        auto counts = metrics["counts"];
+        auto queue = metrics["phases"]["accepted_worker_queue"];
+        auto transform = metrics["phases"]["transform"];
+        require(metrics["schema"].str ==
+                "scrubbed.coordination-metrics.v2" &&
+            metrics["version"].integer == 2 &&
+            counts["submitted"].integer == 4096 &&
+            counts["succeeded"].integer == 4096 &&
+            counts["failed"].integer == 0 && counts["skipped"].integer == 0 &&
+            queue["calls"].integer == 4096 &&
+            queue["units"].integer == 134_217_728 &&
+            queue["nanoseconds"].integer > 0 &&
+            transform["calls"].integer == 4096 &&
+            transform["units"].integer == 134_217_728 &&
+            transform["nanoseconds"].integer > 0 &&
+            sample["output_tree_sha256"].str == coordinationManyOutput,
+            "coordination attribution sample is invalid");
+        return queue["nanoseconds"].integer;
+    }
+    throw new Exception("coordination attribution sample missing");
+}
+
+private bool recomputeCoordinationThresholds(ref JSONValue report) {
+    auto layouts = report["layouts"].array;
+    require(layouts.length == 2, "coordination layout cardinality differs");
+    JSONValue[] manyBaseline, manyCandidate;
+    bool sawMany, sawFew;
+    bool controlsPass = true;
+    foreach (layout; layouts) {
+        auto name = layout["layout"].str;
+        auto isMany = name == "many-small";
+        require(isMany || name == "few-large",
+            "coordination layout identity differs");
+        require(isMany ? !sawMany : !sawFew,
+            "coordination layout identity repeated");
+        if (isMany) sawMany = true; else sawFew = true;
+        auto expectedFiles = isMany ? 4096L : 8L;
+        auto expectedInput = isMany ? coordinationManyInput : coordinationFewInput;
+        auto expectedOutput = isMany ? coordinationManyOutput : coordinationFewOutput;
+        require(layout["files"].integer == expectedFiles &&
+            layout["input_tree_sha256"].str == expectedInput,
+            "coordination layout fixture identity differs");
+        auto baseline = layout["baseline_samples"].array;
+        auto candidate = layout["candidate_samples"].array;
+        require(baseline.length == coordinationRuns * 3 &&
+            candidate.length == coordinationRuns * 3,
+            "coordination performance sample cardinality differs");
+        foreach (sample; baseline)
+            require(sample["output_tree_sha256"].str == expectedOutput,
+                "coordination baseline output identity differs");
+        foreach (sample; candidate)
+            require(sample["output_tree_sha256"].str == expectedOutput,
+                "coordination candidate output identity differs");
+        foreach (threads; [1L, 2L, 4L]) {
+            // These calls also prove each thread/ordinal identity is present once.
+            coordinationMedian(baseline, threads, "wall_us");
+            coordinationMedian(candidate, threads, "wall_us");
+            if (threads == 1 || !isMany)
+                foreach (field; ["wall_us", "cpu_us", "peak_rss_bytes",
+                        "sampled_fd_peak"])
+                    controlsPass = controlsPass && coordinationPairedControl(
+                        baseline, candidate, threads, field);
+        }
+        if (isMany) {
+            manyBaseline = baseline;
+            manyCandidate = candidate;
+        }
+    }
+    require(sawMany && sawFew, "coordination layouts are incomplete");
+    auto baselineWall = coordinationMedian(manyBaseline, 4, "wall_us");
+    auto candidateWall = coordinationMedian(manyCandidate, 4, "wall_us");
+    long targetWins;
+    foreach (ordinal; 0 .. coordinationRuns)
+        if (coordinationSampleValue(manyCandidate, 4, ordinal, "wall_us") <
+                coordinationSampleValue(manyBaseline, 4, ordinal, "wall_us"))
+            ++targetWins;
+    auto baselineAttribution = report["baseline_attribution"].array;
+    auto candidateAttribution = report["candidate_attribution"].array;
+    require(baselineAttribution.length == coordinationRuns &&
+        candidateAttribution.length == coordinationRuns,
+        "coordination attribution cardinality differs");
+    long[] baselineQueue, candidateQueue;
+    foreach (ordinal; 0 .. coordinationRuns) {
+        baselineQueue ~= coordinationQueueValue(baselineAttribution, ordinal);
+        candidateQueue ~= coordinationQueueValue(candidateAttribution, ordinal);
+    }
+    baselineQueue.sort();
+    candidateQueue.sort();
+    auto baselineQueueMedian = baselineQueue[coordinationRuns / 2];
+    auto candidateQueueMedian = candidateQueue[coordinationRuns / 2];
+    require(report["target_wins"].integer == targetWins &&
+        report["target_baseline_median_wall_us"].integer == baselineWall &&
+        report["target_candidate_median_wall_us"].integer == candidateWall &&
+        report["target_baseline_median_queue_ns"].integer ==
+            baselineQueueMedian &&
+        report["target_candidate_median_queue_ns"].integer ==
+            candidateQueueMedian &&
+        report["controls_within_five_percent"].boolean == controlsPass,
+        "coordination derived summary differs from raw samples");
+    auto requiredImprovement = baselineWall / 10 +
+        (baselineWall % 10 != 0 ? 1 : 0);
+    return targetWins >= 4 && baselineWall > 0 && candidateWall >= 0 &&
+        candidateWall < baselineWall &&
+        baselineWall - candidateWall >= requiredImprovement &&
+        candidateQueueMedian < baselineQueueMedian && controlsPass;
+}
+
+private JSONValue coordinationMeasurementFixture() {
+    JSONValue[] layouts;
+    foreach (name; ["many-small", "few-large"]) {
+        auto many = name == "many-small";
+        JSONValue[] baseline, candidate;
+        foreach (ordinal; 0 .. coordinationRuns) foreach (threads; [1L, 2L, 4L]) {
+            auto baselineWall = many && threads == 4 ? 100L : 1_000L;
+            auto candidateWall = many && threads == 4 ? 90L : 1_000L;
+            baseline ~= JSONValue([
+                "threads": JSONValue(threads),
+                "ordinal": JSONValue(cast(long)ordinal),
+                "wall_us": JSONValue(baselineWall),
+                "user_us": JSONValue(100), "system_us": JSONValue(100),
+                "peak_rss_bytes": JSONValue(100),
+                "sampled_fd_peak": JSONValue(10),
+                "output_tree_sha256": JSONValue(many ?
+                    coordinationManyOutput : coordinationFewOutput)]);
+            candidate ~= JSONValue([
+                "threads": JSONValue(threads),
+                "ordinal": JSONValue(cast(long)ordinal),
+                "wall_us": JSONValue(candidateWall),
+                "user_us": JSONValue(100), "system_us": JSONValue(100),
+                "peak_rss_bytes": JSONValue(100),
+                "sampled_fd_peak": JSONValue(10),
+                "output_tree_sha256": JSONValue(many ?
+                    coordinationManyOutput : coordinationFewOutput)]);
+        }
+        layouts ~= JSONValue([
+            "layout": JSONValue(name),
+            "files": JSONValue(many ? 4096 : 8),
+            "input_tree_sha256": JSONValue(many ?
+                coordinationManyInput : coordinationFewInput),
+            "baseline_samples": JSONValue(baseline),
+            "candidate_samples": JSONValue(candidate)]);
+    }
+    JSONValue[] baselineAttribution, candidateAttribution;
+    foreach (ordinal; 0 .. coordinationRuns) {
+        auto attribution = (long queueNanoseconds) => JSONValue([
+            "threads": JSONValue(4),
+            "ordinal": JSONValue(cast(long)ordinal),
+            "output_tree_sha256": JSONValue(coordinationManyOutput),
+            "metrics": JSONValue([
+                "schema": JSONValue("scrubbed.coordination-metrics.v2"),
+                "version": JSONValue(2),
+                "counts": JSONValue([
+                    "submitted": JSONValue(4096),
+                    "succeeded": JSONValue(4096),
+                    "failed": JSONValue(0), "skipped": JSONValue(0)]),
+                "phases": JSONValue([
+                    "accepted_worker_queue": JSONValue([
+                        "calls": JSONValue(4096),
+                        "units": JSONValue(134_217_728),
+                        "nanoseconds": JSONValue(queueNanoseconds)]),
+                    "transform": JSONValue([
+                        "calls": JSONValue(4096),
+                        "units": JSONValue(134_217_728),
+                        "nanoseconds": JSONValue(1)])])])]);
+        baselineAttribution ~= attribution(100);
+        candidateAttribution ~= attribution(90);
+    }
+    return JSONValue([
+        "layouts": JSONValue(layouts),
+        "baseline_attribution": JSONValue(baselineAttribution),
+        "candidate_attribution": JSONValue(candidateAttribution),
+        "target_wins": JSONValue(5),
+        "target_baseline_median_wall_us": JSONValue(100),
+        "target_candidate_median_wall_us": JSONValue(90),
+        "target_baseline_median_queue_ns": JSONValue(100),
+        "target_candidate_median_queue_ns": JSONValue(90),
+        "controls_within_five_percent": JSONValue(true)]);
+}
+
 int main(string[] args) {
     try {
         if (args.length == 7 && args[1] == "--attested-coordination") {
@@ -2018,12 +2273,15 @@ int main(string[] args) {
                 hashFile(expectedHarnessSource) == expectedHarnessSourceHash,
                 "coordination harness source changed during attested build");
             auto harnessTarget = buildPath(root, "coordination-profile-built");
+            verifySnapshot(candidate.compiler);
+            verifyNativeTools(candidate.nativeTools);
             auto harnessBuild = execute([candidate.compiler.path, "-O3", "-release",
                 harnessSource, "-of=" ~ harnessTarget],
                 candidate.buildEnvironment);
             require(harnessBuild.status == 0,
                 "coordination harness build failed: " ~ harnessBuild.output);
             verifySnapshot(candidate.compiler);
+            verifyNativeTools(candidate.nativeTools);
             auto harness = snapshotExecutable(harnessTarget, root,
                 "scrubbed-coordination-profile");
             auto stagedReportPath = buildPath(root,
@@ -2038,18 +2296,6 @@ int main(string[] args) {
                 "attested coordination harness failed: " ~ result.output);
             auto stagedText = readText(stagedReportPath);
             auto report = parseJSON(stagedText);
-            auto targetBaseline = report["target_baseline_median_wall_us"].integer;
-            auto targetCandidate = report["target_candidate_median_wall_us"].integer;
-            auto requiredImprovement = targetBaseline / 10 +
-                (targetBaseline % 10 != 0 ? 1 : 0);
-            auto controlsPass = report["controls_within_five_percent"].boolean;
-            auto recomputedThresholds = report["target_wins"].integer >= 4 &&
-                targetBaseline > 0 && targetCandidate >= 0 &&
-                targetCandidate < targetBaseline &&
-                targetBaseline - targetCandidate >= requiredImprovement &&
-                report["target_candidate_median_queue_ns"].integer <
-                    report["target_baseline_median_queue_ns"].integer &&
-                controlsPass;
             require(report["schema"].str ==
                     "scrubbed.coordination-scheduler-measurement.v2" &&
                 report["version"].integer == 2 &&
@@ -2060,9 +2306,12 @@ int main(string[] args) {
                 report["harness_sha256"].str == harness.sha256 &&
                 !report["production_candidate_authorized"].boolean &&
                 report["decision"].str ==
-                    "MEASUREMENT_ONLY_REQUIRES_PIPELINE_ATTESTATION" &&
-                report["thresholds_satisfied"].boolean == recomputedThresholds,
+                    "MEASUREMENT_ONLY_REQUIRES_PIPELINE_ATTESTATION",
                 "coordination measurement validation failed");
+            auto recomputedThresholds = recomputeCoordinationThresholds(report);
+            require(report["thresholds_satisfied"].boolean ==
+                recomputedThresholds,
+                "coordination measurement threshold summary differs");
             report["schema"] = "scrubbed.coordination-scheduler-comparison.v2";
             report["measurement_schema"] =
                 "scrubbed.coordination-scheduler-measurement.v2";

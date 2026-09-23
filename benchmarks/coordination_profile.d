@@ -700,6 +700,9 @@ private void runComparison(string[] args) {
             auto outputId = identify(output);
             need(outputId.tree == outputTreePins[layout.name],
                 "comparison attribution output tree pin differs");
+            sample["output_bytes"] = cast(long)outputId.bytes;
+            sample["output_tree_sha256"] = outputId.tree;
+            sample["output_concatenated_sha256"] = outputId.concatenated;
             if (isCandidate) candidateAttribution ~= sample;
             else baselineAttribution ~= sample;
             rmdirRecurse(output);

@@ -1,0 +1,4 @@
+population	identity	points	duplicates	estimate	low	high	status	reason	peak_vectors	distances
+synthetic:train-line	eee33cce9ac98c2e62c129699c7bd7869a33a67df8cb3b52ea76fc9a2d4e0caf	96	0	1.185838833	1.071507757	1.272763236	estimate	-	2	9120
+synthetic:train-plane	279e5b12d4235044730e95e55c1787ada66c339172a5cd5f7542d1736f71aa70	128	0	2.161860110	2.047358799	2.295063607	estimate	-	2	16256
+synthetic:train-high	1655c39edab7b398149fd0d15030cd4614d01be3a26a9d29e7baa403db979980	192	0	5.238603523	5.043661826	5.497686142	estimate	-	2	36672

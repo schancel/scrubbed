@@ -29,6 +29,49 @@ child wall/CPU/RSS and sampled-FD observations. The first run in each series
 also enables the D runtime's GC summary as a release-active availability
 control. Scratch fixtures and raw logs remain private and are removed.
 
+## Many-small-file coordination attribution
+
+`coordination_profile.d` measures issue #182's default-off, fixed-cardinality
+coordination counters separately from uninstrumented shipping timings. It
+reuses the canonical 524,288-record logical stream as 4,096 small files and
+eight large files, runs threads 1/2/4 five times for each layout and mode, and
+requires the pinned input and exact output tree identities on every child.
+
+```sh
+dub build --compiler=ldc2 --build=release --force
+ldc2 -O3 -release benchmarks/coordination_profile.d \
+  -of=/tmp/scrubbed-coordination-profile
+rm -f benchmarks/coordination-profile-evidence.json
+/tmp/scrubbed-coordination-profile ./scrubbed \
+  benchmarks/coordination-profile-evidence.json
+```
+
+The performance series does not set the metrics environment or run stack/GC
+probes. The attribution series sets `SCRUBBED_COORDINATION_METRICS_V1`; its
+first sample per thread also records a D-GC availability control and attempts
+a one-second `/usr/bin/sample` trace. Darwin `wait4` supplies direct-child CPU
+and peak RSS. FD counts are sampled with `lsof`, and exact child syscall counts
+are explicitly unsupported. OS cache state is uncontrolled and is never
+described as cold.
+
+On the recorded Apple M4/macOS 26.6.2/LDC 1.43.0 run, uninstrumented median
+wall times in seconds were many-small 8.091/8.115/3.590 and few-large
+9.740/5.526/3.635 for threads 1/2/4. The matching instrumented medians were
+8.001/7.989/3.469 and 22.998/13.171/7.433. Accepted-to-worker queue time was the
+largest aggregate waiting signal in the parallel many-small samples; ordered
+result wait was much smaller, and descriptor wait was negligible. The large
+instrumentation overhead on few-large is why performance and attribution are
+separate series rather than interchangeable timings. These are Darwin-local
+diagnostic observations, not Linux or Windows claims.
+
+No scheduler candidate was implemented, so the report records
+`ATTRIBUTION_ONLY_NO_CANDIDATE` and `production_candidate_authorized: false`.
+The contract's four-of-five, 10% before/after gate therefore cannot authorize
+a scheduling change. Shipping order, admission, descriptor ownership,
+cancellation, error selection, publication, and resource-cap behavior are
+unchanged; when the environment variable is absent, the metrics object is not
+allocated and no instrumentation clock or mutex is touched.
+
 ## Attested full-process target
 
 `pipeline.d --attested-build` refuses a dirty checkout, builds the release

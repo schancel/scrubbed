@@ -3,6 +3,10 @@ module effects.bounded_input;
 
 import core.sync.condition : Condition;
 import core.sync.mutex : Mutex;
+import core.time : MonoTime;
+import std.array : appender;
+import std.conv : to;
+import std.exception : enforce;
 import std.parallelism : TaskPool, task;
 
 struct InputLimits {
@@ -24,6 +28,131 @@ struct InputCounts {
     size_t skipped;
 }
 
+/// Caller-owned, fixed-cardinality coordination evidence. A null reference is
+/// the shipping default and executes no clock reads or metric locking.
+enum CoordinationPhaseV1 {
+    discovery, sourceStat, ordinalAssignment, admissionWait,
+    acceptedWorkerQueue, descriptorWait, descriptorHold, transform,
+    orderedResultWait, atomicPublication, shutdownJoin, count
+}
+
+struct CoordinationMetricValueV1 {
+    ulong calls;
+    ulong units;
+    ulong nanoseconds;
+}
+
+final class CoordinationMetricsV1 {
+    private Mutex mutex;
+    private CoordinationMetricValueV1[CoordinationPhaseV1.count] values;
+    private InputLimits limits;
+    private InputCounts counts;
+    private long wallStarted;
+    private ulong wallNanoseconds;
+
+    this() {
+        mutex = new Mutex;
+        wallStarted = MonoTime.currTime.ticks;
+    }
+
+    void setLimits(InputLimits value) {
+        mutex.lock(); limits = value; mutex.unlock();
+    }
+
+    void setCounts(InputCounts value) {
+        mutex.lock(); counts = value; mutex.unlock();
+    }
+
+    void finishWall() {
+        auto elapsed = MonoTime.currTime.ticks - wallStarted;
+        mutex.lock();
+        if (wallNanoseconds == 0 && elapsed > 0)
+            wallNanoseconds = ticksToNanoseconds(elapsed);
+        mutex.unlock();
+    }
+
+    void record(CoordinationPhaseV1 phase, ulong units = 0,
+            long started = 0) {
+        auto elapsed = started == 0 ? 0L : MonoTime.currTime.ticks - started;
+        mutex.lock();
+        auto value = &values[phase];
+        ++value.calls;
+        value.units += units;
+        if (elapsed > 0) value.nanoseconds += ticksToNanoseconds(elapsed);
+        mutex.unlock();
+    }
+
+    string json() {
+        static immutable names = ["discovery", "source_stat",
+            "ordinal_assignment", "admission_wait", "accepted_worker_queue",
+            "descriptor_wait", "descriptor_hold", "transform",
+            "ordered_result_wait", "atomic_publication", "shutdown_join"];
+        CoordinationMetricValueV1[CoordinationPhaseV1.count] snapshot;
+        InputLimits capturedLimits;
+        InputCounts capturedCounts;
+        ulong capturedWall;
+        mutex.lock();
+        snapshot[] = values[];
+        capturedLimits = limits;
+        capturedCounts = counts;
+        capturedWall = wallNanoseconds;
+        mutex.unlock();
+        enforce(capturedCounts.submitted == capturedCounts.succeeded +
+            capturedCounts.failed + capturedCounts.skipped,
+            "coordination metrics terminal count mismatch");
+        enforce(capturedCounts.queuedDocuments == 0 &&
+            capturedCounts.reservedBytes == 0 &&
+            capturedCounts.workerDescriptors == 0,
+            "coordination metrics retained reservations");
+        enforce(capturedCounts.peakQueuedDocuments <= capturedLimits.queuedDocuments &&
+            capturedCounts.peakReservedBytes <= capturedLimits.reservedBytes &&
+            capturedCounts.peakWorkerDescriptors <= capturedLimits.workerDescriptors,
+            "coordination metrics peak exceeded configured limit");
+        auto result = appender!string;
+        result.put(`{"schema":"scrubbed.coordination-metrics.v1","version":1,`);
+        result.put(`"wall_nanoseconds":`); result.put(capturedWall.to!string);
+        result.put(`,"limits":{"queued_documents":`);
+        result.put(capturedLimits.queuedDocuments.to!string);
+        result.put(`,"reserved_bytes":`); result.put(capturedLimits.reservedBytes.to!string);
+        result.put(`,"worker_descriptors":`);
+        result.put(capturedLimits.workerDescriptors.to!string);
+        result.put(`},"counts":{"queued_documents":`);
+        result.put(capturedCounts.queuedDocuments.to!string);
+        result.put(`,"reserved_bytes":`); result.put(capturedCounts.reservedBytes.to!string);
+        result.put(`,"worker_descriptors":`);
+        result.put(capturedCounts.workerDescriptors.to!string);
+        result.put(`,"peak_queued_documents":`);
+        result.put(capturedCounts.peakQueuedDocuments.to!string);
+        result.put(`,"peak_reserved_bytes":`);
+        result.put(capturedCounts.peakReservedBytes.to!string);
+        result.put(`,"peak_worker_descriptors":`);
+        result.put(capturedCounts.peakWorkerDescriptors.to!string);
+        result.put(`,"submitted":`); result.put(capturedCounts.submitted.to!string);
+        result.put(`,"succeeded":`); result.put(capturedCounts.succeeded.to!string);
+        result.put(`,"failed":`); result.put(capturedCounts.failed.to!string);
+        result.put(`,"skipped":`); result.put(capturedCounts.skipped.to!string);
+        result.put(`},"phases":{`);
+        foreach (index, name; names) {
+            if (index) result.put(',');
+            auto value = snapshot[index];
+            result.put('"'); result.put(name); result.put(`":{"calls":`);
+            result.put(value.calls.to!string); result.put(`,"units":`);
+            result.put(value.units.to!string); result.put(`,"nanoseconds":`);
+            result.put(value.nanoseconds.to!string); result.put('}');
+        }
+        result.put("}}");
+        return result.data;
+    }
+}
+
+long beginCoordinationMetricV1(CoordinationMetricsV1 metrics) {
+    return metrics is null ? 0 : MonoTime.currTime.ticks;
+}
+
+private ulong ticksToNanoseconds(long ticks) {
+    return cast(ulong)(ticks * 1_000_000_000L / MonoTime.ticksPerSecond);
+}
+
 /// The producer owns traversal. The scheduler owns all reservations and joins
 /// every submitted task before returning. The descriptor token covers the
 /// entire processing callback, which may open the input and write output.
@@ -39,11 +168,13 @@ final class BoundedInput {
     private void delegate(string, ulong) process;
     private void delegate(string, Throwable) reportFailure;
     private bool delegate(Throwable) isFatal;
+    private CoordinationMetricsV1 metrics;
 
     this(InputLimits limits, size_t threads,
          void delegate(string, ulong) process,
          void delegate(string, Throwable) reportFailure,
-         bool delegate(Throwable) isFatal = null) {
+         bool delegate(Throwable) isFatal = null,
+         CoordinationMetricsV1 metrics = null) {
         if (!limits.queuedDocuments || !limits.reservedBytes ||
             !limits.workerDescriptors || !threads)
             throw new Exception("input limits and threads must be positive");
@@ -51,6 +182,8 @@ final class BoundedInput {
         this.process = process;
         this.reportFailure = reportFailure;
         this.isFatal = isFatal;
+        this.metrics = metrics;
+        if (metrics !is null) metrics.setLimits(limits);
         mutex = new Mutex;
         changed = new Condition(mutex);
         // finish(true) enlists its caller as a worker. Keep the total
@@ -62,6 +195,7 @@ final class BoundedInput {
 
     /// false means a prior fault or explicit cancellation stopped admission.
     bool submit(string path, ulong bytes) {
+        auto admissionStarted = beginCoordinationMetricV1(metrics);
         mutex.lock();
         if (cancelled) {
             mutex.unlock();
@@ -88,11 +222,17 @@ final class BoundedInput {
             counts.peakReservedBytes = counts.reservedBytes;
         mutex.unlock();
 
+        if (metrics !is null)
+            metrics.record(CoordinationPhaseV1.admissionWait, bytes,
+                admissionStarted);
+        auto acceptedAt = beginCoordinationMetricV1(metrics);
+
         if (pool is null) {
-            execute(path, bytes, sequence);
+            execute(path, bytes, sequence, acceptedAt);
         } else {
             try {
-                auto work = task!executeTask(this, path, bytes, sequence);
+                auto work = task!executeTask(this, path, bytes, sequence,
+                    acceptedAt);
                 pool.put(work);
             } catch (Exception error) {
                 mutex.lock();
@@ -108,11 +248,16 @@ final class BoundedInput {
     }
 
     private static void executeTask(BoundedInput self, string path, ulong bytes,
-            size_t sequence) {
-        self.execute(path, bytes, sequence);
+            size_t sequence, long acceptedAt) {
+        self.execute(path, bytes, sequence, acceptedAt);
     }
 
-    private void execute(string path, ulong bytes, size_t sequence) {
+    private void execute(string path, ulong bytes, size_t sequence,
+            long acceptedAt) {
+        if (metrics !is null)
+            metrics.record(CoordinationPhaseV1.acceptedWorkerQueue, bytes,
+                acceptedAt);
+        auto descriptorWaitStarted = beginCoordinationMetricV1(metrics);
         mutex.lock();
         --counts.queuedDocuments;
         changed.notifyAll();
@@ -137,6 +282,11 @@ final class BoundedInput {
         changed.notifyAll();
         mutex.unlock();
 
+        if (metrics !is null)
+            metrics.record(CoordinationPhaseV1.descriptorWait, bytes,
+                descriptorWaitStarted);
+        auto descriptorHoldStarted = beginCoordinationMetricV1(metrics);
+
         bool success;
         try {
             process(path, bytes);
@@ -151,6 +301,9 @@ final class BoundedInput {
                 stopFor(reportError);
             }
         } finally {
+            if (metrics !is null)
+                metrics.record(CoordinationPhaseV1.descriptorHold, bytes,
+                    descriptorHoldStarted);
             mutex.lock();
             --counts.workerDescriptors;
             counts.reservedBytes -= bytes;
@@ -184,10 +337,15 @@ final class BoundedInput {
     }
 
     InputCounts finish() {
+        auto started = beginCoordinationMetricV1(metrics);
         if (pool !is null) pool.finish(true);
         mutex.lock();
         auto result = counts;
         mutex.unlock();
+        if (metrics !is null) {
+            metrics.record(CoordinationPhaseV1.shutdownJoin, 0, started);
+            metrics.setCounts(result);
+        }
         return result;
     }
 

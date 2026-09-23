@@ -8,6 +8,8 @@ import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1,
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentViewOwner;
 import effects.atomic_piece_sink : writeAtomicPieces;
+import effects.bounded_input : CoordinationMetricsV1, CoordinationPhaseV1,
+    beginCoordinationMetricV1;
 import effects.durable_job : DurableMetricPhaseV1, beginDurableMetricV1,
     recordDurableMetricV1;
 import effects.mapped_file : openMappedFile;
@@ -181,11 +183,15 @@ private final class LocalSource : Source {
 private final class LocalParser : Parser {
     size_t expectedBytes;
     ubyte[32]* inputHash;
+    CoordinationMetricsV1 metrics;
+    long* transformStarted;
 
     override Content parse(SourceRecord record) {
         auto content = new Content([ContentPiece.borrow(
             record.owner.view(0, expectedBytes))]);
         *inputHash = contentDigest(content);
+        if (metrics !is null)
+            *transformStarted = beginCoordinationMetricV1(metrics);
         return content;
     }
 }
@@ -204,9 +210,18 @@ private final class LocalSink : Sink {
     bool began;
     LocalJobOutcome outcome;
     ubyte[32] inputHash;
+    CoordinationMetricsV1 metrics;
+    long* transformStarted;
+    bool* transformRecorded;
+    ulong inputBytes;
 
     override void accept(StageEvent event) {
         if (!began) {
+            if (metrics !is null && !*transformRecorded) {
+                metrics.record(CoordinationPhaseV1.transform, inputBytes,
+                    *transformStarted);
+                *transformRecorded = true;
+            }
             begin();
             began = true;
         }
@@ -214,8 +229,13 @@ private final class LocalSink : Sink {
         case EventKind.emitted:
             auto destination = destinationFor(event);
             admit(destination, event);
-            if (!dryRun)
+            if (!dryRun) {
+                auto publicationStarted = beginCoordinationMetricV1(metrics);
+                scope(exit) if (metrics !is null)
+                    metrics.record(CoordinationPhaseV1.atomicPublication,
+                        event.payload.content.size, publicationStarted);
                 writeAtomicPieces(destination, event.payload.content.pieces());
+            }
             ++outcome.emitted;
             // A derived event is necessarily a new presentation. For a root
             // map, callers compare bytes separately when they need changed vs
@@ -265,7 +285,8 @@ LocalJobOutcome runLocalJob(string filename, ulong expectedBytes,
         Document document, ref RuntimePlanV1 plan,
         scope LocalDestination destinationFor,
         scope LocalAdmission admit, scope LocalPublicationBegin begin,
-        scope LocalRuntimeBatchV1 observe = null, bool dryRun = false) {
+        scope LocalRuntimeBatchV1 observe = null, bool dryRun = false,
+        CoordinationMetricsV1 metrics = null) {
     enforce(destinationFor !is null && admit !is null && begin !is null,
         "local destination callbacks are required");
     auto source = new LocalSource;
@@ -277,16 +298,31 @@ LocalJobOutcome runLocalJob(string filename, ulong expectedBytes,
     sink.admit = admit;
     sink.begin = begin;
     sink.dryRun = dryRun;
+    sink.metrics = metrics;
+    sink.inputBytes = expectedBytes;
+    long transformStarted;
+    bool transformRecorded;
+    sink.transformStarted = &transformStarted;
+    sink.transformRecorded = &transformRecorded;
     auto parser = new LocalParser;
     parser.expectedBytes = cast(size_t) expectedBytes;
     parser.inputHash = &sink.inputHash;
+    parser.metrics = metrics;
+    parser.transformStarted = &transformStarted;
     RuntimeExecutionV1 captured;
     bool hasCaptured;
-    auto result = runEffects(source, parser, sink, plan,
-        (ref RuntimeExecutionV1 execution) {
-            captured = execution;
-            hasCaptured = true;
-        });
+    typeof(runEffects(source, parser, sink, plan)) result;
+    try result = runEffects(source, parser, sink, plan,
+            (ref RuntimeExecutionV1 execution) {
+                captured = execution;
+                hasCaptured = true;
+            });
+    catch (Throwable error) {
+        if (metrics !is null && transformStarted != 0 && !transformRecorded)
+            metrics.record(CoordinationPhaseV1.transform, expectedBytes,
+                transformStarted);
+        throw error;
+    }
     enforce(result.completed == 1,
         "local runtime job did not complete its root");
     if (!sink.began) begin();

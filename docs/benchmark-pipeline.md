@@ -356,8 +356,9 @@ incomplete or reordered samples, durable route/pair/status drift, unsupported
 metrics represented as zero, forged sample aggregates, sampled FDs represented
 as exact, GC represented as total allocation, unsafe capacity arithmetic, and
 local path leakage.
-`--self-test-live` checks the authored records and direct-PID measurement on a
-small actual shipping invocation before the capacity-gated run. `--check`
+`--self-test-live` checks the authored records, direct-PID measurement, and
+complete manifest-v2 and journal-v3 filename bindings on small actual shipping
+invocations before the capacity-gated run. `--check`
 revalidates the sanitized report and binds it to the checker executable.
 
 The report makes no OS-cold, greater-than-RAM, 1 TiB, comparator superiority,

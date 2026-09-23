@@ -21,7 +21,7 @@ import std.json : JSONType, JSONValue, parseJSON;
 import std.path : baseName, buildPath, relativePath;
 import std.process : Config, execute, spawnProcess, wait;
 import std.stdio : File, writeln;
-import std.string : endsWith, indexOf, lastIndexOf, split, splitLines, startsWith, strip;
+import std.string : endsWith, indexOf, lastIndexOf, split, splitLines, startsWith, strip, toLower;
 import std.uuid : randomUUID;
 
 version (OSX) {
@@ -427,7 +427,7 @@ private string explainIdentity(string log) {
 private JSONValue runOnce(string binary, string binaryHash, string input,
         string output, string selector, string config, bool mixed,
         string root, bool explain = false, string[] durable = [],
-        size_t statusFiles = 0, string expectedStatus = "") {
+        size_t statusFiles = 0, string expectedStatus = "", bool journal = false) {
     if (exists(output)) rmdirRecurse(output);
     auto log = buildPath(root, "run-" ~ randomUUID.toString ~ ".log");
     auto command = [binary, "--input", input, "--output", output] ~
@@ -439,28 +439,65 @@ private JSONValue runOnce(string binary, string binaryHash, string input,
     auto logText = readText(log);
     result["canonical_identity"] = explain ? explainIdentity(logText) : "NOT_EXPOSED";
     if (statusFiles) result["explain_statuses"] =
-        explainStatuses(logText, statusFiles, expectedStatus);
+        explainStatuses(logText, input, statusFiles, expectedStatus, journal);
     remove(log);
     return result;
 }
 
-private JSONValue explainStatuses(string output, size_t files,
-        string expectedStatus) {
+private void identityField(ref SHA256 value, string field) {
+    need(field.length <= uint.max, "identity field too long");
+    auto length = cast(uint)field.length;
+    foreach_reverse (shift; [0, 8, 16, 24])
+        value.put(cast(ubyte)(length >> shift));
+    value.put(cast(const(ubyte)[])field);
+}
+
+private string localDocumentId(string inputRoot, string filename) {
+    import core.stdc.stdlib : free;
+    import core.sys.posix.stdlib : realpath;
+    import std.string : fromStringz, toStringz;
+    auto resolved = realpath(inputRoot.toStringz, null);
+    need(resolved !is null, "cannot canonicalize durable input root");
+    scope(exit) free(resolved);
+    auto canonicalRoot = fromStringz(resolved).idup;
+    SHA256 value;
+    value.put(cast(const(ubyte)[])"scrubbed:document-id:v1\0");
+    identityField(value, "local-files:v1");
+    identityField(value, canonicalRoot);
+    identityField(value, filename);
+    return "doc:v1:" ~ toHexString(value.finish()).to!string.toLower;
+}
+
+private JSONValue explainStatuses(string output, string inputRoot, size_t files,
+        string expectedStatus, bool journal) {
     string[string] byFile;
+    string[string] filenameByDocument;
+    if (journal) foreach (i; 0 .. files) {
+        auto filename = "doc-" ~ i.to!string ~ ".txt";
+        filenameByDocument[localDocumentId(inputRoot, filename)] = filename;
+    }
     foreach (line; output.splitLines) {
-        if (!line.startsWith("EXPLAIN\tinput=")) continue;
+        if (!line.startsWith("EXPLAIN\t")) continue;
         auto fields = line.split("\t");
         need(fields.length >= 3, "malformed EXPLAIN record");
         string filename;
-        foreach (i; 0 .. files) {
-            auto candidate = "doc-" ~ i.to!string ~ ".txt";
-            if (fields[1].endsWith(candidate ~ "\"")) {
-                need(filename.length == 0, "ambiguous EXPLAIN input");
-                filename = candidate;
+        if (journal) {
+            string document;
+            foreach (field; fields) if (field.startsWith("document_id="))
+                document = field[12 .. $];
+            if (auto mapped = document in filenameByDocument) filename = *mapped;
+        } else {
+            foreach (i; 0 .. files) {
+                auto candidate = "doc-" ~ i.to!string ~ ".txt";
+                if (fields[1].endsWith(candidate ~ "\"")) {
+                    need(filename.length == 0, "ambiguous EXPLAIN input");
+                    filename = candidate;
+                }
             }
         }
         need(filename.length && (filename in byFile) is null,
-            "unknown or duplicate EXPLAIN input");
+            "unknown or duplicate EXPLAIN input (journal=" ~
+                journal.to!string ~ ", fields=" ~ fields.length.to!string ~ ")");
         string status;
         foreach (field; fields) if (field.startsWith("status=")) {
             need(status.length == 0, "duplicate EXPLAIN status");
@@ -588,7 +625,7 @@ private JSONValue durableCase(string binary, string binaryHash, string input,
         auto durable = journal ? ["--error-journal", database, "--explain"] :
             ["--manifest", database, "--explain"];
         auto first = runOnce(binary, binaryHash, input, output, "config", config,
-            true, root, false, durable, expected.files.array.length, "changed");
+            true, root, false, durable, expected.files.array.length, "changed", journal);
         need(first["exit_code"].integer == 0, "durable first publication failed");
         exactTree(output, expected);
         // Preserve destination/database for the verified skip.
@@ -599,7 +636,7 @@ private JSONValue durableCase(string binary, string binaryHash, string input,
         auto logText = readText(log);
         skip["log_sha256"] = hashFile(log);
         skip["explain_statuses"] = explainStatuses(logText,
-            expected.files.array.length, "skipped");
+            input, expected.files.array.length, "skipped", journal);
         remove(log);
         need(skip["exit_code"].integer == 0 && logText.canFind("status=skipped"),
             "durable verified skip failed");
@@ -1499,6 +1536,13 @@ private void selfTestLive(string binary) {
             mixed["canonical_identity"].str ~ " vs " ~
             tokens["canonical_identity"].str);
     exactTree(buildPath(root, "tokens"), mixedExpected);
+    auto liveManifest = durableCase(binary, binaryHash, input,
+        buildPath(root, "live-manifest"), mixedConfig, root, mixedExpected, false);
+    auto liveJournal = durableCase(binary, binaryHash, input,
+        buildPath(root, "live-journal"), mixedConfig, root, mixedExpected, true);
+    need(liveManifest["pairs"].array.length == 3 &&
+        liveJournal["pairs"].array.length == 3,
+        "live durable explain completeness control failed");
     writeln("canonical profile live self-test passed: fixture/output/identity/wait4/proc PID metrics");
 }
 

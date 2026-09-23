@@ -6,6 +6,9 @@
 module effects.durable_job;
 
 import domain.document : DocumentId;
+import core.atomic : atomicLoad, atomicStore;
+import core.sync.mutex : Mutex;
+import core.time : MonoTime;
 import effects.atomic_piece_sink : OutputPolicyViolation;
 import effects.local_manifest : hashFile, nowUtcMs, resolvedName,
     safeRegularOrAbsent, sameInode;
@@ -17,6 +20,7 @@ import std.file : exists, isFile, isSymlink, remove;
 import std.path : absolutePath, buildNormalizedPath;
 import std.string : fromStringz, indexOf, toStringz;
 import std.uuid : UUID;
+import std.array : appender;
 import core.sys.posix.fcntl : O_NOFOLLOW, O_RDONLY, open;
 import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t, S_ISLNK;
 import core.sys.posix.unistd : close, pread;
@@ -27,6 +31,76 @@ enum DurableEventState : string {
     failed = "failed", uncertain = "uncertain"
 }
 enum DurableAction { publish, skip }
+
+/// Private, default-off, fixed-cardinality process instrumentation for durable
+/// release evidence. It records no identities, paths, content, or reasons.
+enum DurableMetricPhaseV1 {
+    sourceStat, sourceOpen, sourceRead, sourceHash, identity,
+    ledgerQuery, ledgerTransaction, compiledExecution,
+    outputSafeOpen, outputRead, outputHash, publication, shutdown,
+    count
+}
+
+struct DurableMetricValueV1 {
+    ulong calls;
+    ulong bytes;
+    ulong nanoseconds;
+}
+
+private __gshared Mutex durableMetricsMutex;
+private shared bool durableMetricsEnabled;
+private __gshared DurableMetricValueV1[DurableMetricPhaseV1.count]
+    durableMetricsValues;
+
+shared static this() { durableMetricsMutex = new Mutex; }
+
+void enableDurableMetricsV1() {
+    durableMetricsMutex.lock();
+    durableMetricsValues[] = DurableMetricValueV1.init;
+    durableMetricsMutex.unlock();
+    atomicStore(durableMetricsEnabled, true);
+}
+
+long beginDurableMetricV1() {
+    return atomicLoad(durableMetricsEnabled) ? MonoTime.currTime.ticks : 0;
+}
+
+void recordDurableMetricV1(DurableMetricPhaseV1 phase, ulong bytes = 0,
+        long started = 0) {
+    if (!atomicLoad(durableMetricsEnabled)) return;
+    auto elapsed = started == 0 ? 0L : MonoTime.currTime.ticks - started;
+    durableMetricsMutex.lock();
+    auto value = &durableMetricsValues[phase];
+    ++value.calls;
+    value.bytes += bytes;
+    if (elapsed > 0)
+        value.nanoseconds += cast(ulong)(elapsed * 1_000_000_000L /
+            MonoTime.ticksPerSecond);
+    durableMetricsMutex.unlock();
+}
+
+string durableMetricsJsonV1() {
+    static immutable names = ["source_stat", "source_open", "source_read",
+        "source_hash", "identity", "ledger_query", "ledger_transaction",
+        "compiled_execution", "output_safe_open", "output_read",
+        "output_hash", "publication", "shutdown"];
+    DurableMetricValueV1[DurableMetricPhaseV1.count] snapshot;
+    durableMetricsMutex.lock();
+    snapshot[] = durableMetricsValues[];
+    durableMetricsMutex.unlock();
+    auto result = appender!string;
+    result.put(`{"schema":"scrubbed.durable-metrics.v1","version":1,"phases":{`);
+    foreach (index, name; names) {
+        if (index) result.put(',');
+        auto value = snapshot[index];
+        result.put('"'); result.put(name); result.put(`":{"calls":`);
+        result.put(value.calls.to!string); result.put(`,"bytes":`);
+        result.put(value.bytes.to!string); result.put(`,"nanoseconds":`);
+        result.put(value.nanoseconds.to!string); result.put('}');
+    }
+    result.put("}}");
+    return result.data;
+}
 
 struct DurableIdentity {
     ubyte[32] digest;
@@ -228,6 +302,9 @@ private final class Database {
             "sql-failed");
     }
     sqlite3_stmt* prepare(string sql) {
+        auto started = beginDurableMetricV1();
+        scope(exit) recordDurableMetricV1(DurableMetricPhaseV1.ledgerQuery,
+            0, started);
         sqlite3_stmt* result;
         need(sqlite3_prepare_v2(handle, sql.toStringz, -1, &result, null) == SQLITE_OK,
             "prepare-failed");
@@ -492,7 +569,13 @@ final class DurableJobLedger {
     }
 
     ~this() { if (db !is null && db.handle !is null) db.close(); }
-    void close() { if (db !is null) db.close(); db = null; }
+    void close() {
+        auto started = beginDurableMetricV1();
+        scope(exit) recordDurableMetricV1(DurableMetricPhaseV1.shutdown,
+            0, started);
+        if (db !is null) db.close();
+        db = null;
+    }
     private void live() { need(db !is null && db.handle !is null && !poisoned, "fail-stop"); }
     private void validateV4Binding() {
         auto s = db.prepare(`SELECT count(*) FROM root_state WHERE
@@ -505,6 +588,9 @@ final class DurableJobLedger {
     }
     private void transaction(scope void delegate() operation) {
         live();
+        auto started = beginDurableMetricV1();
+        scope(exit) recordDurableMetricV1(
+            DurableMetricPhaseV1.ledgerTransaction, 0, started);
         try {
             db.exec("BEGIN IMMEDIATE");
             operation();
@@ -563,6 +649,80 @@ final class DurableJobLedger {
         bindRoot(s, key);
         need(sqlite3_step(s) == SQLITE_ROW && columnText(s, 0) == identity.jobIdentity,
             "root-identity-mismatch");
+    }
+
+    /// Return true only when the existing durable root is a complete,
+    /// byte-verifiable all-emitted result. This is deliberately narrower than
+    /// replay: any incomplete, terminal-policy, retry, or recovery state falls
+    /// through to ordinary compiled execution.
+    bool verifiedEmittedSkip(DurableRootKey key) {
+        live();
+        need(key.configSha256 == identity.digest, "derived-identity-mismatch");
+        auto root = db.prepare(`SELECT event_count,event_set_sha256,state,job_identity
+            FROM root_state WHERE document_id=?1 AND input_sha256=?2 AND config_sha256=?3`);
+        scope(exit) sqlite3_finalize(root);
+        bindRoot(root, key);
+        auto rc = sqlite3_step(root);
+        if (rc == SQLITE_DONE) return false;
+        need(rc == SQLITE_ROW, "root-read-failed");
+        if (sqlite3_column_type(root, 0) == SQLITE_NULL ||
+                sqlite3_column_type(root, 1) == SQLITE_NULL ||
+                columnText(root, 2) != "complete")
+            return false;
+        need(columnText(root, 3) == identity.jobIdentity,
+            "root-identity-mismatch");
+        auto count = sqlite3_column_int64(root, 0);
+        if (count <= 0 || count > size_t.max) return false;
+        auto expectedSet = columnDigest(root, 1);
+        if (eventCount(key) != count) return false;
+        DurableEventPlan[] plans;
+        foreach (ordinal; 0 .. cast(size_t)count) {
+            DurableEventRecord row;
+            try row = readEvent(key, ordinal);
+            catch (Exception) { return false; }
+            if (row.plan.kind != "emitted" || !row.plan.hasOutput ||
+                    row.plan.hasReason || row.state != DurableEventState.committed)
+                return false;
+            try validateEvent(row.plan);
+            catch (Exception) { return false; }
+            plans ~= row.plan;
+        }
+        if (eventSetDigest(plans) != expectedSet) return false;
+        foreach (ordinal, ref plan; plans) {
+            auto safeStarted = beginDurableMetricV1();
+            scope(exit) recordDurableMetricV1(
+                DurableMetricPhaseV1.outputSafeOpen, 0, safeStarted);
+            try {
+                if (pathIsSymlink(plan.destination)) return false;
+                safeRegularOrAbsent(plan.destination, true);
+                if (!exists(plan.destination) || !isFile(plan.destination))
+                    return false;
+                if (needsInodeAliasScan(plan.destination)) {
+                    auto aliases = db.prepare(`SELECT destination,final_document_id,sink_key
+                        FROM final_event WHERE destination IS NOT NULL AND
+                        NOT(document_id=?1 AND input_sha256=?2 AND
+                        config_sha256=?3 AND ordinal=?4)`);
+                    scope(exit) sqlite3_finalize(aliases);
+                    bindRoot(aliases, key);
+                    bindLong(aliases, 4, cast(long)ordinal);
+                    while (true) {
+                        auto aliasRc = sqlite3_step(aliases);
+                        if (aliasRc == SQLITE_DONE) break;
+                        need(aliasRc == SQLITE_ROW,
+                            "destination-owner-read-failed");
+                        auto sameOwner = columnText(aliases, 1) ==
+                                plan.document.text &&
+                            columnText(aliases, 2) == plan.sink;
+                        if (!sameOwner && sameInode(plan.destination,
+                                columnText(aliases, 0)))
+                            return false;
+                    }
+                }
+                if (measuredOutputHash(plan.destination) != plan.outputSha256)
+                    return false;
+            } catch (Exception) { return false; }
+        }
+        return true;
     }
     private void validateEvent(ref const(DurableEventPlan) event) {
         need(event.ordinal <= long.max && event.outputName.length != 0 &&
@@ -718,6 +878,9 @@ final class DurableJobLedger {
     DurableAction prepare(DurableRootKey key, size_t ordinal, bool retry) {
         auto row = readEvent(key, ordinal);
         if (row.plan.hasOutput) {
+            auto safeStarted = beginDurableMetricV1();
+            scope(exit) recordDurableMetricV1(
+                DurableMetricPhaseV1.outputSafeOpen, 0, safeStarted);
             need(!pathIsSymlink(row.plan.destination), "symlink-destination");
             safeRegularOrAbsent(row.plan.destination, true);
             if (exists(row.plan.destination) && needsInodeAliasScan(row.plan.destination)) {
@@ -743,7 +906,7 @@ final class DurableJobLedger {
         if (row.state == DurableEventState.committed) {
             if (row.plan.hasOutput && exists(row.plan.destination) &&
                     !isSymlink(row.plan.destination) && isFile(row.plan.destination) &&
-                    hashFile(row.plan.destination) == row.plan.outputSha256)
+                    measuredOutputHash(row.plan.destination) == row.plan.outputSha256)
                 return DurableAction.skip;
             transaction({ markFailureInternal(key, ordinal, true,
                 "inspect", "inspect-invalidated"); });
@@ -801,7 +964,7 @@ final class DurableJobLedger {
             "commit-not-planned");
         need(exists(row.plan.destination) && !isSymlink(row.plan.destination) &&
             isFile(row.plan.destination) &&
-            hashFile(row.plan.destination) == row.plan.outputSha256,
+            measuredOutputHash(row.plan.destination) == row.plan.outputSha256,
             "published-output-mismatch");
         transaction({
             transition(key, ordinal, DurableEventState.committed);
@@ -1003,6 +1166,17 @@ final class DurableJobLedger {
     }
 }
 
+private ubyte[32] measuredOutputHash(string path) {
+    import std.file : getSize;
+    auto bytes = getSize(path);
+    auto started = beginDurableMetricV1();
+    scope(exit) {
+        recordDurableMetricV1(DurableMetricPhaseV1.outputRead, bytes, started);
+        recordDurableMetricV1(DurableMetricPhaseV1.outputHash, bytes, started);
+    }
+    return hashFile(path);
+}
+
 version (unittest) {
     import std.array : replicate;
     import std.exception : assertThrown;
@@ -1012,6 +1186,8 @@ version (unittest) {
     import std.uuid : randomUUID;
     import core.sys.posix.sys.stat : stat, stat_t;
     import core.sys.posix.unistd : link;
+    import core.thread : Thread;
+    import std.json : parseJSON;
 
     unittest {
         auto root = buildPath(tempDir, "durable-job-" ~ randomUUID.toString);
@@ -1197,5 +1373,22 @@ version (unittest) {
             }
             writer.exec("ROLLBACK"); writer.close();
         }
+    }
+
+    unittest { // Default-off accounting is bounded and concurrent increments are exact.
+        auto disabled = parseJSON(durableMetricsJsonV1());
+        assert(disabled["phases"]["source_hash"]["calls"].integer == 0);
+        enableDurableMetricsV1();
+        Thread[] workers;
+        foreach (_; 0 .. 4) workers ~= new Thread({
+            foreach (_; 0 .. 1_000)
+                recordDurableMetricV1(DurableMetricPhaseV1.ledgerQuery, 3);
+        });
+        foreach (worker; workers) worker.start();
+        foreach (worker; workers) worker.join();
+        auto enabled = parseJSON(durableMetricsJsonV1());
+        assert(enabled["phases"]["ledger_query"]["calls"].integer == 4_000);
+        assert(enabled["phases"]["ledger_query"]["bytes"].integer == 12_000);
+        assert(enabled["phases"].object.length == DurableMetricPhaseV1.count);
     }
 }

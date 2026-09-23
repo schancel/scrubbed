@@ -16,7 +16,9 @@ import effects.stdio_stream : processStandardJsonlDocuments;
 import effects.local_manifest : SinkKey, inputDigest;
 import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
     DurableIdentity, DurableJobLedger, DurableKind, DurableRootKey, deriveDurableIdentity,
-    createJournalV3, derivedSink, reasonDigest;
+    DurableMetricPhaseV1, beginDurableMetricV1, createJournalV3,
+    derivedSink, durableMetricsJsonV1, enableDurableMetricsV1,
+    reasonDigest, recordDurableMetricV1;
 import effects.dispatch_record : canonicalDispatchCancellationRecordV1,
     canonicalDispatchFailureRecordV1,
     canonicalDispatchRecordV1, canonicalJsonlDispatchFailureRecordV1,
@@ -59,6 +61,7 @@ import std.getopt : config, defaultGetoptPrinter, getopt;
 import std.exception : enforce;
 import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
 import std.parallelism : totalCPUs;
+import std.process : environment;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
@@ -895,7 +898,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
         string databasePath, string file, string inputRoot, string outputRoot,
         bool inputIsDir, ref RuntimePlanV1 job, ulong reservedBytes,
         ref const(ubyte[32]) configHash, bool retry, bool journalRoute,
-        bool targeted) {
+        bool targeted, bool requireRuntimeEvidence, bool allowVerifiedSkip) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
         OutputName(inputIsDir ? relative : baseName(outputRoot)));
@@ -903,6 +906,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
     DurableRootKey rootKey;
     LocalJobOutcome outcome;
     bool allEventsPreviouslyTerminal = true;
+    bool verifiedSkip;
     string dispatchRecord;
     try outcome = runLocalJobBatch(file, reservedBytes, document, job,
         (ref const ubyte[32] inputHash) {
@@ -918,6 +922,9 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                     "retry-required", "retry-required",
                     derivedSink("root", rootKey.document, 0),
                     new Exception("durable job: retry-required"));
+            if (allowVerifiedSkip && !retry && !requireRuntimeEvidence)
+                verifiedSkip = ledger.verifiedEmittedSkip(rootKey);
+            if (verifiedSkip) return;
             ledger.planRoot(rootKey);
             version (FailurePolicyHarness) {
                 foreach (phase; ["read", "decode", "filter"]) try {
@@ -1028,8 +1035,14 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                     }
                     version (FailurePolicyHarness)
                         failureAt(databasePath, "sink", file);
-                    writeAtomicPieces(plans[ordinal].destination,
-                        event.payload.content.pieces());
+                    {
+                        auto publicationStarted = beginDurableMetricV1();
+                        scope(exit) recordDurableMetricV1(
+                            DurableMetricPhaseV1.publication,
+                            event.payload.content.size, publicationStarted);
+                        writeAtomicPieces(plans[ordinal].destination,
+                            event.payload.content.pieces());
+                    }
                     version (ManifestCliHarness) manifestKillAt(databasePath,
                         ordinal == 0 ? "after-first-publish" : "after-last-output");
                     version (ManifestCliHarness) if (ordinal == 1)
@@ -1065,7 +1078,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                 "before-root-commit");
             ledger.completeRoot(rootKey);
             version (ManifestCliHarness) manifestKillAt(databasePath, "after-root-commit");
-        });
+        }, { return verifiedSkip; });
     catch (DispatchExecutionFailureV1 failure) {
         if (rootKey.document.text.length != 0) {
             auto phase = failure.phase == "refine" ? "inspect" :
@@ -1109,6 +1122,12 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
 }
 
 int runApp(string[] args) {
+    auto metricsPath = environment.get("SCRUBBED_DURABLE_METRICS_V1", "");
+    const allowVerifiedSkip =
+        environment.get("SCRUBBED_DURABLE_SKIP_DISABLE_V1", "") != "1";
+    if (metricsPath.length) enableDurableMetricsV1();
+    scope(exit) if (metricsPath.length)
+        write(metricsPath, durableMetricsJsonV1() ~ "\n");
     auto compositionTokens = takeCompositionTokens(args);
     const compositionExplicit = compositionTokens.length != 0;
     string inputPath;
@@ -1374,10 +1393,17 @@ int runApp(string[] args) {
         if (!errorJournalPath.length) writeln("valid. No files processed.");
         return 0;
     }
-    auto executable = runningExecutableDigest();
-    ubyte[32] configHash = deriveDurableIdentity(canonicalSpec,
-        runtimePlan.identity, inputIsDir ? "tree" : "file",
-        outputPath, executable);
+    ubyte[32] executable, configHash;
+    {
+        auto identityStarted = beginDurableMetricV1();
+        scope(exit) if (durableRoute)
+            recordDurableMetricV1(DurableMetricPhaseV1.identity, 0,
+                identityStarted);
+        executable = runningExecutableDigest();
+        configHash = deriveDurableIdentity(canonicalSpec,
+            runtimePlan.identity, inputIsDir ? "tree" : "file",
+            outputPath, executable);
+    }
     DurableJobLedger durableLedger;
     if (durableRoute)
         durableLedger = new DurableJobLedger(
@@ -1397,15 +1423,16 @@ int runApp(string[] args) {
         manifestPath.length || errorJournalPath.length ? 1 : nThreads,
         (string file, ulong bytes) {
             ManifestOutcome decision;
-            if (durableRoute)
+            if (durableRoute) {
                 decision = processDurableOne(durableLedger,
                     manifestPath.length ? manifestPath : errorJournalPath,
                     file, inputPath, outputPath, inputIsDir, runtimePlan,
                     bytes, configHash,
                     manifestPath.length ? manifestRetry : errorRetry,
                     errorJournalPath.length != 0,
-                    errorTargeted);
-            else {
+                    errorTargeted, explain && runtimePlan.isDispatch,
+                    allowVerifiedSkip);
+            } else {
                 auto local = processCompiledOne(file, inputPath, outputPath,
                     inputIsDir, runtimePlan, bytes, dryRun, publication);
                 decision.status = local.status;
@@ -1511,7 +1538,14 @@ int runApp(string[] args) {
             }
             if (explain) pending.add(file);
             if (!durableRoute) publication.assign(file);
-            auto bytes = getSize(file);
+            ulong bytes;
+            {
+                auto statStarted = beginDurableMetricV1();
+                scope(exit) if (durableRoute)
+                    recordDurableMetricV1(DurableMetricPhaseV1.sourceStat,
+                        0, statStarted);
+                bytes = getSize(file);
+            }
             if (!scheduler.submit(file, bytes)) {
                 admissionCanceled = true;
                 workerFatalAdmission = true;

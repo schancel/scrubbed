@@ -565,20 +565,28 @@ private JSONValue sampleProbe(string binary, string input, string output,
 private JSONValue probes(string binary, string input, string output,
         string config, string root) {
     JSONValue result = JSONValue();
-    auto dtrace = execute(["/usr/bin/dtrace", "-q", "-n", "BEGIN { exit(0); }"]);
-    result["syscall_bytes"] = unsupported(dtrace.status == 0 ?
+    int dtraceStatus = -1;
+    try dtraceStatus = execute(["/usr/bin/dtrace", "-q", "-n",
+        "BEGIN { exit(0); }"]).status;
+    catch (Exception) {}
+    result["syscall_bytes"] = unsupported(dtraceStatus == 0 ?
         "privilege-free DTrace probe ran, but no exact-child syscall-byte aggregation control is accepted" :
         "noninteractive privilege-free DTrace probe failed; dtruss therefore unavailable");
-    auto xctraceVersion = execute(["xcrun", "xctrace", "version"]);
+    int xctraceStatus = -1;
+    try xctraceStatus = execute(["xcrun", "xctrace", "version"]).status;
+    catch (Exception) {}
     string allocationReason;
-    if (xctraceVersion.status == 0) {
+    if (xctraceStatus == 0) {
         auto sleeper = spawnProcess(["/bin/sleep", "3"]);
         auto tracePath = buildPath(root, "allocation-calibration.trace");
-        auto traced = execute(["xcrun", "xctrace", "record", "--template",
-            "Allocations", "--attach", sleeper.processID.to!string,
-            "--time-limit", "1s", "--output", tracePath, "--no-prompt"]);
+        int tracedStatus = -1;
+        try tracedStatus = execute(["xcrun", "xctrace", "record", "--template",
+                "Allocations", "--attach", sleeper.processID.to!string,
+                "--time-limit", "1s", "--output", tracePath,
+                "--no-prompt"]).status;
+        catch (Exception) {}
         auto sleeperStatus = wait(sleeper);
-        allocationReason = traced.status == 0 && exists(tracePath) ?
+        allocationReason = tracedStatus == 0 && exists(tracePath) ?
             "exact-PID xctrace capture succeeded, but its export has no stable validated total-process allocation counter" :
             "xctrace exact-PID noninteractive allocation control failed";
         if (exists(tracePath)) rmdirRecurse(tracePath);

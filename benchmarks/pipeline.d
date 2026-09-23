@@ -1163,13 +1163,14 @@ private JSONValue manifestTransitions(string[] command, string input,
 
 private JSONValue restartProbe(string binary, string root, bool mac,
                                string targetHash = "") {
+    enum restartBytes = 64UL * 1024 * 1024;
     auto input = buildPath(root, "restart-input.txt");
     auto output = buildPath(root, "restart-output.txt");
     auto db = buildPath(root, "restart.sqlite");
     {
         auto file = File(input, "wb");
         auto chunk = "x".replicate(1024 * 1024);
-        foreach (_; 0 .. 64) file.rawWrite(chunk);
+        foreach (_; 0 .. restartBytes / chunk.length) file.rawWrite(chunk);
     }
     auto command = [binary, "run", "--input", input, "--output", output,
         "--manifest", db, "--filters", "normalize-line-endings",
@@ -1179,7 +1180,7 @@ private JSONValue restartProbe(string binary, string root, bool mac,
     foreach (_; 0 .. 250) {
         if (exists(db)) {
             auto query = execute(["sqlite3", "-readonly", db,
-                "SELECT count(*) FROM sink_state WHERE state='planned';"]);
+                "SELECT count(*) FROM root_state WHERE state='planned';"]);
             if (query.status == 0 && query.output.strip == "1") {
                 planned = true; break;
             }
@@ -1193,7 +1194,7 @@ private JSONValue restartProbe(string binary, string root, bool mac,
     require(kill(child.processID, SIGKILL) == 0, "kill exact planned process");
     require(wait(child) == -SIGKILL, "planned process did not die by SIGKILL");
     auto query = checked(["sqlite3", "-readonly", db,
-        "SELECT count(*) FROM sink_state WHERE state='planned';"]);
+        "SELECT count(*) FROM root_state WHERE state='planned';"]);
     require(query == "1", "killed process lost durable planned row");
     bool hadOutput = exists(output);
     auto replay = timed(hadOutput ? command ~ ["--manifest-retry"] : command,
@@ -1202,7 +1203,7 @@ private JSONValue restartProbe(string binary, string root, bool mac,
         (replay["changed"].integer == 1 || replay["unchanged"].integer == 1 ||
          replay["retry"].integer == 1),
         "restart replay was not a publish/retry: " ~ replay.toString);
-    require(exists(output) && getSize(output) == 64UL * 1024 * 1024 &&
+    require(exists(output) && getSize(output) == restartBytes &&
         hashFile(output) == hashFile(input), "restart output bytes differ");
     auto skip = timed(command, mac, 1, 0, targetHash);
     require(hashFile(output) == hashFile(input), "restart skip changed output");
@@ -1939,6 +1940,24 @@ private void selfTestNativePath(string sourceRoot, string poisonPath,
 
 int main(string[] args) {
     try {
+        if (args.length == 6 && args[1] == "--attested-profile") {
+            auto root = privateScratch("scrubbed-canonical-profile-build-");
+            scope(exit) rmdirRecurse(root);
+            auto built = buildAttestedExecutable(args[2], root);
+            validateAttestation(built.attestation, built.snapshot.sha256);
+            auto harness = snapshotExecutable(args[3], root,
+                "scrubbed-pipeline-profile-check");
+            auto attestationPath = buildPath(root, "build-attestation.json");
+            write(attestationPath, built.attestation.toString ~ "\n");
+            auto result = execute([harness.path, "--run", built.snapshot.path,
+                attestationPath, args[4], args[5], harness.path]);
+            verifySnapshot(built.snapshot);
+            verifySnapshot(harness);
+            require(result.status == 0,
+                "canonical profile harness failed: " ~ result.output);
+            writeln(result.output.strip);
+            return 0;
+        }
         if (args.length == 2 && args[1] == "--self-test") {
             selfTest(); return 0;
         }
@@ -1985,7 +2004,8 @@ int main(string[] args) {
             (args.length == 3 || args.length == 4 || large);
         require(validSupplied || validAttested,
             "usage: pipeline SCRUBBED_BINARY [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
-            "or pipeline --attested-build CLEAN_SOURCE [REPORT_JSON [--large TIME_BUDGET_SECONDS]]");
+            "or pipeline --attested-build CLEAN_SOURCE [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
+            "or pipeline --attested-profile CLEAN_SOURCE PROFILE_HARNESS REPORT_JSON TIME_BUDGET_SECONDS");
         auto inputTarget = attestedMode ? args[2] : args[1];
         auto reportPath = attestedMode ?
             (args.length >= 4 ? args[3] : "") :

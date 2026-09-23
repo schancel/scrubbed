@@ -25,6 +25,53 @@ actual report publication. Supplied binaries continue to emit explicitly
 unverified v3/v4 reports. Commands, report fields, negatives, and unsupported
 metrics are in [`docs/benchmark-pipeline.md`](../docs/benchmark-pipeline.md).
 
+## Canonical full-CLI profile
+
+`pipeline_profile_check.d` is the D-only runner and publication checker for
+the evidence-only `scrubbed-cli-profile-v1` report. It measures only an
+executable produced by `pipeline.d`'s existing private attested-build closure;
+the bridge snapshots both target and profile harness before execution. The
+fixed corpus is exactly 524,288 independently specified 256-byte records
+(128 MiB), partitioned as 4,096 small files and eight large files without
+changing the logical byte stream. Independently authored scalar and mixed
+expected streams are exact-gated before a sample is retained.
+
+```sh
+ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
+ldc2 -O3 -release benchmarks/pipeline_profile_check.d \
+  -of=/tmp/scrubbed-pipeline-profile-check
+/tmp/scrubbed-pipeline-profile-check --self-test
+/tmp/scrubbed-pipeline-profile-check --self-test-live "$(pwd)/scrubbed"
+# The full run requires a clean Darwin checkout and passes its preflight first.
+/tmp/scrubbed-pipeline --attested-profile "$(pwd)" \
+  /tmp/scrubbed-pipeline-profile-check \
+  benchmarks/pipeline-canonical-profile.json 1800
+/tmp/scrubbed-pipeline-profile-check --check \
+  benchmarks/pipeline-canonical-profile.json
+ldc2 -O3 -release benchmarks/pipeline_resource_check.d \
+  -of=/tmp/scrubbed-pipeline-resource-check
+/tmp/scrubbed-pipeline-resource-check \
+  benchmarks/pipeline-canonical-profile.json
+```
+
+The checker command above is the exact identity recipe: do not add compiler
+flags or change the output basename. The run verifies the resolved `ldc2`
+hash and version against the attested build-tool closure, and `--check` binds
+the resulting Mach-O hash to the report.
+
+The report binds source/compiler/dependency/build attestation, executed binary,
+harness, frozen record table, configs, input and expected file sets, and every
+timed output. Darwin `wait4` supplies direct-child wall/CPU/RSS accounting. FD
+evidence is a `proc_pidinfo` sampled lower bound. `proc_pid_rusage` disk bytes
+use the complete 296-byte `rusage_info_v4` ABI through `ri_runnable_time`, with
+compile-time disk-field offsets and a guarded live layout canary, and retain
+their kernel and last-success semantics. DTrace/dtruss, xctrace
+allocations, D GC profiling, and `/usr/bin/sample` are calibrated separately;
+failed controls are structured `UNSUPPORTED`, never zero or a substitute.
+The strict checker also rejects nonfinite or negative timing/CPU values,
+signals, byte-count drift, invalid RSS/FD/rusage domains, and fabricated disk
+support for every ordinary and durable measurement.
+
 ## Fused scalar-filter microbenchmark
 
 `fused_filters.d` compares the former separately materialized

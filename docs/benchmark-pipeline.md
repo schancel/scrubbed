@@ -275,6 +275,103 @@ these are raw repetitions rather than confidence intervals. The supplied
 target binary's source mapping, compiler, and flags remain `UNVERIFIED` even
 though its executed snapshot hash is retained.
 
+### Canonical 128 MiB shipping-CLI profile
+
+`scrubbed-cli-profile-v1` is an additive evidence artifact, not a production
+optimization or a speedup claim. `pipeline.d --attested-profile` creates the
+shipping release executable through the existing private
+`scrubbed-build-attestation-v4` closure, snapshots that executable and the
+D-only `pipeline_profile_check.d` harness, and lets the snapshot run the fixed
+matrix. The report can be deleted with its harness/docs to roll this slice
+back; no production format or behavior depends on it.
+
+The independently authored cyclic table contains exactly 524,288 fixed-width
+256-byte records (134,217,728 input bytes). It covers unchanged ASCII, valid
+accented Unicode and emoji, supported Latin-1/CP1252 mojibake and negatives,
+named/numeric entities and ampersand negatives, curly/straight quotes,
+CRLF/bare CR, and removable controls while preserving tab/LF. ASCII padding
+does not make a transform depend on record boundaries. The frozen table,
+legacy-v1 config, scalar-v3 config, and mixed-v3 config have literal SHA-256
+pins in the harness. Independently authored expected bytes do not call project
+filters. The same logical stream is partitioned into 4,096 files of 32,768
+bytes and eight files of 16,777,216 bytes. Reports retain exact per-file sets,
+sizes and hashes plus tree and canonical-concatenation hashes. The checker
+recomputes file counts, bytes, and tree hashes and binds every generated tree
+and concatenation hash to literal fixture identities; the two layouts must
+have equal concatenated input.
+
+An untimed 8 MiB freeze requires exact output equality for default selection,
+explicit `--filters`, equivalent v1 JSON, canonical v3 JSON, and ordered v3
+tokens. The canonical v3 identity must match wherever that identity is
+exposed; predecessor selectors are recorded as `NOT_EXPOSED`, not assigned a
+fabricated identity. The expected selector tree, concatenated content, and
+canonical v3 identity are literal independently frozen pins, so coordinated
+replacement of expected and observed values is rejected. The 128 MiB ordinary matrix covers scalar
+`normalize-line-endings,strip-control` and mixed
+`uncurl-quotes,fix-mojibake,decode-html-entities,normalize-line-endings,strip-control`
+workloads through both v3 JSON and ordered tokens on both layouts. Options are
+pinned (`fix-mojibake max-passes=2`). Each case gets one untimed conditioning
+process, then five fresh-process/fresh-output samples in round-robin declared
+order. All ordinary children use `--threads 4 --max-open-inputs 4`. This is
+application-cold with uncontrolled OS cache, never OS-cold.
+
+The durable mixed matrix uses v3 JSON and shipping serialization. Each layout
+has three independent manifest-v2 first-publication/verified-skip pairs and,
+after explicit `errors-init`, three journal-v3 first/skip pairs. Every status,
+exit, output set, byte count, and hash is gated. Every first and skip EXPLAIN
+stream is parsed by exact filename, required complete, and reduced to a
+deterministic status digest retained in the report. Crash/retry timing is outside
+this profile; the existing manifest/journal correctness gates remain required.
+
+The capacity preflight executes before fixture creation. Checked arithmetic
+derives the planned scratch footprint, requires four times that value and at
+least 2 GiB free scratch, at least 2 GiB physical RAM, and a declared budget of
+at least 1,800 seconds. It refuses overflow and does not attempt a greater-than-
+RAM workload.
+
+Every timed application is the profiler's direct child PID. Monotonic wall
+time and Darwin `wait4` user/system CPU, termination status and `ru_maxrss`
+bytes are retained. `proc_pidinfo(PROC_PIDLISTFDS)` is polled every 10 ms; the
+result is explicitly `sampled_peak_fd_lower_bound`, with sample/error counts
+and polling interval, never an exact peak. Successful live-child
+`proc_pid_rusage(RUSAGE_INFO_V4)` values are reported as Darwin disk-I/O bytes
+from the last successful sample, never syscall bytes. The harness mirrors the
+complete 296-byte Darwin `rusage_info_v4` through `ri_runnable_time`, proves
+the 144/152 disk-counter offsets at compile time, and runs a guarded live ABI
+canary. A noninteractive
+privilege-free DTrace probe determines whether syscall tracing can proceed.
+An exact-PID xctrace control is attempted before any total-allocation claim.
+D runtime profiling, when recognized, is labelled GC-only and excludes native
+allocations. `/usr/bin/sample` runs separately on a single-thread mixed child
+for each layout and is accepted only with PID/binary binding and at least two
+samples. Instrumented runs and their overhead are excluded from timing.
+Unavailable or failed controls are structured `UNSUPPORTED`; zero is never a
+substitute.
+
+The checker executable basename is literally
+`scrubbed-pipeline-profile-check` in the bridge and documented commands, so a
+documented `ldc2 -O3 -release` rebuild with no additional flags reproduces the
+report-bound Mach-O identity. The run also binds the resolved compiler hash
+and version to the attested compiler closure.
+`pipeline_profile_check --self-test` release-actively rejects 102 mutations,
+including every material build-attestation axis, fixture/config/binary/harness
+drift, unequal or swapped layouts, selector set/order/identity/output drift,
+incomplete or reordered samples, durable route/pair/status drift, unsupported
+metrics represented as zero, forged sample aggregates, sampled FDs represented
+as exact, GC represented as total allocation, unsafe capacity arithmetic,
+nonfinite/negative resource domains for both ordinary and durable samples,
+bogus supported disk semantics, and local path leakage.
+`--self-test-live` checks the authored records, direct-PID measurement, and
+complete manifest-v2 and journal-v3 filename bindings on small actual shipping
+invocations before the capacity-gated run. `--check`
+revalidates the sanitized report and binds it to the checker executable.
+
+The report makes no OS-cold, greater-than-RAM, 1 TiB, comparator superiority,
+cross-platform, exact-FD, exact-syscall, native-allocation, or statistical
+performance claim. Any later optimization needs a separate accepted contract
+that preserves this fixture/schema/equivalence boundary and supplies
+interleaved before/after evidence.
+
 ## Comparator boundary
 
 The existing [CLI baseline](../benchmarks/README.md) pins `ftfy==6.3.1` and

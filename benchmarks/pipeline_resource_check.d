@@ -2,8 +2,10 @@
 module pipeline_resource_check;
 
 import std.conv : to;
+import std.algorithm.searching : canFind;
 import std.file : readText;
-import std.json : parseJSON;
+import std.json : JSONValue, parseJSON;
+import std.math : isFinite;
 import std.stdio : writeln;
 
 private bool digest(string value, size_t length) {
@@ -15,6 +17,39 @@ private bool digest(string value, size_t length) {
     return true;
 }
 
+private bool validProfileSample(JSONValue sample,
+        string binary, string tree, long outputBytes) {
+    try {
+        auto wall = sample["wall_seconds"].floating;
+        auto user = sample["user_seconds"].floating;
+        auto system = sample["system_seconds"].floating;
+        auto fdSamples = sample["fd_poll_samples"].integer;
+        auto fdErrors = sample["fd_poll_errors"].integer;
+        auto ruSamples = sample["rusage_v4_samples"].integer;
+        auto ruErrors = sample["rusage_v4_errors"].integer;
+        if (sample["exit_code"].integer != 0 || sample["signal"].integer != 0 ||
+            !sample["exact_output"].boolean || !isFinite(wall) || wall <= 0 ||
+            !isFinite(user) || user < 0 || !isFinite(system) || system < 0 ||
+            sample["peak_rss_bytes"].integer <= 0 ||
+            sample["target_binary_sha256"].str != binary ||
+            sample["input_bytes"].integer != 134_217_728 ||
+            sample["output_bytes"].integer != outputBytes ||
+            sample["output_tree_sha256"].str != tree ||
+            sample["sampled_peak_fd_lower_bound"].integer <= 0 || fdSamples <= 0 ||
+            fdErrors < 0 || sample["fd_poll_interval_milliseconds"].integer != 10 ||
+            sample["fd_metric_semantics"].str != "sampled lower bound; not exact peak" ||
+            ruSamples < 0 || ruErrors < 0 || fdSamples + fdErrors != ruSamples + ruErrors)
+            return false;
+        auto io = sample["disk_io"];
+        if (io["status"].str == "SUPPORTED")
+            return ruSamples > 0 && io["bytes_read"].integer >= 0 &&
+                io["bytes_written"].integer >= 0 && io["semantics"].str ==
+                "Darwin proc_pid_rusage RUSAGE_INFO_V4 disk-I/O bytes; last successful live-child sample; not syscall bytes";
+        return io["status"].str == "UNSUPPORTED" && ruSamples == 0 &&
+            io["reason"].str.length != 0;
+    } catch (Exception) { return false; }
+}
+
 int main(string[] args) {
     if (args.length != 2) {
         writeln("usage: pipeline_resource_check REPORT_JSON");
@@ -22,6 +57,83 @@ int main(string[] args) {
     }
     try {
         auto report = parseJSON(readText(args[1]));
+        if (report["schema"].str == "scrubbed-cli-profile-v1") {
+            if (report["source_binary_mapping"].str != "ATTESTED" ||
+                report["build_attestation"]["schema"].str !=
+                    "scrubbed-build-attestation-v4" ||
+                report["build_attestation"]["target_sha256"].str !=
+                    report["binary_sha256"].str ||
+                !digest(report["binary_sha256"].str, 64) ||
+                !digest(report["harness_sha256"].str, 64) ||
+                report["harness_executable_name"].str !=
+                    "scrubbed-pipeline-profile-check" ||
+                report["harness_build_recipe"].str !=
+                    "ldc2 -O3 -release <PROFILE_SOURCE> -of=<STANDARD_TMP>/scrubbed-pipeline-profile-check" ||
+                report["harness_compiler_executable_sha256"].str !=
+                    report["build_attestation"]["compiler_executable_sha256"].str ||
+                report["harness_compiler_version"].str !=
+                    report["build_attestation"]["compiler_version"].str ||
+                report["preflight"]["derived_fixture_footprint_bytes"].integer !=
+                    134_217_728L * 12 ||
+                report["preflight"]["required_scratch_bytes"].integer !=
+                    134_217_728L * 48 ||
+                report["preflight"]["scratch_free_bytes"].integer <
+                    134_217_728L * 48 ||
+                report["selector_freeze"]["selectors"].array.length != 5 ||
+                report["selector_freeze"]["expected_tree_sha256"].str !=
+                    "1CA96072CB1A056D38EC6A95E52C17D4ADF46BE3293740307A0A0DB98964662D" ||
+                report["selector_freeze"]["expected_concatenated_sha256"].str !=
+                    "30B29564DC4C991F3BB7EC53F0269FE09E76FA617897F81A4E545E1DB43B3BE2" ||
+                report["selector_freeze"]["canonical_identity"].str !=
+                    "job:v3:c985d95c6c2b8b13c2354bede8649d1557a13c4e211e647f804787e002c10ed1" ||
+                report["layouts"].array.length != 2)
+                throw new Exception("not a complete canonical CLI profile");
+            foreach (layoutIndex, layout; report["layouts"].array) {
+                auto expectedName = layoutIndex == 0 ? "many-small" : "few-large";
+                auto expectedFiles = layoutIndex == 0 ? 4096 : 8;
+                if (layout["name"].str != expectedName ||
+                    layout["input_bytes"].integer != 134_217_728 ||
+                    layout["input_files"].array.length != expectedFiles ||
+                    layout["ordinary"].array.length != 4 ||
+                    layout["durable"].array.length != 2)
+                    throw new Exception("incomplete canonical layout matrix");
+                foreach (item; layout["ordinary"].array) {
+                    if (item["result"]["samples"].array.length != 5)
+                        throw new Exception("incomplete canonical samples");
+                    auto mixed = item["workload"].str == "mixed";
+                    auto tree = mixed ? layout["mixed_expected_tree_sha256"].str :
+                        layout["scalar_expected_tree_sha256"].str;
+                    auto bytes = mixed ? layout["mixed_expected_bytes"].integer :
+                        layout["scalar_expected_bytes"].integer;
+                    foreach (sample; item["result"]["samples"].array)
+                        if (!validProfileSample(sample,
+                            report["binary_sha256"].str, tree, bytes))
+                            throw new Exception("invalid canonical sample");
+                }
+                foreach (routeIndex, route; layout["durable"].array) {
+                    if (route["kind"].str !=
+                            (routeIndex == 0 ? "manifest-v2" : "journal-v3") ||
+                        route["pairs"].array.length != 3)
+                        throw new Exception("incomplete durable profile pairs");
+                    foreach (pair; route["pairs"].array)
+                        foreach (phase; ["first", "skip"])
+                            if (!validProfileSample(pair[phase],
+                                report["binary_sha256"].str,
+                                layout["mixed_expected_tree_sha256"].str,
+                                layout["mixed_expected_bytes"].integer))
+                                throw new Exception("invalid durable resource sample");
+                }
+                writeln(expectedName, ": input=", layout["input_bytes"].integer,
+                    " ordinary-cases=4 x 5 durable-routes=2 x 3 pairs");
+            }
+            auto serialized = report.toString;
+            if (serialized.canFind("/Users/") || serialized.canFind("Users\\/") ||
+                serialized.canFind("/private/var/") || serialized.canFind("private\\/var"))
+                throw new Exception("canonical report leaks local paths");
+            writeln("Harness SHA-256: ", report["harness_sha256"].str);
+            writeln("Target SHA-256: ", report["binary_sha256"].str);
+            return 0;
+        }
         auto attested = report["schema"].str == "scrubbed-pipeline-v6";
         if ((!attested && report["schema"].str != "scrubbed-pipeline-v4") ||
             report["cases"].array.length != 12)

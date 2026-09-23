@@ -191,8 +191,9 @@ private string identityPolicy() {
 
 private string attestedBuildCommand() {
     return "git archive <source-sha> -> <private-source>; " ~
-        "dub describe/build --root=<private-source> --build=release " ~
-        "--compiler=<attested-compiler> --force --non-interactive " ~
+        "private read-only dub describe/build --root=<private-source> " ~
+        "--build=release --compiler=<private-read-only-ldc2> " ~
+        "--force --non-interactive " ~
         "--cache=local with private DUB_HOME";
 }
 
@@ -216,7 +217,8 @@ private string nativeCommandsHash(string[] commands) {
 private string nativeEnvironmentTemplate() {
     return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
         "CC=<attested-selected-clang>; AR=<attested-ar>; " ~
-        "RANLIB=<attested-ranlib>; SDKROOT=<xcrun-selected-sdk>";
+        "RANLIB=<attested-ranlib>; COMPILER_PATH=<private-pinned-tools>; " ~
+        "SDKROOT=<xcrun-selected-sdk>";
 }
 
 private void requireCleanStatus(string status) {
@@ -350,11 +352,13 @@ private struct NativeTool {
     string role;
 }
 
-private string toolVersion(string name, string path, string ranlibWriter) {
-    string[] command;
-    if (name.startsWith("ar-") || name.startsWith("ranlib-"))
-        command = [ranlibWriter, "-V"];
-    else command = [path, "--version"];
+private enum unavailableToolVersion = "UNAVAILABLE";
+
+private string toolVersion(string name, string path) {
+    if (name.endsWith("-driver") || name.startsWith("ar-"))
+        return unavailableToolVersion;
+    auto command = name.startsWith("ranlib-") ? [path, "-V"] :
+        name == "linker" ? [path, "-v"] : [path, "--version"];
     auto versionLine = checked(command).splitLines[0];
     require(versionLine.length != 0 && !versionLine.canFind('/') &&
         !versionLine.canFind('\\'), "unsafe or empty native tool version");
@@ -367,14 +371,14 @@ private NativeTool[] resolveNativeTools() {
     NativeTool[] result;
     auto ccDriver = checked(["which", "cc"]);
     auto ccCompiler = checked(["/usr/bin/xcrun", "--find", "clang"]);
-    require(toolVersion("cc-driver", ccDriver, ranlibWriter) ==
-        toolVersion("cc-compiler", ccCompiler, ranlibWriter),
+    require(checked([ccDriver, "--version"]).splitLines[0] ==
+        toolVersion("cc-compiler", ccCompiler),
         "cc driver did not select the attested Clang compiler");
     result ~= NativeTool("cc-driver", ccDriver, hashFile(ccDriver),
-        toolVersion("cc-driver", ccDriver, ranlibWriter),
+        toolVersion("cc-driver", ccDriver),
         "ambient cc command selector");
     result ~= NativeTool("cc-compiler", ccCompiler, hashFile(ccCompiler),
-        toolVersion("cc-compiler", ccCompiler, ranlibWriter),
+        toolVersion("cc-compiler", ccCompiler),
         "selected C compiler for SQLite, Lexbor, and zstd");
     auto arDriver = checked(["which", "ar"]);
     auto arWriter = checked(["/usr/bin/xcrun", "--find", "ar"]);
@@ -387,16 +391,22 @@ private NativeTool[] resolveNativeTools() {
     foreach (index, name; archiveNames)
         result ~= NativeTool(name, archivePaths[index],
             hashFile(archivePaths[index]),
-            toolVersion(name, archivePaths[index], ranlibWriter),
+            toolVersion(name, archivePaths[index]),
             archiveRoles[index]);
+    auto linker = checked(["/usr/bin/xcrun", "--find", "ld"]);
+    result ~= NativeTool("linker", linker, hashFile(linker),
+        toolVersion("linker", linker),
+        "selected final executable linker");
     auto names = ["cmake", "make"];
     auto roles = [
         "Lexbor build generator", "Lexbor and zstd build executor"];
     foreach (index, name; names) {
-        auto path = checked(["which", name]);
+        auto path = name == "make" ?
+            checked(["/usr/bin/xcrun", "--find", "make"]) :
+            checked(["which", name]);
         require(baseName(path) == name, "native tool basename mismatch");
         result ~= NativeTool(name, path, hashFile(path),
-            toolVersion(name, path, ranlibWriter), roles[index]);
+            toolVersion(name, path), roles[index]);
     }
     return result;
 }
@@ -412,16 +422,25 @@ private JSONValue nativeToolsJson(const(NativeTool)[] tools) {
     return JSONValue(result);
 }
 
+private JSONValue archiveSuiteJson(const(NativeTool)[] tools) {
+    auto evidence = nativeTool(tools, "ranlib-writer");
+    return JSONValue([
+        "schema": JSONValue("scrubbed-archive-suite-evidence-v1"),
+        "evidence_tool_name": JSONValue(evidence.name),
+        "evidence_tool_sha256": JSONValue(evidence.sha256),
+        "evidence_arguments": JSONValue([JSONValue("-V")]),
+        "version": JSONValue(evidence.version_)]);
+}
+
 private NativeTool nativeTool(const(NativeTool)[] tools, string name) {
     foreach (tool; tools) if (tool.name == name) return tool;
     throw new Exception("missing resolved native tool " ~ name);
 }
 
 private void verifyNativeTools(const(NativeTool)[] tools) {
-    auto ranlib = nativeTool(tools, "ranlib-writer");
     foreach (tool; tools)
         require(hashFile(tool.path) == tool.sha256 &&
-            toolVersion(tool.name, tool.path, ranlib.path) == tool.version_,
+            toolVersion(tool.name, tool.path) == tool.version_,
             "native build tool changed during attested build");
 }
 
@@ -436,7 +455,8 @@ private void pinNativeTools(ref PreparedAttestedBuild result,
     foreach (tool; result.nativeTools) {
         auto pinnedName = tool.name == "cc-compiler" ? "cc" :
             tool.name == "ar-writer" ? "ar" :
-            tool.name == "ranlib-writer" ? "ranlib" : tool.name;
+            tool.name == "ranlib-writer" ? "ranlib" :
+            tool.name == "linker" ? "ld" : tool.name;
         if (!tool.name.endsWith("-driver"))
             symlink(tool.path, buildPath(result.pinnedToolDirectory, pinnedName));
     }
@@ -468,16 +488,22 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     require(describedNativeCommands == nativePrebuildCommands(),
         "native pre-build command recipe changed");
     result.nativeCommandsSha256 = nativeCommandsHash(describedNativeCommands);
-    result.compiler = checked(["which", "ldc2"]);
-    require(baseName(result.compiler) == "ldc2",
+    auto compilerSource = checked(["which", "ldc2"]);
+    require(baseName(compilerSource) == "ldc2",
         "attested compiler must resolve to ldc2");
-    result.compilerHash = hashFile(result.compiler);
+    auto compilerSnapshot = snapshotExecutable(compilerSource, scratchRoot,
+        "ldc2-attested");
+    result.compiler = compilerSnapshot.path;
+    result.compilerHash = compilerSnapshot.sha256;
     result.compilerVersion = checked([result.compiler, "--version"]).splitLines[0];
-    auto dub = checked(["which", "dub"]);
-    require(baseName(dub) == "dub", "attested build tool must resolve to dub");
-    result.dub = dub;
-    result.dubHash = hashFile(dub);
-    result.dubVersion = checked([dub, "--version"]);
+    auto dubSource = checked(["which", "dub"]);
+    require(baseName(dubSource) == "dub",
+        "attested build tool must resolve to dub");
+    auto dubSnapshot = snapshotExecutable(dubSource, scratchRoot,
+        "dub-attested");
+    result.dub = dubSnapshot.path;
+    result.dubHash = dubSnapshot.sha256;
+    result.dubVersion = checked([result.dub, "--version"]);
     require(result.dubVersion.startsWith("DUB version 1.42.0,"),
         "attested build requires verified DUB 1.42.0 target discovery");
     pinNativeTools(result, scratchRoot);
@@ -503,9 +529,15 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
         "CC": cc.path,
         "AR": ar.path,
         "RANLIB": ranlib.path,
+        "COMPILER_PATH": result.pinnedToolDirectory,
         "SDKROOT": result.sdkRoot,
     ];
-    auto describe = checkedEnv([dub, "describe", "--root=" ~ result.privateSource,
+    auto linkerTrace = checkedEnv([cc.path, "-###", "-x", "c", "/dev/null",
+        "-o", buildPath(scratchRoot, "linker-selection-probe")],
+        result.environment);
+    require(linkerTrace.canFind(buildPath(result.pinnedToolDirectory, "ld")),
+        "selected compiler did not resolve the attested final linker");
+    auto describe = checkedEnv([result.dub, "describe", "--root=" ~ result.privateSource,
         "--build=release", "--compiler=" ~ result.compiler, "--cache=local",
         "--vquiet"],
         result.environment);
@@ -530,7 +562,7 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
 }
 
 private void validateAttestation(JSONValue attestation, string targetHash) {
-    require(attestation["schema"].str == "scrubbed-build-attestation-v3",
+    require(attestation["schema"].str == "scrubbed-build-attestation-v4",
         "build attestation schema");
     foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
                    "dub_recipe_sha256", "dependency_lock_sha256",
@@ -548,6 +580,8 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
         !attestation["compiler_version"].str.canFind('\\') &&
         attestation["dub_version"].str.startsWith("DUB version 1.42.0,") &&
         !attestation["dub_version"].str.canFind('/') &&
+        attestation["primary_tool_policy"].str ==
+            "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
         attestation["source_materialization"].str ==
             "hashed Git archive extracted into private scratch" &&
         attestation["dependency_cache_policy"].str ==
@@ -566,7 +600,9 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
         !attestation["sdk_version"].str.canFind('/') &&
         !attestation["sdk_build_version"].str.canFind('/') &&
         attestation["native_tool_policy"].str ==
-            "exact executables hashed/versioned before and after; private pinned PATH; CMake selections verified" &&
+            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified" &&
+        attestation["linker_selection"].str ==
+            "COMPILER_PATH private ld selected by attested compiler -### trace" &&
         attestation["build_command_template"].str == attestedBuildCommand() &&
         attestation["build_flags"].str ==
             "release; force; non-interactive; cache=local" &&
@@ -574,23 +610,39 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
         attestation["target_sha256"].str == targetHash,
         "inconsistent build attestation");
     auto names = ["cc-driver", "cc-compiler", "ar-driver", "ar-writer",
-        "ranlib-driver", "ranlib-writer", "cmake", "make"];
+        "ranlib-driver", "ranlib-writer", "linker", "cmake", "make"];
     auto roles = ["ambient cc command selector",
         "selected C compiler for SQLite, Lexbor, and zstd",
         "ambient ar command selector", "selected static archive writer",
         "ambient ranlib command selector",
-        "selected static archive index writer", "Lexbor build generator",
+        "selected static archive index writer", "selected final executable linker",
+        "Lexbor build generator",
         "Lexbor and zstd build executor"];
-    require(attestation["native_tools"].array.length == 8,
+    require(attestation["native_tools"].array.length == 9,
         "native build tool closure is incomplete");
     foreach (index, tool; attestation["native_tools"].array)
         require(tool["name"].str == names[index] &&
             tool["role"].str == roles[index] &&
             digestField(tool["sha256"].str, 64) &&
             tool["version"].str.length != 0 &&
+            (index == 0 || index == 2 || index == 3 || index == 4 ?
+                tool["version"].str == unavailableToolVersion :
+                tool["version"].str != unavailableToolVersion) &&
             !tool["version"].str.canFind('/') &&
             !tool["version"].str.canFind('\\'),
             "invalid native build tool attestation");
+    auto archiveSuite = attestation["archive_suite_evidence"];
+    require(archiveSuite["schema"].str ==
+            "scrubbed-archive-suite-evidence-v1" &&
+        archiveSuite["evidence_tool_name"].str == "ranlib-writer" &&
+        archiveSuite["evidence_tool_sha256"].str ==
+            attestation["native_tools"][5]["sha256"].str &&
+        archiveSuite["evidence_arguments"].array.length == 1 &&
+        archiveSuite["evidence_arguments"][0].str == "-V" &&
+        archiveSuite["version"].str ==
+            attestation["native_tools"][5]["version"].str &&
+        archiveSuite["version"].str != unavailableToolVersion,
+        "archive suite evidence is not bound to its exact evidence tool");
 }
 
 private void requireCmakeSelection(string cache, string key,
@@ -619,6 +671,9 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "--build=release", "--compiler=" ~ prepared.compiler, "--force",
         "--non-interactive", "--cache=local"], prepared.environment);
     require(buildResult.status == 0, "attested build failed: " ~ buildResult.output);
+    require(hashFile(prepared.compiler) == prepared.compilerHash &&
+        hashFile(prepared.dub) == prepared.dubHash,
+        "private compiler or DUB snapshot changed during attested build");
     verifyDependencyInputs(prepared.dependency);
     verifyNativeTools(prepared.nativeTools);
     auto cmakeCache = readText(buildPath(prepared.privateSource, ".dub",
@@ -652,7 +707,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     auto snapshot = snapshotExpectedExecutable(prepared.target, scratchRoot,
         "scrubbed-attested-snapshot", targetHash);
     JSONValue attestation = JSONValue([
-        "schema": JSONValue("scrubbed-build-attestation-v3"),
+        "schema": JSONValue("scrubbed-build-attestation-v4"),
         "source_sha": JSONValue(prepared.sourceSha),
         "source_tree_id": JSONValue(prepared.treeId),
         "source_archive_sha256": JSONValue(prepared.archiveHash),
@@ -666,6 +721,8 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "compiler_version": JSONValue(prepared.compilerVersion),
         "dub_executable_sha256": JSONValue(prepared.dubHash),
         "dub_version": JSONValue(prepared.dubVersion),
+        "primary_tool_policy": JSONValue(
+            "private read-only LDC/DUB snapshots invoked and hash-verified after build"),
         "dependency_cache_policy": JSONValue(
             "private DUB_HOME and --cache=local under private source"),
         "argparse_name": JSONValue(prepared.dependency.name),
@@ -680,8 +737,11 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "native_prebuild_command_count": JSONValue(5),
         "native_environment_template": JSONValue(nativeEnvironmentTemplate()),
         "native_tool_policy": JSONValue(
-            "exact executables hashed/versioned before and after; private pinned PATH; CMake selections verified"),
+            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified"),
         "native_tools": nativeToolsJson(prepared.nativeTools),
+        "archive_suite_evidence": archiveSuiteJson(prepared.nativeTools),
+        "linker_selection": JSONValue(
+            "COMPILER_PATH private ld selected by attested compiler -### trace"),
         "sdk_version": JSONValue(prepared.sdkVersion),
         "sdk_build_version": JSONValue(prepared.sdkBuildVersion),
         "target_relative_path": JSONValue(prepared.targetRelative),
@@ -1308,21 +1368,24 @@ private void selfTest() {
     attested.object.remove("target_binary_build_flags");
     JSONValue[] nativeToolFixtures;
     auto nativeNames = ["cc-driver", "cc-compiler", "ar-driver", "ar-writer",
-        "ranlib-driver", "ranlib-writer", "cmake", "make"];
+        "ranlib-driver", "ranlib-writer", "linker", "cmake", "make"];
     auto nativeRoles = ["ambient cc command selector",
         "selected C compiler for SQLite, Lexbor, and zstd",
         "ambient ar command selector", "selected static archive writer",
         "ambient ranlib command selector",
-        "selected static archive index writer", "Lexbor build generator",
+        "selected static archive index writer", "selected final executable linker",
+        "Lexbor build generator",
         "Lexbor and zstd build executor"];
     foreach (index, name; nativeNames)
         nativeToolFixtures ~= JSONValue([
             "name": JSONValue(name),
             "sha256": JSONValue((index + 1).to!string.replicate(64)),
-            "version": JSONValue("test " ~ name),
+            "version": JSONValue(index == 0 || index == 2 || index == 3 ||
+                index == 4 ?
+                unavailableToolVersion : "test " ~ name),
             "role": JSONValue(nativeRoles[index])]);
     JSONValue buildAttestation = JSONValue([
-        "schema": JSONValue("scrubbed-build-attestation-v3"),
+        "schema": JSONValue("scrubbed-build-attestation-v4"),
         "source_sha": JSONValue("0".replicate(40)),
         "source_tree_id": JSONValue("1".replicate(40)),
         "source_archive_sha256": JSONValue("2".replicate(64)),
@@ -1336,6 +1399,8 @@ private void selfTest() {
         "compiler_version": JSONValue("LDC test"),
         "dub_executable_sha256": JSONValue("6".replicate(64)),
         "dub_version": JSONValue("DUB version 1.42.0, test"),
+        "primary_tool_policy": JSONValue(
+            "private read-only LDC/DUB snapshots invoked and hash-verified after build"),
         "dependency_cache_policy": JSONValue(
             "private DUB_HOME and --cache=local under private source"),
         "argparse_name": JSONValue("argparse"),
@@ -1347,8 +1412,16 @@ private void selfTest() {
         "native_prebuild_command_count": JSONValue(5),
         "native_environment_template": JSONValue(nativeEnvironmentTemplate()),
         "native_tool_policy": JSONValue(
-            "exact executables hashed/versioned before and after; private pinned PATH; CMake selections verified"),
+            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified"),
         "native_tools": JSONValue(nativeToolFixtures),
+        "archive_suite_evidence": JSONValue([
+            "schema": JSONValue("scrubbed-archive-suite-evidence-v1"),
+            "evidence_tool_name": JSONValue("ranlib-writer"),
+            "evidence_tool_sha256": JSONValue("6".replicate(64)),
+            "evidence_arguments": JSONValue([JSONValue("-V")]),
+            "version": JSONValue("test ranlib-writer")]),
+        "linker_selection": JSONValue(
+            "COMPILER_PATH private ld selected by attested compiler -### trace"),
         "sdk_version": JSONValue("test-sdk"),
         "sdk_build_version": JSONValue("test-sdk-build"),
         "target_relative_path": JSONValue("scrubbed"),
@@ -1395,10 +1468,18 @@ private void selfTest() {
                 "target_sha256": JSONValue("b".replicate(64))])]),
         "samples": JSONValue(controlSamples)]);
     validate(attested);
+    auto crossAttributed = parseJSON(attested.toString);
+    crossAttributed["build_attestation"]["native_tools"][3]["version"] =
+        crossAttributed["build_attestation"]["archive_suite_evidence"]["version"];
+    bool attestationFailed;
+    try { validate(crossAttributed); }
+    catch (Exception) { attestationFailed = true; }
+    require(attestationFailed,
+        "cross-tool archive version attribution negative did not fail");
     auto invalidAttestation = parseJSON(attested.toString);
     invalidAttestation["cases"][0]["samples"][1]["target_binary_sha256"] =
         "9".replicate(64);
-    bool attestationFailed;
+    attestationFailed = false;
     try { validate(invalidAttestation); }
     catch (Exception) { attestationFailed = true; }
     require(attestationFailed, "mixed target sample attribution negative did not fail");
@@ -1422,7 +1503,7 @@ private void selfTest() {
     require(attestationFailed, "attested target hash mismatch negative did not fail");
     invalidAttestation = parseJSON(attested.toString);
     invalidAttestation["build_attestation"]["schema"] =
-        "scrubbed-build-attestation-v2";
+        "scrubbed-build-attestation-v3";
     attestationFailed = false;
     try { validate(invalidAttestation); }
     catch (Exception) { attestationFailed = true; }
@@ -1817,6 +1898,34 @@ private void selfTestBuildIsolation(string sourceRoot) {
         prepared.dependency.sha256, " ", changed);
 }
 
+private void selfTestPrimaryToolSnapshots(string executable) {
+    auto root = privateScratch("scrubbed-primary-tool-snapshot-test-");
+    scope(exit) rmdirRecurse(root);
+    auto compilerSource = buildPath(root, "ldc2");
+    auto dubSource = buildPath(root, "dub");
+    copy(executable, compilerSource);
+    copy(executable, dubSource);
+    require(chmod(compilerSource.toStringz, S_IRWXU) == 0 &&
+        chmod(dubSource.toStringz, S_IRWXU) == 0,
+        "cannot prepare primary tool replacement fixtures");
+    auto compilerSnapshot = snapshotExecutable(compilerSource, root,
+        "ldc2-attested");
+    auto dubSnapshot = snapshotExecutable(dubSource, root, "dub-attested");
+    write(compilerSource, cast(ubyte[])"replacement-compiler");
+    write(dubSource, cast(ubyte[])"replacement-dub");
+    require(hashFile(compilerSource) != compilerSnapshot.sha256 &&
+        hashFile(dubSource) != dubSnapshot.sha256,
+        "primary tool replacement fixture did not change");
+    verifySnapshot(compilerSnapshot);
+    verifySnapshot(dubSnapshot);
+    require(checked([compilerSnapshot.path, "--self-test-tool-fixture", "ldc2"]) ==
+            "fixture-ldc2" &&
+        checked([dubSnapshot.path, "--self-test-tool-fixture", "dub"]) ==
+            "fixture-dub",
+        "private primary tool snapshot did not remain executable");
+    writeln("primary LDC/DUB same-path replacement remained snapshot-bound");
+}
+
 private void selfTestNativePath(string sourceRoot, string poisonPath,
                                 string reportPath) {
     auto root = privateScratch("scrubbed-native-path-test-");
@@ -1832,6 +1941,12 @@ int main(string[] args) {
     try {
         if (args.length == 2 && args[1] == "--self-test") {
             selfTest(); return 0;
+        }
+        if (args.length == 3 && args[1] == "--self-test-tool-fixture") {
+            writeln("fixture-", args[2]); return 0;
+        }
+        if (args.length == 2 && args[1] == "--self-test-primary-tools") {
+            selfTestPrimaryToolSnapshots(args[0]); return 0;
         }
         if (args.length == 4 && args[1] == "--self-test-snapshot") {
             selfTestSnapshot(args[2], args[3]); return 0;

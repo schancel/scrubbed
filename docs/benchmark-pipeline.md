@@ -133,13 +133,24 @@ The release build runs only there; ignored caller `.dub`, native-object, and
 target artifacts are neither copied nor consumed. DUB resolution uses a
 private `DUB_HOME` and `--cache=local` beneath the private extracted source.
 
-Build attestation v3 records hashes of `dub.json`, `dub.selections.json`, the
+Build attestation v4 records hashes of `dub.json`, `dub.selections.json`, the
 resolved compiler and DUB executables, their versions, and the complete
 versioned argparse recipe/input set named by DUB's release build description.
+LDC and DUB are invoked only through private read-only snapshots and their
+hashes are verified again after the build, so same-path replacement of the
+original executable cannot change the described or compiled target.
 It also records the fixed native pre-build command digest and exact identities
-(name, role, version, and executable SHA-256) of the ambient `cc`, `ar`, and
+(name, role, per-executable version or explicit `UNAVAILABLE`, and executable SHA-256) of the ambient `cc`, `ar`, and
 `ranlib` selectors; their `xcrun`-selected Clang/archive executables; and
-`cmake` and `make`. The private commands invoke the selected executables
+`cmake` and the `xcrun`-selected Make executable. Selector shims and the selected `ar` binary expose no usable
+per-executable version query, so their rows say `UNAVAILABLE`; a separate
+versioned archive-suite record
+names the exact `ranlib-writer -V` evidence command and binds its output to
+that ranlib executable's SHA-256. It is never presented as an `ar` version.
+The closure also hashes, honestly versions, pins, and re-verifies the
+`xcrun`-selected final linker. `COMPILER_PATH` points to its private `ld`
+symlink, and an attested-compiler `-###` trace must select that exact path
+before the release build. The private commands invoke the selected executables
 directly. The material tools are
 resolved before building, exposed through a
 private pinned-tool directory and fixed system PATH, and accompanied by exact
@@ -148,8 +159,11 @@ again after compilation. The selected macOS SDK version/build is recorded and
 its exact root is supplied privately through `SDKROOT`; the report omits that
 host path. The Lexbor CMake cache must name the attested C
 compiler, archive tools, and pinned make executable. A D-only negative swaps
-ambient PATH to executable poison tools after resolution and requires the
-private build and emitted attestation to remain bound to the resolved set.
+ambient PATH to executable poison tools, including `ld`, after resolution and
+requires the private build and emitted attestation to remain bound to the
+resolved set. A separate D-only same-path replacement control proves the
+private LDC/DUB snapshots remain executable and hash-bound after their source
+paths change.
 The argparse input digest is likewise verified after compilation. The supported DUB
 1.42.0 target path is derived from the described root `targetPath` plus
 `targetFileName`, required to remain the private relative path `scrubbed`, and

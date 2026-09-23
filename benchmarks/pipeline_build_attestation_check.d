@@ -62,12 +62,18 @@ int main(string[] args) {
 
         auto poisonTools = buildPath(root, "poison-tools");
         mkdirRecurse(poisonTools);
-        foreach (name; ["cc", "cmake", "make", "ar", "ranlib"]) {
+        foreach (name; ["cc", "cmake", "make", "ar", "ranlib", "ld"]) {
             auto poisonTool = buildPath(poisonTools, name);
             copy(args[0], poisonTool);
             require(chmod(poisonTool.toStringz, S_IRWXU) == 0,
                 "cannot make D-only poison tool executable");
         }
+
+        auto primarySwap = execute([args[1], "--self-test-primary-tools"]);
+        require(primarySwap.status == 0 && primarySwap.output.canFind(
+                "primary LDC/DUB same-path replacement remained snapshot-bound"),
+            "primary tool snapshot replacement negative failed: " ~
+                primarySwap.output);
 
         auto mutation = execute([args[1], "--self-test-build-isolation", source]);
         require(mutation.status == 0 &&
@@ -84,8 +90,12 @@ int main(string[] args) {
             "native PATH swap control failed: " ~ pathSwap.output);
         auto nativeAttestation = parseJSON(readText(nativePathReport));
         require(nativeAttestation["schema"].str ==
-                "scrubbed-build-attestation-v3" &&
-            nativeAttestation["native_tools"].array.length == 8,
+                "scrubbed-build-attestation-v4" &&
+            nativeAttestation["native_tools"].array.length == 9 &&
+            nativeAttestation["primary_tool_policy"].str ==
+                "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
+            nativeAttestation["linker_selection"].str ==
+                "COMPILER_PATH private ld selected by attested compiler -### trace",
             "native PATH report lacks complete tool closure");
         auto poisonHash = hashFile(buildPath(poisonTools, "cc"));
         foreach (tool; nativeAttestation["native_tools"].array) {
@@ -99,11 +109,30 @@ int main(string[] args) {
                 name == "ranlib-driver" ? checked(["which", "ranlib"]) :
                 name == "ranlib-writer" ?
                     checked(["/usr/bin/xcrun", "--find", "ranlib"]) :
+                name == "linker" ?
+                    checked(["/usr/bin/xcrun", "--find", "ld"]) :
+                name == "make" ?
+                    checked(["/usr/bin/xcrun", "--find", "make"]) :
                     checked(["which", name]);
             require(tool["sha256"].str == hashFile(resolved) &&
                 tool["sha256"].str != poisonHash,
                 "native PATH report did not match the resolved executed tool");
         }
+        auto archiveSuite = nativeAttestation["archive_suite_evidence"];
+        require(nativeAttestation["native_tools"][0]["version"].str ==
+                "UNAVAILABLE" &&
+            nativeAttestation["native_tools"][2]["version"].str ==
+                "UNAVAILABLE" &&
+            nativeAttestation["native_tools"][3]["version"].str ==
+                "UNAVAILABLE" &&
+            nativeAttestation["native_tools"][4]["version"].str ==
+                "UNAVAILABLE" &&
+            archiveSuite["evidence_tool_name"].str == "ranlib-writer" &&
+            archiveSuite["evidence_tool_sha256"].str ==
+                nativeAttestation["native_tools"][5]["sha256"].str &&
+            archiveSuite["version"].str ==
+                nativeAttestation["native_tools"][5]["version"].str,
+            "archive suite evidence was cross-attributed to an ar executable");
 
         auto reportPath = buildPath(root, "published-report.json");
         auto run = execute([args[1], "--attested-build", source, reportPath]);
@@ -114,7 +143,7 @@ int main(string[] args) {
         auto attestation = report["build_attestation"];
         require(report["schema"].str == "scrubbed-pipeline-v5" &&
             report["source_binary_mapping"].str == "ATTESTED" &&
-            attestation["schema"].str == "scrubbed-build-attestation-v3" &&
+            attestation["schema"].str == "scrubbed-build-attestation-v4" &&
             attestation["source_sha"].str ==
                 checked(["git", "-C", source, "rev-parse", "HEAD"]) &&
             attestation["source_materialization"].str ==
@@ -128,7 +157,7 @@ int main(string[] args) {
             digest(attestation["argparse_inputs_sha256"].str) &&
             digest(attestation["native_prebuild_commands_sha256"].str) &&
             attestation["native_prebuild_command_count"].integer == 5 &&
-            attestation["native_tools"].array.length == 8 &&
+            attestation["native_tools"].array.length == 9 &&
             attestation["sdk_version"].str.length != 0 &&
             attestation["sdk_build_version"].str.length != 0 &&
             attestation["target_relative_path"].str == "scrubbed" &&

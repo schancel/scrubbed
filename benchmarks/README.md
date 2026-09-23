@@ -160,9 +160,11 @@ ldc2 -i -O3 -release -d-version=MaterializationWorkProbe -Isource -J. \
 The self-test compares ordinary and measured execution, checks strict invalid
 UTF-8 exceptions, independent concurrent counters, split identity/order,
 terminal reject/quarantine filter skipping, post-owner-close retained output, exact atomic
-sink bytes and failure non-publication, two accounting mutants, and a 4 MiB
-allocation-heavy positive control. GC numbers are D runtime current-thread
-allocation evidence, not total process or native allocation.
+sink bytes and failure non-publication, identical/prefix/suffix/interior/empty
+borrowed and distinct filter outputs in both measured paths, three accounting
+mutants, and a 4 MiB allocation-heavy positive control. GC numbers are D
+runtime current-thread allocation evidence, not total process or native
+allocation.
 
 | Boundary | Current ownership/lifetime rule | Payload work and status |
 |---|---|---|
@@ -170,7 +172,7 @@ allocation evidence, not total process or native allocation.
 | `Content` descriptor snapshot/edit/split | Descriptor arrays may be copied, but every borrow still requires its live owner; split children may share immutable input. | No payload copy. Sharing is mandatory for current split/lineage semantics. |
 | `Content` -> UTF-8 string | `composition.executor` appends pieces into a growing GC-owned byte array, validates it, and exposes the resulting owning string before the public filter ABI. | One logical payload copy; mandatory while filters accept `string`; allocation can exceed final payload bytes while the array grows. |
 | fused scalar run | Up to 16 consecutive caller-owned transducers borrow the input string and materialize one owning result. | One result materialization per fused run; longer runs intentionally form another bounded barrier. |
-| whole-text filter | The pure filter may return its input slice or a new GC-owned string; the probe records alias/distinct bytes without retaining mutable state. | Algorithm-owned work; not removable by orchestration evidence alone. |
+| whole-text filter | The pure public filter may return the identical input, a borrowed prefix/suffix/interior/empty subslice, a partially overlapping slice, or distinct GC-owned storage. The probe uses integer byte intervals rather than ordering unrelated pointers and records borrowed/overlap/distinct calls and bytes without retaining mutable state. | Borrowed subslices are not materializations; partial overlaps are never reported as distinct. Distinct algorithm-owned work is not removable by orchestration evidence alone. |
 | filter result -> owned `ContentPiece` | `ContentPiece.own` duplicates the result so no caller/appender/scratch slice escapes and output survives source-owner close. | A second logical payload copy and the leading future candidate, but not authorized here. |
 | final-event split/map descriptors | Events retain `Content` references synchronously; after-filters independently own each emitted result. | Unfiltered sharing is payload-copy-free; filtered siblings currently repeat the explicit barriers. |
 | atomic piece sink | A 64 KiB caller-local buffer is consumed synchronously, fsynced, and renamed; no chunk escapes and no full-output join occurs. | One logical stream copy into bounded syscall storage; required by the current atomic sink. |

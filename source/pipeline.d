@@ -322,7 +322,8 @@ struct Pipeline {
                         fused[fusedLength++] = stages[index].streaming;
                         ++index;
                     }
-                    auto inputBytes = text.length;
+                    auto input = text;
+                    auto inputBytes = input.length;
                     auto before = GC.allocatedInCurrentThread;
                     text = fusedStreamingRange(text,
                         fused[0 .. fusedLength]).to!string;
@@ -335,6 +336,7 @@ struct Pipeline {
                     boundary.outputBytes += text.length;
                     boundary.logicalMaterializedBytes += text.length;
                     boundary.gcAllocatedBytes += after - before;
+                    recordOutputRelation(*boundary, input, text);
                     continue;
                 }
                 auto stage = stages[index++];
@@ -350,10 +352,7 @@ struct Pipeline {
                 boundary.inputBytes += input.length;
                 boundary.outputBytes += text.length;
                 boundary.gcAllocatedBytes += after - before;
-                if (text.ptr == input.ptr && text.length == input.length)
-                    boundary.aliasedOutputBytes += text.length;
-                else
-                    boundary.distinctOutputBytes += text.length;
+                recordOutputRelation(*boundary, input, text);
             }
             return text;
         }
@@ -365,19 +364,74 @@ struct Pipeline {
 }
 
 version (MaterializationWorkProbe) {
+    enum OutputStorageRelation : ubyte { borrowed, overlaps, distinct }
+
+    /// Classify byte-storage relationships without ordering unrelated
+    /// pointers. Integer intervals also make partial overlap explicit. An
+    /// empty output borrows when its pointer is anywhere from the input start
+    /// through its one-past-the-end address; two identical empty slices borrow.
+    OutputStorageRelation classifyOutputStorage(string input,
+            string output) pure {
+        auto inputStart = cast(size_t)input.ptr;
+        auto outputStart = cast(size_t)output.ptr;
+        if (input.length == 0)
+            return output.length == 0 && outputStart == inputStart
+                ? OutputStorageRelation.borrowed
+                : OutputStorageRelation.distinct;
+        if (input.length > size_t.max - inputStart)
+            return OutputStorageRelation.distinct;
+        auto inputEnd = inputStart + input.length;
+        if (output.length == 0)
+            return outputStart >= inputStart && outputStart <= inputEnd
+                ? OutputStorageRelation.borrowed
+                : OutputStorageRelation.distinct;
+        if (output.length > size_t.max - outputStart)
+            return outputStart >= inputStart && outputStart < inputEnd
+                ? OutputStorageRelation.overlaps
+                : OutputStorageRelation.distinct;
+        auto outputEnd = outputStart + output.length;
+        if (outputStart >= inputStart && outputEnd <= inputEnd)
+            return OutputStorageRelation.borrowed;
+        if (outputStart < inputEnd && inputStart < outputEnd)
+            return OutputStorageRelation.overlaps;
+        return OutputStorageRelation.distinct;
+    }
+
     struct PipelineBoundaryWorkV1 {
         ulong calls;
         ulong inputBytes;
         ulong outputBytes;
         ulong logicalMaterializedBytes;
         ulong gcAllocatedBytes;
+        ulong aliasedOutputCalls;
+        ulong overlappingOutputCalls;
+        ulong distinctOutputCalls;
         ulong aliasedOutputBytes;
+        ulong overlappingOutputBytes;
         ulong distinctOutputBytes;
     }
 
     struct PipelineMaterializationWorkV1 {
         PipelineBoundaryWorkV1 fusedScalar;
         PipelineBoundaryWorkV1 wholeTextFilter;
+    }
+
+    private void recordOutputRelation(ref PipelineBoundaryWorkV1 work,
+            string input, string output) pure {
+        final switch (classifyOutputStorage(input, output)) {
+        case OutputStorageRelation.borrowed:
+            ++work.aliasedOutputCalls;
+            work.aliasedOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.overlaps:
+            ++work.overlappingOutputCalls;
+            work.overlappingOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.distinct:
+            ++work.distinctOutputCalls;
+            work.distinctOutputBytes += output.length;
+            break;
+        }
     }
 }
 

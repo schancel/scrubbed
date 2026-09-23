@@ -12,7 +12,8 @@ import domain.document : Document, DocumentViewOwner, OutputName, SourceLocator;
 import effects.atomic_piece_sink : writeAtomicPieces;
 import job.json : parseJobJson;
 import pipeline : Filter, FilterRegistry, Pipeline, PipelineMaterializationWorkV1,
-    StreamingFilter, StreamingState, TypedFilterSpec;
+    OutputStorageRelation, PipelineBoundaryWorkV1, StreamingFilter,
+    StreamingState, TypedFilterSpec, classifyOutputStorage;
 import stages.contract : EventKind, PassMode, ResourceDeclaration,
     StageDecision, StageDeclaration, StageDocument, StageResult;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
@@ -87,6 +88,14 @@ private size_t duplicatePush(ref StreamingState, dchar input,
 }
 
 private string wholeIdentity(string input) pure { return input; }
+private string wholePrefix(string input) pure { return input[0 .. $ - 1]; }
+private string wholeSuffix(string input) pure { return input[1 .. $]; }
+private string wholeInterior(string input) pure { return input[1 .. $ - 1]; }
+private string wholeEmptyBorrowed(string input) pure { return input[2 .. 2]; }
+private string wholeDistinct(string input) pure {
+    auto allocated = input ~ "!";
+    return allocated[0 .. input.length];
+}
 
 private StageDecision mapStage(StageDocument input,
         immutable(StageConfiguration)) pure {
@@ -156,6 +165,11 @@ private FilterRegistry filters() {
     result.addStreamingFilter("duplicate", StreamingFilter(
         StreamingState.init, &duplicatePush, null));
     result.addFilter("whole-identity", cast(Filter)&wholeIdentity);
+    result.addFilter("whole-prefix", cast(Filter)&wholePrefix);
+    result.addFilter("whole-suffix", cast(Filter)&wholeSuffix);
+    result.addFilter("whole-interior", cast(Filter)&wholeInterior);
+    result.addFilter("whole-empty-borrowed", cast(Filter)&wholeEmptyBorrowed);
+    result.addFilter("whole-distinct", cast(Filter)&wholeDistinct);
     return result;
 }
 
@@ -187,7 +201,23 @@ private struct Evidence {
     ulong sinkGcAllocatedBytes;
 }
 
+private void validateRelation(T)(ref const T boundary, string label) {
+    need(boundary.aliasedOutputCalls + boundary.overlappingOutputCalls +
+            boundary.distinctOutputCalls == boundary.calls,
+        label ~ " relation calls do not reconcile");
+    need(boundary.aliasedOutputBytes + boundary.overlappingOutputBytes +
+            boundary.distinctOutputBytes == boundary.outputBytes,
+        label ~ " relation bytes do not reconcile");
+}
+
 private void validateEvidence(ref const Evidence evidence) {
+    validateRelation(evidence.pipeline.fusedScalar, "pipeline fused scalar");
+    validateRelation(evidence.pipeline.wholeTextFilter,
+        "pipeline whole-text filter");
+    validateRelation(evidence.before.filterExecution,
+        "before filter execution");
+    validateRelation(evidence.split.filterExecution,
+        "split filter execution");
     need(evidence.own.calls == 1 &&
         evidence.own.sourceBytes == fourMiB &&
         evidence.own.retainedBytes == fourMiB &&
@@ -198,9 +228,12 @@ private void validateEvidence(ref const Evidence evidence) {
         evidence.pipeline.fusedScalar.inputBytes == 12 &&
         evidence.pipeline.fusedScalar.outputBytes == 18 &&
         evidence.pipeline.fusedScalar.logicalMaterializedBytes == 18 &&
+        evidence.pipeline.fusedScalar.distinctOutputCalls == 2 &&
+        evidence.pipeline.fusedScalar.distinctOutputBytes == 18 &&
         evidence.pipeline.wholeTextFilter.calls == 1 &&
         evidence.pipeline.wholeTextFilter.inputBytes == 6 &&
         evidence.pipeline.wholeTextFilter.outputBytes == 6 &&
+        evidence.pipeline.wholeTextFilter.aliasedOutputCalls == 1 &&
         evidence.pipeline.wholeTextFilter.aliasedOutputBytes == 6 &&
         evidence.pipeline.wholeTextFilter.distinctOutputBytes == 0,
         "pipeline boundary accounting does not reconcile");
@@ -211,6 +244,7 @@ private void validateEvidence(ref const Evidence evidence) {
         evidence.before.filterExecution.calls == 1 &&
         evidence.before.filterExecution.inputBytes == oneMiB &&
         evidence.before.filterExecution.outputBytes == 2 * oneMiB &&
+        evidence.before.filterExecution.distinctOutputCalls == 1 &&
         evidence.before.filterExecution.distinctOutputBytes == 2 * oneMiB &&
         evidence.before.filterResultToOwnedPiece.calls == 1 &&
         evidence.before.filterResultToOwnedPiece.inputBytes == 2 * oneMiB &&
@@ -222,6 +256,7 @@ private void validateEvidence(ref const Evidence evidence) {
     need(evidence.split.contentToUtf8.calls == 2 &&
         evidence.split.contentToUtf8.inputBytes == 4 * oneMiB &&
         evidence.split.filterExecution.calls == 2 &&
+        evidence.split.filterExecution.distinctOutputCalls == 2 &&
         evidence.split.filterExecution.distinctOutputBytes == 4 * oneMiB &&
         evidence.split.filterResultToOwnedPiece.calls == 2 &&
         evidence.split.filterResultToOwnedPiece.logicalCopiedBytes == 4 * oneMiB &&
@@ -426,6 +461,95 @@ private void concurrencyControl() {
             "caller-owned concurrent evidence interfered");
 }
 
+private void needRelation(T)(ref const T boundary,
+        OutputStorageRelation expected, size_t outputBytes, string label) {
+    validateRelation(boundary, label);
+    final switch (expected) {
+    case OutputStorageRelation.borrowed:
+        need(boundary.aliasedOutputCalls == 1 &&
+            boundary.aliasedOutputBytes == outputBytes &&
+            boundary.overlappingOutputCalls == 0 &&
+            boundary.distinctOutputCalls == 0,
+            label ~ " was not classified as borrowed storage");
+        break;
+    case OutputStorageRelation.overlaps:
+        need(boundary.overlappingOutputCalls == 1 &&
+            boundary.overlappingOutputBytes == outputBytes &&
+            boundary.aliasedOutputCalls == 0 &&
+            boundary.distinctOutputCalls == 0,
+            label ~ " was not classified as overlapping storage");
+        break;
+    case OutputStorageRelation.distinct:
+        need(boundary.distinctOutputCalls == 1 &&
+            boundary.distinctOutputBytes == outputBytes &&
+            boundary.aliasedOutputCalls == 0 &&
+            boundary.overlappingOutputCalls == 0,
+            label ~ " was not classified as distinct storage");
+        break;
+    }
+}
+
+private void aliasClassificationControl() {
+    struct Case {
+        string name;
+        string expected;
+        OutputStorageRelation relation;
+    }
+    immutable cases = [
+        Case("whole-identity", "abcdef", OutputStorageRelation.borrowed),
+        Case("whole-prefix", "abcde", OutputStorageRelation.borrowed),
+        Case("whole-suffix", "bcdef", OutputStorageRelation.borrowed),
+        Case("whole-interior", "bcde", OutputStorageRelation.borrowed),
+        Case("whole-empty-borrowed", "", OutputStorageRelation.borrowed),
+        Case("whole-distinct", "abcdef", OutputStorageRelation.distinct)
+    ];
+    auto registry = filters;
+    auto stageRegistry = stages;
+    auto document = Document(SourceLocator("materialization", "alias", "one"),
+        OutputName("alias.txt"));
+    foreach (test; cases) {
+        auto chain = Pipeline.buildTyped([TypedFilterSpec(test.name)],
+            &registry);
+        PipelineMaterializationWorkV1 pipelineWork;
+        auto ordinaryPipeline = chain.run("abcdef");
+        auto measuredPipeline = chain.runMeasured("abcdef", pipelineWork);
+        need(ordinaryPipeline == test.expected &&
+            measuredPipeline == ordinaryPipeline,
+            test.name ~ " pipeline output differs");
+        needRelation(pipelineWork.wholeTextFilter, test.relation,
+            test.expected.length, test.name ~ " pipeline");
+
+        auto spec = parseJobJson(`{"version":3,"stages":[{"id":"alias",` ~
+            `"implementation":"map","filters":[{"name":"` ~ test.name ~
+            `"}]}]}`);
+        auto plan = compileJob(spec, &stageRegistry, &registry);
+        auto content = new Content([ContentPiece.own(
+            cast(const(ubyte)[])"abcdef")]);
+        auto ordinary = runCompiledStage([StageDocument(document, content)],
+            plan.stages[0]);
+        ExecutorMaterializationWorkV1 executorWork;
+        auto measured = runCompiledStageMeasured([
+            StageDocument(document, content)], plan.stages[0], executorWork);
+        sameResult(ordinary, measured);
+        need(bytes(measured.events[0].payload.content) == test.expected,
+            test.name ~ " executor output differs");
+        needRelation(executorWork.filterExecution, test.relation,
+            test.expected.length, test.name ~ " executor");
+    }
+
+    auto backing = "012345";
+    need(classifyOutputStorage(backing[1 .. 5], backing[0 .. 3]) ==
+        OutputStorageRelation.overlaps,
+        "partial shared-storage overlap was classified as distinct");
+    need(classifyOutputStorage(backing[1 .. 5], string.init) ==
+        OutputStorageRelation.distinct,
+        "unrelated empty storage was classified as borrowed");
+    auto sameEmpty = backing[2 .. 2];
+    need(classifyOutputStorage(sameEmpty, sameEmpty) ==
+        OutputStorageRelation.borrowed,
+        "identical empty storage was classified as distinct");
+}
+
 private void invalidUtf8Control() {
     auto registry = filters;
     auto chain = Pipeline.buildTyped([TypedFilterSpec("identity")], &registry);
@@ -464,14 +588,20 @@ private void invalidUtf8Control() {
 
 private JSONValue boundaryJson(ulong calls, ulong inputBytes,
         ulong outputBytes, ulong copiedBytes, ulong gcBytes,
-        ulong aliasedBytes = 0, ulong distinctBytes = 0) {
+        ulong aliasedBytes = 0, ulong distinctBytes = 0,
+        ulong overlappingBytes = 0, ulong aliasedCalls = 0,
+        ulong overlappingCalls = 0, ulong distinctCalls = 0) {
     return JSONValue([
         "calls": JSONValue(cast(long)calls),
         "input_bytes": JSONValue(cast(long)inputBytes),
         "output_bytes": JSONValue(cast(long)outputBytes),
         "logical_copied_bytes": JSONValue(cast(long)copiedBytes),
         "gc_allocated_bytes": JSONValue(cast(long)gcBytes),
+        "aliased_output_calls": JSONValue(cast(long)aliasedCalls),
         "aliased_output_bytes": JSONValue(cast(long)aliasedBytes),
+        "overlapping_output_calls": JSONValue(cast(long)overlappingCalls),
+        "overlapping_output_bytes": JSONValue(cast(long)overlappingBytes),
+        "distinct_output_calls": JSONValue(cast(long)distinctCalls),
         "distinct_output_bytes": JSONValue(cast(long)distinctBytes)
     ]);
 }
@@ -523,7 +653,11 @@ private JSONValue report(ref const Evidence evidence) {
         evidence.pipeline.fusedScalar.logicalMaterializedBytes,
         evidence.pipeline.fusedScalar.gcAllocatedBytes,
         evidence.pipeline.fusedScalar.aliasedOutputBytes,
-        evidence.pipeline.fusedScalar.distinctOutputBytes);
+        evidence.pipeline.fusedScalar.distinctOutputBytes,
+        evidence.pipeline.fusedScalar.overlappingOutputBytes,
+        evidence.pipeline.fusedScalar.aliasedOutputCalls,
+        evidence.pipeline.fusedScalar.overlappingOutputCalls,
+        evidence.pipeline.fusedScalar.distinctOutputCalls);
     boundaries["pipeline_whole_text_filter"] = boundaryJson(
         evidence.pipeline.wholeTextFilter.calls,
         evidence.pipeline.wholeTextFilter.inputBytes,
@@ -531,7 +665,11 @@ private JSONValue report(ref const Evidence evidence) {
         evidence.pipeline.wholeTextFilter.logicalMaterializedBytes,
         evidence.pipeline.wholeTextFilter.gcAllocatedBytes,
         evidence.pipeline.wholeTextFilter.aliasedOutputBytes,
-        evidence.pipeline.wholeTextFilter.distinctOutputBytes);
+        evidence.pipeline.wholeTextFilter.distinctOutputBytes,
+        evidence.pipeline.wholeTextFilter.overlappingOutputBytes,
+        evidence.pipeline.wholeTextFilter.aliasedOutputCalls,
+        evidence.pipeline.wholeTextFilter.overlappingOutputCalls,
+        evidence.pipeline.wholeTextFilter.distinctOutputCalls);
     boundaries["executor_content_to_utf8"] = boundaryJson(
         evidence.before.contentToUtf8.calls,
         evidence.before.contentToUtf8.inputBytes,
@@ -545,7 +683,11 @@ private JSONValue report(ref const Evidence evidence) {
         evidence.before.filterExecution.logicalCopiedBytes,
         evidence.before.filterExecution.gcAllocatedBytes,
         evidence.before.filterExecution.aliasedOutputBytes,
-        evidence.before.filterExecution.distinctOutputBytes);
+        evidence.before.filterExecution.distinctOutputBytes,
+        evidence.before.filterExecution.overlappingOutputBytes,
+        evidence.before.filterExecution.aliasedOutputCalls,
+        evidence.before.filterExecution.overlappingOutputCalls,
+        evidence.before.filterExecution.distinctOutputCalls);
     boundaries["executor_filter_result_to_owned_piece"] = boundaryJson(
         evidence.before.filterResultToOwnedPiece.calls,
         evidence.before.filterResultToOwnedPiece.inputBytes,
@@ -565,7 +707,11 @@ private JSONValue report(ref const Evidence evidence) {
         evidence.split.filterExecution.logicalCopiedBytes,
         evidence.split.filterExecution.gcAllocatedBytes,
         evidence.split.filterExecution.aliasedOutputBytes,
-        evidence.split.filterExecution.distinctOutputBytes);
+        evidence.split.filterExecution.distinctOutputBytes,
+        evidence.split.filterExecution.overlappingOutputBytes,
+        evidence.split.filterExecution.aliasedOutputCalls,
+        evidence.split.filterExecution.overlappingOutputCalls,
+        evidence.split.filterExecution.distinctOutputCalls);
     boundaries["split_filter_result_to_owned_piece"] = boundaryJson(
         evidence.split.filterResultToOwnedPiece.calls,
         evidence.split.filterResultToOwnedPiece.inputBytes,
@@ -589,6 +735,8 @@ private JSONValue report(ref const Evidence evidence) {
     root["controls"] = JSONValue([
         "allocation_heavy_positive": JSONValue(true),
         "ordinary_measured_equivalence": JSONValue(true),
+        "pipeline_executor_storage_relations": JSONValue(true),
+        "partial_overlap_not_distinct": JSONValue(true),
         "owner_close": JSONValue(true),
         "split_order_identity": JSONValue(true),
         "terminal_reject_quarantine_skip": JSONValue(true),
@@ -608,6 +756,7 @@ void main(string[] args) {
     auto evidence = measure;
     invalidUtf8Control;
     concurrencyControl;
+    aliasClassificationControl;
     // Mutants prove that logical-copy and outcome accounting are checked.
     auto copyMutant = evidence;
     ++copyMutant.before.contentToUtf8.logicalCopiedBytes;
@@ -617,6 +766,13 @@ void main(string[] args) {
     outcomeMutant.reject.terminalFilterSkips = 0;
     expectInvalid(() { validateEvidence(outcomeMutant); },
         "terminal-outcome accounting");
+    auto aliasMutant = evidence;
+    aliasMutant.pipeline.wholeTextFilter.aliasedOutputCalls = 0;
+    aliasMutant.pipeline.wholeTextFilter.distinctOutputCalls = 1;
+    aliasMutant.pipeline.wholeTextFilter.aliasedOutputBytes = 0;
+    aliasMutant.pipeline.wholeTextFilter.distinctOutputBytes = 6;
+    expectInvalid(() { validateEvidence(aliasMutant); },
+        "borrowed-output classification");
     if (args.length == 2) {
         writeln("materialization work self-test passed");
         return;

@@ -66,14 +66,38 @@ StageResult runCompiledStage(StageDocument[] inputs,
 }
 
 version (MaterializationWorkProbe) {
+    import pipeline : OutputStorageRelation, classifyOutputStorage;
+
     struct ExecutorBoundaryWorkV1 {
         ulong calls;
         ulong inputBytes;
         ulong outputBytes;
         ulong logicalCopiedBytes;
         ulong gcAllocatedBytes;
+        ulong aliasedOutputCalls;
+        ulong overlappingOutputCalls;
+        ulong distinctOutputCalls;
         ulong aliasedOutputBytes;
+        ulong overlappingOutputBytes;
         ulong distinctOutputBytes;
+    }
+
+    private void recordOutputRelation(ref ExecutorBoundaryWorkV1 work,
+            string input, string output) pure {
+        final switch (classifyOutputStorage(input, output)) {
+        case OutputStorageRelation.borrowed:
+            ++work.aliasedOutputCalls;
+            work.aliasedOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.overlaps:
+            ++work.overlappingOutputCalls;
+            work.overlappingOutputBytes += output.length;
+            break;
+        case OutputStorageRelation.distinct:
+            ++work.distinctOutputCalls;
+            work.distinctOutputBytes += output.length;
+            break;
+        }
     }
 
     struct ExecutorMaterializationWorkV1 {
@@ -118,10 +142,7 @@ version (MaterializationWorkProbe) {
         work.filterExecution.inputBytes += text.length;
         work.filterExecution.outputBytes += filtered.length;
         work.filterExecution.gcAllocatedBytes += afterFilter - beforeFilter;
-        if (filtered.ptr == text.ptr && filtered.length == text.length)
-            work.filterExecution.aliasedOutputBytes += filtered.length;
-        else
-            work.filterExecution.distinctOutputBytes += filtered.length;
+        recordOutputRelation(work.filterExecution, text, filtered);
 
         auto beforeOwn = GC.allocatedInCurrentThread;
         auto result = ownedText(filtered);

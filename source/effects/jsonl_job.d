@@ -2,6 +2,7 @@
 module effects.jsonl_job;
 
 import composition.compiler : CompiledJob;
+import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, OutputName, SourceLocator, DocumentViewOwner;
 import effects.jsonl_stream : JsonlDecisionFailure, JsonlDecisionKind;
@@ -82,6 +83,31 @@ string runJsonlField(SourceLocator locator, string field, string text,
     case EventKind.quarantined:
         throw new JsonlDecisionFailure(JsonlDecisionKind.quarantined,
             "compiled JSONL job " ~ job.identity ~
+            " quarantined selected field: " ~ sink.reason);
+    }
+}
+
+alias JsonlDispatchObserverV1 = void delegate(
+    ref RuntimeExecutionV1 execution);
+
+string runJsonlField(SourceLocator locator, string field, string text,
+        ref RuntimePlanV1 plan, scope JsonlDispatchObserverV1 observe = null) {
+    auto source = new FieldSource(locator, field, text);
+    auto sink = new FieldSink;
+    runEffects(source, new FieldParser(text.length), sink, plan, observe);
+    if (sink.events != 1 || sink.child)
+        throw new JsonlDecisionFailure(JsonlDecisionKind.unsupportedFanout,
+            "compiled JSONL job " ~ plan.identity ~ " produced unsupported fanout");
+    final switch (sink.kind) {
+    case EventKind.emitted:
+        return sink.mapped;
+    case EventKind.rejected:
+        throw new JsonlDecisionFailure(JsonlDecisionKind.rejected,
+            "compiled JSONL job " ~ plan.identity ~
+            " rejected selected field: " ~ sink.reason);
+    case EventKind.quarantined:
+        throw new JsonlDecisionFailure(JsonlDecisionKind.quarantined,
+            "compiled JSONL job " ~ plan.identity ~
             " quarantined selected field: " ~ sink.reason);
     }
 }

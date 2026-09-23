@@ -4,12 +4,14 @@ module cli_check;
 import std.algorithm.searching : canFind;
 import std.array : replicate;
 import std.conv : to;
+import std.digest : LetterCase, toHexString;
+import std.digest.sha : SHA256, sha256Of;
 import std.file : SpanMode, dirEntries, exists, mkdir, readText, rmdirRecurse,
     symlink, tempDir, write;
 import std.json : parseJSON;
 import std.path : baseName, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
-import std.string : split, splitLines, startsWith;
+import std.string : replace, split, splitLines, startsWith;
 import std.uuid : randomUUID;
 
 private void check(bool condition, string label) {
@@ -29,6 +31,53 @@ private Captured separately(string[] command) {
     foreach (line; pipes.stderr.byLineCopy) result.error ~= line ~ "\n";
     result.status = pipes.pid.wait();
     return result;
+}
+
+private Captured withInput(string[] command, string input) {
+    auto pipes = pipeProcess(command, Redirect.all);
+    pipes.stdin.write(input);
+    pipes.stdin.close();
+    Captured result;
+    foreach (line; pipes.stdout.byLineCopy) result.output ~= line ~ "\n";
+    foreach (line; pipes.stderr.byLineCopy) result.error ~= line ~ "\n";
+    result.status = pipes.pid.wait();
+    return result;
+}
+
+private string[] dispatchRecords(Captured result) {
+    string[] records;
+    foreach (line; (result.output ~ result.error).splitLines()) {
+        if (!line.startsWith("EXPLAIN\t{")) continue;
+        auto record = line["EXPLAIN\t".length .. $];
+        parseJSON(record);
+        records ~= record;
+    }
+    return records;
+}
+
+private string dispatchRecord(Captured result) {
+    auto records = dispatchRecords(result);
+    check(records.length == 1, "exactly one dispatch explain record");
+    return records[0];
+}
+
+private string expectedJsonlUnit(string documentId, size_t ordinal) {
+    SHA256 digest;
+    digest.put(cast(const(ubyte)[]) "scrubbed.dispatch.unit.v1\0");
+    digest.put(cast(const(ubyte)[]) documentId);
+    digest.put([cast(ubyte) 0]);
+    digest.put(cast(const(ubyte)[]) "jsonl-field:v1:");
+    digest.put(cast(const(ubyte)[]) ordinal.to!string);
+    return "unit:v1:" ~ toHexString!(LetterCase.lower)(digest.finish()).idup;
+}
+
+private string rawNameDictionaryGuess(string documentId, string field) {
+    SHA256 digest;
+    digest.put(cast(const(ubyte)[]) "scrubbed.dispatch.unit.v1\0");
+    digest.put(cast(const(ubyte)[]) documentId);
+    digest.put([cast(ubyte) 0]);
+    digest.put(cast(const(ubyte)[]) field);
+    return "unit:v1:" ~ toHexString!(LetterCase.lower)(digest.finish()).idup;
 }
 
 int main(string[] args) {
@@ -123,6 +172,216 @@ int main(string[] args) {
         "--validate"]);
     check(validate.status == 0 && validate.output.canFind("valid. No files processed.") &&
         !exists(dryOutput), "validate no output");
+    auto dispatchOutput = buildPath(root, "dispatch.txt");
+    auto dispatch = separately([exe, "run", "--input", input,
+        "--output", dispatchOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json"]);
+    check(dispatch.status == 0 && readText(dispatchOutput) == "line\r\n" &&
+        dispatch.output.canFind("job: job:v4:") &&
+        dispatch.output.canFind("EXPLAIN\t{\"schema\":\"scrubbed.dispatch.v1\"") &&
+        !dispatch.output.canFind(input), "shipping dispatch v4 config/explain");
+
+    // Both local transports must expose the same structured dispatch failure,
+    // even though a non-durable worker failure remains exit 2 and a recorded
+    // durable root failure remains exit 1.
+    auto cappedConfig = buildPath(root, "dispatch-cap4.json");
+    write(cappedConfig, readText("scrubbed.dispatch.example.json").replace(
+        `"max-output-bytes":268435456`, `"max-output-bytes":4`));
+    auto cappedInput = buildPath(root, "capped.txt");
+    write(cappedInput, "hello");
+    auto cappedDirectOutput = buildPath(root, "capped-direct.txt");
+    auto cappedDirect = separately([exe, "run", "--input", cappedInput,
+        "--output", cappedDirectOutput, "--threads", "1", "--explain",
+        "--config", cappedConfig]);
+    auto cappedDurableOutput = buildPath(root, "capped-durable.txt");
+    auto cappedDurable = separately([exe, "run", "--input", cappedInput,
+        "--output", cappedDurableOutput, "--threads", "1", "--explain",
+        "--config", cappedConfig, "--manifest",
+        buildPath(root, "capped.db")]);
+    auto directFailureRecord = dispatchRecord(cappedDirect);
+    auto durableFailureRecord = dispatchRecord(cappedDurable);
+    check(cappedDirect.status == 2 && cappedDurable.status == 1 &&
+        directFailureRecord == durableFailureRecord &&
+        parseJSON(directFailureRecord)["outcome"].str == "plain-text" &&
+        parseJSON(directFailureRecord)["phase"].str == "decode" &&
+        parseJSON(directFailureRecord)["code"].str == "decode-failed" &&
+        !exists(cappedDirectOutput) && !exists(cappedDurableOutput),
+        "durable/direct dispatch failure record parity and exits");
+    auto cappedJsonl = withInput([exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "example",
+        "--source-key", "cap4", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "1024", "--config", cappedConfig,
+        "--explain"], `{"text":"hello"}` ~ "\n");
+    auto jsonlFailureRecord = dispatchRecord(cappedJsonl);
+    auto directFailure = parseJSON(directFailureRecord);
+    auto jsonlFailure = parseJSON(jsonlFailureRecord);
+    foreach (field; ["job_identity", "status", "outcome", "action", "phase",
+            "code", "reason_hash"])
+        check(directFailure[field].str == jsonlFailure[field].str,
+            "three-transport dispatch failure parity field " ~ field);
+    check(cappedJsonl.status == 1 && cappedJsonl.output.length == 0,
+        "JSONL dispatch failure has no current-record output");
+
+    auto outputCappedJsonl = withInput([exe, "run", "--input", "-",
+        "--output", "-", "--jsonl-fields",
+        "alpha-secret-field,beta-secret-field", "--dataset-namespace",
+        "example", "--source-key", "cap8", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "8", "--config",
+        "scrubbed.dispatch.example.json", "--explain"],
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n");
+    auto outputCappedRecord = parseJSON(dispatchRecord(outputCappedJsonl));
+    check(outputCappedJsonl.status == 1 && outputCappedJsonl.output.length == 0 &&
+        outputCappedRecord["status"].str == "failure" &&
+        outputCappedRecord["phase"].str == "resource" &&
+        outputCappedRecord["code"].str == "resource-failed",
+        "JSONL output cap after two decisions emits one failure only");
+
+    auto cardinalityArgs = [exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "alpha-secret-field,beta-secret-field",
+        "--dataset-namespace", "example", "--source-key", "cardinality",
+        "--max-jsonl-line-bytes", "1024", "--max-jsonl-output-bytes", "1024",
+        "--config", "scrubbed.dispatch.example.json", "--explain"];
+    auto noFields = withInput(cardinalityArgs, `{"other":"x"}` ~ "\n");
+    auto oneField = withInput(cardinalityArgs,
+        `{"alpha-secret-field":"a"}` ~ "\n");
+    auto twoFields = withInput(cardinalityArgs,
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n");
+    auto oneRecords = dispatchRecords(oneField);
+    auto twoRecords = dispatchRecords(twoFields);
+    check(noFields.status == 0 && dispatchRecords(noFields).length == 0 &&
+        oneField.status == 0 && oneRecords.length == 1 &&
+        twoFields.status == 0 && twoRecords.length == 2,
+        "JSONL absent/one/two selected-field record cardinality");
+    auto firstUnit = parseJSON(twoRecords[0]);
+    auto secondUnit = parseJSON(twoRecords[1]);
+    check(firstUnit["document_id"].str == secondUnit["document_id"].str &&
+        firstUnit["unit_id"].str != secondUnit["unit_id"].str &&
+        firstUnit["unit_id"].str == expectedJsonlUnit(
+            firstUnit["document_id"].str, 0) &&
+        secondUnit["unit_id"].str == expectedJsonlUnit(
+            secondUnit["document_id"].str, 1) &&
+        firstUnit["unit_id"].str.startsWith("unit:v1:") &&
+        !twoRecords[0].canFind("alpha-secret-field") &&
+        !twoRecords[0].canFind("beta-secret-field") &&
+        !twoRecords[1].canFind("alpha-secret-field") &&
+        !twoRecords[1].canFind("beta-secret-field"),
+        "JSONL unit IDs distinguish fields without leaking names");
+    check(firstUnit["unit_id"].str != rawNameDictionaryGuess(
+            firstUnit["document_id"].str, "alpha-secret-field") &&
+        secondUnit["unit_id"].str != rawNameDictionaryGuess(
+            secondUnit["document_id"].str, "beta-secret-field"),
+        "JSONL field-name dictionary guesses cannot reproduce unit IDs");
+    auto replayRecords = dispatchRecords(withInput(cardinalityArgs,
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n"));
+    check(replayRecords.length == 2 &&
+        parseJSON(replayRecords[0])["unit_id"].str == firstUnit["unit_id"].str &&
+        parseJSON(replayRecords[1])["unit_id"].str == secondUnit["unit_id"].str,
+        "JSONL unit IDs are deterministic and replay-stable");
+    auto reorderedArgs = cardinalityArgs.dup;
+    foreach (ref argument; reorderedArgs)
+        if (argument == "alpha-secret-field,beta-secret-field")
+            argument = "beta-secret-field,alpha-secret-field";
+    auto reordered = dispatchRecords(withInput(reorderedArgs,
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n"));
+    check(reordered.length == 2 &&
+        parseJSON(reordered[0])["unit_id"].str == firstUnit["unit_id"].str &&
+        parseJSON(reordered[1])["unit_id"].str == secondUnit["unit_id"].str &&
+        parseJSON(reordered[1])["unit_id"].str != firstUnit["unit_id"].str,
+        "JSONL configured reordering follows ordinal unit semantics");
+
+    auto mixedArgs = [exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "alpha-secret-field,beta-secret-field",
+        "--dataset-namespace", "example", "--source-key", "mixed",
+        "--max-jsonl-line-bytes", "1024", "--max-jsonl-output-bytes", "1024",
+        "--config", cappedConfig, "--explain"];
+    auto secondFailed = withInput(mixedArgs,
+        `{"alpha-secret-field":"hey","beta-secret-field":"hello"}` ~ "\n");
+    auto secondFailure = parseJSON(dispatchRecord(secondFailed));
+    auto secondOnly = withInput([exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "beta-secret-field", "--dataset-namespace", "example",
+        "--source-key", "mixed", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "1024", "--config", cappedConfig,
+        "--explain"], `{"beta-secret-field":"hello"}` ~ "\n");
+    check(secondFailed.status == 1 && secondFailed.output.length == 0 &&
+        secondFailure["unit_id"].str == expectedJsonlUnit(
+            secondFailure["document_id"].str, 1) &&
+        secondFailure["unit_id"].str !=
+            parseJSON(dispatchRecord(secondOnly))["unit_id"].str &&
+        secondFailure["outcome"].str == "plain-text" &&
+        secondFailure["code"].str == "decode-failed",
+        "JSONL second-field failure suppresses first speculative success");
+
+    // Filename hints are non-authoritative, but must reach detection through
+    // both local transports so warnings and all other explain metadata agree.
+    auto hintedInput = buildPath(root, "hinted.html");
+    write(hintedInput, "hello");
+    auto hintedDirectOutput = buildPath(root, "hinted-direct.txt");
+    auto hintedDirect = separately([exe, "run", "--input", hintedInput,
+        "--output", hintedDirectOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json"]);
+    auto hintedDurableOutput = buildPath(root, "hinted-durable.txt");
+    auto hintedDurable = separately([exe, "run", "--input", hintedInput,
+        "--output", hintedDurableOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json", "--manifest",
+        buildPath(root, "hinted.db")]);
+    auto hintedRecord = dispatchRecord(hintedDirect);
+    check(hintedDirect.status == 0 && hintedDurable.status == 0 &&
+        hintedRecord == dispatchRecord(hintedDurable) &&
+        hintedRecord.canFind(`"warning_codes":["untrusted-hint-conflicts-with-content"]`) &&
+        sha256Of(cast(const(ubyte)[])readText(hintedDirectOutput)) ==
+            sha256Of(cast(const(ubyte)[])readText(hintedDurableOutput)),
+        "durable/direct misleading HTML hint and output hash parity");
+
+    auto textControl = buildPath(root, "control.txt");
+    write(textControl, "hello");
+    auto textDirect = separately([exe, "run", "--input", textControl,
+        "--output", buildPath(root, "text-direct.txt"), "--threads", "1",
+        "--explain", "--config", "scrubbed.dispatch.example.json"]);
+    auto textDurable = separately([exe, "run", "--input", textControl,
+        "--output", buildPath(root, "text-durable.txt"), "--threads", "1",
+        "--explain", "--config", "scrubbed.dispatch.example.json",
+        "--manifest", buildPath(root, "text.db")]);
+    auto textRecord = dispatchRecord(textDirect);
+    check(textDirect.status == 0 && textDurable.status == 0 &&
+        textRecord == dispatchRecord(textDurable) &&
+        textRecord.canFind(`"warning_codes":[]`),
+        "durable/direct text hint control parity");
+
+    auto htmlControl = buildPath(root, "genuine.html");
+    write(htmlControl, "<!doctype html><html><body>hello</body></html>");
+    auto htmlDirectOutput = buildPath(root, "html-direct.txt");
+    auto htmlDirect = separately([exe, "run", "--input", htmlControl,
+        "--output", htmlDirectOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json"]);
+    auto htmlDurableOutput = buildPath(root, "html-durable.txt");
+    auto htmlDurable = separately([exe, "run", "--input", htmlControl,
+        "--output", htmlDurableOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json", "--manifest",
+        buildPath(root, "html.db")]);
+    auto htmlRecord = dispatchRecord(htmlDirect);
+    check(htmlDirect.status == 1 && htmlDurable.status == 1 &&
+        htmlRecord == dispatchRecord(htmlDurable) &&
+        parseJSON(htmlRecord)["outcome"].str == "html" &&
+        htmlRecord.canFind(`"warning_codes":[]`) &&
+        !exists(htmlDirectOutput) && !exists(htmlDurableOutput),
+        "durable/direct genuine HTML control parity");
+    auto rejectedDispatch = separately([exe, "run", "--input", input,
+        "--output", buildPath(root, "mixed.txt"), "--config",
+        "scrubbed.dispatch.example.json", "--filters", "strip-control"]);
+    check(rejectedDispatch.status == 2 &&
+        rejectedDispatch.error.canFind("mutually exclusive"),
+        "dispatch config/filter pre-effects rejection");
+    auto dispatchJsonl = withInput([exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "example",
+        "--source-key", "stdin", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "1024", "--config",
+        "scrubbed.dispatch.example.json", "--explain"],
+        "{\"text\":\"hello\"}\n");
+    check(dispatchJsonl.status == 0 &&
+        parseJSON(dispatchJsonl.output.splitLines()[0])["text"].str == "hello" &&
+        dispatchJsonl.error.canFind("EXPLAIN\t{\"schema\":\"scrubbed.dispatch.v1\"") &&
+        !dispatchJsonl.output.canFind("EXPLAIN"),
+        "dispatch JSONL whole-line output and stderr explain");
     auto extractOutput = buildPath(root, "extract.txt");
     auto extract = separately([exe, "extract", "--input", input, "--output", extractOutput]);
     check(extract.status == 2 && extract.output == "" &&
@@ -179,5 +438,31 @@ int main(string[] args) {
         foreach (path; visited)
             check(records.get(baseName(path), 0) == 1, "exactly one record for " ~ path);
     }
+    size_t dispatchCanceled;
+    foreach (attempt; 0 .. 5) {
+        auto traversal = separately([exe, "run", "--input", tree,
+            "--output", buildPath(root, "dispatch-tree-output"), "--dry-run",
+            "--explain", "--threads", "4", "--max-queued-docs", "4",
+            "--max-open-inputs", "1", "--config",
+            "scrubbed.dispatch.example.json"]);
+        size_t records;
+        size_t failures;
+        foreach (line; traversal.output.splitLines()) {
+            if (!line.startsWith("EXPLAIN\t")) continue;
+            ++records;
+            check(line.startsWith("EXPLAIN\t{\"schema\":\"scrubbed.dispatch.v1\"") &&
+                !line.canFind(tree) && !line.canFind("dispatch-tree-output") &&
+                !line.canFind("refusing symlink") && !line.canFind("canceled after"),
+                "v4 traversal explain is canonical and content-free");
+            auto record = parseJSON(line["EXPLAIN\t".length .. $]);
+            if (record["status"].str == "canceled") ++dispatchCanceled;
+            if (record["status"].str == "failure") ++failures;
+        }
+        check(traversal.status == 2 && records == visited.length && failures == 1 &&
+            !exists(buildPath(root, "dispatch-tree-output")),
+            "v4 traversal schema/privacy/cardinality attempt " ~ attempt.to!string);
+        if (dispatchCanceled) break;
+    }
+    check(dispatchCanceled > 0, "v4 traversal cancellation record reached");
     return 0;
 }

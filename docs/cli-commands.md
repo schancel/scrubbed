@@ -66,3 +66,11 @@ dub build --compiler=ldc2 --build=release
 ldc2 -O -of=.dub/cli-command-check examples/cli/check.d
 .dub/cli-command-check ./scrubbed
 ```
+# Dispatch v4
+
+`run` and `repair` accept explicit dispatch v4 either through a version-4
+`--config` or through `--dispatch-option`, `--route`, `--route-option`, and
+`--action`, followed by `--common`. These tokens cannot be mixed with
+`--config` or `--filters`. See [job-spec-v4.md](job-spec-v4.md) and the root
+`scrubbed.dispatch.example.json`. Existing no-config, filter, legacy, and v3
+invocations are unchanged.

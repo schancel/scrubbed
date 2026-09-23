@@ -295,7 +295,8 @@ private void appendDigest(ref SHA256 digest, ref const(ubyte[32]) value) {
 ubyte[32] deriveDurableIdentity(string canonicalJobJson, string jobIdentity,
         string mode, string canonicalOutputRoute,
         ref const(ubyte[32]) executableSha256) {
-    need(jobIdentity.length == 71 && jobIdentity[0 .. 7] == "job:v3:",
+    need(jobIdentity.length == 71 &&
+        (jobIdentity[0 .. 7] == "job:v3:" || jobIdentity[0 .. 7] == "job:v4:"),
         "invalid-job-identity");
     need(mode == "file" || mode == "tree", "invalid-route-mode");
     SHA256 digest;
@@ -474,6 +475,12 @@ final class DurableJobLedger {
                 "database-header-changed-after-preflight");
             db.exec("PRAGMA foreign_keys=ON");
             validateShape(db, kind);
+            // V3 historically permits multiple compiled configurations in one
+            // store. Explicit v4 instead binds the existing store before any
+            // WAL/recovery mutation, separating v3 and changed-v4 execution.
+            if (identity.jobIdentity.length == 71 &&
+                    identity.jobIdentity[0 .. 7] == "job:v4:")
+                validateV4Binding;
             db.exec("PRAGMA journal_mode=WAL");
             db.exec("PRAGMA synchronous=FULL");
             need(db.textScalar("PRAGMA journal_mode") == "wal" &&
@@ -487,6 +494,15 @@ final class DurableJobLedger {
     ~this() { if (db !is null && db.handle !is null) db.close(); }
     void close() { if (db !is null) db.close(); db = null; }
     private void live() { need(db !is null && db.handle !is null && !poisoned, "fail-stop"); }
+    private void validateV4Binding() {
+        auto s = db.prepare(`SELECT count(*) FROM root_state WHERE
+            config_sha256<>?1 OR job_identity<>?2`);
+        scope(exit) sqlite3_finalize(s);
+        bindDigest(s, 1, identity.digest);
+        bindText(s, 2, identity.jobIdentity);
+        need(sqlite3_step(s) == SQLITE_ROW &&
+            sqlite3_column_int64(s, 0) == 0, "v4-store-identity-mismatch");
+    }
     private void transaction(scope void delegate() operation) {
         live();
         try {

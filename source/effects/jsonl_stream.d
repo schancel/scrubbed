@@ -11,7 +11,10 @@ alias ReadBytes = size_t delegate(ubyte[] destination);
 alias WriteBytes = void delegate(const(ubyte)[] bytes);
 alias TextTransform = string delegate(string field, string text, DocumentId id);
 alias DocumentTransform = string delegate(string field, string text,
-    SourceLocator source);
+    SourceLocator source, size_t selectedOrdinal);
+/// Called synchronously only after the complete encoded record was accepted
+/// by the writer; framing/output failures never call it for the current line.
+alias DocumentCommit = void delegate(SourceLocator source);
 
 enum JsonlFailureKind {
     inputLimit, malformedJson, invalidText, outputLimit, reader, writer,
@@ -37,15 +40,20 @@ final class JsonlFailure : Exception {
     DocumentId documentId;
     size_t completedRecords;
     bool partialOutputPossible;
+    Exception original;
+    size_t selectedOrdinal = size_t.max;
 
     this(JsonlFailureKind kind, size_t line, DocumentId id, size_t completed,
-        bool partial, string detail) {
+        bool partial, string detail, Exception original = null,
+        size_t selectedOrdinal = size_t.max) {
         super(detail);
         this.kind = kind;
         this.line = line;
         documentId = id;
         completedRecords = completed;
         partialOutputPossible = partial;
+        this.original = original;
+        this.selectedOrdinal = selectedOrdinal;
     }
 }
 
@@ -62,7 +70,8 @@ size_t processJsonl(ReadBytes read, WriteBytes write, string datasetNamespace,
     if (transform is null)
         throw new Exception("JSONL callbacks and byte caps must be configured");
     return processJsonlDocuments(read, write, datasetNamespace, sourceKey, fields,
-        (string field, string text, SourceLocator source) =>
+        (string field, string text, SourceLocator source,
+                size_t selectedOrdinal) =>
             transform(field, text, DocumentId.from(source)), limits);
 }
 
@@ -70,7 +79,8 @@ size_t processJsonl(ReadBytes read, WriteBytes write, string datasetNamespace,
 /// at the framing boundary and remains the selected field's document identity.
 size_t processJsonlDocuments(ReadBytes read, WriteBytes write,
     string datasetNamespace, string sourceKey, const(string)[] fields,
-    DocumentTransform transform, JsonlLimits limits) {
+    DocumentTransform transform, JsonlLimits limits,
+    scope DocumentCommit committed = null) {
     if (read is null || write is null || transform is null || !limits.rawLineBytes ||
         !limits.outputRecordBytes)
         throw new Exception("JSONL callbacks and byte caps must be configured");
@@ -96,7 +106,7 @@ size_t processJsonlDocuments(ReadBytes read, WriteBytes write,
             if (c == '\n') {
                 ++lineNumber;
                 processLine(line, lineNumber, completed, write, datasetNamespace,
-                    sourceKey, fields, transform, limits);
+                    sourceKey, fields, transform, limits, committed);
                 line.length = 0;
                 ++completed;
             } else {
@@ -116,7 +126,7 @@ size_t processJsonlDocuments(ReadBytes read, WriteBytes write,
     if (line.length) {
         ++lineNumber;
         processLine(line, lineNumber, completed, write, datasetNamespace,
-            sourceKey, fields, transform, limits);
+            sourceKey, fields, transform, limits, committed);
         ++completed;
     }
     return completed;
@@ -124,7 +134,8 @@ size_t processJsonlDocuments(ReadBytes read, WriteBytes write,
 
 private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
     WriteBytes write, string datasetNamespace, string sourceKey,
-    const(string)[] fields, DocumentTransform transform, JsonlLimits limits) {
+    const(string)[] fields, DocumentTransform transform, JsonlLimits limits,
+    scope DocumentCommit committed) {
     if (raw.length && raw[$ - 1] == '\r') raw = raw[0 .. $ - 1];
     auto source = SourceLocator(datasetNamespace, sourceKey, ordinal.to!string);
     auto id = DocumentId.from(source);
@@ -143,18 +154,20 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
         throw new JsonlFailure(JsonlFailureKind.malformedJson, ordinal, id,
             completed, false, "invalid JSONL object: " ~ error.msg);
     }
-    foreach (field; fields) {
+    foreach (selectedOrdinal, field; fields) {
         auto found = field in record.object;
         if (found is null) continue;
         if (found.type != JSONType.string)
             throw new JsonlFailure(JsonlFailureKind.invalidText, ordinal, id,
-                completed, false, "selected field is not text: " ~ field);
+                completed, false, "selected field is not text: " ~ field,
+                null, selectedOrdinal);
         try {
-            auto changed = transform(field, found.str, source);
+            auto changed = transform(field, found.str, source, selectedOrdinal);
             validate(changed);
             if (changed.length > limits.outputRecordBytes)
                 throw new JsonlFailure(JsonlFailureKind.outputLimit, ordinal, id,
-                    completed, false, "transformed text exceeds output cap");
+                    completed, false, "transformed text exceeds output cap",
+                    null, selectedOrdinal);
             *found = JSONValue(changed);
         } catch (JsonlFailure error) { throw error; }
         catch (JsonlDecisionFailure error) {
@@ -170,11 +183,13 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
                 kind = JsonlFailureKind.unsupportedFanout;
                 break;
             }
-            throw new JsonlFailure(kind, ordinal, id, completed, false, error.msg);
+            throw new JsonlFailure(kind, ordinal, id, completed, false,
+                error.msg, error, selectedOrdinal);
         }
         catch (Exception error) {
             throw new JsonlFailure(JsonlFailureKind.invalidText, ordinal, id,
-                completed, false, "selected text rejected: " ~ error.msg);
+                completed, false, "selected text rejected: " ~ error.msg,
+                error, selectedOrdinal);
         }
     }
     auto encoded = appender!string();
@@ -190,6 +205,7 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
         throw new JsonlFailure(JsonlFailureKind.writer, ordinal, id,
             completed, true, "JSONL writer failed; current record may be partial: " ~ error.msg);
     }
+    if (committed !is null) committed(source);
 }
 
 private void putBounded(ref Appender!string output, string piece, size_t cap) {

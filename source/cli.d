@@ -4,16 +4,23 @@ module cli;
 import composition.compiler : CompiledJob, compileJob;
 import composition.executor : runCompiledStage;
 import composition.job_executor : CompiledJobFailure;
+import composition.dispatch_compiler : compileDispatchJobV1;
+import composition.dispatch_executor : DispatchExecutionFailureV1;
+import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1;
 import core.sync.mutex : Mutex;
 import core.sync.condition : Condition;
 import effects.bounded_input : BoundedInput, InputLimits;
-import effects.jsonl_stream : JsonlFailure, JsonlLimits;
+import effects.jsonl_stream : JsonlFailure, JsonlFailureKind, JsonlLimits;
 import effects.jsonl_job : runJsonlField;
 import effects.stdio_stream : processStandardJsonlDocuments;
 import effects.local_manifest : SinkKey, inputDigest;
 import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
     DurableIdentity, DurableJobLedger, DurableKind, DurableRootKey, deriveDurableIdentity,
     createJournalV3, derivedSink, reasonDigest;
+import effects.dispatch_record : canonicalDispatchCancellationRecordV1,
+    canonicalDispatchFailureRecordV1,
+    canonicalDispatchRecordV1, canonicalJsonlDispatchFailureRecordV1,
+    canonicalJsonlDispatchRecordV1, canonicalJsonlRecordFailureRecordV1;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.local_job : LocalJobOutcome, runLocalJob, runLocalJobBatch;
@@ -27,7 +34,12 @@ import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, StageEvent;
 import stages.text_transform;
 import job.cli_tokens : parseJobTokens;
-import job.json : canonicalJobJson, jobIdentity, parseJobJson;
+import job.json : canonicalJobJson, parseJobJson;
+import job.dispatch_cli_tokens : parseDispatchJobTokensV1;
+import job.dispatch_json : canonicalDispatchJobJsonV1,
+    parseDispatchJobJsonV1;
+import extraction.registry : coreExtractorRegistryV1;
+import extraction.contracts : DetectionOutcomeV1;
 import job.legacy : lowerLegacyDefault, lowerLegacyJson, lowerLegacyNames;
 import job.spec : JobOption, JobSpec, JobStageSpec;
 import filters.entities;
@@ -44,13 +56,13 @@ import std.file : FileException, SpanMode, dirEntries, exists,
     getSize, isDir, isFile, isSymlink, mkdir, mkdirRecurse, remove, rename, readText,
     write, thisExePath;
 import std.getopt : config, defaultGetoptPrinter, getopt;
+import std.exception : enforce;
 import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
 import std.parallelism : totalCPUs;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
 import std.string : indexOf, join;
-import std.typecons : Nullable;
 import std.utf : validate;
 import std.uuid : randomUUID;
 import std.digest.sha : SHA256;
@@ -366,7 +378,7 @@ int runExtract(string requestedInput, string requestedOutput,
 }
 
 private LocalJobOutcome processCompiledOne(string file, string inputRoot,
-        string outputRoot, bool inputIsDir, const ref CompiledJob job,
+        string outputRoot, bool inputIsDir, ref RuntimePlanV1 job,
         ulong reservedBytes, bool dryRun, PublicationOrder publication) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto rootDestination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
@@ -375,6 +387,7 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
     auto ordinal = publication.ordinal(file);
     bool entered;
     try {
+        string dispatchRecord;
         auto result = runLocalJob(file, reservedBytes, document, job,
             (const ref StageEvent event) {
                 if (!event.isChild) return rootDestination;
@@ -396,11 +409,16 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
             () {
                 publication.enter(ordinal);
                 entered = true;
+            }, (ref RuntimeExecutionV1 execution, ref const ubyte[32]) {
+                if (execution.hasDispatch)
+                    dispatchRecord = canonicalDispatchRecordV1(
+                        execution.dispatch);
             }, dryRun);
         // Every valid compiled job emits at least one terminal event, so entering
         // publication is part of completing a root.
         if (!entered) throw new Exception("compiled job produced no terminal decision");
         publication.complete();
+        result.dispatchRecord = dispatchRecord;
         return result;
     } catch (Throwable error) {
         publication.fail(ordinal);
@@ -468,7 +486,8 @@ private bool canFindOption(const string[] args, string option) {
 }
 
 private bool isCompositionOption(string value, out string name) {
-    foreach (candidate; ["--stage", "--stage-option", "--filter", "--filter-option"])
+    foreach (candidate; ["--stage", "--stage-option", "--filter", "--filter-option",
+            "--dispatch-option", "--route", "--route-option", "--action", "--common"])
         if (value == candidate || value.startsWith(candidate ~ "=")) {
             name = candidate;
             return true;
@@ -485,6 +504,11 @@ private string[] takeCompositionTokens(ref string[] args) {
         string name;
         if (!isCompositionOption(args[i], name)) {
             kept ~= args[i];
+            continue;
+        }
+        if (name == "--common") {
+            enforce(args[i] == "--common", "--common does not take a value");
+            tokens ~= name;
             continue;
         }
         auto separator = args[i].indexOf('=');
@@ -509,6 +533,19 @@ private bool hasJobVersion(string json) {
     return false;
 }
 
+private long selectedJobVersion(string json) {
+    auto root = parseJSON(json, 16,
+        JSONOptions.strictParsing | JSONOptions.preserveObjectOrder);
+    if (root.type != JSONType.object) return 0;
+    foreach (ref member; root.orderedObject)
+        if (member.key == "version") {
+            enforce(member.value.type == JSONType.integer,
+                "job version must be an integer");
+            return member.value.integer;
+        }
+    return 0;
+}
+
 private JobSpec selectedJob(string[] compositionTokens, bool filtersExplicit,
         string filterList, bool configExplicit, string configContents,
         bool versionedConfig) {
@@ -518,6 +555,33 @@ private JobSpec selectedJob(string[] compositionTokens, bool filtersExplicit,
             lowerLegacyJson(configContents);
     if (filtersExplicit) return lowerLegacyNames(filterList.split(","));
     return lowerLegacyDefault();
+}
+
+private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
+        bool filtersExplicit, string filterList, bool configExplicit,
+        string configContents, bool versionedConfig) {
+    bool dispatchTokens;
+    foreach (token; compositionTokens)
+        if (token == "--dispatch-option" || token == "--route" ||
+                token == "--route-option" || token == "--action" ||
+                token == "--common") dispatchTokens = true;
+    if (dispatchTokens) {
+        auto spec = parseDispatchJobTokensV1(compositionTokens);
+        auto canonical = canonicalDispatchJobJsonV1(spec);
+        auto registry = coreExtractorRegistryV1();
+        return RuntimePlanV1.dispatchV4(
+            compileDispatchJobV1(spec, &registry), canonical);
+    }
+    if (configExplicit && versionedConfig && selectedJobVersion(configContents) == 4) {
+        auto spec = parseDispatchJobJsonV1(configContents);
+        auto canonical = canonicalDispatchJobJsonV1(spec);
+        auto registry = coreExtractorRegistryV1();
+        return RuntimePlanV1.dispatchV4(
+            compileDispatchJobV1(spec, &registry), canonical);
+    }
+    auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
+        configExplicit, configContents, versionedConfig);
+    return RuntimePlanV1.linearV3(compileJob(spec), canonicalJobJson(spec));
 }
 
 private final class PublicationOrder {
@@ -714,11 +778,18 @@ private struct ManifestOutcome {
     SinkKey key;
     bool hasKey;
     bool terminal;
+    string dispatchRecord;
 }
 
 private ManifestOutcome manifestOutcome(string status, string detail, SinkKey key,
         bool terminal = false) {
-    return ManifestOutcome(status, detail, key, true, terminal);
+    ManifestOutcome result;
+    result.status = status;
+    result.detail = detail;
+    result.key = key;
+    result.hasKey = true;
+    result.terminal = terminal;
+    return result;
 }
 
 
@@ -750,6 +821,7 @@ private final class DurableDocumentFailure : Exception {
     string code;
     string sink;
     bool fatal;
+    Exception original;
     this(DurableRootKey key, string status, string code, string sink,
             Exception cause, bool fatal = false) {
         super(cause.msg);
@@ -758,7 +830,59 @@ private final class DurableDocumentFailure : Exception {
         this.code = code;
         this.sink = sink;
         this.fatal = fatal;
+        this.original = cause;
     }
+}
+
+private struct DispatchFailureFacts {
+    bool found;
+    DetectionOutcomeV1 outcome;
+    string phase;
+    string code;
+    string reason;
+}
+
+/// Recover the same dispatch failure through each shipping transport wrapper.
+private DispatchFailureFacts dispatchFailureFacts(Throwable failure) {
+    if (failure is null) return DispatchFailureFacts.init;
+    if (auto dispatch = cast(DispatchExecutionFailureV1)failure) {
+        auto phase = dispatch.phase == "refine" ? "inspect" :
+            dispatch.phase == "extract" ? "decode" : "filter";
+        auto code = phase == "inspect" ? "inspect-invalidated" :
+            phase == "decode" ? "decode-failed" : "filter-failed";
+        return DispatchFailureFacts(true, dispatch.outcome, phase, code,
+            dispatch.original is null ? dispatch.msg : dispatch.original.msg);
+    }
+    if (auto effect = cast(EffectFailure)failure) {
+        auto facts = dispatchFailureFacts(effect.original);
+        if (facts.found) return facts;
+    }
+    if (auto durable = cast(DurableDocumentFailure)failure) {
+        auto facts = dispatchFailureFacts(durable.original);
+        if (facts.found) return facts;
+    }
+    if (auto jsonl = cast(JsonlFailure)failure) {
+        auto facts = dispatchFailureFacts(jsonl.original);
+        if (facts.found) return facts;
+    }
+    return dispatchFailureFacts(failure.next);
+}
+
+private DocumentId localDocumentId(string file, string inputPath,
+        bool inputIsDir) {
+    auto relative = inputIsDir ? relativePath(file, inputPath) : ".";
+    return DocumentId.from(SourceLocator("local-files:v1", inputPath, relative));
+}
+
+private void explainDispatchInputProblem(ref RuntimePlanV1 plan,
+        string file, string inputPath, bool inputIsDir, bool canceled) {
+    auto id = localDocumentId(file, inputPath, inputIsDir);
+    auto record = canceled ? canonicalDispatchCancellationRecordV1(
+        plan.identity, id, "source", "canceled", "input-canceled") :
+        canonicalDispatchFailureRecordV1(plan.identity, id,
+            DetectionOutcomeV1.unknown, "source", "input-failed",
+            "input-failed");
+    writeln("EXPLAIN\t", record);
 }
 
 private ubyte[32] durableContentDigest(Content content) {
@@ -769,7 +893,7 @@ private ubyte[32] durableContentDigest(Content content) {
 
 private ManifestOutcome processDurableOne(DurableJobLedger ledger,
         string databasePath, string file, string inputRoot, string outputRoot,
-        bool inputIsDir, const ref CompiledJob job, ulong reservedBytes,
+        bool inputIsDir, ref RuntimePlanV1 job, ulong reservedBytes,
         ref const(ubyte[32]) configHash, bool retry, bool journalRoute,
         bool targeted) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
@@ -779,6 +903,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
     DurableRootKey rootKey;
     LocalJobOutcome outcome;
     bool allEventsPreviouslyTerminal = true;
+    string dispatchRecord;
     try outcome = runLocalJobBatch(file, reservedBytes, document, job,
         (ref const ubyte[32] inputHash) {
             rootKey = DurableRootKey(document.id, inputHash, configHash);
@@ -812,7 +937,11 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
             version (ManifestCliHarness) manifestKillAt(databasePath, "after-root-plan");
             version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
         },
-        (StageEvent[] events, ref const ubyte[32] inputHash) {
+        (ref RuntimeExecutionV1 execution, ref const ubyte[32] inputHash) {
+            auto events = execution.events;
+            if (execution.hasDispatch)
+                dispatchRecord = canonicalDispatchRecordV1(
+                    execution.dispatch);
             DurableEventPlan[] plans;
             bool[string] destinations;
             foreach (ordinal, ref event; events) {
@@ -937,6 +1066,22 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
             ledger.completeRoot(rootKey);
             version (ManifestCliHarness) manifestKillAt(databasePath, "after-root-commit");
         });
+    catch (DispatchExecutionFailureV1 failure) {
+        if (rootKey.document.text.length != 0) {
+            auto phase = failure.phase == "refine" ? "inspect" :
+                failure.phase == "extract" ? "decode" : "filter";
+            auto code = phase == "inspect" ? "inspect-invalidated" :
+                phase == "decode" ? "decode-failed" : "filter-failed";
+            try ledger.recordRootFailure(rootKey, phase, code);
+            catch (Exception unavailable) {
+                if (unavailable.msg != "durable job: root-failure-unavailable")
+                    throw unavailable;
+            }
+            throw new DurableDocumentFailure(rootKey, "failed", code,
+                derivedSink("root", rootKey.document, 0), failure);
+        }
+        throw failure;
+    }
     catch (CompiledJobFailure failure) {
         if (rootKey.document.text.length != 0) {
             try ledger.recordRootFailure(rootKey, "filter", "filter-failed");
@@ -956,9 +1101,11 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
     auto status = terminal ? outcome.status :
         (allEventsPreviouslyTerminal ? "skipped" :
             (retry ? "retry" : outcome.status));
-    return manifestOutcome(status, outcome.firstReason,
+    auto result = manifestOutcome(status, outcome.firstReason,
         SinkKey(rootKey.document, rootKey.inputSha256, rootKey.configSha256,
             "local-primary:v1"), terminal);
+    result.dispatchRecord = dispatchRecord;
+    return result;
 }
 
 int runApp(string[] args) {
@@ -1055,8 +1202,8 @@ int runApp(string[] args) {
             !fieldsExplicit || !namespaceExplicit || !sourceExplicit ||
             !lineCapExplicit || !outputCapExplicit)
             throw new Exception("JSONL requires --input -, --output -, selected fields, identity, and both byte caps");
-        if (listFilters || explain)
-            throw new Exception("--list-filters and --explain are unavailable in JSONL mode");
+        if (listFilters)
+            throw new Exception("--list-filters is unavailable in JSONL mode");
         if (fileSchedulingExplicit)
             throw new Exception("file scheduling limits are unavailable in JSONL mode");
         if (!maxJsonlLineBytes || !maxJsonlOutputBytes)
@@ -1077,22 +1224,67 @@ int runApp(string[] args) {
             throw new Exception("composition options are mutually exclusive with --config and --filters");
         configContents = configPath.length ? readText(configPath) : "";
         versionedConfig = configContents.length && hasJobVersion(configContents);
-        auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
-            configPath.length != 0, configContents, versionedConfig);
-        auto compiledJob = compileJob(spec);
+        auto runtimePlan = selectedRuntimePlan(compositionTokens, filtersExplicit,
+            filterList, configPath.length != 0, configContents, versionedConfig);
+        if (explain && !runtimePlan.isDispatch)
+            throw new Exception("--explain is unavailable for v3 JSONL mode");
         if (validateOnly) {
             stderr.writeln("valid JSONL invocation; no stdin read.");
             return 0;
         }
+        string[] pendingDispatchRecords;
         try {
             const completed = processStandardJsonlDocuments(datasetNamespace,
                 sourceKey, fields,
-                (string field, string text, SourceLocator source) =>
-                    runJsonlField(source, field, text, compiledJob),
-                JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun);
+                (string field, string text, SourceLocator source,
+                        size_t selectedOrdinal) =>
+                    runJsonlField(source, field, text, runtimePlan,
+                        (ref RuntimeExecutionV1 execution) {
+                            if (explain && execution.hasDispatch)
+                                pendingDispatchRecords ~=
+                                    canonicalJsonlDispatchRecordV1(
+                                        execution.dispatch, selectedOrdinal);
+                        }),
+                JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun,
+                (SourceLocator committed) {
+                    foreach (record; pendingDispatchRecords)
+                        stderr.writeln("EXPLAIN\t", record);
+                    pendingDispatchRecords = null;
+                });
             stderr.writeln("JSONL done. ", completed, " records processed", dryRun ? "; dry-run, no stdout." : ".");
             return 0;
         } catch (JsonlFailure error) {
+            if (explain && runtimePlan.isDispatch &&
+                    (error.kind == JsonlFailureKind.rejected ||
+                        error.kind == JsonlFailureKind.quarantined))
+                foreach (record; pendingDispatchRecords)
+                    stderr.writeln("EXPLAIN\t", record);
+            pendingDispatchRecords = null;
+            if (explain && runtimePlan.isDispatch &&
+                    error.kind != JsonlFailureKind.rejected &&
+                    error.kind != JsonlFailureKind.quarantined) {
+                auto dispatchFailure = dispatchFailureFacts(error);
+                auto outcome = dispatchFailure.found ? dispatchFailure.outcome :
+                    DetectionOutcomeV1.unknown;
+                auto phase = dispatchFailure.found ? dispatchFailure.phase :
+                    (error.kind == JsonlFailureKind.writer ? "sink" :
+                        error.kind == JsonlFailureKind.outputLimit ?
+                            "resource" : "decode");
+                auto code = dispatchFailure.found ? dispatchFailure.code :
+                    (error.kind == JsonlFailureKind.writer ?
+                        "sink-write-failed" :
+                        error.kind == JsonlFailureKind.outputLimit ?
+                            "resource-failed" : "decode-failed");
+                auto reason = dispatchFailure.found ?
+                    dispatchFailure.reason : error.msg;
+                auto record = error.selectedOrdinal == size_t.max ?
+                    canonicalJsonlRecordFailureRecordV1(runtimePlan.identity,
+                        error.documentId, outcome, phase, code, reason) :
+                    canonicalJsonlDispatchFailureRecordV1(runtimePlan.identity,
+                        error.documentId, outcome, phase, code, reason,
+                        error.selectedOrdinal);
+                stderr.writeln("EXPLAIN\t", record);
+            }
             stderr.writefln("JSONL %s at physical line %s, DocumentId %s: %s; %s prior records %s; current record %s",
                 error.kind, error.line, error.documentId.text, error.msg,
                 error.completedRecords, dryRun ? "processed, no stdout" :
@@ -1123,12 +1315,16 @@ int runApp(string[] args) {
     versionedConfig = configContents.length && hasJobVersion(configContents);
 
     const durableRoute = (manifestPath.length || errorJournalPath.length) && !dryRun;
-    auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
-        configPath.length != 0, configContents, versionedConfig);
-    auto canonicalSpec = canonicalJobJson(spec);
-    Nullable!CompiledJob compiledJob = compileJob(spec);
-    string chainLabel = versionedConfig || compositionExplicit ? compiledJob.get.identity :
-        spec.stages[0].filters.map!(filter => filter.name).join(" -> ");
+    auto runtimePlan = selectedRuntimePlan(compositionTokens, filtersExplicit,
+        filterList, configPath.length != 0, configContents, versionedConfig);
+    auto canonicalSpec = runtimePlan.canonical;
+    string chainLabel = runtimePlan.identity;
+    if (!versionedConfig && !compositionExplicit) {
+        auto legacySpec = selectedJob(null, filtersExplicit, filterList,
+            configPath.length != 0, configContents, false);
+        chainLabel = legacySpec.stages[0].filters
+            .map!(filter => filter.name).join(" -> ");
+    }
     if (!exists(inputPath))
         throw new Exception("input path does not exist: " ~ inputPath);
     if (isSymlink(inputPath))
@@ -1162,17 +1358,17 @@ int runApp(string[] args) {
     if (validateOnly) {
         auto executable = runningExecutableDigest();
         auto durableDigest = deriveDurableIdentity(canonicalSpec,
-            compiledJob.get.identity, inputIsDir ? "tree" : "file",
+            runtimePlan.identity, inputIsDir ? "tree" : "file",
             outputPath, executable);
         if (errorJournalPath.length) {
             auto checkedJournal = new DurableJobLedger(errorJournalPath,
                 DurableKind.journal,
-                DurableIdentity(durableDigest, compiledJob.get.identity));
+                DurableIdentity(durableDigest, runtimePlan.identity));
             checkedJournal.close();
         } else if (manifestPath.length && exists(manifestPath)) {
             auto checkedManifest = new DurableJobLedger(manifestPath,
                 DurableKind.manifest,
-                DurableIdentity(durableDigest, compiledJob.get.identity));
+                DurableIdentity(durableDigest, runtimePlan.identity));
             checkedManifest.close();
         }
         if (!errorJournalPath.length) writeln("valid. No files processed.");
@@ -1180,14 +1376,14 @@ int runApp(string[] args) {
     }
     auto executable = runningExecutableDigest();
     ubyte[32] configHash = deriveDurableIdentity(canonicalSpec,
-        compiledJob.get.identity, inputIsDir ? "tree" : "file",
+        runtimePlan.identity, inputIsDir ? "tree" : "file",
         outputPath, executable);
     DurableJobLedger durableLedger;
     if (durableRoute)
         durableLedger = new DurableJobLedger(
             manifestPath.length ? manifestPath : errorJournalPath,
             manifestPath.length ? DurableKind.manifest : DurableKind.journal,
-            DurableIdentity(configHash, compiledJob.get.identity));
+            DurableIdentity(configHash, runtimePlan.identity));
     scope(exit) if (durableLedger !is null) durableLedger.close();
     if (!dryRun && !errorTargeted)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
@@ -1204,24 +1400,27 @@ int runApp(string[] args) {
             if (durableRoute)
                 decision = processDurableOne(durableLedger,
                     manifestPath.length ? manifestPath : errorJournalPath,
-                    file, inputPath, outputPath, inputIsDir, compiledJob.get,
+                    file, inputPath, outputPath, inputIsDir, runtimePlan,
                     bytes, configHash,
                     manifestPath.length ? manifestRetry : errorRetry,
                     errorJournalPath.length != 0,
                     errorTargeted);
             else {
                 auto local = processCompiledOne(file, inputPath, outputPath,
-                    inputIsDir, compiledJob.get, bytes, dryRun, publication);
+                    inputIsDir, runtimePlan, bytes, dryRun, publication);
                 decision.status = local.status;
                 decision.detail = local.firstReason;
                 decision.terminal = local.rejected != 0 || local.quarantined != 0;
+                decision.dispatchRecord = local.dispatchRecord;
             }
             if (decision.terminal) {
                 decisionMutex.lock();
                 ++terminalDecisions;
                 decisionMutex.unlock();
             }
-            if (explain && errorJournalPath.length)
+            if (explain && runtimePlan.isDispatch && decision.dispatchRecord.length)
+                writeln("EXPLAIN\t", decision.dispatchRecord);
+            else if (explain && errorJournalPath.length)
                 v2Explain(decision.status, decision.key,
                     durableLedger.publicSinkId(decision.key.sink));
             else if (explain)
@@ -1236,10 +1435,22 @@ int runApp(string[] args) {
             auto durableDecision = cast(DurableDocumentFailure)error;
             auto effectFailure = cast(EffectFailure)error;
             auto orderedCanceled = cast(OrderedPublicationCanceled)error;
+            if (explain && runtimePlan.isDispatch && orderedCanceled is null) {
+                auto id = localDocumentId(file, inputPath, inputIsDir);
+                auto dispatchFailure = dispatchFailureFacts(error);
+                writeln("EXPLAIN\t", canonicalDispatchFailureRecordV1(
+                    runtimePlan.identity, id,
+                    dispatchFailure.found ? dispatchFailure.outcome :
+                        DetectionOutcomeV1.unknown,
+                    dispatchFailure.found ? dispatchFailure.phase : "filter",
+                    dispatchFailure.found ? dispatchFailure.code : "filter-failed",
+                    dispatchFailure.found ? dispatchFailure.reason : error.msg));
+                if (explain) pending.remove(file);
+            }
             if (errorJournalPath.length) {
                 stderr.writeln("scrubbed: ", durableDecision !is null ?
                     durableDecision.code : "error-journal-fatal");
-                if (explain && durableDecision !is null) {
+                if (explain && !runtimePlan.isDispatch && durableDecision !is null) {
                     auto display = SinkKey(durableDecision.key.document,
                         durableDecision.key.inputSha256,
                         durableDecision.key.configSha256, durableDecision.sink);
@@ -1252,9 +1463,13 @@ int runApp(string[] args) {
             }
             if (orderedCanceled !is null) {
                 stderr.writefln("CANCELED %s: %s", file, error.msg);
-                if (explain)
-                    explainOne(file, destinationFor(file, inputPath, outputPath,
-                        inputIsDir), chainLabel, "canceled", error.msg);
+                if (explain) {
+                    if (runtimePlan.isDispatch)
+                        explainDispatchInputProblem(runtimePlan, file, inputPath,
+                            inputIsDir, true);
+                    else explainOne(file, destinationFor(file, inputPath,
+                        outputPath, inputIsDir), chainLabel, "canceled", error.msg);
+                }
                 if (explain) pending.remove(file);
                 return;
             }
@@ -1264,7 +1479,7 @@ int runApp(string[] args) {
                 durableDecision !is null && !durableDecision.fatal ?
                     "SKIP" : "FATAL",
                 file, renderedError);
-            if (explain) {
+            if (explain && !runtimePlan.isDispatch) {
                 string status = "failure", detail, documentId, sinkKey;
                 if (durableDecision !is null) {
                     status = durableDecision.status;
@@ -1305,7 +1520,10 @@ int runApp(string[] args) {
         } catch (Exception error) {
             if (explain && !admissionCanceled && !errorJournalPath.length) {
                 pending.remove(file);
-                explainOne(file, destinationFor(file, inputPath, outputPath,
+                if (runtimePlan.isDispatch)
+                    explainDispatchInputProblem(runtimePlan, file, inputPath,
+                        inputIsDir, false);
+                else explainOne(file, destinationFor(file, inputPath, outputPath,
                     inputIsDir), chainLabel, "failure", error.msg);
             }
             throw error;
@@ -1322,9 +1540,14 @@ int runApp(string[] args) {
         foreach (entry; entries) {
             if (entry.isSymlink) {
                 auto reason = "refusing symlink in input tree: " ~ entry.name;
-                if (explain && !errorJournalPath.length)
-                    explainOne(entry.name, destinationFor(entry.name, inputPath,
-                        outputPath, inputIsDir), chainLabel, "failure", reason);
+                if (explain && !errorJournalPath.length) {
+                    if (runtimePlan.isDispatch)
+                        explainDispatchInputProblem(runtimePlan, entry.name,
+                            inputPath, inputIsDir, false);
+                    else explainOne(entry.name, destinationFor(entry.name,
+                        inputPath, outputPath, inputIsDir), chainLabel,
+                        "failure", reason);
+                }
                 throw new Exception(reason);
             }
             if (entry.isFile) {
@@ -1345,11 +1568,17 @@ int runApp(string[] args) {
         scheduler.cancel();
         scheduler.finish();
         if (explain && !errorJournalPath.length)
-            foreach (file; pending.drain())
-                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, workerFatalAdmission ? "canceled" : "failure",
-                    workerFatalAdmission ? "canceled after fatal processing failure" :
+            foreach (file; pending.drain()) {
+                if (runtimePlan.isDispatch)
+                    explainDispatchInputProblem(runtimePlan, file, inputPath,
+                        inputIsDir, true);
+                else explainOne(file, destinationFor(file, inputPath, outputPath,
+                    inputIsDir), chainLabel,
+                    workerFatalAdmission ? "canceled" : "failure",
+                    workerFatalAdmission ?
+                        "canceled after fatal processing failure" :
                         "canceled after traversal error");
+            }
         auto workerFatal = scheduler.fatal();
         if (workerFatalAdmission && workerFatal !is null)
             throw new Exception("fatal file processing failure: " ~ workerFatal.msg);
@@ -1358,9 +1587,14 @@ int runApp(string[] args) {
     const counts = scheduler.finish();
     if (scheduler.fatal() !is null) {
         if (explain && !errorJournalPath.length)
-            foreach (file; pending.drain())
-                explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, "canceled", "fatal processing failure");
+            foreach (file; pending.drain()) {
+                if (runtimePlan.isDispatch)
+                    explainDispatchInputProblem(runtimePlan, file, inputPath,
+                        inputIsDir, true);
+                else explainOne(file, destinationFor(file, inputPath,
+                    outputPath, inputIsDir), chainLabel, "canceled",
+                    "fatal processing failure");
+            }
         throw new Exception("fatal file processing failure: " ~ scheduler.fatal().msg);
     }
     if (durableLedger !is null) durableLedger.checkpoint();
@@ -1607,6 +1841,114 @@ unittest {
         ["--error-journal", durableJournal, "--error-retry"]) == 1,
         "journal terminal retry exit");
     requireCli(!exists(rejectedOutput), "durable rejection published output");
+}
+
+unittest {
+    import std.exception : assertThrown;
+    import std.file : rmdirRecurse, tempDir;
+
+    string[] dispatchTokens(string action, long cap = 268435456) {
+        auto tokens = [
+            "--dispatch-option", "detector-prefix-bytes=4096",
+            "--dispatch-option", "detector-evidence-records=16",
+            "--dispatch-option", "detector-warnings=8",
+            "--dispatch-option", "container-max-physical-bytes=33554432",
+            "--dispatch-option", "container-max-expanded-bytes=134217728",
+            "--dispatch-option", "container-max-entries=2048",
+            "--dispatch-option", "container-max-depth=2",
+            "--dispatch-option", "container-max-ratio=100"
+        ];
+        if (action == "route") tokens ~= [
+            "--route", "text=core-plain-text",
+            "--route-option", "max-output-bytes=integer:" ~ cap.to!string
+        ];
+        foreach (outcome; ["unknown", "plain-text", "html", "pdf", "png",
+                "jpeg", "gif", "ambiguous", "malformed", "encrypted",
+                "unsupported", "generic-zip", "ooxml-word"]) {
+            auto selected = outcome == "plain-text" ? action : "reject";
+            auto target = selected == "route" ? "text" : "policy";
+            tokens ~= ["--action", outcome ~ "=" ~ selected ~ ":" ~ target];
+        }
+        tokens ~= "--common";
+        return tokens;
+    }
+
+    auto root = buildPath(tempDir, "scrubbed-dispatch-cli-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdir(root);
+    auto input = buildPath(root, "input.txt");
+    write(input, "hello");
+
+    auto routeTokens = dispatchTokens("route", 5);
+    auto tokenPlan = selectedRuntimePlan(routeTokens, false, null,
+        false, null, false);
+    auto json = tokenPlan.canonical;
+    auto jsonPlan = selectedRuntimePlan(null, false, null, true, json, true);
+    assert(tokenPlan.identity == jsonPlan.identity &&
+        tokenPlan.canonical == jsonPlan.canonical);
+
+    auto routed = buildPath(root, "routed.txt");
+    assert(runApp(["scrubbed", "--input", input, "--output", routed,
+        "--threads", "1"] ~ routeTokens) == 0);
+    assert(readText(routed) == "hello");
+
+    auto passOutput = buildPath(root, "passed.txt");
+    assert(runApp(["scrubbed", "--input", input, "--output", passOutput,
+        "--threads", "1"] ~ dispatchTokens("pass")) == 0);
+    assert(readText(passOutput) == "hello");
+    foreach (policy; ["reject", "quarantine"]) {
+        auto output = buildPath(root, policy ~ ".txt");
+        assert(runApp(["scrubbed", "--input", input, "--output", output,
+            "--threads", "1"] ~ dispatchTokens(policy)) == 1);
+        assert(!exists(output));
+    }
+
+    auto below = buildPath(root, "below.txt");
+    assertThrown(runApp(["scrubbed", "--input", input, "--output", below,
+        "--threads", "1"] ~ dispatchTokens("route", 4)));
+    assert(!exists(below));
+    auto above = buildPath(root, "above.txt");
+    assert(runApp(["scrubbed", "--input", input, "--output", above,
+        "--threads", "1"] ~ dispatchTokens("route", 6)) == 0);
+
+    auto invalid = buildPath(root, "invalid.txt");
+    ubyte[] invalidBytes = new ubyte[4097];
+    invalidBytes[] = 'a';
+    invalidBytes[$ - 1] = 0xff;
+    write(invalid, invalidBytes);
+    auto invalidOutput = buildPath(root, "invalid-output.txt");
+    assertThrown(runApp(["scrubbed", "--input", invalid,
+        "--output", invalidOutput, "--threads", "1"] ~
+        dispatchTokens("route", 5000)));
+    assert(!exists(invalidOutput));
+
+    auto malformed = dispatchTokens("route", 5);
+    malformed = malformed[0 .. $ - 1] ~ ["--route-option",
+        "max-output-bytes=integer:5", "--common"];
+    auto unopenedOutput = buildPath(root, "unopened.txt");
+    auto unopenedStore = buildPath(root, "unopened.db");
+    assertThrown(runApp(["scrubbed", "--input", buildPath(root, "missing"),
+        "--output", unopenedOutput, "--manifest", unopenedStore] ~ malformed));
+    assert(!exists(unopenedOutput) && !exists(unopenedStore));
+
+    auto durableOutput = buildPath(root, "durable.txt");
+    auto durableStore = buildPath(root, "v4.db");
+    auto durableArgs = ["scrubbed", "--input", input, "--output", durableOutput,
+        "--threads", "1", "--manifest", durableStore] ~ routeTokens;
+    assert(runApp(durableArgs) == 0);
+    assert(runApp(durableArgs) == 0);
+    assertThrown(runApp(["scrubbed", "--input", input, "--output", durableOutput,
+        "--threads", "1", "--manifest", durableStore] ~
+        dispatchTokens("route", 6)));
+
+    auto v3Output = buildPath(root, "v3.txt");
+    auto v3Store = buildPath(root, "v3.db");
+    auto v3Args = ["scrubbed", "--input", input, "--output", v3Output,
+        "--threads", "1", "--manifest", v3Store];
+    assert(runApp(v3Args) == 0);
+    assertThrown(runApp(["scrubbed", "--input", input, "--output", v3Output,
+        "--threads", "1", "--manifest", v3Store] ~ routeTokens));
+    assert(runApp(v3Args) == 0);
 }
 
 // Model the late-traversal-fault boundary deterministically: one worker has

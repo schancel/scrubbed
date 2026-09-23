@@ -93,13 +93,24 @@ combined-order tests proving that fusion and barriers preserve exact results.
    [#65](https://github.com/schancel/scrubbed/issues/65): deterministic
    metadata first; optional `llama-server` primary and explicit local-GGUF
    backend behind the same schema/provenance contract.
-5. [#34](https://github.com/schancel/scrubbed/issues/34): language with
+5. Add optional, separately identified metadata enrichments: provenance-bearing
+   source/inferred tags under [#167](https://github.com/schancel/scrubbed/issues/167),
+   per-document compressor-specific measurements under
+   [#168](https://github.com/schancel/scrubbed/issues/168), and an evidence-only
+   embedding-space intrinsic-dimension evaluation under
+   [#169](https://github.com/schancel/scrubbed/issues/169). #169's
+   repository-only TwoNN evaluation is complete, but production exposure would
+   require a separate accepted ticket. Exact Kolmogorov complexity, exact
+   Hausdorff dimension, and a universal quality score are not claimed. These
+   optional enrichments do not delay the first package once the core metadata
+   schema can carry their versioned annotations.
+6. [#34](https://github.com/schancel/scrubbed/issues/34): language with
    confidence and abstention.
-6. [#36](https://github.com/schancel/scrubbed/issues/36) then
+7. [#36](https://github.com/schancel/scrubbed/issues/36) then
    [#37](https://github.com/schancel/scrubbed/issues/37): disk-backed
    similarity candidates and near-duplicate decisions. Optional embeddings
    and clustering remain a separately measurable backend under #66.
-7. Finish rights, quality/code routing, mixing, JSONL and Parquet/Arrow
+8. Finish rights, quality/code routing, mixing, JSONL and Parquet/Arrow
    interchange under #43, #44, #45, #40 and #41.
 
 Gate: quality-matched comparisons. Unsupported fields/modes are reported as

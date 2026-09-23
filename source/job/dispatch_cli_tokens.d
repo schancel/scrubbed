@@ -117,7 +117,9 @@ private DispatchOutcomeV1 parsedOutcome(string name) {
 }
 
 unittest {
-    import job.dispatch_json : canonicalDispatchJobJsonV1;
+    import job.dispatch_json : canonicalDispatchJobJsonV1,
+        dispatchJobIdentityV1;
+    import std.exception : assertThrown;
     string[] tokens = [
         "--dispatch-option", "detector-prefix-bytes=4096",
         "--dispatch-option", "detector-evidence-records=16",
@@ -128,18 +130,66 @@ unittest {
         "--dispatch-option", "container-max-depth=2",
         "--dispatch-option", "container-max-ratio=100",
         "--route", "text=identity", "--route-option", "z=integer:1",
-        "--route-option", "strict=boolean:true"
+        "--route-option", "strict=boolean:true",
+        "--action", "unknown=reject:not selected",
+        "--action", "plain-text=route:text",
+        "--action", "html=reject:not selected",
+        "--action", "pdf=reject:not selected",
+        "--action", "png=reject:not selected",
+        "--action", "jpeg=reject:not selected",
+        "--action", "gif=reject:not selected",
+        "--action", "ambiguous=reject:not selected",
+        "--action", "malformed=reject:not selected",
+        "--action", "encrypted=reject:not selected",
+        "--action", "unsupported=reject:not selected",
+        "--action", "generic-zip=reject:not selected",
+        "--action", "ooxml-word=reject:not selected",
+        "--common"
     ];
-    foreach (i; 0 .. cast(size_t) DispatchOutcomeV1.max + 1) {
-        auto outcome = cast(DispatchOutcomeV1) i;
-        tokens ~= ["--action", outcomeName(outcome) ~
-            (outcome == DispatchOutcomeV1.plainText
-                ? "=route:text" : "=reject:not selected")];
-    }
-    tokens ~= "--common";
     auto parsed = parseDispatchJobTokensV1(tokens);
     auto canonical = canonicalDispatchJobJsonV1(parsed);
-    import job.dispatch_json : dispatchJobIdentityV1, parseDispatchJobJsonV1;
-    auto reparsed = parseDispatchJobJsonV1(canonical);
-    assert(dispatchJobIdentityV1(parsed) == dispatchJobIdentityV1(reparsed));
+    assert(parsed.dispatch.routes[0].options["strict"].asBoolean);
+    assert(canonical == `{"version":4,"dispatch":{"detector":` ~
+        `{"prefix-bytes":4096,"evidence-records":16,"warnings":8},` ~
+        `"container":{"max-physical-bytes":1024,"max-expanded-bytes":2048,` ~
+        `"max-entries":10,"max-depth":2,"max-ratio":100},` ~
+        `"routes":[{"name":"text","extractor":"identity",` ~
+        `"options":{"strict":true,"z":1}}],"actions":[` ~
+        `{"outcome":"unknown","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"plain-text","action":"route","route":"text"},` ~
+        `{"outcome":"html","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"pdf","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"png","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"jpeg","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"gif","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"ambiguous","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"malformed","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"encrypted","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"unsupported","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"generic-zip","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"ooxml-word","action":"reject","reason":"not selected"}` ~
+        `]},"common":{"version":3,"stages":[]}}`);
+    assert(dispatchJobIdentityV1(parsed) ==
+        "job:v4:eaa685ab62a19bfa65dcefe34834adf14450670c8bf4cd1fbfa7910cedaf8627");
+
+    string[][] bad;
+    auto noncanonicalInteger = tokens.dup;
+    noncanonicalInteger[1] = "detector-prefix-bytes=04096";
+    bad ~= noncanonicalInteger;
+    auto caseOutcome = tokens.dup;
+    caseOutcome[23] = "Unknown=reject:not selected";
+    bad ~= caseOutcome;
+    auto caseBoolean = tokens.dup;
+    caseBoolean[21] = "strict=Boolean:True";
+    bad ~= caseBoolean;
+    auto duplicateLimit = tokens[0 .. $ - 1].dup;
+    duplicateLimit ~= ["--dispatch-option", "detector-prefix-bytes=4096", "--common"];
+    bad ~= duplicateLimit;
+    auto duplicateAction = tokens[0 .. $ - 1].dup;
+    duplicateAction ~= ["--action", "unknown=reject:again", "--common"];
+    bad ~= duplicateAction;
+    auto misplacedStage = tokens[0 .. 2].dup;
+    misplacedStage ~= ["--stage", "x=text-transform", "--common"];
+    bad ~= misplacedStage;
+    foreach (candidate; bad) assertThrown(parseDispatchJobTokensV1(candidate));
 }

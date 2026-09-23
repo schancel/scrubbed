@@ -1,7 +1,7 @@
 /// Finite injected extractor registry and configured pure extraction port.
 module extraction.port;
 
-import content.pieces : Content;
+import content.pieces : Content, ContentPiece;
 import domain.document : Document;
 import extraction.container : AdmittedZipV1;
 import extraction.contracts : DetectionOutcomeV1, DetectionResultV1,
@@ -60,9 +60,43 @@ struct ExtractorResourcesV1 {
     }
 }
 
+/// Descriptor snapshot exposing checked reads but no mutation API.
+struct SourceContentV1 {
+private:
+    ContentPiece[] descriptors;
+    this(Content source) {
+        enforce(source !is null, "extractor source content is required");
+        foreach (offset, piece; source) descriptors ~= piece;
+    }
+public:
+    static SourceContentV1 from(Content source) {
+        return SourceContentV1(source);
+    }
+    size_t size() const pure {
+        size_t total;
+        foreach (piece; descriptors) {
+            auto count = piece.size;
+            enforce(count <= size_t.max - total, "extractor source length overflow");
+            total += count;
+        }
+        return total;
+    }
+    void stream(scope void delegate(const(ubyte)[]) pure sink,
+            size_t chunkSize = 8192) const pure {
+        enforce(chunkSize > 0, "extractor stream chunk size must be positive");
+        auto buffer = new ubyte[chunkSize];
+        size_t filled;
+        foreach (piece; descriptors) foreach (index; 0 .. piece.size) {
+            buffer[filled++] = piece.at(index);
+            if (filled == chunkSize) { sink(buffer[]); filled = 0; }
+        }
+        if (filled) sink(buffer[0 .. filled]);
+    }
+}
+
 struct ExtractionInputV1 {
     Document document;
-    Content source;
+    SourceContentV1 source;
     DetectionResultV1 detection;
     string routeName;
     AdmittedZipV1 admittedZip;
@@ -70,7 +104,7 @@ struct ExtractionInputV1 {
 
 abstract class ExtractorConfigurationV1 {}
 alias ExtractorApplyV1 = TextDocumentV1 function(ExtractionInputV1,
-    immutable(ExtractorConfigurationV1));
+    immutable(ExtractorConfigurationV1)) pure;
 
 struct ConfiguredExtractorV1 {
 private:
@@ -82,7 +116,7 @@ public:
         enforce(apply !is null, "configured extractor needs an apply function");
         applyValue = apply; configurationValue = configuration;
     }
-    TextDocumentV1 opCall(ExtractionInputV1 input) const {
+    TextDocumentV1 opCall(ExtractionInputV1 input) const pure {
         enforce(applyValue !is null, "configured extractor is not initialized");
         return applyValue(input, configurationValue);
     }
@@ -134,7 +168,14 @@ struct ExtractorRegistrationV1 {
         return false;
     }
 
-    ConfiguredExtractorV1 build(const ref ExtractorOptionsV1 options) const {
+    ExtractorRegistrationV1 validatedCopy() {
+        return ExtractorRegistrationV1(implementation, version_,
+            acceptedOutcomes, resources, optionSchema, factory);
+    }
+
+    void validateOptions(const ref ExtractorOptionsV1 options) {
+        // Revalidate public registration fields before trusting its schema.
+        validatedCopy;
         enforce(options.length <= optionSchema.length,
             "extractor has undeclared options");
         foreach (key, value; options) {
@@ -147,6 +188,10 @@ struct ExtractorRegistrationV1 {
         foreach (declaration; optionSchema)
             enforce(!declaration.required || (declaration.key in options) !is null,
                 "missing extractor option: " ~ declaration.key);
+    }
+
+    ConfiguredExtractorV1 build(const ref ExtractorOptionsV1 options) {
+        validateOptions(options);
         auto configured = factory(options);
         enforce(configured.isValid, "extractor factory returned invalid configuration");
         return configured;
@@ -183,4 +228,23 @@ private void validateKey(string value, string field) {
 private void validateLabel(string value, string field) {
     enforce(value.length > 0 && value.length <= 128, field ~ " is not bounded");
     validate(value); enforce(value.indexOf('\0') < 0, field ~ " contains NUL");
+}
+
+version (unittest) {
+    private __gshared size_t forbiddenExtractorGlobal;
+    private TextDocumentV1 impureExtractor(ExtractionInputV1 input,
+            immutable(ExtractorConfigurationV1)) {
+        ++forbiddenExtractorGlobal;
+        return TextDocumentV1.init;
+    }
+}
+
+unittest {
+    static assert(!__traits(compiles, {
+        ExtractionInputV1 input;
+        input.source.replace(0, 0);
+    }));
+    static assert(!__traits(compiles, {
+        ExtractorApplyV1 apply = &impureExtractor;
+    }));
 }

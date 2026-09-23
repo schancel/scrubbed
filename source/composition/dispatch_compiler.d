@@ -32,6 +32,13 @@ final class DispatchCompilationFailureV1 : Exception {
     }
 }
 
+private struct ValidatedDispatchRouteV1 {
+    string name;
+    ExtractorRegistrationV1 registration;
+    ExtractorOptionsV1 options;
+    DetectionOutcomeV1 routedOutcome;
+}
+
 struct CompiledDispatchRouteV1 {
 private:
     bool initialized;
@@ -128,13 +135,16 @@ CompiledDispatchJobV1 compileDispatchJobV1(ref DispatchJobSpecV1 spec,
     }
     auto declaration = RouteDeclarationV1(rules);
 
-    CompiledDispatchRouteV1[] routes;
+    // Preflight the entire finite registry boundary before invoking any
+    // extractor factory. Later invalid routes cannot leave earlier effects.
+    ValidatedDispatchRouteV1[] validatedRoutes;
     foreach (route; spec.dispatch.routes) {
         auto registration = extractors.find(route.extractor);
         enforce(registration !is null, "unknown extractor: " ~ route.extractor);
+        auto checkedRegistration = registration.validatedCopy;
         foreach (action; spec.dispatch.actions)
             if (action.kind == DispatchActionKindV1.route && action.target == route.name)
-                enforce(registration.accepts(extractionOutcome(action.outcome)),
+                enforce(checkedRegistration.accepts(extractionOutcome(action.outcome)),
                     "extractor is incompatible with routed outcome: " ~ route.name);
         ExtractorOptionsV1 options;
         foreach (key, value; route.options) {
@@ -150,11 +160,21 @@ CompiledDispatchJobV1 compileDispatchJobV1(ref DispatchJobSpecV1 spec,
                 routedOutcome = extractionOutcome(action.outcome);
                 break;
             }
-        auto configured = buildExtractor(*registration, options, identity,
-            routedOutcome, route.name);
-        routes ~= CompiledDispatchRouteV1(route.name, registration.implementation,
-            registration.version_, registration.acceptedOutcomes,
-            registration.resources, configured);
+        checkedRegistration.validateOptions(options);
+        validatedRoutes ~= ValidatedDispatchRouteV1(route.name.idup,
+            checkedRegistration, options, routedOutcome);
+    }
+
+    CompiledDispatchRouteV1[] routes;
+    foreach (validated; validatedRoutes) {
+        auto configured = buildExtractor(validated.registration,
+            validated.options, identity, validated.routedOutcome,
+            validated.name);
+        routes ~= CompiledDispatchRouteV1(validated.name,
+            validated.registration.implementation,
+            validated.registration.version_,
+            validated.registration.acceptedOutcomes,
+            validated.registration.resources, configured);
     }
     // Exactly one compilation of the nested existing v3 common plan.
     auto common = buildCommon(spec, stages, filters, identity);
@@ -163,7 +183,7 @@ CompiledDispatchJobV1 compileDispatchJobV1(ref DispatchJobSpecV1 spec,
 }
 
 private ConfiguredExtractorV1 buildExtractor(
-        const ref ExtractorRegistrationV1 registration,
+        ref ExtractorRegistrationV1 registration,
         const ref ExtractorOptionsV1 options, string identity,
         DetectionOutcomeV1 outcome, string route) {
     try return registration.build(options);

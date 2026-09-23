@@ -35,7 +35,10 @@ it performs no file, process, network, CLI, or adapter I/O.
 - `port.d` defines the injected finite extractor registry. Registrations carry
   canonical implementation/version identity, accepted outcomes, descriptive
   resources, a typed option schema, and one configured source-to-text apply
-  function; there is no global registry or discovery mechanism.
+  function. Extractor input is a descriptor-snapshotted read-only source view,
+  configured apply functions are compiler-enforced pure, and owned UTF-8
+  output has a pure checked `TextDocumentV1` construction path. There is no
+  global registry or discovery mechanism.
 
 These contracts still have no concrete Office, PDF, image, or OCR adapter,
 shipping executor wiring, fan-out, join, DEFLATE support, or general

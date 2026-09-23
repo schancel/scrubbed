@@ -44,7 +44,8 @@ and transport remain outside this subtree.
 
 [`dispatch_compiler.d`](dispatch_compiler.d) validates a complete v4 plan,
 checks route/outcome compatibility against an injected finite extractor
-registry, invokes every referenced extractor factory once, and compiles the
+registry, preflights every route and option before any extractor factory is
+called, invokes every referenced extractor factory once, and compiles the
 nested v3 common job once. Its opaque result binds canonical identity, bounded
 detection/container limits, the complete action declaration, configured
 routes, and the common plan.

@@ -50,7 +50,7 @@ struct MediaEvidenceV1 {
 
     string detail() const pure { return detailValue; }
 
-    private void validateEvidence() const {
+    private void validateEvidence() const pure {
         enforce(kind >= EvidenceKindV1.min && kind <= EvidenceKindV1.max,
             "invalid evidence kind");
         enforce(isConcreteMediaV1(outcome), "evidence needs a concrete media outcome");
@@ -119,7 +119,7 @@ struct DetectionResultV1 {
     size_t availableBytes() const pure { return availableBytesValue; }
 
     /// Reject default or corrupted values before they cross the boundary.
-    void validateResult() const {
+    void validateResult() const pure {
         enforce(outcomeValue >= DetectionOutcomeV1.min &&
             outcomeValue <= DetectionOutcomeV1.max, "invalid detection outcome");
         enforce(detectorVersionValue.length != 0,
@@ -305,7 +305,7 @@ struct ExtractionProvenanceV1 {
     private string routeValue;
     size_t sourceBytes;
 
-    this(DetectionOutcomeV1 sourceOutcome, string routeName, size_t sourceBytes) {
+    this(DetectionOutcomeV1 sourceOutcome, string routeName, size_t sourceBytes) pure {
         enforce(isConcreteMediaV1(sourceOutcome),
             "text provenance needs a concrete source outcome");
         this.sourceOutcome = sourceOutcome;
@@ -392,6 +392,39 @@ struct TextDocumentV1 {
         provenanceValue = provenance;
     }
 
+    /// Pure extractor construction from one independently owned UTF-8 value.
+    /// The returned content cannot alias or mutate the source byte view.
+    static TextDocumentV1 extractedOwned(Document document,
+            const(ubyte)[] utf8, DetectionResultV1 detection,
+            string extractor, string extractorVersion, string[] warnings,
+            ExtractionProvenanceV1 provenance) pure {
+        auto id = document.id;
+        enforce(id.text.length != 0 && document.outputName.text.length != 0,
+            "text document needs initialized identity and output name");
+        validate(cast(const(char)[]) utf8);
+        detection.validateResult;
+        enforce(isConcreteMediaV1(detection.outcome),
+            "text document needs a concrete detection outcome");
+        enforce(detection.outcome == provenance.sourceOutcome,
+            "text provenance must match detection outcome");
+        enforce(detection.availableBytes == provenance.sourceBytes,
+            "text provenance must match detected source byte count");
+        enforce(warnings.length <= maxDetectionWarningsV1,
+            "too many extraction warnings");
+
+        TextDocumentV1 result;
+        result.documentValue = document;
+        result.contentValue.snapshot = new Content([ContentPiece.own(utf8)]);
+        result.detectionValue = detection;
+        result.extractorValue = checkedLabel(extractor, "extractor name", 128);
+        result.extractorVersionValue = checkedLabel(extractorVersion,
+            "extractor version", 128);
+        result.warningsValue = checkedLabels(warnings, "extraction warning",
+            maxWarningBytesV1);
+        result.provenanceValue = provenance;
+        return result;
+    }
+
     Document document() const pure { return documentValue; }
     DocumentId id() const pure { return documentValue.id; }
     OutputName outputName() const pure { return documentValue.outputName; }
@@ -411,19 +444,19 @@ bool isConcreteMediaV1(DetectionOutcomeV1 outcome) pure {
         outcome == DetectionOutcomeV1.ooxmlWord;
 }
 
-private string checkedLabel(string value, string field, size_t maxBytes) {
+private string checkedLabel(string value, string field, size_t maxBytes) pure {
     validateLabel(value, field, maxBytes);
     return value.idup;
 }
 
-private void validateLabel(string value, string field, size_t maxBytes) {
+private void validateLabel(string value, string field, size_t maxBytes) pure {
     enforce(value.length != 0 && value.length <= maxBytes,
         field ~ " must be nonempty and bounded");
     validate(value);
     enforce(value.indexOf('\0') < 0, field ~ " must not contain NUL");
 }
 
-private string[] checkedLabels(string[] values, string field, size_t maxBytes) {
+private string[] checkedLabels(string[] values, string field, size_t maxBytes) pure {
     auto result = new string[values.length];
     foreach (index, value; values)
         result[index] = checkedLabel(value, field, maxBytes);

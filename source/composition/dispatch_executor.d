@@ -9,7 +9,7 @@ import extraction.container : ZipInspectionResultV1;
 import extraction.contracts : DetectionOutcomeV1, DetectionResultV1,
     ExtractionProvenanceV1, RouteActionKindV1, RouteActionV1, TextDocumentV1;
 import extraction.detector : detectMediaV1;
-import extraction.port : ExtractionInputV1;
+import extraction.port : ExtractionInputV1, SourceContentV1;
 import extraction.refinement : RefinedMediaV1, refineMediaV1;
 import stages.contract : EventKind, StageDocument;
 import std.exception : enforce;
@@ -130,7 +130,8 @@ DispatchExecutionEventV1 runDispatchJobV1(StageDocument input,
     TextDocumentV1 text;
     try {
         auto configured = route.configured;
-        text = configured(ExtractionInputV1(input.document, input.content,
+        text = configured(ExtractionInputV1(input.document,
+            SourceContentV1.from(input.content),
             finalDetection, route.name,
             refined.hasAdmittedZip ? refined.admittedZip : null));
         validateExtraction(text, input, finalDetection, route);
@@ -225,12 +226,13 @@ version (unittest) {
         SourceLocator;
     import extraction.contracts : ExtractionProvenanceV1;
     import extraction.port : ConfiguredExtractorV1, ExtractorConfigurationV1,
-        ExtractorOptionsV1, ExtractorRegistrationV1, ExtractorRegistryV1,
+        ExtractorOptionDeclarationV1, ExtractorOptionsV1,
+        ExtractorOptionTypeV1, ExtractorRegistrationV1, ExtractorRegistryV1,
         ExtractorResourcesV1;
     import job.dispatch_spec : DispatchActionKindV1, DispatchActionSpecV1,
         DispatchContainerSpecV1, DispatchDetectorSpecV1, DispatchJobSpecV1,
         DispatchOutcomeV1, DispatchRouteSpecV1, DispatchSpecV1;
-    import job.spec : JobSpec, JobStageSpec;
+    import job.spec : JobOption, JobSpec, JobStageSpec;
     import pipeline : FilterRegistry;
     import stages.contract : PassMode, ResourceDeclaration, StageDecision,
         StageDeclaration;
@@ -238,16 +240,14 @@ version (unittest) {
         StageConfiguration, StageOptions, StageRegistration, StageRegistry;
 
     private __gshared size_t dispatchFactoryCalls;
-    private __gshared size_t dispatchApplyCalls;
     private __gshared size_t commonFactoryCalls;
 
     private TextDocumentV1 applyIdentityExtractor(ExtractionInputV1 input,
-            immutable(ExtractorConfigurationV1)) {
-        ++dispatchApplyCalls;
+            immutable(ExtractorConfigurationV1)) pure {
         ubyte[] bytes;
         input.source.stream((const(ubyte)[] chunk) { bytes ~= chunk; });
-        return TextDocumentV1(input.document,
-            new Content([ContentPiece.own(bytes)]), input.detection,
+        return TextDocumentV1.extractedOwned(input.document, bytes,
+            input.detection,
             "identity", "identity:v1", ["extracted"],
             ExtractionProvenanceV1(input.detection.outcome,
                 input.routeName, input.source.size));
@@ -315,13 +315,30 @@ version (unittest) {
             null, &identityFactory));
         return result;
     }
+
+    private DispatchJobSpecV1 twoRouteSpec(string secondImplementation) {
+        auto result = testDispatchSpec("append");
+        result.dispatch.routes ~= DispatchRouteSpecV1("second",
+            secondImplementation);
+        result.dispatch.actions[cast(size_t) DispatchOutcomeV1.html] =
+            DispatchActionSpecV1.route(DispatchOutcomeV1.html, "second");
+        return result;
+    }
+
+    private void addSecond(ref ExtractorRegistryV1 registry,
+            DetectionOutcomeV1 accepted,
+            ExtractorOptionDeclarationV1[] schema = null) {
+        registry.add(ExtractorRegistrationV1("second", "second:v1",
+            [accepted], ExtractorResourcesV1(1, 4096), schema,
+            &identityFactory));
+    }
 }
 
 unittest {
+    import core.thread : Thread;
     import std.exception : assertThrown;
 
     dispatchFactoryCalls = 0;
-    dispatchApplyCalls = 0;
     commonFactoryCalls = 0;
     auto extractors = testExtractors;
     StageRegistry stages;
@@ -340,6 +357,47 @@ unittest {
         DispatchOutcomeV1.genericZip, "text");
     assertThrown(compileDispatchJobV1(incompatible, &extractors, &stages, &filters));
     assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto unknownLater = twoRouteSpec("missing");
+    assertThrown(compileDispatchJobV1(unknownLater, &extractors,
+        &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto unsupportedRegistry = testExtractors;
+    addSecond(unsupportedRegistry, DetectionOutcomeV1.pdf);
+    auto unsupportedLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(unsupportedLater, &unsupportedRegistry,
+        &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto optionRegistry = testExtractors;
+    addSecond(optionRegistry, DetectionOutcomeV1.html,
+        [ExtractorOptionDeclarationV1("enabled",
+            ExtractorOptionTypeV1.boolean, true)]);
+    auto badOptionLater = twoRouteSpec("second");
+    badOptionLater.dispatch.routes[1].options["enabled"] =
+        JobOption.text("true");
+    assertThrown(compileDispatchJobV1(badOptionLater, &optionRegistry,
+        &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto unknownOptionRegistry = testExtractors;
+    addSecond(unknownOptionRegistry, DetectionOutcomeV1.html);
+    auto unknownOptionLater = twoRouteSpec("second");
+    unknownOptionLater.dispatch.routes[1].options["extra"] =
+        JobOption.boolean(true);
+    assertThrown(compileDispatchJobV1(unknownOptionLater,
+        &unknownOptionRegistry, &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto resourceRegistry = testExtractors;
+    addSecond(resourceRegistry, DetectionOutcomeV1.html);
+    resourceRegistry.find("second").resources.cpuSlots = 0;
+    auto badResourceLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(badResourceLater, &resourceRegistry,
+        &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
     auto plan = compileDispatchJobV1(spec, &extractors, &stages, &filters);
     assert(dispatchFactoryCalls == 1);
     assert(commonFactoryCalls == 1);
@@ -350,7 +408,6 @@ unittest {
     auto owner = new DocumentViewOwner(cast(ubyte[]) "hello".dup);
     auto source = new Content([ContentPiece.borrow(owner.view(0, 5))]);
     auto event = runDispatchJobV1(StageDocument(document, source), plan);
-    assert(dispatchApplyCalls == 1);
     assert(event.kind == DispatchEventKindV1.emitted);
     assert(event.source.content is source);
     assert(event.output.document.id == document.id &&
@@ -365,24 +422,46 @@ unittest {
     assert(owner.view(0, 1).at(0) == 'h'); // executor did not close borrowed owner
 
     auto repeated = runDispatchJobV1(StageDocument(document, source), plan);
-    assert(dispatchApplyCalls == 2);
     assert(repeated.jobIdentity == event.jobIdentity);
+    auto concurrentPlanA = plan;
+    auto concurrentPlanB = plan;
+    string concurrentTextA;
+    string concurrentTextB;
+    auto threadA = new Thread({
+        auto concurrentSource = new Content([ContentPiece.own(
+            cast(const(ubyte)[]) "hello")]);
+        auto concurrent = runDispatchJobV1(
+            StageDocument(document, concurrentSource), concurrentPlanA);
+        ubyte[] bytes;
+        concurrent.output.content.stream(
+            (const(ubyte)[] chunk) { bytes ~= chunk; });
+        concurrentTextA = cast(string) bytes;
+    });
+    auto threadB = new Thread({
+        auto concurrentSource = new Content([ContentPiece.own(
+            cast(const(ubyte)[]) "hello")]);
+        auto concurrent = runDispatchJobV1(
+            StageDocument(document, concurrentSource), concurrentPlanB);
+        ubyte[] bytes;
+        concurrent.output.content.stream(
+            (const(ubyte)[] chunk) { bytes ~= chunk; });
+        concurrentTextB = cast(string) bytes;
+    });
+    threadA.start; threadB.start; threadA.join; threadB.join;
+    assert(concurrentTextA == "hello!" && concurrentTextB == concurrentTextA);
     auto pdf = new Content([ContentPiece.own(cast(const(ubyte)[]) "%PDF-1.7")]);
     auto passed = runDispatchJobV1(StageDocument(document, pdf), plan);
     assert(passed.kind == DispatchEventKindV1.passed &&
         passed.output.content is pdf && !passed.hasProvenance);
-    assert(dispatchApplyCalls == 2);
     auto binary = new Content([ContentPiece.own([cast(ubyte) 0, 1, 2])]);
     auto rejected = runDispatchJobV1(StageDocument(document, binary), plan);
     assert(rejected.kind == DispatchEventKindV1.rejected &&
         rejected.reason == "not selected" && !rejected.hasProvenance);
-    assert(dispatchApplyCalls == 2);
     auto conflict = new Content([ContentPiece.own(
         cast(const(ubyte)[]) "<html>%PDF-1.7")]);
     auto quarantined = runDispatchJobV1(StageDocument(document, conflict), plan);
     assert(quarantined.kind == DispatchEventKindV1.quarantined &&
         quarantined.reason == "conflicting evidence");
-    assert(dispatchApplyCalls == 2);
 
     StageRegistry splitStages;
     splitStages.add(StageRegistration(StageDeclaration("split",

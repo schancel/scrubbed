@@ -372,6 +372,103 @@ performance claim. Any later optimization needs a separate accepted contract
 that preserves this fixture/schema/equivalence boundary and supplies
 interleaved before/after evidence.
 
+### Canonical shipping-CLI attribution
+
+`scrubbed-cli-attribution-v1` is an additive companion to the frozen canonical
+profile. It literal-pins that report and its historical target hash, while each
+new trace binds to the current-base target produced through the same complete
+`scrubbed-build-attestation-v4` closure. This distinction is explicit because
+later additive production modules changed the shipping Mach-O without changing
+the frozen workload or expected output. The companion independently pins the existing
+record table, 524,288 × 256-byte corpus, layouts, scalar/mixed configs, and
+input/scalar/mixed tree and concatenation identities. It does not revise the
+profile schema, fixture frequencies, filter order/options, expected output, or
+durable behavior.
+
+The ancestry record pins historical issue-branch profile source
+`61e8ff9c70ff51842c1dd0063dc253fccc29f1dd`, its merge base
+`65789b90b294b9d0edfe4270d8654e120e7c4928`, accepted attribution base
+`0fe58a0955e1afe16894c91acfdb7bf59077eee5`, and the additive extraction
+commits `7b0f164` and `fc61fdf`. The historical issue-branch source is not
+misrepresented as a direct ancestor of the squashed landing. The bridge proves
+the pinned merge base and requires the accepted base to be an ancestor of the
+clean source it builds. The attribution report records that current
+source/tree/build closure and current target on every trace and GC row. Its
+diagnostic times are not merged into, or directly compared with, the historical
+timing samples.
+
+For each layout, repetitions 0–2 retain exact-PID traces in this order:
+scalar ordinary threads1/open1, mixed ordinary threads1/open1, mixed ordinary
+threads4/open4, manifest-v2 verified skip, and journal-v3 verified skip.
+Durable state is created through the shipping CLI; only the verified skip is
+sampled. Every child must exit normally and pass the frozen exact-output gate.
+The first-publication and skip EXPLAIN streams must each contain exactly one
+expected status for every input file. Instrumented wall, user/system CPU, and
+peak RSS are direct-child diagnostics and are excluded from canonical timing.
+
+`/usr/bin/sample` runs for two seconds at 10 ms against the retained child PID.
+The D parser binds the current Darwin analysis header, process PID, canonical
+binary path, and settings; accepts at least 100 call-graph thread-root stacks;
+and publishes at most 20 inclusive and leaf symbols/images. Absolute paths and
+addresses are removed. Original private output and the committed sanitized
+payload are separately hashed. The sanitized digest uses a fixed-order,
+length-prefixed semantic encoding rather than JSON object or floating-point
+serialization; a JSON round-trip is a release-active control. Leaf stacks are accounted exactly across
+kernel, system, runtime, project, and unresolved partitions, with counts and
+fractions. All three repetitions and their accepted-stack and diagnostic-wall
+median/range remain visible. A named component is stable only when it is the
+same dominant leaf in all three repetitions. These are sampled stacks, not
+exact calls. If sampling is unusable, only a noninteractive, nonprivileged,
+exact-PID Time Profiler attempt is allowed; absent a stable validated export,
+the trace remains structured `UNSUPPORTED`.
+
+Current Darwin `sample` deliberately renders a private executable as
+`/private/var/folders/*/<basename>` (and a user executable as
+`/Users/USER/*/<basename>`). The parser accepts only those literal redaction
+shapes when the trusted root and basename match the launched executable. The
+direct-child PID and hash of the launched snapshot provide exact binary
+identity; the report states whether the sampled path itself was redacted.
+Wrong roots, basenames, or multiple wildcards are release-active negatives.
+The live sampler gate exercises both a canonical system path and a copied
+private-scratch target whose path is redacted by Darwin.
+
+Separately, each layout has three scalar and three mixed single-thread
+druntime GC profiles. Recognized collection count, allocated bytes, and
+collection time are bound to binary/config/fixture/layout/output. Pool and heap
+size remain explicitly `UNSUPPORTED` when the runtime summary does not expose
+them. These fields are D-GC-only and exclude native and total-process
+allocations. Raw private and sanitized GC summaries are separately hashed.
+
+The checker release-actively rejects malformed GC summaries, wrong or missing
+PID/binary/config bindings, fewer than 100 stacks, bad totals or fractions,
+mixed repetitions, failed processes or exact outputs, stale material/build
+identity, and private-path leakage. The full capacity check precedes fixture
+creation and retains the canonical checked-arithmetic, 2 GiB, four-times
+headroom, and 1,800-second requirements. The final decision is exactly one of
+`STABLE_NAMED_HOTSPOT`, `DISTRIBUTED_COST`, or `UNAVAILABLE_ATTRIBUTION`.
+Optimization remains unauthorized; any successor must name its attributed
+component and receive a separate contract.
+
+The reproducible commands are:
+
+```sh
+ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
+ldc2 -O3 -release benchmarks/pipeline_attribution_check.d \
+  -of=/tmp/scrubbed-pipeline-attribution-check
+/tmp/scrubbed-pipeline-attribution-check --self-test
+/tmp/scrubbed-pipeline-attribution-check --self-test-live-sample
+/tmp/scrubbed-pipeline --attested-attribution "$(pwd)" \
+  /tmp/scrubbed-pipeline-attribution-check \
+  benchmarks/pipeline-canonical-profile.json \
+  benchmarks/pipeline-canonical-attribution.json 1800
+/tmp/scrubbed-pipeline-attribution-check --check \
+  benchmarks/pipeline-canonical-attribution.json
+```
+
+The literal checker basename is part of its Mach-O/report identity. No flags
+may be added to the documented recipe. Rollback deletes the companion checker,
+report, bridge mode, and these docs; no production source depends on them.
+
 ## Comparator boundary
 
 The existing [CLI baseline](../benchmarks/README.md) pins `ftfy==6.3.1` and

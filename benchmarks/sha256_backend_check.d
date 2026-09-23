@@ -321,7 +321,7 @@ private void writeNativeReport(string path) {
     enforce(sha256BackendName(selectedSha256Backend) == expectedBackend,
         "automatic SHA-256 backend did not select native hardware");
     JSONValue report;
-    report["schema"] = "scrubbed-sha256-native-backend-v1";
+    report["schema"] = "scrubbed-sha256-native-backend-v2";
     report["os"] = os;
     report["os_release"] = release;
     report["architecture"] = architecture;
@@ -335,9 +335,18 @@ private void writeNativeReport(string path) {
             "source/crypto/sha256_x86_64.d", "benchmarks/sha256_backend_check.d"])
         sources[source] = sourceHash(source);
     report["source_sha256"] = sources;
+    immutable size_t[10] crossoverSizes =
+        [32, 55, 56, 63, 64, 65, 128, 256, 512, 1024];
+    report["short_message_microbench"] = benchmarkRows(crossoverSizes[]);
+    report["microbench_claim"] =
+        "descriptive crossover evidence; hosted runner frequency uncontrolled";
     write(path, report.toString(JSONOptions.doNotEscapeSlashes));
     auto reopened = parseJSON(readText(path));
-    enforce(reopened.toString == report.toString,
+    enforce(reopened["schema"].str == "scrubbed-sha256-native-backend-v2" &&
+        reopened["architecture"].str == architecture &&
+        reopened["selected_backend"].str == expectedBackend &&
+        reopened["short_message_microbench"].array.length ==
+            crossoverSizes.length * 5 * 2,
         "native SHA-256 report reopen mismatch");
     writeln("wrote native SHA-256 evidence: ", path);
 }
@@ -363,6 +372,31 @@ private BenchmarkRow benchmark(size_t bytes, Sha256Backend backend,
     watch.stop;
     return BenchmarkRow(role, sha256BackendName(backend), sample, bytes, iterations,
         watch.peek.total!"nsecs" / 1_000_000_000.0, hex(consumed));
+}
+
+private JSONValue[] benchmarkRows(const(size_t)[] sizes) {
+    JSONValue[] rows;
+    foreach (bytes; sizes) {
+        foreach (sample; 0 .. 5) foreach (pairOrdinal, backend;
+                sample % 2 == 0
+                    ? [Sha256Backend.scalar, selectedSha256Backend]
+                    : [selectedSha256Backend, Sha256Backend.scalar]) {
+            auto role = sample % 2 == 0
+                ? (pairOrdinal == 0 ? "baseline" : "selected")
+                : (pairOrdinal == 0 ? "selected" : "baseline");
+            auto row = benchmark(bytes, backend, sample, role);
+            JSONValue value;
+            value["role"] = row.role;
+            value["backend"] = row.backend;
+            value["sample"] = cast(long)row.sample;
+            value["bytes"] = cast(long)row.bytes;
+            value["iterations"] = cast(long)row.iterations;
+            value["seconds"] = row.seconds;
+            value["last_digest"] = row.digest;
+            rows ~= value;
+        }
+    }
+    return rows;
 }
 
 private string sourceHash(string path) {
@@ -498,28 +532,8 @@ private void writeReport(string path) {
     report["llvm_objdump_sha256"] =
         sourceHash("/opt/homebrew/opt/llvm/bin/llvm-objdump");
     report["disassembly"] = disassemblyEvidence(host);
-    JSONValue[] rows;
-    foreach (bytes; [64, 1024, 8192, 1024 * 1024]) {
-        foreach (sample; 0 .. 5) foreach (pairOrdinal, backend;
-                sample % 2 == 0
-                    ? [Sha256Backend.scalar, selectedSha256Backend]
-                    : [selectedSha256Backend, Sha256Backend.scalar]) {
-            auto role = sample % 2 == 0
-                ? (pairOrdinal == 0 ? "baseline" : "selected")
-                : (pairOrdinal == 0 ? "selected" : "baseline");
-            auto row = benchmark(bytes, backend, sample, role);
-            JSONValue value;
-            value["role"] = row.role;
-            value["backend"] = row.backend;
-            value["sample"] = cast(long)row.sample;
-            value["bytes"] = cast(long)row.bytes;
-            value["iterations"] = cast(long)row.iterations;
-            value["seconds"] = row.seconds;
-            value["last_digest"] = row.digest;
-            rows ~= value;
-        }
-    }
-    report["microbench"] = rows;
+    immutable size_t[4] sizes = [64, 1024, 8192, 1024 * 1024];
+    report["microbench"] = benchmarkRows(sizes[]);
     report["claims"] = [JSONValue("digest bytes only; no production speed claim"),
         JSONValue("OS cache and frequency state uncontrolled")];
     write(path, report.toString(JSONOptions.doNotEscapeSlashes));

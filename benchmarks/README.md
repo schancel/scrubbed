@@ -623,6 +623,12 @@ instances, the frozen caller inventory, and `/usr/bin/shasum` as a separate
 system oracle. The long test streams 4,296,015,890 logical bytes through both
 the selected facade and Phobos without allocating that logical input.
 
+The native report also records five interleaved scalar/hardware samples for
+32, 55, 56, 63, 64, 65, 128, 256, 512, and 1,024-byte one-shot messages. This
+is descriptive crossover evidence from hosted runners, not a frequency-
+controlled throughput claim; it exists to prevent a large-buffer win from
+silently regressing the short identity hashes used by production callers.
+
 The ARM compression function alone has LDC `@target("sha2")`; runtime Darwin
 `sysctl` or Linux `getauxval` detection happens once before automatic
 selection. The x86 function alone has `@target("sha")`; normal x86 builds use

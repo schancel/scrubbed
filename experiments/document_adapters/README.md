@@ -35,7 +35,8 @@ The tab-separated files are the reviewable evidence surface:
   and observations contain no source paths or engine messages.
 - `results.tsv` is the derived summary. The checker decodes every observation
   and recomputes its output hash, tokens, order errors, and four named layout
-  predicates before accepting the corresponding row.
+  predicates before accepting the corresponding row. Footer predicates require
+  both terminal columns/cells and place the footer after the later one.
 
 Rollback is deletion of this directory and
 `docs/document-adapters-evaluation.md`; there is no persisted or user-visible

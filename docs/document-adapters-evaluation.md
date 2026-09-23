@@ -35,10 +35,13 @@ The exact evidence is in
 subprocess outcomes, and lossless hex of every extracted output. The
 release-active checker decodes those bytes and recomputes all output hashes,
 token streams, occurrence counts, token-order inversions, and layout scores;
-`results.tsv` must match. Thirteen deliberate negative controls cover wrong
+`results.tsv` must match. Fourteen deliberate negative controls cover wrong
 text/order, missing sample/hash/provenance/observation/arguments, malformed
 success, crash, timeout, fabricated output hash/tokens/geometry, unknown
-geometry structure, and malformed preserved bytes.
+geometry structure, malformed preserved bytes, and a terminal PDF column moved
+after the footer with every non-geometry derived field recomputed. The analogous
+DOCX footer predicate is also pinned to require both terminal cells before the
+footer.
 
 ## Candidate provenance and licensing
 
@@ -68,8 +71,9 @@ from line structure in the preserved output bytes. PDF checks are
 `pdf_footer_after_columns`. DOCX checks are `docx_row1_cells`,
 `docx_row2_cells`, `docx_right_column_aligned`, and
 `docx_footer_after_table`. They describe this command output only, not source
-document coordinates. Times and RSS are single cold observations, not
-performance benchmarks.
+document coordinates. Each footer predicate requires both terminal columns or
+cells and places the footer after the later terminal line. Times and RSS are
+single cold observations, not performance benchmarks.
 
 | Candidate / held-out sample | Text | Order errors | Geometry | Cold elapsed | Peak RSS | Malformed case |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |

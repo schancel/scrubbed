@@ -9,7 +9,7 @@ import std.exception : enforce;
 import std.file : read, readText;
 import std.path : buildPath;
 import std.stdio : writeln;
-import std.string : indexOf, split, splitLines, strip, toLower;
+import std.string : indexOf, replace, split, splitLines, strip, toLower;
 import std.utf : validate;
 
 struct Sample
@@ -297,8 +297,11 @@ private bool geometryPredicate(string name, string[] lines)
     case "pdf_right_column_aligned":
         return alignedColumns(lines, "LEFT A", "RIGHT A", "LEFT B", "RIGHT B");
     case "pdf_footer_after_columns":
-        return lineWith(lines, "FOOTER END") > lineWith(lines, "RIGHT B") &&
-            lineWith(lines, "RIGHT B") >= 0 && lineWith(lines, "LEFT B") >= 0;
+        const pdfFooter = lineWith(lines, "FOOTER END");
+        const pdfLeftTerminal = lineWith(lines, "LEFT B");
+        const pdfRightTerminal = lineWith(lines, "RIGHT B");
+        return pdfLeftTerminal >= 0 && pdfRightTerminal >= 0 &&
+            pdfFooter > pdfLeftTerminal && pdfFooter > pdfRightTerminal;
     case "docx_row1_cells":
         return lineWith(lines, "ROW1 LEFT", "ROW1 RIGHT") >= 0;
     case "docx_row2_cells":
@@ -307,8 +310,11 @@ private bool geometryPredicate(string name, string[] lines)
         return alignedColumns(lines, "ROW1 LEFT", "ROW1 RIGHT",
             "ROW2 LEFT", "ROW2 RIGHT");
     case "docx_footer_after_table":
-        return lineWith(lines, "OFFICE END") > lineWith(lines, "ROW2 RIGHT") &&
-            lineWith(lines, "ROW2 RIGHT") >= 0;
+        const docxFooter = lineWith(lines, "OFFICE END");
+        const docxLeftTerminal = lineWith(lines, "ROW2 LEFT");
+        const docxRightTerminal = lineWith(lines, "ROW2 RIGHT");
+        return docxLeftTerminal >= 0 && docxRightTerminal >= 0 &&
+            docxFooter > docxLeftTerminal && docxFooter > docxRightTerminal;
     default:
         throw new Exception("unknown geometry predicate: " ~ name);
     }
@@ -600,7 +606,39 @@ void main(string[] arguments)
     expectFailure(() => validateEvidence(root, samples, truths, adapters,
         missingObservation, results), "missing raw observation");
 
+    // MuPDF has no other geometry hits, so moving only the left terminal
+    // column after the footer isolates the footer predicate. Recompute every
+    // other derived summary field: a checker that considers only RIGHT B
+    // would accept this internally consistent but structurally false row.
+    auto terminalAfterFooterObservations = observations.dup;
+    auto terminalAfterFooterResults = results.dup;
+    auto changed = cast(string) decodeObservation(
+        terminalAfterFooterObservations[4].extractedHex);
+    enforce(changed.canFind("LEFT B\n\n") &&
+        changed.canFind("FOOTER END\n\n\f\n"),
+        "MuPDF structural control no longer matches preserved bytes");
+    changed = changed.replace("LEFT B\n\n", "").replace(
+        "FOOTER END\n\n\f\n", "FOOTER END\n\nLEFT B\n\n\f\n");
+    auto changedBytes = cast(const(ubyte)[]) changed;
+    terminalAfterFooterObservations[4].extractedHex =
+        changedBytes.toHexString.toLower;
+    terminalAfterFooterResults[4].outputSha256 = bytesHash(changedBytes);
+    terminalAfterFooterResults[4].observedTokens = tokensFrom(changedBytes);
+    const changedAccuracy = accuracy(truths[1].tokens,
+        terminalAfterFooterResults[4].observedTokens);
+    terminalAfterFooterResults[4].matched = changedAccuracy[0];
+    terminalAfterFooterResults[4].total =
+        cast(int) truths[1].tokens.split('|').length;
+    terminalAfterFooterResults[4].orderErrors = changedAccuracy[1];
+    expectFailure(() => validateEvidence(root, samples, truths, adapters,
+        terminalAfterFooterObservations, terminalAfterFooterResults),
+        "terminal PDF column after footer");
+
+    enforce(!geometryPredicate("docx_footer_after_table",
+        ["ROW2 RIGHT", "OFFICE END", "ROW2 LEFT"]),
+        "DOCX footer predicate ignored the left terminal cell");
+
     writeln("PASS: ", samples.length, " samples, ", adapters.length,
         " candidates, ", results.length,
-        " measurements, hashes/tokens/order/geometry recomputed, 13 controls");
+        " measurements, hashes/tokens/order/geometry recomputed, 14 controls");
 }

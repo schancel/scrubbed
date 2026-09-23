@@ -1,5 +1,23 @@
 # Error events and outstanding failures (F13 staged contract)
 
+## Canonical failure journal v3
+
+`errors-init` creates only a fresh `application_id=0x53435242`,
+`user_version=3` journal. Canonical `run --error-journal` refuses v2 without
+opening it as a writer; retain that file read-only and choose a fresh v3 path.
+V3 adds the same root and ordered-final-event workflow tables as manifest v2
+while retaining the bounded public `error_event` and `outstanding` projections.
+`errors-export` validates and exports either archival v2 or current v3 with the
+unchanged public JSON schemas. `errors-copy --from-v1` remains the explicit
+offline v1-to-v2 archival copy; its result is exportable but not runnable.
+
+Failures persist bounded phase/code values and opaque public sink IDs. The
+private stable sink derives from final kind, final document identity, and event
+ordinal; targeted retry uses it internally but never prints it. A root-level
+compiled failure keeps job/stage attribution in the live diagnostic and a
+bounded persisted code. No journal operation claims filesystem rollback or
+power-loss atomicity.
+
 ## F14 Stage 1 retry-target visitor
 
 `FailureJournal.visitOutstandingTargets` is an internal, read-only stream of
@@ -33,22 +51,23 @@ Build it with `ldc2 -i -O3 -release -Isource
 experiments/retry_targets/check.d third_party/sqlite/sqlite3.o
 -of=.dub/retry-targets-check`, then run `.dub/retry-targets-check`.
 
-## F14 Stage 2 local targeted retry
+## Current local targeted retry (journal v3)
 
-`run` and `repair` accept `--error-targeted` only alongside an existing v2
+`run` and `repair` accept `--error-targeted` only alongside an existing v3
 `--error-journal` and explicit `--error-retry`. This opt-in local file/tree
 route selects only documents with a current outstanding `local-primary:v1`
 sink before file-size admission, content reads, or output preflight. It does
 not materialize the target corpus. After hashing a selected input it requires
 the exact outstanding document/input/config/sink key; changed input or config
 reports a fixed `target-mismatch` and leaves the prior key and output alone.
-Matching targets reuse the v2 plan, publication-intent, rehash and commit
-path; a repeat skips cleared targets without rewriting outputs. Other sinks,
+Matching targets reuse the v3 durable plan, publication-intent, rehash and
+commit path; a repeat skips cleared targets without rewriting outputs. Other sinks,
 roots, and missing sources may still have outstanding rows: success is not a
 claim that the journal is globally empty. Use `errors-export` and
 `errors-verify` for inspection. The route does not handle multi-sink
-publication, non-seekable sources or S3. Default v1 and plain v2
-`--error-retry` behavior remain unchanged.
+publication, non-seekable sources or S3. Journals are created explicitly with
+`errors-init`; v2 journals are export-only compatibility inputs and are
+refused for live processing.
 
 `experiments/retry_targets/live_cli_check.d` drives the shipping executable
 through exact mismatch, multi-target, unrelated-sink preservation,
@@ -59,8 +78,9 @@ retain-all control to exceed the 64 MiB RSS limit. A separate release-mode
 `ManifestCliHarness` executable covers a deterministic crash after sink
 publication; that marker code is absent from the shipping binary.
 
-Stage 2 adds an effects-only v2 SQLite journal and explicit offline v1-to-v2
-copy. The release-active `experiments/errors/check.d` pins v1 behavior and
+Historical predecessor note: Stage 2 added an effects-only v2 SQLite journal
+and explicit offline v1-to-v2 copy. The release-active
+`experiments/errors/check.d` pins v1 behavior and
 the v2 effects boundary. Stage 3a adds an opt-in effects-only JSONL exporter,
 pinned by `experiments/errors/export_check.d`. Stage 3b1 exposes explicit
 v2 management verbs. Stage 3b2 adds an opt-in v2 run/repair route; no-flag
@@ -71,14 +91,14 @@ interpret this check as proof of the F13 JSONL acceptance criteria.
 
 ## Stage 3b1 explicit management CLI
 
-The shipping executable accepts `errors-init --journal NEW_PATH`,
+The shipping executable accepts `errors-init --journal NEW_V3`,
 `errors-copy --from-v1 EXISTING_V1 --journal NEW_V2`,
-`errors-export --journal EXISTING_V2 [--errors-jsonl PATH]
+`errors-export --journal EXISTING_V2_OR_V3 [--errors-jsonl PATH]
 [--outstanding-jsonl PATH]`, and `errors-verify [--errors-jsonl PATH]
 [--outstanding-jsonl PATH]`. Export and verify require at least one JSONL
 path. Both kinds requested in one export share a read snapshot. Init/copy
 refuse existing journal paths and companions; copy leaves the v1 source intact.
-All four verbs are opt-in: they never process documents, activate v2 for
+All four verbs are opt-in: they never process documents, activate a v2 copy for
 run/repair, or migrate a path in place. Successful management commands exit 0
 without stdout records or diagnostics; syntax and effects refusals exit 2
 with fixed tokens that contain no user path, source byte, private sink key, or
@@ -92,12 +112,12 @@ The release-active actual-binary proof is `experiments/errors/cli_check.d`.
 
 ## Stage 3b2 opt-in live processing
 
-`run` and `repair` accept `--error-journal EXISTING_V2` and optional
-`--error-retry`. The journal must already exist from `errors-init` or
-`errors-copy`; processing never creates or migrates it. This route is local
-file/tree only, excludes `--manifest`, `--manifest-retry`, JSONL stdin/stdout,
+`run` and `repair` accept `--error-journal EXISTING_V3` and optional
+`--error-retry`. The v3 journal must already exist from `errors-init`;
+processing never creates or migrates it. V2 copies remain export-only. This
+route is local file/tree only, excludes `--manifest`, `--manifest-retry`, JSONL stdin/stdout,
 and dry-run, and serializes one journal writer. `--validate` checks the
-existing v2 journal without creating an output or journal; opening it may
+existing v3 journal without creating an output or journal; opening it may
 recover a previously unresolved publication intent. A verified committed output is
 skipped. An unresolved or pre-existing destination requires an explicit
 retry; planned state alone does not grant replacement authority. A retry of
@@ -119,8 +139,8 @@ intent becomes uncertain and requires explicit retry. This is process-crash
 recovery, not a power-loss or JSONL pair atomicity guarantee.
 
 The release-active binary proof is `experiments/errors/live_cli_check.d`.
-Compile it with `ldc2 -O3 -release -of=.dub/live-v2-cli-check
-experiments/errors/live_cli_check.d` and run `.dub/live-v2-cli-check
+Compile it with `ldc2 -O3 -release -of=.dub/live-v3-cli-check
+experiments/errors/live_cli_check.d` and run `.dub/live-v3-cli-check
 ./scrubbed`. A separate release-mode executable compiled with
 `ManifestCliHarness` and `FailurePolicyHarness` enables deterministic
 process-crash and acknowledgment-fault markers; that instrumentation is

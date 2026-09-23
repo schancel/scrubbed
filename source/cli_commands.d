@@ -46,11 +46,11 @@ mixin template ProcessingOptions() {
     string manifest;
     @(NamedArgument("manifest-retry").Description("Inspect and explicitly replace an unresolved manifest output"))
     bool manifestRetry;
-    @(NamedArgument("error-journal").Description("Existing opt-in v2 failure journal path"))
+    @(NamedArgument("error-journal").Description("Existing opt-in v3 failure journal path"))
     string errorJournal;
-    @(NamedArgument("error-retry").Description("Explicitly retry unresolved v2 outputs"))
+    @(NamedArgument("error-retry").Description("Explicitly retry unresolved v3 outputs"))
     bool errorRetry;
-    @(NamedArgument("error-targeted").Description("Retry only exact local v2 outstanding targets"))
+    @(NamedArgument("error-targeted").Description("Retry only exact local v3 outstanding targets"))
     bool errorTargeted;
     @(NamedArgument("jsonl-fields").Description("Comma-separated top-level JSON text fields for stdin/stdout JSONL"))
     string jsonlFields;
@@ -90,9 +90,9 @@ struct Extract {
 @(Command("completion").Description("Generate shell setup or command/option-name candidates; use completion init --bash, --zsh or --fish."))
 struct Completion {}
 
-@(Command("errors-init").Description("Create a new opt-in v2 error journal."))
+@(Command("errors-init").Description("Create a new opt-in v3 error journal."))
 struct ErrorsInit {
-    @(NamedArgument("journal").Description("New v2 journal path")) string journal;
+    @(NamedArgument("journal").Description("New v3 journal path")) string journal;
 }
 
 @(Command("errors-copy").Description("Copy an existing v1 journal to a new v2 journal."))
@@ -101,9 +101,9 @@ struct ErrorsCopy {
     @(NamedArgument("journal").Description("New v2 journal path")) string journal;
 }
 
-@(Command("errors-export").Description("Export a bounded v2 journal snapshot."))
+@(Command("errors-export").Description("Export a bounded v2 or v3 journal snapshot."))
 struct ErrorsExport {
-    @(NamedArgument("journal").Description("Existing v2 journal path")) string journal;
+    @(NamedArgument("journal").Description("Existing v2 or v3 journal path")) string journal;
     @(NamedArgument("errors-jsonl").Description("History JSONL destination")) string errorsJsonl;
     @(NamedArgument("outstanding-jsonl").Description("Outstanding JSONL destination"))
     string outstandingJsonl;
@@ -204,8 +204,11 @@ int runCommands(string[] argv) {
             argv[1] == "repair" || argv[1] == "fix")) first = 2;
         forwarded ~= argv[first .. $];
         try return runApp(forwarded);
-        catch (Throwable ignored) {
-            stderr.writeln("scrubbed: error-journal-fatal");
+        catch (Throwable failure) {
+            if (failure.msg ==
+                    "durable job: journal-v2-requires-fresh-v3")
+                stderr.writeln("scrubbed: journal-v2-requires-fresh-v3");
+            else stderr.writeln("scrubbed: error-journal-fatal");
             return 2;
         }
     }

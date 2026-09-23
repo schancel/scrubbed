@@ -3,6 +3,7 @@ module effects.error_export;
 
 import effects.sqlite_ffi;
 import effects.failure_journal : validateV2ReadSnapshot;
+import effects.durable_job : validateV3ReadSnapshot;
 import effects.local_manifest : resolvedName, safeRegularOrAbsent, sameInode;
 import std.conv : to;
 import std.algorithm.searching : canFind;
@@ -133,6 +134,18 @@ private enum historySql = `SELECT event_id,sequence,run_id,0,document_id,input_s
 private enum outstandingSql = `SELECT document_id,input_sha256,config_sha256,sink_id,
     state,origin,event_id,run_id,time_utc_ms FROM outstanding
     ORDER BY document_id,input_sha256,config_sha256,sink_id`;
+
+private void validateReadSnapshot(sqlite3* db) {
+    sqlite3_stmt* versionStatement;
+    need(sqlite3_prepare_v2(db, "PRAGMA user_version".toStringz,
+        -1, &versionStatement, null) == SQLITE_OK, "prepare-failed");
+    scope(exit) sqlite3_finalize(versionStatement);
+    need(sqlite3_step(versionStatement) == SQLITE_ROW, "read-failed");
+    auto value = sqlite3_column_int64(versionStatement, 0);
+    if (value == 2) validateV2ReadSnapshot(db);
+    else if (value == 3) validateV3ReadSnapshot(db);
+    else need(false, "incompatible-version");
+}
 
 private void preflightOutstandingSort(sqlite3* db) {
     // The v2 PK ends in private sink_key. SQLite sorts sink_id within each
@@ -273,7 +286,7 @@ private void exportImpl(string database, string historyDestination,
         if (stage.sideTemporary.length && exists(stage.sideTemporary)) remove(stage.sideTemporary);
     }
     need(sqlite3_exec(db, "BEGIN", null, null, null) == SQLITE_OK, "snapshot-failed");
-    validateV2ReadSnapshot(db);
+    validateReadSnapshot(db);
     auto id = uuid();
     foreach (ref stage; stages) stageRows(db, stage, id, dbPath);
     need(sqlite3_exec(db, "COMMIT", null, null, null) == SQLITE_OK, "snapshot-failed");

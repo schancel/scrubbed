@@ -1,8 +1,8 @@
 # Current architecture
 
 Scrubbed is a D executable, not a supported library API. Its v3 job model is
-the shipping format for ordinary local file/tree and selected-field JSONL
-processing; durable routes remain on their predecessor path.
+the shipping format for ordinary and durable local file/tree plus
+selected-field JSONL processing.
 The [source guide](../source/README.md) describes the current boundary, and
 the [filter guide](../source/filters/README.md) is the shortest path to adding
 one transform.
@@ -22,6 +22,7 @@ content.pieces -> domain.document (checked borrowed content)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
 stages.config -> stages.registry -> stages.contract (unwired v2 config API)
 effects.local_job -> effects.runner, mapped_file, atomic_piece_sink
+effects.durable_job -> domain.document, sqlite_ffi, local_manifest path/hash primitives
 effects.jsonl_job -> effects.runner, effects.jsonl_stream
 ```
 
@@ -119,7 +120,12 @@ final/terminal events. `effects.runner` bridges a compiled job to its typed
 source/parser/sink ports one record at a time, preserving root commit and
 failure accounting while closing the transferred content owner after
 synchronous delivery. `effects.local_job` binds an admitted local record to
-that bridge and atomic sink without duplicating stage traversal.
+that bridge. Its durable batch seam plans the root after the trustworthy input
+digest, executes the job once, then exposes the complete ordered final-event
+set while borrowed content remains live. `effects.durable_job` records
+manifest-v2 or journal-v3 root/event state before publication and commits the
+root only after every output is committed and every no-output terminal is
+acknowledged.
 
 `content.pieces` is the standalone ordered byte-content facade. A
 `ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one

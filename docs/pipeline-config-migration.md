@@ -2,9 +2,8 @@
 
 Issue #148 replaces two disconnected execution descriptions with one typed job
 specification. This document pins predecessor behavior during the compatibility
-window. Ordinary local file/tree and selected-field JSONL processing now lower
-these forms into v3 and use compiled effects bridges; durable routes remain
-deferred.
+window. Ordinary and durable local file/tree plus selected-field JSONL
+processing now lower these forms into v3 and use compiled effects bridges.
 
 ## Current compatibility boundary
 
@@ -64,3 +63,5 @@ Stage 5a adds actual-binary CLI/JSON and process-resource checks in
 `shipping_check.d` and `resource_check.d`. Stage 5b extends the JSONL CLI
 checker and adds `jsonl_stream/job_resource_check.d` for exact predecessor /
 canonical bytes plus fresh-child wall, CPU, and peak-RSS observations.
+Stage 5c switches manifest/journal routes to the same compiled plan and derives
+durable identity from canonical v3 bytes rather than selector spelling.

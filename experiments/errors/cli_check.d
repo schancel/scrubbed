@@ -1,9 +1,11 @@
-/// Actual shipping-binary proof for the explicit v2 management verbs.
+/// Actual shipping-binary proof for the explicit v3 management verbs and
+/// the retained v1-to-v2 copy route.
 module experiments.errors.cli_check;
 
 import domain.document : DocumentId, SourceLocator;
-import effects.local_manifest : SinkKey, LocalManifest, inputDigest, configDigest;
-import effects.failure_journal : FailureJournal;
+import effects.local_manifest : SinkKey, LocalManifest, inputDigest;
+import effects.durable_job : DurableEventPlan, DurableIdentity,
+    DurableJobLedger, DurableKind, DurableRootKey, reasonDigest;
 import std.algorithm.searching : canFind;
 import std.conv : to;
 import std.file : exists, mkdir, readText, remove, rmdirRecurse, tempDir, write;
@@ -78,12 +80,24 @@ private void check(string root, string binary, bool crashHarness) {
 
     auto doc = DocumentId.from(SourceLocator("cli", "set", "one"));
     auto input = inputDigest(cast(const(ubyte)[])"F13_SOURCE_BYTES");
-    auto config = configDigest(cast(const(ubyte)[])"config");
-    auto key = SinkKey(doc, input, config,
-        "F13_SECRET_TOKEN /private/f13-canary.txt https://invalid.example/f13-canary F13_EXCEPTION_TEXT");
-    auto journal = new FailureJournal(db);
-    journal.plan(key, buildPath(root, "sink.txt"));
-    journal.recordFailure(key, "sink", "sink-write-failed", true);
+    DurableIdentity identity;
+    identity.jobIdentity = "job:v3:" ~ "0000000000000000000000000000000000000000000000000000000000000000";
+    identity.digest = reasonDigest("config");
+    auto config = identity.digest;
+    auto key = DurableRootKey(doc, input, identity.digest);
+    auto journal = new DurableJobLedger(db, DurableKind.journal, identity);
+    journal.planRoot(key);
+    DurableEventPlan event;
+    event.ordinal = 0;
+    event.kind = "emitted";
+    event.document = doc;
+    event.outputName = "sink.txt";
+    event.sink = "F13_SECRET_TOKEN /private/f13-canary.txt https://invalid.example/f13-canary F13_EXCEPTION_TEXT";
+    event.destination = buildPath(root, "sink.txt");
+    event.outputSha256 = reasonDigest("output");
+    event.hasOutput = true;
+    journal.planEvents(key, [event]);
+    journal.recordFailure(key, 0, true, "sink", "sink-write-failed");
     journal.close();
     call(["errors-export", "--journal", db, "--errors-jsonl", h,
         "--outstanding-jsonl", o], 0, true);
@@ -104,10 +118,17 @@ private void check(string root, string binary, bool crashHarness) {
     write(h, originalH);
     call(["errors-verify", "--errors-jsonl", h, "--outstanding-jsonl", o], 0, true);
     if (crashHarness) {
-        auto next = SinkKey(doc, input, config, "next-private-key");
-        journal = new FailureJournal(db);
-        journal.plan(next, buildPath(root, "next-output"));
-        journal.recordFailure(next, "filter", "filter-failed", false);
+        auto nextDoc = DocumentId.from(SourceLocator("cli", "set", "two"));
+        auto next = DurableRootKey(nextDoc, reasonDigest("next-input"),
+            identity.digest);
+        journal = new DurableJobLedger(db, DurableKind.journal, identity);
+        journal.planRoot(next);
+        event.document = nextDoc;
+        event.outputName = "next-output";
+        event.sink = "next-private-key";
+        event.destination = buildPath(root, "next-output");
+        journal.planEvents(next, [event]);
+        journal.recordFailure(next, 0, false, "filter", "filter-failed");
         journal.close();
         auto marker = db ~ ".fault-export-kill-after-json-rename";
         write(marker, "1");

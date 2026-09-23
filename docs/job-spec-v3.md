@@ -2,9 +2,9 @@
 
 The v3 job specification is the common typed model for `run` composition
 tokens and persistent JSON configuration. The shipping CLI accepts it for
-ordinary local file/tree and selected-field JSONL processing. Manifest and
-error-journal routes remain deferred and reject v3 before reading input or
-mutating output.
+ordinary and durable local file/tree plus selected-field JSONL processing.
+Durable routes compile before opening input or durable state and persist the
+readable `job:v3:` identity beside their derived route/executable digest.
 
 ```json
 {

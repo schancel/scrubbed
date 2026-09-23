@@ -1,0 +1,17 @@
+key	value
+tool_args	--embedding --pooling mean --embd-normalize 2 --host 127.0.0.1 --threads 1 --threads-batch 1 --parallel 1 --ctx-size 512 --batch-size 512 --ubatch-size 512 --load-mode none --device none --no-webui
+embedding_dimension	384
+shard_size	4
+maximum_live_embeddings	4
+wall_seconds	60
+cpu_seconds	60
+rss_guard_bytes	536870912
+rss_guard_poll_milliseconds	10
+http_response_bytes	2097152
+log_bytes	8388608
+output_bytes	134217728
+tool_archive_bytes	16777216
+tool_unpacked_bytes	100663296
+model_bytes	67108864
+acquisition_scratch_bytes	201326592
+corpus_license	CC0-1.0 authored fixture text

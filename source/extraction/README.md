@@ -25,7 +25,8 @@ it performs no file, process, network, CLI, or adapter I/O.
   central/local index and canonical paths, applies cumulative byte, ratio,
   count, and nesting limits, and reports generic ZIP or exact OOXML Word
   marker evidence. Accepted results snapshot piece descriptors and owned entry
-  names; entry bytes remain behind a scoped fixed-buffer stream, so borrowed
+  names; entry bytes remain behind scoped, read-only logical windows capped at
+  64 KiB. Retained windows never alias a reusable buffer, while borrowed
   backing stays caller-owned and closing its owner invalidates access.
 
 These contracts still have no concrete Office, PDF, image, or OCR adapter,

@@ -36,6 +36,9 @@ enum ZipEvidenceV1 : ubyte {
 
 enum ZipWarningV1 : ubyte { none }
 
+/// Caller requests cannot make one logical entry chunk exceed this size.
+enum size_t maxZipEntryStreamChunkBytesV1 = 64 * 1024;
+
 /// Configured limits are validated against fixed hard ceilings before parsing.
 struct ZipInspectionLimitsV1 {
     enum size_t defaultPhysicalBytes = 32 * 1024 * 1024;
@@ -131,22 +134,34 @@ private final class ContentSnapshot {
         return 0;
     }
 
-    void stream(size_t start, size_t count,
-            scope void delegate(scope const(ubyte)[]) pure sink,
-            size_t chunkSize) const pure {
-        enforce(chunkSize > 0, "ZIP stream chunk size must be positive");
-        enforce(start <= size && count <= size - start,
-            "ZIP entry stream outside source");
-        auto buffer = new ubyte[chunkSize];
-        size_t filled;
-        foreach (offset; start .. start + count) {
-            buffer[filled++] = at(offset);
-            if (filled == buffer.length) {
-                sink(buffer[]);
-                filled = 0;
-            }
+}
+
+/// A stable logical window over admitted bytes, never a reusable raw buffer.
+/// Copies may be retained; borrowed-owner closure still invalidates access.
+struct ZipEntryChunkV1 {
+    private ContentSnapshot source;
+    private size_t start;
+    private size_t count;
+
+    size_t size() const pure {
+        enforce(source !is null, "ZIP entry chunk is not initialized");
+        auto sourceSize = source.size;
+        enforce(start <= sourceSize && count <= sourceSize - start,
+            "ZIP entry chunk outside source");
+        return count;
+    }
+
+    ubyte at(size_t index) const pure {
+        enforce(index < size, "ZIP entry chunk index out of range");
+        return source.at(start + index);
+    }
+
+    int opApply(scope int delegate(ubyte) pure visit) const pure {
+        foreach (index; 0 .. size) {
+            auto result = visit(at(index));
+            if (result) return result;
         }
-        if (filled) sink(buffer[0 .. filled]);
+        return 0;
     }
 }
 
@@ -171,18 +186,28 @@ final class AdmittedZipV1 {
         return result;
     }
 
-    /// The callback's chunk is temporary and cannot outlive this call.
+    /// Each callback receives a stable logical window, not a reusable slice.
     void streamEntry(string canonicalName,
-            scope void delegate(scope const(ubyte)[]) pure sink,
-            size_t chunkSize = 8192) const pure {
+            scope void delegate(ZipEntryChunkV1) pure sink,
+            size_t chunkSize = 8192) pure {
         enforce(source !is null, "admitted ZIP is not initialized");
         enforce(sink !is null, "ZIP entry stream needs a sink");
+        enforce(chunkSize > 0, "ZIP stream chunk size must be positive");
+        auto boundedChunkSize = chunkSize < maxZipEntryStreamChunkBytesV1
+            ? chunkSize : maxZipEntryStreamChunkBytesV1;
         foreach (entry; entriesValue) {
             if (entry.evidence.nameValue == canonicalName) {
                 enforce(!entry.evidence.directoryValue,
                     "ZIP directory entries have no byte stream");
-                source.stream(entry.payloadOffset,
-                    entry.evidence.compressedValue, sink, chunkSize);
+                auto remaining = entry.evidence.compressedValue;
+                auto offset = entry.payloadOffset;
+                while (remaining) {
+                    auto count = remaining < boundedChunkSize
+                        ? remaining : boundedChunkSize;
+                    sink(ZipEntryChunkV1(source, offset, count));
+                    offset += count;
+                    remaining -= count;
+                }
                 return;
             }
         }
@@ -644,6 +669,9 @@ private void validateNames(InspectionState state, ParsedEntry[] entries) {
             state.refuse(ZipInspectionReasonV1.unsafePath);
     }
     foreach (name; names) {
+        if (name.folded.length > 1 && name.folded[$ - 1] == '/' &&
+                (name.folded[0 .. $ - 1] in files) !is null)
+            state.refuse(ZipInspectionReasonV1.unsafePath);
         foreach (index, ch; name.folded) {
             if (ch == '/' && index != name.folded.length - 1 &&
                     (name.folded[0 .. index] in files) !is null) {
@@ -713,17 +741,30 @@ unittest {
         ZipEvidenceV1.storeOnly]);
     assert(accepted.admitted.entries[0].name == "a.txt");
     ubyte[] streamed;
+    ZipEntryChunkV1 retainedFirst;
     accepted.admitted.streamEntry("a.txt",
-        (const(ubyte)[] chunk) { streamed ~= chunk; }, 2);
+        (ZipEntryChunkV1 chunk) {
+            if (retainedFirst.source is null) retainedFirst = chunk;
+            foreach (value; chunk) streamed ~= value;
+        }, 1);
     assert(streamed == cast(const(ubyte)[]) "aye");
+    assert(retainedFirst.size == 1 && retainedFirst.at(0) == 'a');
     assertThrown(accepted.admitted.streamEntry("missing",
-        (const(ubyte)[] chunk) {}));
+        (ZipEntryChunkV1 chunk) {}));
+
+    static assert(!__traits(compiles, {
+        const(ubyte)[] escaped;
+        accepted.admitted.streamEntry("a.txt",
+            (const(ubyte)[] chunk) { escaped = chunk; });
+    }));
 
     // Replacing the caller's descriptors cannot alter the admitted snapshot.
     content.replace(0, content.size, [ContentPiece.own(cast(const(ubyte)[]) "changed")]);
     streamed.length = 0;
     accepted.admitted.streamEntry("b.txt",
-        (const(ubyte)[] chunk) { streamed ~= chunk; });
+        (ZipEntryChunkV1 chunk) {
+            foreach (value; chunk) streamed ~= value;
+        });
     assert(streamed == cast(const(ubyte)[]) "bee");
 
     auto borrowedBytes = basic.dup;
@@ -733,9 +774,13 @@ unittest {
         ContentPiece.borrow(owner.view(5, borrowedBytes.length - 5))
     ]);
     auto borrowedAccepted = inspectZipContainerV1(borrowed);
+    ZipEntryChunkV1 retainedBorrowed;
+    borrowedAccepted.admitted.streamEntry("a.txt",
+        (ZipEntryChunkV1 chunk) { retainedBorrowed = chunk; }, 1);
     owner.close();
+    assertThrown(retainedBorrowed.at(0));
     assertThrown(borrowedAccepted.admitted.streamEntry("a.txt",
-        (const(ubyte)[] chunk) {}));
+        (ZipEntryChunkV1 chunk) { chunk.size; }));
 }
 
 unittest {
@@ -770,6 +815,20 @@ unittest {
             [FixtureEntry("Name", cast(ubyte[]) "x".dup), FixtureEntry("name", cast(ubyte[]) "y".dup)],
             [FixtureEntry("file", cast(ubyte[]) "x".dup), FixtureEntry("file/child", cast(ubyte[]) "y".dup)]])
         assert(inspectBytes(zipFixture(pair)).reason == ZipInspectionReasonV1.unsafePath);
+    foreach (reverseCentral; [false, true]) {
+        assert(inspectBytes(zipFixture([
+            FixtureEntry("a", cast(ubyte[]) "x".dup),
+            FixtureEntry("a/", null)
+        ], reverseCentral)).reason == ZipInspectionReasonV1.unsafePath);
+        assert(inspectBytes(zipFixture([
+            FixtureEntry("A", cast(ubyte[]) "x".dup),
+            FixtureEntry("a/", null)
+        ], reverseCentral)).reason == ZipInspectionReasonV1.unsafePath);
+        assert(inspectBytes(zipFixture([
+            FixtureEntry("a/", null),
+            FixtureEntry("a/b", cast(ubyte[]) "x".dup)
+        ], reverseCentral)).status == ZipInspectionStatusV1.admitted);
+    }
 
     auto encrypted = zipFixture([FixtureEntry("safe", cast(ubyte[]) "x".dup, 0, 1)]);
     assert(inspectBytes(encrypted).reason == ZipInspectionReasonV1.encrypted);
@@ -790,7 +849,7 @@ unittest {
     bool refusedSinkCalled;
     try {
         refused.admitted.streamEntry("word/document.xml",
-            (const(ubyte)[] chunk) { refusedSinkCalled = true; });
+            (ZipEntryChunkV1 chunk) { refusedSinkCalled = true; });
         assert(0, "refused ZIP unexpectedly exposed a stream");
     } catch (Exception) {}
     assert(!refusedSinkCalled && refused.evidence.length == 0);
@@ -901,6 +960,7 @@ unittest {
 unittest {
     import core.memory : GC;
     import domain.document : DocumentViewOwner;
+    import std.exception : assertThrown;
 
     auto payload = new ubyte[32 * 1024 * 1024 - 256];
     auto archive = zipFixture([FixtureEntry("large.bin", payload)]);
@@ -914,9 +974,37 @@ unittest {
     assert(retained < 2 * 1024 * 1024); // descriptors, names and fixed metadata only
     size_t seen;
     result.admitted.streamEntry("large.bin",
-        (const(ubyte)[] chunk) { seen += chunk.length; }, 4096);
+        (ZipEntryChunkV1 chunk) { seen += chunk.size; }, 4096);
     assert(seen == payload.length);
     owner.close();
+
+    auto small = inspectBytes(zipFixture([
+        FixtureEntry("empty", null),
+        FixtureEntry("tiny", cast(ubyte[]) "A".dup),
+        FixtureEntry("bounded", new ubyte[maxZipEntryStreamChunkBytesV1 + 1])
+    ]));
+    size_t emptyCalls;
+    auto smallBefore = GC.stats().usedSize;
+    small.admitted.streamEntry("empty",
+        (ZipEntryChunkV1 chunk) { ++emptyCalls; }, 64 * 1024 * 1024);
+    ZipEntryChunkV1 tinyRetained;
+    small.admitted.streamEntry("tiny",
+        (ZipEntryChunkV1 chunk) { tinyRetained = chunk; }, 64 * 1024 * 1024);
+    auto smallRetained = GC.stats().usedSize - smallBefore;
+    assert(emptyCalls == 0 && tinyRetained.size == 1 && tinyRetained.at(0) == 'A');
+    assert(smallRetained < 256 * 1024);
+    size_t[] boundaryChunks;
+    small.admitted.streamEntry("bounded",
+        (ZipEntryChunkV1 chunk) { boundaryChunks ~= chunk.size; },
+        maxZipEntryStreamChunkBytesV1);
+    assert(boundaryChunks == [maxZipEntryStreamChunkBytesV1, cast(size_t) 1]);
+    boundaryChunks.length = 0;
+    small.admitted.streamEntry("bounded",
+        (ZipEntryChunkV1 chunk) { boundaryChunks ~= chunk.size; },
+        maxZipEntryStreamChunkBytesV1 + 1);
+    assert(boundaryChunks == [maxZipEntryStreamChunkBytesV1, cast(size_t) 1]);
+    assertThrown(small.admitted.streamEntry("tiny",
+        (ZipEntryChunkV1 chunk) {}, 0));
 }
 
 private struct FixtureEntry {

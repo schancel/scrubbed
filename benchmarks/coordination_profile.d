@@ -202,7 +202,7 @@ private ulong micros(ref const typeof(rusage.init.ru_utime) value) {
 
 private JSONValue invoke(string binary, string input, string output,
         string config, size_t threads, size_t ordinal, string root,
-        bool instrumented) {
+        bool instrumented, bool injectProbeFailure = false) {
     auto label = (instrumented ? "attribution-" : "performance-") ~
         threads.to!string ~ "-" ~ ordinal.to!string ~ "-" ~
         randomUUID.toString;
@@ -247,6 +247,8 @@ private JSONValue invoke(string binary, string input, string output,
         atomicStore(stopped, true);
         sampler.join();
     }
+    if (injectProbeFailure)
+        throw new Exception("injected post-spawn probe failure");
     string stackStatus = "not-attempted", stackHash;
     if (instrumented && ordinal == 0) {
         auto stackPath = buildPath(root, label ~ ".sample.txt");
@@ -322,6 +324,53 @@ private void validateMetrics(ref JSONValue sample, size_t expectedFiles,
     need(phases["transform"]["nanoseconds"].integer <=
         processCpuNanoseconds + 1_000_000,
         "transform CPU exceeds whole-process CPU");
+}
+
+private void runSelfTest(string harnessPath) {
+    auto root = buildPath(tempDir, "scrubbed-coordination-self-test-" ~
+        randomUUID.toString);
+    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+
+    auto mutableExecutable = buildPath(root, "mutable-executable");
+    write(mutableExecutable, "#!/bin/sh\nexit 0\n");
+    setAttributes(mutableExecutable, getAttributes(harnessPath));
+    auto snapshot = snapshotExecutable(mutableExecutable, root, "self-test");
+    auto snapshotDigest = fileDigest(snapshot.path);
+    write(mutableExecutable, "replaced after snapshot\n");
+    need(fileDigest(snapshot.path) == snapshotDigest &&
+        fileDigest(mutableExecutable) != snapshotDigest,
+        "executable snapshot followed mutable source");
+
+    bool cleanupFailureObserved;
+    try invoke("/usr/bin/true", root, root, root, 1, 0, root, false, true);
+    catch (Exception error) {
+        cleanupFailureObserved = error.msg == "injected post-spawn probe failure";
+    }
+    need(cleanupFailureObserved, "post-spawn cleanup injection differed");
+
+    enum validMetrics = `{"user_us":1000,"system_us":1000,"metrics":{` ~
+        `"counts":{"submitted":1,"succeeded":1,"failed":0,"skipped":0,` ~
+        `"queued_documents":0,"reserved_bytes":0,"worker_descriptors":0},` ~
+        `"phases":{` ~
+        `"source_stat":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"ordinal_assignment":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"admission_wait":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"accepted_worker_queue":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"descriptor_wait":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"descriptor_hold":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"transform":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"ordered_result_wait":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"atomic_publication":{"calls":1,"units":1,"nanoseconds":1},` ~
+        `"shutdown_join":{"calls":1,"units":0,"nanoseconds":1}}}}`;
+    auto valid = parseJSON(validMetrics);
+    validateMetrics(valid, 1, 1);
+    auto invalid = parseJSON(validMetrics);
+    invalid["metrics"]["phases"]["accepted_worker_queue"]["calls"] = 0;
+    bool invalidRejected;
+    try validateMetrics(invalid, 1, 1);
+    catch (Exception) { invalidRejected = true; }
+    need(invalidRejected, "zeroed comparison attribution was accepted");
+    writeln("coordination profile self-test: ok");
 }
 
 private long[] values(JSONValue[] samples, size_t threads, string field) {
@@ -730,12 +779,16 @@ private void runAttribution(string[] args) {
 }
 
 void main(string[] args) {
-    need(args.length == 3 || args.length == 4 || args.length == 5,
+    need(args.length == 2 || args.length == 3 || args.length == 4 ||
+        args.length == 5,
         "usage: coordination_profile <release-binary> <report> | " ~
         "<baseline-binary> <candidate-binary> <report> | " ~
         "--size-order <release-binary> <report> | " ~
-        "--disabled-overhead <baseline-binary> <candidate-binary> <report>");
-    if (args.length == 5 && args[1] == "--disabled-overhead")
+        "--disabled-overhead <baseline-binary> <candidate-binary> <report> | " ~
+        "--self-test");
+    if (args.length == 2 && args[1] == "--self-test")
+        runSelfTest(absolutePath(args[0]));
+    else if (args.length == 5 && args[1] == "--disabled-overhead")
         runDisabledMetricsOverhead(args);
     else if (args.length == 4 && args[1] == "--size-order") runSizeOrder(args);
     else if (args.length == 4) runComparison(args);

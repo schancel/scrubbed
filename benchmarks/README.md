@@ -41,6 +41,7 @@ requires the pinned input and exact output tree identities on every child.
 dub build --compiler=ldc2 --build=release --force
 ldc2 -O3 -release benchmarks/coordination_profile.d \
   -of=/tmp/scrubbed-coordination-profile
+/tmp/scrubbed-coordination-profile --self-test
 rm -f benchmarks/coordination-profile-evidence.json
 /tmp/scrubbed-coordination-profile ./scrubbed \
   benchmarks/coordination-profile-evidence.json

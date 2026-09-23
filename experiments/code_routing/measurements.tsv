@@ -1,0 +1,9 @@
+file	expected_route	actual_route	language	baseline_integrity	candidate_integrity	license_retained	outside_equal	baseline_proxy	candidate_proxy
+mixed_d.md	yes	yes	d	yes	yes	yes	yes	no	yes
+mixed_python.md	yes	yes	python	yes	yes	yes	yes	no	yes
+mixed_json.md	yes	yes	json	yes	yes	yes	yes	no	yes
+prose_inline.md	no	no	none	no	no	yes	yes	no	no
+prose_license.md	no	no	none	no	no	yes	yes	no	no
+unclosed_fence.md	no	no	none	no	no	yes	yes	no	no
+fenced_text.md	no	no	none	no	no	yes	yes	no	no
+code_only.md	no	no	none	no	no	yes	yes	no	no

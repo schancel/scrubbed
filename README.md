@@ -202,10 +202,11 @@ shipping `run`/`repair` path without a durability flag is non-durable. An
 init/copy/export/verify commands,
 and bounded JSONL history/outstanding export with SHA-256 sidecars now exist;
 `--error-journal` and `--error-retry` select canonical compiled local file/tree
-processing. Canonical durable ledgers bind either the unchanged v3 identity or
-the explicit v4 plan and executable; a ledger bound to one refuses the other
-before recovery or publication. Archival v2 journals remain exportable but
-cannot be run.
+processing. An incoming v4 job binds the exact v4 plan and executable: a store
+containing v3 work or a different v4 binding refuses it before recovery or
+publication. Incoming v3 jobs retain the historical multi-configuration
+compatibility and may coexist after v4 work. Archival v2 journals remain
+exportable but cannot be run.
 An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
 commit caller-supplied content and metadata payloads separately. The
 [`route-metadata` CLI](docs/metadata-route.md) now feeds it filtered HTML

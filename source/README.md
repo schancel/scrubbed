@@ -158,7 +158,10 @@ field ordinal and are written to stderr by the CLI wrapper.
 durability: manifest v2 and failure-journal v3 root records, complete ordered
 final-event plans, per-event publication intents, exact retry, and root-last
 completion. It accepts caller-derived v3 or v4 plan identity and never imports
-`job`; existing stores refuse a different plan or executable before mutation.
+`job`. An incoming v4 plan requires every existing row to carry its exact plan
+and executable binding, so existing v3 or changed-v4 rows refuse it before
+mutation. Incoming v3 preserves the historical multi-configuration behavior
+and may coexist with earlier v4 rows.
 [`effects/local_manifest.d`](effects/local_manifest.d) remains the predecessor
 v1 API for offline copy and retained consumers; canonical `--manifest` runs
 refuse it rather than upgrading it. See

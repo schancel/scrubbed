@@ -18,11 +18,13 @@ compiled failure keeps job/stage attribution in the live diagnostic and a
 bounded persisted code. No journal operation claims filesystem rollback or
 power-loss atomicity.
 
-Canonical live processing accepts unchanged v3 or explicit v4 plans. The root
-binds the selected readable job identity, canonical plan bytes, output route,
-and executable; a journal bound to one plan refuses another before recovery or
-publication. V4 reject/quarantine decisions persist as acknowledged no-output
-events, while route/pass use the existing emitted sink kind.
+Canonical live processing accepts unchanged v3 or explicit v4 plans. An
+incoming v4 root requires every existing row to bind its exact readable job
+identity, canonical plan bytes, output route, and executable, so v3-bound or
+changed-v4 rows refuse it before recovery or publication. Incoming v3 retains
+the historical multi-configuration behavior and may coexist after v4 work. V4
+reject/quarantine decisions persist as acknowledged no-output events, while
+route/pass use the existing emitted sink kind.
 
 ## F14 Stage 1 retry-target visitor
 

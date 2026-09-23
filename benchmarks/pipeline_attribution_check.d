@@ -3,6 +3,8 @@ module pipeline_attribution_check;
 
 import core.sys.posix.sys.resource : rusage;
 import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WIFSIGNALED, WTERMSIG;
+import core.thread : Thread;
+import core.time : msecs;
 import std.algorithm.sorting : sort;
 import std.algorithm.searching : canFind;
 import std.array : join, replicate;
@@ -10,7 +12,7 @@ import std.conv : to;
 import std.digest : toHexString;
 import std.digest.sha : SHA256, sha256Of;
 import std.datetime.stopwatch : StopWatch;
-import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
+import std.file : SpanMode, copy, dirEntries, exists, mkdirRecurse, read, readText,
     remove, rmdirRecurse, tempDir, write;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.math : isFinite;
@@ -222,6 +224,18 @@ private string canonicalExisting(string path) {
     scope(exit) free(value);
     return fromStringz(value).idup;
 }
+private bool redactedSamplePathMatches(string sampled, string canonical) {
+    need(sampled.split("*").length == 2,
+        "sample path has an unexpected redaction shape");
+    need(baseName(sampled) == baseName(canonical),
+        "sample redacted path basename differs from launched binary");
+    if (sampled.startsWith("/private/var/folders/*/"))
+        return canonical.startsWith("/private/var/folders/") ||
+            canonical.startsWith("/var/folders/");
+    if (sampled.startsWith("/Users/USER/*/"))
+        return canonical.startsWith("/Users/");
+    return false;
+}
 
 private double seconds(ref const typeof(rusage.init.ru_utime) value) {
     return value.tv_sec + value.tv_usec / 1_000_000.0;
@@ -292,6 +306,8 @@ private string sanitizedSampleDigest(JSONValue value) {
         "inclusive_top": value["inclusive_top"],
         "leaf_top": value["leaf_top"],
         "dominant_leaf_component": value["dominant_leaf_component"],
+        "sample_path_redacted": value["sample_path_redacted"],
+        "path_binding_semantics": value["path_binding_semantics"],
         "partitions": value["partitions"]]);
     return hashBytes(cast(const(ubyte)[])payload.toString);
 }
@@ -299,7 +315,7 @@ private string sanitizedSampleDigest(JSONValue value) {
 private JSONValue parseSample(string raw, long expectedPid, string binary) {
     auto lines = raw.splitLines;
     auto canonicalBinary = canonicalExisting(binary);
-    bool analysisBound, processBound, pathBound, inCallGraph, inLeaf;
+    bool analysisBound, processBound, pathBound, pathRedacted, inCallGraph, inLeaf;
     long accepted;
     SymbolCount[] inclusive, leaf;
     foreach (line; lines) {
@@ -310,8 +326,13 @@ private JSONValue parseSample(string raw, long expectedPid, string binary) {
             analysisBound = true;
         if (clean.startsWith("Process:") && clean.canFind("[" ~ expectedPid.to!string ~ "]"))
             processBound = true;
-        if (clean.startsWith("Path:"))
-            pathBound = canonicalExisting(clean[5 .. $].strip) == canonicalBinary;
+        if (clean.startsWith("Path:")) {
+            auto sampledPath = clean[5 .. $].strip;
+            if (sampledPath.canFind('*')) {
+                pathBound = redactedSamplePathMatches(sampledPath, canonicalBinary);
+                pathRedacted = true;
+            } else pathBound = canonicalExisting(sampledPath) == canonicalBinary;
+        }
         if (clean == "Call graph:") { inCallGraph = true; inLeaf = false; continue; }
         if (clean.startsWith("Total number in stack")) { inCallGraph = false; continue; }
         if (clean.startsWith("Sort by top of stack")) { inLeaf = true; continue; }
@@ -347,6 +368,10 @@ private JSONValue parseSample(string raw, long expectedPid, string binary) {
     auto sanitized = JSONValue(["accepted_stacks": JSONValue(accepted),
         "inclusive_top": inclusiveTop, "leaf_top": leafTop,
         "dominant_leaf_component": JSONValue(component), "partitions": partitionJson]);
+    sanitized["sample_path_redacted"] = pathRedacted;
+    sanitized["path_binding_semantics"] = pathRedacted ?
+        "Darwin sample privacy-redacted root/basename plus exact direct-child PID and launched binary hash" :
+        "canonical sampled path plus exact direct-child PID and launched binary hash";
     auto serialized = sanitized.toString;
     foreach (token; ["/Users/", "/private/var/", "/tmp/"])
         need(!serialized.canFind(token), "sanitized sample leaks a private path");
@@ -1005,6 +1030,12 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
         need(sample["pid_binary_bound"].boolean &&
             sample["accepted_stacks"].integer >= minimumStacks &&
             sample["sanitized_sha256"].str == sanitizedSampleDigest(sample) &&
+            ((!sample["sample_path_redacted"].boolean &&
+                sample["path_binding_semantics"].str ==
+                "canonical sampled path plus exact direct-child PID and launched binary hash") ||
+             (sample["sample_path_redacted"].boolean &&
+                sample["path_binding_semantics"].str ==
+                "Darwin sample privacy-redacted root/basename plus exact direct-child PID and launched binary hash")) &&
             digest(trace["raw_private_sha256"].str) &&
             sample["inclusive_top"].array.length > 0 &&
             sample["inclusive_top"].array.length <= 20 &&
@@ -1232,6 +1263,22 @@ private void selfTest() {
     mustThrow(() { parseSample(raw, 124, "/bin/sleep"); }, "wrong PID accepted");
     mustThrow(() { parseSample(raw.replace("Path: /bin/sleep", "Path: /bin/date"),
         123, "/bin/sleep"); }, "wrong binary accepted");
+    need(redactedSamplePathMatches(
+        "/private/var/folders/*/scrubbed-attested-snapshot",
+        "/private/var/folders/j3/private/scrubbed-attested-snapshot"),
+        "valid Darwin privacy-redacted path control failed");
+    mustThrow(() { redactedSamplePathMatches(
+        "/private/var/folders/*/wrong-name",
+        "/private/var/folders/j3/private/scrubbed-attested-snapshot"); },
+        "wrong redacted basename accepted");
+    mustThrow(() { need(redactedSamplePathMatches(
+        "/untrusted/root/*/scrubbed-attested-snapshot",
+        "/private/var/folders/j3/private/scrubbed-attested-snapshot"),
+        "untrusted redacted root"); }, "untrusted redacted root accepted");
+    mustThrow(() { redactedSamplePathMatches(
+        "/private/var/folders/*/*/scrubbed-attested-snapshot",
+        "/private/var/folders/j3/private/scrubbed-attested-snapshot"); },
+        "multiple redactions accepted");
     mustThrow(() { parseSample(raw.replace("120 Thread", "99 Thread").replace(
         "120 work", "99 work"), 123, "/bin/sleep"); }, "too few stacks accepted");
     auto privateSymbol = parseSample(raw.replace("work  (in sleep)",
@@ -1310,10 +1357,10 @@ private void selfTest() {
         "mixed trace repetition indexes accepted");
     mustThrow(() { noLeak(`{"symbol":"/Users/private/name"}`); },
         "published private path accepted");
-    writeln("canonical attribution self-test passed (19 release-active negatives)");
+    writeln("canonical attribution self-test passed (22 release-active negatives)");
 }
 
-private void selfTestLiveSample() {
+private void selfTestLiveSample(string self) {
     auto root = scratch(); scope(exit) if (exists(root)) rmdirRecurse(root);
     auto rawPath = buildPath(root, "sample.txt");
     auto child = spawnProcess(["/bin/sleep", "4"]);
@@ -1326,17 +1373,37 @@ private void selfTestLiveSample() {
     auto parsed = parseSample(readText(rawPath), pid, "/bin/sleep");
     need(parsed["accepted_stacks"].integer >= minimumStacks,
         "live sample control accepted too few stacks");
+    auto privateTarget = buildPath(root, "scrubbed-attested-snapshot");
+    copy(self, privateTarget);
+    need(execute(["chmod", "700", privateTarget]).status == 0,
+        "cannot prepare live redacted-path control");
+    rawPath = buildPath(root, "redacted-sample.txt");
+    child = spawnProcess([privateTarget, "--self-test-sample-child"]);
+    pid = child.processID;
+    sampled = execute(["/usr/bin/sample", pid.to!string,
+        sampleDuration.to!string, sampleInterval.to!string, "-file", rawPath]);
+    status = wait(child);
+    need(sampled.status == 0 && status == 0 && exists(rawPath),
+        "live redacted-path sample control process failed");
+    auto redacted = parseSample(readText(rawPath), pid, privateTarget);
+    need(redacted["sample_path_redacted"].boolean &&
+        redacted["accepted_stacks"].integer >= minimumStacks,
+        "live Darwin redacted-path binding control failed");
     writeln("canonical attribution live sample parser passed: ",
-        parsed["accepted_stacks"].integer, " accepted stacks");
+        parsed["accepted_stacks"].integer, " exact-path and ",
+        redacted["accepted_stacks"].integer, " redacted-path accepted stacks");
 }
 
 int main(string[] args) {
     try {
+        if (args.length == 2 && args[1] == "--self-test-sample-child") {
+            Thread.sleep(msecs(4_000)); return 0;
+        }
         need(baseName(args[0]) == harnessName,
             "attribution checker executable basename must be " ~ harnessName);
         if (args.length == 2 && args[1] == "--self-test") { selfTest(); return 0; }
         if (args.length == 2 && args[1] == "--self-test-live-sample") {
-            selfTestLiveSample(); return 0;
+            selfTestLiveSample(args[0]); return 0;
         }
         if (args.length == 3 && args[1] == "--check") {
             validateReport(parseJSON(readText(args[2])), hashFile(args[0]));

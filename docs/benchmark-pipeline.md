@@ -420,6 +420,16 @@ exact calls. If sampling is unusable, only a noninteractive, nonprivileged,
 exact-PID Time Profiler attempt is allowed; absent a stable validated export,
 the trace remains structured `UNSUPPORTED`.
 
+Current Darwin `sample` deliberately renders a private executable as
+`/private/var/folders/*/<basename>` (and a user executable as
+`/Users/USER/*/<basename>`). The parser accepts only those literal redaction
+shapes when the trusted root and basename match the launched executable. The
+direct-child PID and hash of the launched snapshot provide exact binary
+identity; the report states whether the sampled path itself was redacted.
+Wrong roots, basenames, or multiple wildcards are release-active negatives.
+The live sampler gate exercises both a canonical system path and a copied
+private-scratch target whose path is redacted by Darwin.
+
 Separately, each layout has three scalar and three mixed single-thread
 druntime GC profiles. Recognized collection count, allocated bytes, and
 collection time are bound to binary/config/fixture/layout/output. Pool and heap

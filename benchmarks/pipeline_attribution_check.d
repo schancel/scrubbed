@@ -244,11 +244,23 @@ private double seconds(ref const typeof(rusage.init.ru_utime) value) {
 private struct SymbolCount { string symbol, image; long count; }
 private bool parseCounted(string line, out long count, out string rest) {
     auto clean = line.strip;
+    while (clean.length && (clean[0] == '+' || clean[0] == '!' ||
+            clean[0] == '|' || clean[0] == ':'))
+        clean = clean[1 .. $].strip;
     auto splitAt = clean.indexOf(' ');
     if (splitAt <= 0) return false;
     try count = clean[0 .. splitAt].to!long;
     catch (Exception) { return false; }
     rest = clean[splitAt .. $].strip;
+    return count >= 0 && rest.length != 0;
+}
+private bool parseTrailingCount(string line, out long count, out string rest) {
+    auto clean = line.strip;
+    auto splitAt = clean.lastIndexOf(' ');
+    if (splitAt <= 0) return false;
+    rest = clean[0 .. splitAt].strip;
+    try count = clean[splitAt .. $].strip.to!long;
+    catch (Exception) { return false; }
     return count >= 0 && rest.length != 0;
 }
 private SymbolCount parseSymbol(long count, string rest, string targetName) {
@@ -338,11 +350,12 @@ private JSONValue parseSample(string raw, long expectedPid, string binary) {
         if (clean.startsWith("Sort by top of stack")) { inLeaf = true; continue; }
         if (clean == "Binary Images:") { inLeaf = false; continue; }
         long count; string rest;
-        if (!parseCounted(line, count, rest)) continue;
         if (inCallGraph) {
+            if (!parseCounted(line, count, rest)) continue;
             if (rest.startsWith("Thread_")) accepted += count;
             else inclusive ~= parseSymbol(count, rest, baseName(canonicalBinary));
-        } else if (inLeaf) leaf ~= parseSymbol(count, rest, baseName(canonicalBinary));
+        } else if (inLeaf && parseTrailingCount(line, count, rest))
+            leaf ~= parseSymbol(count, rest, baseName(canonicalBinary));
     }
     need(analysisBound && processBound && pathBound,
         "sample PID/binary/settings binding failed");
@@ -1257,9 +1270,12 @@ private void selfTest() {
         "    120 Thread_1\n      120 work  (in sleep) + 4  [0x1]\n" ~
         "Total number in stack (recursive counted multiple, when >=5):\n\n" ~
         "Sort by top of stack, same collapsed (when >= 5):\n" ~
-        "        120 work  (in sleep)\n\nBinary Images:\n";
+        "        work  (in sleep)        120\n\nBinary Images:\n";
     auto parsed = parseSample(raw, 123, "/bin/sleep");
     need(parsed["accepted_stacks"].integer == 120, "valid sample parser control failed");
+    need(parsed["inclusive_top"].array.length == 1 &&
+        parsed["leaf_top"].array.length == 1,
+        "valid sample top-symbol parser control failed");
     mustThrow(() { parseSample(raw, 124, "/bin/sleep"); }, "wrong PID accepted");
     mustThrow(() { parseSample(raw.replace("Path: /bin/sleep", "Path: /bin/date"),
         123, "/bin/sleep"); }, "wrong binary accepted");
@@ -1287,8 +1303,8 @@ private void selfTest() {
     mustThrow(() { parseSample(raw.replace("every 10 milliseconds",
         "every 20 milliseconds"), 123, "/bin/sleep"); },
         "wrong sampling settings accepted");
-    mustThrow(() { parseSample(raw.replace("120 work  (in sleep)",
-        "121 work  (in sleep)"), 123, "/bin/sleep"); },
+    mustThrow(() { parseSample(raw.replace("(in sleep)        120",
+        "(in sleep)        121"), 123, "/bin/sleep"); },
         "over-accounted leaf stacks accepted");
     auto gc = "\tNumber of collections:  2\n\tGrand total GC time:  3 milliseconds\n" ~
         "GC summary:    5 MB,    2 GC    3 ms, Pauses    1 ms <    2 ms\n";
@@ -1373,6 +1389,8 @@ private void selfTestLiveSample(string self) {
     auto parsed = parseSample(readText(rawPath), pid, "/bin/sleep");
     need(parsed["accepted_stacks"].integer >= minimumStacks,
         "live sample control accepted too few stacks");
+    need(parsed["inclusive_top"].array.length && parsed["leaf_top"].array.length,
+        "live exact-path sample lacked parsed symbol rows");
     auto privateTarget = buildPath(root, "scrubbed-attested-snapshot");
     copy(self, privateTarget);
     need(execute(["chmod", "700", privateTarget]).status == 0,
@@ -1387,7 +1405,8 @@ private void selfTestLiveSample(string self) {
         "live redacted-path sample control process failed");
     auto redacted = parseSample(readText(rawPath), pid, privateTarget);
     need(redacted["sample_path_redacted"].boolean &&
-        redacted["accepted_stacks"].integer >= minimumStacks,
+        redacted["accepted_stacks"].integer >= minimumStacks &&
+        redacted["inclusive_top"].array.length && redacted["leaf_top"].array.length,
         "live Darwin redacted-path binding control failed");
     writeln("canonical attribution live sample parser passed: ",
         parsed["accepted_stacks"].integer, " exact-path and ",

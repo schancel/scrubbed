@@ -4,7 +4,8 @@ module cli_check;
 import std.algorithm.searching : canFind;
 import std.array : replicate;
 import std.conv : to;
-import std.digest.sha : sha256Of;
+import std.digest : LetterCase, toHexString;
+import std.digest.sha : SHA256, sha256Of;
 import std.file : SpanMode, dirEntries, exists, mkdir, readText, rmdirRecurse,
     symlink, tempDir, write;
 import std.json : parseJSON;
@@ -58,6 +59,25 @@ private string dispatchRecord(Captured result) {
     auto records = dispatchRecords(result);
     check(records.length == 1, "exactly one dispatch explain record");
     return records[0];
+}
+
+private string expectedJsonlUnit(string documentId, size_t ordinal) {
+    SHA256 digest;
+    digest.put(cast(const(ubyte)[]) "scrubbed.dispatch.unit.v1\0");
+    digest.put(cast(const(ubyte)[]) documentId);
+    digest.put([cast(ubyte) 0]);
+    digest.put(cast(const(ubyte)[]) "jsonl-field:v1:");
+    digest.put(cast(const(ubyte)[]) ordinal.to!string);
+    return "unit:v1:" ~ toHexString!(LetterCase.lower)(digest.finish()).idup;
+}
+
+private string rawNameDictionaryGuess(string documentId, string field) {
+    SHA256 digest;
+    digest.put(cast(const(ubyte)[]) "scrubbed.dispatch.unit.v1\0");
+    digest.put(cast(const(ubyte)[]) documentId);
+    digest.put([cast(ubyte) 0]);
+    digest.put(cast(const(ubyte)[]) field);
+    return "unit:v1:" ~ toHexString!(LetterCase.lower)(digest.finish()).idup;
 }
 
 int main(string[] args) {
@@ -236,18 +256,38 @@ int main(string[] args) {
     auto secondUnit = parseJSON(twoRecords[1]);
     check(firstUnit["document_id"].str == secondUnit["document_id"].str &&
         firstUnit["unit_id"].str != secondUnit["unit_id"].str &&
+        firstUnit["unit_id"].str == expectedJsonlUnit(
+            firstUnit["document_id"].str, 0) &&
+        secondUnit["unit_id"].str == expectedJsonlUnit(
+            secondUnit["document_id"].str, 1) &&
         firstUnit["unit_id"].str.startsWith("unit:v1:") &&
         !twoRecords[0].canFind("alpha-secret-field") &&
         !twoRecords[0].canFind("beta-secret-field") &&
         !twoRecords[1].canFind("alpha-secret-field") &&
         !twoRecords[1].canFind("beta-secret-field"),
         "JSONL unit IDs distinguish fields without leaking names");
+    check(firstUnit["unit_id"].str != rawNameDictionaryGuess(
+            firstUnit["document_id"].str, "alpha-secret-field") &&
+        secondUnit["unit_id"].str != rawNameDictionaryGuess(
+            secondUnit["document_id"].str, "beta-secret-field"),
+        "JSONL field-name dictionary guesses cannot reproduce unit IDs");
     auto replayRecords = dispatchRecords(withInput(cardinalityArgs,
         `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n"));
     check(replayRecords.length == 2 &&
         parseJSON(replayRecords[0])["unit_id"].str == firstUnit["unit_id"].str &&
         parseJSON(replayRecords[1])["unit_id"].str == secondUnit["unit_id"].str,
         "JSONL unit IDs are deterministic and replay-stable");
+    auto reorderedArgs = cardinalityArgs.dup;
+    foreach (ref argument; reorderedArgs)
+        if (argument == "alpha-secret-field,beta-secret-field")
+            argument = "beta-secret-field,alpha-secret-field";
+    auto reordered = dispatchRecords(withInput(reorderedArgs,
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n"));
+    check(reordered.length == 2 &&
+        parseJSON(reordered[0])["unit_id"].str == firstUnit["unit_id"].str &&
+        parseJSON(reordered[1])["unit_id"].str == secondUnit["unit_id"].str &&
+        parseJSON(reordered[1])["unit_id"].str != firstUnit["unit_id"].str,
+        "JSONL configured reordering follows ordinal unit semantics");
 
     auto mixedArgs = [exe, "run", "--input", "-", "--output", "-",
         "--jsonl-fields", "alpha-secret-field,beta-secret-field",
@@ -263,7 +303,9 @@ int main(string[] args) {
         "--max-jsonl-output-bytes", "1024", "--config", cappedConfig,
         "--explain"], `{"beta-secret-field":"hello"}` ~ "\n");
     check(secondFailed.status == 1 && secondFailed.output.length == 0 &&
-        secondFailure["unit_id"].str ==
+        secondFailure["unit_id"].str == expectedJsonlUnit(
+            secondFailure["document_id"].str, 1) &&
+        secondFailure["unit_id"].str !=
             parseJSON(dispatchRecord(secondOnly))["unit_id"].str &&
         secondFailure["outcome"].str == "plain-text" &&
         secondFailure["code"].str == "decode-failed",

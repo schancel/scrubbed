@@ -29,10 +29,14 @@ With `--explain`, v4 emits `EXPLAIN\t` followed by one canonical
 provenance, accounting, and stable error vocabulary; they never include source
 or extracted bytes, archive entry names, paths, hints, or exception text.
 Each record represents one dispatched unit. Its fixed-size `unit_id` hashes
-the document identity plus the unit's logical output name, so JSONL fields on
-the same physical line remain distinct without exposing field names. Only
-present selected fields are dispatched and receive records; absent fields do
-not. Local and durable single-document routes use the same logical root unit.
+the document identity plus a domain token. JSONL tokens use the field's
+zero-based position in the configured `--jsonl-fields` order, never its name,
+so fields on the same physical line remain distinct without enabling a field
+name dictionary attack. Reordering the configured selection rebinds unit IDs
+to the new ordinals. Only present selected fields are dispatched and receive
+records; absent fields do not. Local and durable single-document routes use
+the same root-domain token, while whole-record JSONL failures use a separate
+record-domain token.
 JSONL explain records use stderr so stdout remains whole-record JSONL.
 
 Durable v4 execution uses the existing manifest/journal schema and final-event

@@ -16,15 +16,25 @@ import std.string : indexOf;
 enum string dispatchRecordSchemaV1 = "scrubbed.dispatch.v1";
 enum size_t maxDispatchRecordBytesV1 = 16 * 1024;
 
-string canonicalDispatchRecordV1(ref DispatchExecutionEventV1 event,
-        string unitName = null) {
-    if (unitName is null) unitName = event.source.document.outputName.text;
+string canonicalDispatchRecordV1(ref DispatchExecutionEventV1 event) {
+    return canonicalDispatchRecord(event, DispatchUnitDomainV1.root, 0);
+}
+
+string canonicalJsonlDispatchRecordV1(ref DispatchExecutionEventV1 event,
+        size_t selectedOrdinal) {
+    return canonicalDispatchRecord(event, DispatchUnitDomainV1.jsonlField,
+        selectedOrdinal);
+}
+
+private string canonicalDispatchRecord(ref DispatchExecutionEventV1 event,
+        DispatchUnitDomainV1 domain, size_t selectedOrdinal) {
     auto output = appender!string;
     output.put(`{"schema":`); output.put(quote(dispatchRecordSchemaV1));
     output.put(`,"job_identity":`); output.put(quote(event.jobIdentity));
     output.put(`,"document_id":`); output.put(quote(event.source.document.id.text));
     output.put(`,"unit_id":`);
-    output.put(quote(dispatchUnitId(event.source.document.id, unitName)));
+    output.put(quote(dispatchUnitId(event.source.document.id, domain,
+        selectedOrdinal)));
     output.put(`,"status":`); output.put(quote(statusName(event.kind)));
     output.put(`,"outcome":`); output.put(quote(outcomeName(event.detection.outcome)));
     output.put(`,"action":`); output.put(quote(actionName(event.action.kind)));
@@ -87,27 +97,45 @@ string canonicalDispatchRecordV1(ref DispatchExecutionEventV1 event,
 }
 
 string canonicalDispatchFailureRecordV1(string jobIdentity, DocumentId document,
-        DetectionOutcomeV1 outcome, string phase, string code, string reason,
-        string unitName = "root") {
+        DetectionOutcomeV1 outcome, string phase, string code, string reason) {
     return canonicalDispatchProblemRecordV1(jobIdentity, document, outcome,
-        "failure", phase, code, reason, unitName);
+        "failure", phase, code, reason, DispatchUnitDomainV1.root, 0);
+}
+
+string canonicalJsonlDispatchFailureRecordV1(string jobIdentity,
+        DocumentId document, DetectionOutcomeV1 outcome, string phase,
+        string code, string reason, size_t selectedOrdinal) {
+    return canonicalDispatchProblemRecordV1(jobIdentity, document, outcome,
+        "failure", phase, code, reason, DispatchUnitDomainV1.jsonlField,
+        selectedOrdinal);
+}
+
+string canonicalJsonlRecordFailureRecordV1(string jobIdentity,
+        DocumentId document, DetectionOutcomeV1 outcome, string phase,
+        string code, string reason) {
+    return canonicalDispatchProblemRecordV1(jobIdentity, document, outcome,
+        "failure", phase, code, reason, DispatchUnitDomainV1.jsonlRecord, 0);
 }
 
 string canonicalDispatchCancellationRecordV1(string jobIdentity,
-        DocumentId document, string phase, string code, string reason,
-        string unitName = "root") {
+        DocumentId document, string phase, string code, string reason) {
     return canonicalDispatchProblemRecordV1(jobIdentity, document,
-        DetectionOutcomeV1.unknown, "canceled", phase, code, reason, unitName);
+        DetectionOutcomeV1.unknown, "canceled", phase, code, reason,
+        DispatchUnitDomainV1.root, 0);
 }
+
+private enum DispatchUnitDomainV1 : ubyte { root, jsonlField, jsonlRecord }
 
 private string canonicalDispatchProblemRecordV1(string jobIdentity,
         DocumentId document, DetectionOutcomeV1 outcome, string status,
-        string phase, string code, string reason, string unitName) {
+        string phase, string code, string reason, DispatchUnitDomainV1 domain,
+        size_t selectedOrdinal) {
     auto output = appender!string;
     output.put(`{"schema":`); output.put(quote(dispatchRecordSchemaV1));
     output.put(`,"job_identity":`); output.put(quote(jobIdentity));
     output.put(`,"document_id":`); output.put(quote(document.text));
-    output.put(`,"unit_id":`); output.put(quote(dispatchUnitId(document, unitName)));
+    output.put(`,"unit_id":`);
+    output.put(quote(dispatchUnitId(document, domain, selectedOrdinal)));
     output.put(`,"status":`); output.put(quote(status));
     output.put(`,"outcome":`);
     output.put(quote(outcomeName(outcome)));
@@ -128,12 +156,24 @@ private string reasonHash(string reason) {
         sha256Of(cast(const(ubyte)[])reason)).idup;
 }
 
-private string dispatchUnitId(DocumentId document, string unitName) {
+private string dispatchUnitId(DocumentId document, DispatchUnitDomainV1 domain,
+        size_t selectedOrdinal) {
     SHA256 digest;
     digest.put(cast(const(ubyte)[]) "scrubbed.dispatch.unit.v1\0");
     digest.put(cast(const(ubyte)[]) document.text);
     digest.put([cast(ubyte) 0]);
-    digest.put(cast(const(ubyte)[]) unitName);
+    final switch (domain) {
+    case DispatchUnitDomainV1.root:
+        digest.put(cast(const(ubyte)[]) "local-root:v1");
+        break;
+    case DispatchUnitDomainV1.jsonlField:
+        digest.put(cast(const(ubyte)[]) "jsonl-field:v1:");
+        digest.put(cast(const(ubyte)[]) selectedOrdinal.to!string);
+        break;
+    case DispatchUnitDomainV1.jsonlRecord:
+        digest.put(cast(const(ubyte)[]) "jsonl-record:v1");
+        break;
+    }
     return "unit:v1:" ~ toHexString!(LetterCase.lower)(digest.finish()).idup;
 }
 
@@ -202,20 +242,21 @@ unittest {
         "source", "canceled", "/secret/canceled/path");
     assert(canceled.indexOf(`"status":"canceled"`) >= 0 &&
         canceled.indexOf("secret") < 0 && canceled.length <= maxDispatchRecordBytesV1);
-    auto firstUnit = canonicalDispatchFailureRecordV1(
+    auto firstUnit = canonicalJsonlDispatchFailureRecordV1(
         "job:v4:0000000000000000000000000000000000000000000000000000000000000000",
         DocumentId.fromCanonicalText(
             "doc:v1:0000000000000000000000000000000000000000000000000000000000000000"),
-        DetectionOutcomeV1.unknown, "decode", "decode-failed", "same",
-        "private-field-a");
-    auto secondUnit = canonicalDispatchFailureRecordV1(
+        DetectionOutcomeV1.unknown, "decode", "decode-failed", "same", 0);
+    auto secondUnit = canonicalJsonlDispatchFailureRecordV1(
         "job:v4:0000000000000000000000000000000000000000000000000000000000000000",
         DocumentId.fromCanonicalText(
             "doc:v1:0000000000000000000000000000000000000000000000000000000000000000"),
-        DetectionOutcomeV1.unknown, "decode", "decode-failed", "same",
-        "private-field-b");
+        DetectionOutcomeV1.unknown, "decode", "decode-failed", "same", 1);
     assert(parseJSON(firstUnit)["unit_id"].str !=
         parseJSON(secondUnit)["unit_id"].str);
-    assert(firstUnit.indexOf("private-field") < 0 &&
-        secondUnit.indexOf("private-field") < 0);
+    assert(firstUnit == canonicalJsonlDispatchFailureRecordV1(
+        "job:v4:0000000000000000000000000000000000000000000000000000000000000000",
+        DocumentId.fromCanonicalText(
+            "doc:v1:0000000000000000000000000000000000000000000000000000000000000000"),
+        DetectionOutcomeV1.unknown, "decode", "decode-failed", "same", 0));
 }

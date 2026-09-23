@@ -19,7 +19,8 @@ import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
     createJournalV3, derivedSink, reasonDigest;
 import effects.dispatch_record : canonicalDispatchCancellationRecordV1,
     canonicalDispatchFailureRecordV1,
-    canonicalDispatchRecordV1;
+    canonicalDispatchRecordV1, canonicalJsonlDispatchFailureRecordV1,
+    canonicalJsonlDispatchRecordV1, canonicalJsonlRecordFailureRecordV1;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.local_job : LocalJobOutcome, runLocalJob, runLocalJobBatch;
@@ -411,7 +412,7 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
             }, (ref RuntimeExecutionV1 execution, ref const ubyte[32]) {
                 if (execution.hasDispatch)
                     dispatchRecord = canonicalDispatchRecordV1(
-                        execution.dispatch, "root");
+                        execution.dispatch);
             }, dryRun);
         // Every valid compiled job emits at least one terminal event, so entering
         // publication is part of completing a root.
@@ -940,7 +941,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
             auto events = execution.events;
             if (execution.hasDispatch)
                 dispatchRecord = canonicalDispatchRecordV1(
-                    execution.dispatch, "root");
+                    execution.dispatch);
             DurableEventPlan[] plans;
             bool[string] destinations;
             foreach (ordinal, ref event; events) {
@@ -1235,12 +1236,14 @@ int runApp(string[] args) {
         try {
             const completed = processStandardJsonlDocuments(datasetNamespace,
                 sourceKey, fields,
-                (string field, string text, SourceLocator source) =>
+                (string field, string text, SourceLocator source,
+                        size_t selectedOrdinal) =>
                     runJsonlField(source, field, text, runtimePlan,
                         (ref RuntimeExecutionV1 execution) {
                             if (explain && execution.hasDispatch)
                                 pendingDispatchRecords ~=
-                                    canonicalDispatchRecordV1(execution.dispatch);
+                                    canonicalJsonlDispatchRecordV1(
+                                        execution.dispatch, selectedOrdinal);
                         }),
                 JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun,
                 (SourceLocator committed) {
@@ -1261,21 +1264,26 @@ int runApp(string[] args) {
                     error.kind != JsonlFailureKind.rejected &&
                     error.kind != JsonlFailureKind.quarantined) {
                 auto dispatchFailure = dispatchFailureFacts(error);
-                stderr.writeln("EXPLAIN\t", canonicalDispatchFailureRecordV1(
-                    runtimePlan.identity, error.documentId,
-                    dispatchFailure.found ? dispatchFailure.outcome :
-                        DetectionOutcomeV1.unknown,
-                    dispatchFailure.found ? dispatchFailure.phase :
-                        (error.kind == JsonlFailureKind.writer ? "sink" :
-                            error.kind == JsonlFailureKind.outputLimit ?
-                                "resource" : "decode"),
-                    dispatchFailure.found ? dispatchFailure.code :
-                        (error.kind == JsonlFailureKind.writer ?
-                            "sink-write-failed" :
-                            error.kind == JsonlFailureKind.outputLimit ?
-                                "resource-failed" : "decode-failed"),
-                    dispatchFailure.found ? dispatchFailure.reason : error.msg,
-                    error.unitName));
+                auto outcome = dispatchFailure.found ? dispatchFailure.outcome :
+                    DetectionOutcomeV1.unknown;
+                auto phase = dispatchFailure.found ? dispatchFailure.phase :
+                    (error.kind == JsonlFailureKind.writer ? "sink" :
+                        error.kind == JsonlFailureKind.outputLimit ?
+                            "resource" : "decode");
+                auto code = dispatchFailure.found ? dispatchFailure.code :
+                    (error.kind == JsonlFailureKind.writer ?
+                        "sink-write-failed" :
+                        error.kind == JsonlFailureKind.outputLimit ?
+                            "resource-failed" : "decode-failed");
+                auto reason = dispatchFailure.found ?
+                    dispatchFailure.reason : error.msg;
+                auto record = error.selectedOrdinal == size_t.max ?
+                    canonicalJsonlRecordFailureRecordV1(runtimePlan.identity,
+                        error.documentId, outcome, phase, code, reason) :
+                    canonicalJsonlDispatchFailureRecordV1(runtimePlan.identity,
+                        error.documentId, outcome, phase, code, reason,
+                        error.selectedOrdinal);
+                stderr.writeln("EXPLAIN\t", record);
             }
             stderr.writefln("JSONL %s at physical line %s, DocumentId %s: %s; %s prior records %s; current record %s",
                 error.kind, error.line, error.documentId.text, error.msg,

@@ -144,7 +144,8 @@ void main(string[] args) {
         try {
             processJsonlDocuments(&decided.read, &decided.write, "batch",
                 "stable-source", ["text"],
-                (string field, string text, SourceLocator source) {
+                (string field, string text, SourceLocator source,
+                        size_t selectedOrdinal) {
                     require(DocumentId.from(source).text == DocumentId.from(
                         SourceLocator("batch", "stable-source", "1")).text,
                         "typed transform locator changed");
@@ -281,7 +282,8 @@ void main(string[] args) {
             if (used > peakUsed) peakUsed = used;
         }
     }, "batch", "bounded-source", ["text"],
-       (string field, string text, SourceLocator source) =>
+       (string field, string text, SourceLocator source,
+               size_t selectedOrdinal) =>
            runJsonlField(source, field, text, compiled),
        JsonlLimits(64, 128));
     require(streamed == 20_000 && discarded == 20_000, "large stream count");

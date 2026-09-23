@@ -20,8 +20,16 @@ it performs no file, process, network, CLI, or adapter I/O.
 - `dispatch.d` selects exactly one route or policy from a complete table.
   Rules are indexed in canonical outcome order, so declaration order cannot
   change precedence.
+- `container.d` inspects a deliberately narrow classic, single-disk,
+  STORE-only ZIP subset before any entry bytes are exposed. It validates the
+  central/local index and canonical paths, applies cumulative byte, ratio,
+  count, and nesting limits, and reports generic ZIP or exact OOXML Word
+  marker evidence. Accepted results snapshot piece descriptors and owned entry
+  names; entry bytes remain behind scoped, read-only logical windows capped at
+  64 KiB. Retained windows never alias a reusable buffer, while borrowed
+  backing stays caller-owned and closing its owner invalidates access.
 
-This first slice deliberately has no ZIP/container parsing, concrete Office,
-PDF, image, or OCR adapter, executor wiring, CLI/JSON syntax, fan-out, join, or
-general workflow graph. Later slices may consume these contracts without
-changing shipping behavior introduced here.
+These contracts still have no concrete Office, PDF, image, or OCR adapter,
+executor wiring, CLI/JSON syntax, fan-out, join, DEFLATE support, or general
+workflow graph. Later slices may consume them without changing shipping
+behavior introduced here.

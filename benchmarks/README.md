@@ -148,6 +148,20 @@ and only two of five target pairs improved. Many-small two-thread wall rose
 0.11% and four-thread CPU rose 1.00%; controls remained within 5%. The added
 synchronization surface is therefore not retained in production.
 
+### Canonical-key caching experiment
+
+`coordination-canonical-key-evidence.json` tests computing each shallow
+entry's basename-plus-directory-marker sort key once instead of repeatedly
+calling `relativePath`, `isSymlink`, and `isDir` from the comparison function.
+It uses the authorized worker-availability binary as its paired baseline.
+
+The candidate reduced the instrumented many-small discovery median from
+334.6 ms to 10.8 ms, but the effect did not clear the production gate:
+four-thread wall improved 8.04%, only four of five pairs won, and aggregate
+queue residence fell 1.17%. The few-large one-thread CPU control was 4.85%
+higher, too close to the 5% ceiling to provide useful margin. Exact outputs
+and resource caps passed, but the per-entry cached state is not retained.
+
 ## Attested full-process target
 
 `pipeline.d --attested-build` refuses a dirty checkout, builds the release

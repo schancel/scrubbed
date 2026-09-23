@@ -650,6 +650,12 @@ the x86 job must expose and select SHA-NI, while the ARM job must expose and
 select ARMv8 SHA2. Each job also runs the multi-GiB logical stream and uploads
 a sanitized, source- and binary-bound architecture report. Workflow actions
 and LDC 1.43.0 are pinned; the workflow has read-only repository permission.
+Run `35914157081` passed both native jobs. The committed sanitized artifacts
+record `SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on
+x86-64 and `armv8-sha2` on arm64, and identical source hashes across both
+architectures. Native x86 execution is therefore no longer an external
+blocker; production migration remains deferred only for the combined
+full-CLI/durable equivalence and performance gates.
 
 `sha256-backend-evidence.json` contains five interleaved scalar/selected
 samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,

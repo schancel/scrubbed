@@ -1941,8 +1941,11 @@ private void selfTestNativePath(string sourceRoot, string poisonPath,
 int main(string[] args) {
     try {
         if (args.length == 7 && args[1] == "--attested-attribution") {
-            require(execute(["git", "-C", args[2], "merge-base", "--is-ancestor",
-                    "61e8ff9c70ff51842c1dd0063dc253fccc29f1dd", "HEAD"]).status == 0 &&
+            auto historicalMergeBase = execute(["git", "-C", args[2], "merge-base",
+                "61e8ff9c70ff51842c1dd0063dc253fccc29f1dd", "HEAD"]);
+            require(historicalMergeBase.status == 0 &&
+                historicalMergeBase.output.strip ==
+                    "65789b90b294b9d0edfe4270d8654e120e7c4928" &&
                 execute(["git", "-C", args[2], "merge-base", "--is-ancestor",
                     "0fe58a0955e1afe16894c91acfdb7bf59077eee5", "HEAD"]).status == 0,
                 "canonical profile/current attribution source ancestry differs");

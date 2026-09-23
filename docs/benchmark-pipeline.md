@@ -385,13 +385,17 @@ input/scalar/mixed tree and concatenation identities. It does not revise the
 profile schema, fixture frequencies, filter order/options, expected output, or
 durable behavior.
 
-The ancestry record pins historical profile source `61e8ff9c70ff51842c1dd0063dc253fccc29f1dd`,
-accepted attribution base `0fe58a0955e1afe16894c91acfdb7bf59077eee5`, and
-the intervening additive extraction commits `7b0f164` and `fc61fdf`. The bridge
-requires both historical source and accepted base to be ancestors of the clean
-source it builds. The attribution report records that current source/tree/build
-closure and current target on every trace and GC row. Its diagnostic times are
-not merged into, or directly compared with, the historical timing samples.
+The ancestry record pins historical issue-branch profile source
+`61e8ff9c70ff51842c1dd0063dc253fccc29f1dd`, its merge base
+`65789b90b294b9d0edfe4270d8654e120e7c4928`, accepted attribution base
+`0fe58a0955e1afe16894c91acfdb7bf59077eee5`, and the additive extraction
+commits `7b0f164` and `fc61fdf`. The historical issue-branch source is not
+misrepresented as a direct ancestor of the squashed landing. The bridge proves
+the pinned merge base and requires the accepted base to be an ancestor of the
+clean source it builds. The attribution report records that current
+source/tree/build closure and current target on every trace and GC row. Its
+diagnostic times are not merged into, or directly compared with, the historical
+timing samples.
 
 For each layout, repetitions 0–2 retain exact-PID traces in this order:
 scalar ordinary threads1/open1, mixed ordinary threads1/open1, mixed ordinary

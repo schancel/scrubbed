@@ -38,6 +38,8 @@ private enum canonicalProfileSourcePin =
     "61e8ff9c70ff51842c1dd0063dc253fccc29f1dd";
 private enum acceptedBasePin =
     "0fe58a0955e1afe16894c91acfdb7bf59077eee5";
+private enum historicalMergeBasePin =
+    "65789b90b294b9d0edfe4270d8654e120e7c4928";
 private enum recordBytes = 256L;
 private enum recordCount = 524_288L;
 private enum corpusBytes = recordBytes * recordCount;
@@ -896,10 +898,11 @@ private JSONValue runAttribution(string binary, JSONValue attestation,
         "canonical_profile_schema": JSONValue("scrubbed-cli-profile-v1"),
         "source_ancestry": JSONValue([
             "canonical_profile_source_sha": JSONValue(canonicalProfileSourcePin),
+            "historical_merge_base_sha": JSONValue(historicalMergeBasePin),
             "accepted_attribution_base_sha": JSONValue(acceptedBasePin),
             "attribution_source_sha": attestation["source_sha"],
             "relationship": JSONValue(
-                "canonical profile source and accepted attribution base are ancestors of attribution source"),
+                "historical issue-branch profile source and attribution line share the pinned merge base; accepted attribution base is an ancestor of attribution source"),
             "intervening_production_commits": JSONValue([
                 JSONValue("7b0f164 bounded extraction detection contracts"),
                 JSONValue("fc61fdf bounded ZIP container inspection")])]),
@@ -1099,12 +1102,14 @@ private void validateReport(JSONValue report, string expectedHarness = "") {
         report["canonical_profile_schema"].str == "scrubbed-cli-profile-v1" &&
         report["source_ancestry"]["canonical_profile_source_sha"].str ==
             canonicalProfileSourcePin &&
+        report["source_ancestry"]["historical_merge_base_sha"].str ==
+            historicalMergeBasePin &&
         report["source_ancestry"]["accepted_attribution_base_sha"].str ==
             acceptedBasePin &&
         report["source_ancestry"]["attribution_source_sha"].str ==
             report["build_attestation"]["source_sha"].str &&
         report["source_ancestry"]["relationship"].str ==
-            "canonical profile source and accepted attribution base are ancestors of attribution source" &&
+            "historical issue-branch profile source and attribution line share the pinned merge base; accepted attribution base is an ancestor of attribution source" &&
         report["source_ancestry"]["intervening_production_commits"].array.length == 2 &&
         report["source_ancestry"]["intervening_production_commits"][0].str ==
             "7b0f164 bounded extraction detection contracts" &&

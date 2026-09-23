@@ -681,6 +681,34 @@ private final class OrderedPublicationCanceled : Exception {
     this() { super("ordered publication canceled after an earlier fatal root"); }
 }
 
+unittest {
+    import core.sync.semaphore : Semaphore;
+    import core.thread : Thread;
+    import core.time : msecs;
+    import std.exception : assertThrown;
+
+    auto order = new PublicationOrder;
+    auto laterStarted = new Semaphore(0);
+    auto laterFinished = new Semaphore(0);
+    Throwable laterError;
+    auto later = new Thread({
+        laterStarted.notify();
+        try order.fail(1);
+        catch (Throwable error) { laterError = error; }
+        laterFinished.notify();
+    });
+    later.start();
+    laterStarted.wait();
+    assert(!laterFinished.wait(50.msecs),
+        "later canonical failure did not wait for the earlier root");
+    order.enter(0);
+    order.complete();
+    assert(laterFinished.wait(500.msecs));
+    later.join();
+    assert(laterError is null);
+    assertThrown!OrderedPublicationCanceled(order.enter(2));
+}
+
 private string effectFailureDetail(EffectFailure failure) {
     return "completed-root-prefix=" ~ failure.completed.to!string ~
         ";committed-event-prefix=" ~ failure.eventOrdinal.to!string ~

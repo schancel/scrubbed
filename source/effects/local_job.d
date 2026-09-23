@@ -9,7 +9,7 @@ import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentViewOwner;
 import effects.atomic_piece_sink : writeAtomicPieces;
 import effects.bounded_input : CoordinationMetricsV1, CoordinationPhaseV1,
-    beginCoordinationMetricV1;
+    beginCoordinationMetricV1, beginCoordinationThreadCpuMetricV1;
 import effects.durable_job : DurableMetricPhaseV1, beginDurableMetricV1,
     recordDurableMetricV1;
 import effects.mapped_file : openMappedFile;
@@ -191,7 +191,7 @@ private final class LocalParser : Parser {
             record.owner.view(0, expectedBytes))]);
         *inputHash = contentDigest(content);
         if (metrics !is null)
-            *transformStarted = beginCoordinationMetricV1(metrics);
+            *transformStarted = beginCoordinationThreadCpuMetricV1(metrics);
         return content;
     }
 }
@@ -218,7 +218,7 @@ private final class LocalSink : Sink {
     override void accept(StageEvent event) {
         if (!began) {
             if (metrics !is null && !*transformRecorded) {
-                metrics.record(CoordinationPhaseV1.transform, inputBytes,
+                metrics.recordThreadCpu(CoordinationPhaseV1.transform, inputBytes,
                     *transformStarted);
                 *transformRecorded = true;
             }
@@ -319,7 +319,7 @@ LocalJobOutcome runLocalJob(string filename, ulong expectedBytes,
             });
     catch (Throwable error) {
         if (metrics !is null && transformStarted != 0 && !transformRecorded)
-            metrics.record(CoordinationPhaseV1.transform, expectedBytes,
+            metrics.recordThreadCpu(CoordinationPhaseV1.transform, expectedBytes,
                 transformStarted);
         throw error;
     }

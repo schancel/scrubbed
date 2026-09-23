@@ -3,7 +3,16 @@ module effects.bounded_input;
 
 import core.sync.condition : Condition;
 import core.sync.mutex : Mutex;
-import core.time : MonoTime;
+import core.time : MonoTime, ticksToNSecs;
+version (Posix) {
+    import core.sys.posix.time : timespec;
+    version (OSX) {
+        private enum CLOCK_THREAD_CPUTIME_ID = 16;
+        private extern(C) int clock_gettime(int, timespec*);
+    } else import core.sys.posix.time : CLOCK_THREAD_CPUTIME_ID, clock_gettime;
+}
+version (Windows) import core.sys.windows.winbase : FILETIME,
+    GetCurrentThread, GetThreadTimes;
 import std.array : appender;
 import std.conv : to;
 import std.exception : enforce;
@@ -30,6 +39,8 @@ struct InputCounts {
 
 /// Caller-owned, fixed-cardinality coordination evidence. A null reference is
 /// the shipping default and executes no clock reads or metric locking.
+/// Transform nanoseconds are per-worker-thread CPU; other phase durations and
+/// the top-level wall duration use the monotonic elapsed clock.
 enum CoordinationPhaseV1 {
     discovery, sourceStat, ordinalAssignment, admissionWait,
     acceptedWorkerQueue, descriptorWait, descriptorHold, transform,
@@ -79,6 +90,17 @@ final class CoordinationMetricsV1 {
         ++value.calls;
         value.units += units;
         if (elapsed > 0) value.nanoseconds += ticksToNanoseconds(elapsed);
+        mutex.unlock();
+    }
+
+    void recordThreadCpu(CoordinationPhaseV1 phase, ulong units,
+            long startedNanoseconds) {
+        auto elapsed = threadCpuNanoseconds() - startedNanoseconds;
+        mutex.lock();
+        auto value = &values[phase];
+        ++value.calls;
+        value.units += units;
+        if (elapsed > 0) value.nanoseconds += cast(ulong)elapsed;
         mutex.unlock();
     }
 
@@ -150,7 +172,29 @@ long beginCoordinationMetricV1(CoordinationMetricsV1 metrics) {
 }
 
 private ulong ticksToNanoseconds(long ticks) {
-    return cast(ulong)(ticks * 1_000_000_000L / MonoTime.ticksPerSecond);
+    return cast(ulong)ticksToNSecs(ticks);
+}
+
+long beginCoordinationThreadCpuMetricV1(CoordinationMetricsV1 metrics) {
+    return metrics is null ? 0 : threadCpuNanoseconds();
+}
+
+private long threadCpuNanoseconds() {
+    version (Posix) {
+        timespec value;
+        enforce(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) == 0,
+            "thread CPU clock unavailable");
+        return cast(long)value.tv_sec * 1_000_000_000L + value.tv_nsec;
+    } else version (Windows) {
+        FILETIME created, exited, kernel, user;
+        enforce(GetThreadTimes(GetCurrentThread(), &created, &exited,
+            &kernel, &user) != 0, "thread CPU clock unavailable");
+        ulong kernelTicks = (cast(ulong)kernel.dwHighDateTime << 32) |
+            kernel.dwLowDateTime;
+        ulong userTicks = (cast(ulong)user.dwHighDateTime << 32) |
+            user.dwLowDateTime;
+        return cast(long)((kernelTicks + userTicks) * 100);
+    } else static assert(0, "unsupported thread CPU clock platform");
 }
 
 /// The producer owns traversal. The scheduler owns all reservations and joins
@@ -193,7 +237,7 @@ final class BoundedInput {
         // admitting paths. finish(true) may enlist its caller later, so the
         // processing gate below remains the authoritative --threads cap.
         if (threads > 1)
-            pool = new TaskPool(threads);
+            pool = new TaskPool(processingLimit);
     }
 
     /// false means a prior fault or explicit cancellation stopped admission.
@@ -366,6 +410,22 @@ unittest {
     import core.sync.semaphore : Semaphore;
     import std.conv : to;
     import core.time : msecs;
+
+    auto overflowBoundary = long.max / 1_000_000_000L + 1;
+    assert(ticksToNanoseconds(overflowBoundary) ==
+        cast(ulong)ticksToNSecs(overflowBoundary));
+
+    auto cpuStarted = threadCpuNanoseconds();
+    Thread.sleep(100.msecs);
+    auto sleptCpu = threadCpuNanoseconds() - cpuStarted;
+    assert(sleptCpu >= 0 && sleptCpu < 50_000_000L,
+        "thread CPU clock advanced like wall time while sleeping");
+
+    auto cappedPool = new BoundedInput(InputLimits(1, 1, 1), 8,
+        (string path, ulong bytes) {},
+        (string path, Throwable error) { assert(0, error.msg); });
+    assert(cappedPool.pool.size == 1);
+    cappedPool.finish();
 
     foreach (threads; [1, 4]) {
         shared size_t completed;

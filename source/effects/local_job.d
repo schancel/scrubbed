@@ -13,7 +13,7 @@ import effects.durable_job : DurableMetricPhaseV1, beginDurableMetricV1,
 import effects.mapped_file : openMappedFile;
 import effects.runner : Parser, Sink, Source, SourceRecord, runEffects;
 import stages.contract : EventKind, StageDocument, StageEvent;
-import std.digest.sha : SHA256;
+import crypto.sha256 : Sha256;
 import std.exception : enforce;
 import std.file : isSymlink;
 import std.stdio : File;
@@ -191,7 +191,7 @@ private final class LocalParser : Parser {
 }
 
 private ubyte[32] contentDigest(Content content) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     content.stream((const(ubyte)[] chunk) { digest.put(chunk); });
     return digest.finish();
 }

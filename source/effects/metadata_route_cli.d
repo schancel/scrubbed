@@ -18,7 +18,7 @@ import effects.local_manifest : LocalManifest, SinkKey, SinkState, configDigest,
     inputDigest;
 import job.legacy : lowerLegacyNames;
 import job.spec : JobSpec, JobStageSpec;
-import std.digest.sha : SHA256;
+import crypto.sha256 : Sha256;
 import stages.contract : EventKind, StageDocument;
 import std.algorithm.sorting : sort;
 import std.file : SpanMode, dirEntries, mkdir, read, thisExePath;
@@ -53,7 +53,7 @@ private ubyte[32] runningExecutableDigest() {
         before.st_dev != opened.st_dev || before.st_ino != opened.st_ino ||
         before.st_size != opened.st_size)
         throw new Exception("running executable changed before hashing");
-    SHA256 digest;
+    auto digest = Sha256.create;
     ubyte[64 * 1024] buffer;
     ulong total;
     while (true) {

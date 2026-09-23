@@ -5,7 +5,7 @@ import domain.document : DocumentId;
 import domain.quality_features : Disposition, QualityDecision;
 import domain.exact_dedup : ExactDuplicateLink, exactBytesVersion;
 import std.algorithm.sorting : sort;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 
 enum mixPolicyVersion = "mix-policy:v1";
 enum uint maxSampleDenominator = 1_000_000;

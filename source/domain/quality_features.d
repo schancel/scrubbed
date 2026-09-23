@@ -3,7 +3,7 @@ module domain.quality_features;
 
 import domain.document : DocumentId, OutputName, SourceLocator;
 import domain.shard_format : ShardDocument, maxDocumentPayload;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 import std.exception : enforce;
 import std.uni : unicode;
 import std.utf : UTFException, validate;

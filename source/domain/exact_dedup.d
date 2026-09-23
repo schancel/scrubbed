@@ -3,7 +3,7 @@ module domain.exact_dedup;
 
 import domain.document : DocumentId;
 import std.algorithm.sorting : sort;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 import std.exception : enforce;
 
 /// Exact bytes are the canonical content in exact-bytes:v1. The caller owns the

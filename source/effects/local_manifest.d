@@ -5,7 +5,7 @@ import domain.document : DocumentId;
 import effects.sqlite_ffi;
 import std.datetime.systime : Clock;
 import std.conv : to;
-import std.digest.sha : sha256Of, SHA256;
+import crypto.sha256 : Sha256, sha256Of;
 import std.digest : LetterCase, toHexString;
 import core.stdc.stdlib : free;
 import core.stdc.errno : errno, EINTR, ENOENT, EIO, EACCES, EPERM, ELOOP,
@@ -87,7 +87,7 @@ ubyte[32] inputDigest(const(ubyte)[] bytes) { return sha256Of(bytes); }
 ubyte[32] outputDigest(const(ubyte)[] bytes) { return sha256Of(bytes); }
 
 ubyte[32] configDigest(const(ubyte)[] canonicalBytes) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     digest.put(cast(const(ubyte)[]) "scrubbed:manifest-config:v1\0");
     ulong length = canonicalBytes.length;
     ubyte[8] width;
@@ -283,7 +283,7 @@ package ubyte[32] hashFile(string path) {
         failRehashIo("cannot stat observed output", savedErrno);
     }
     require(statResult == 0 && S_ISREG(info.st_mode), "observed output is not regular");
-    SHA256 digest;
+    auto digest = Sha256.create;
     ubyte[64 * 1024] buffer;
     while (true) {
         version (FailurePolicyHarness) injectedRehashFault(path, "read");

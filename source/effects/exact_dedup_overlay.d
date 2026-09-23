@@ -10,7 +10,7 @@ import effects.document_shards : DocumentShardReader, OverlayWriter, PublishFaul
     PublishStep;
 import std.algorithm.sorting : sort;
 import std.conv : to;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 import std.exception : enforce;
 import std.file : SpanMode, dirEntries, isDir, isSymlink, mkdir, remove, rmdir;
 import std.path : absolutePath, buildNormalizedPath, buildPath, dirName;

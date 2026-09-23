@@ -53,7 +53,7 @@ private immutable InventoryEntry[] expectedInventory = [
     InventoryEntry("source/effects/local_job.d", 2),
     InventoryEntry("source/effects/local_manifest.d", 6),
     InventoryEntry("source/effects/metadata_route_cli.d", 2),
-    InventoryEntry("source/effects/mix_export.d", 7),
+    InventoryEntry("source/effects/mix_export.d", 8),
     InventoryEntry("source/effects/pii_policy_overlay.d", 2),
     InventoryEntry("source/job/dispatch_json.d", 2),
     InventoryEntry("source/job/json.d", 2),
@@ -92,8 +92,29 @@ private ubyte[] deterministicBytes(size_t length, uint seed) {
     return result;
 }
 
+private bool identifierByte(char value) pure nothrow {
+    return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' ||
+        value >= '0' && value <= '9' || value == '_';
+}
+
+private size_t wordOccurrences(string source, string token) {
+    size_t result, from;
+    while (from < source.length) {
+        auto relative = source[from .. $].indexOf(token);
+        if (relative < 0) break;
+        auto at = from + cast(size_t)relative;
+        auto end = at + token.length;
+        if ((at == 0 || !identifierByte(source[at - 1])) &&
+                (end == source.length || !identifierByte(source[end])))
+            ++result;
+        from = end;
+    }
+    return result;
+}
+
 private size_t tokenOccurrences(string source) {
-    return source.count("SHA256") + source.count("sha256Of");
+    return wordOccurrences(source, "Sha256") +
+        wordOccurrences(source, "sha256Of");
 }
 
 private JSONValue inventoryEvidence() {
@@ -122,7 +143,7 @@ private JSONValue inventoryEvidence() {
             enforce((path in expected) !is null,
                 "new production SHA-256 caller is outside the frozen inventory: " ~ path);
     }
-    enforce(total == 76 && rows.length == 21,
+    enforce(total == 77 && rows.length == 21,
         "production SHA-256 inventory cardinality drift");
     JSONValue result;
     result["base"] = "cd15948466509055ae0431439f651ecba8a301f6";
@@ -457,7 +478,7 @@ private void writeReport(string path) {
     report["arm_sha2_execution"] = armExecutionStatus(host);
     report["x86_sha_ni_execution"] = x86ExecutionStatus(host);
     report["production_migration"] =
-        "DEFERRED_PENDING_NATIVE_X86_PROOF_AND_COMBINED_GATES";
+        "MIGRATED_AFTER_NATIVE_AND_COMBINED_GATES";
     report["multi_gib_logical_bytes"] = 4_296_015_890L;
     report["multi_gib_status"] = "PASSED_AGAINST_PHOBOS";
     report["inventory"] = inventoryEvidence;
@@ -523,7 +544,7 @@ private void validateReport(string path) {
         report["arm_sha2_execution"].str == armExecutionStatus(host) &&
         report["x86_sha_ni_execution"].str == x86ExecutionStatus(host) &&
         report["production_migration"].str ==
-            "DEFERRED_PENDING_NATIVE_X86_PROOF_AND_COMBINED_GATES" &&
+            "MIGRATED_AFTER_NATIVE_AND_COMBINED_GATES" &&
         report["multi_gib_logical_bytes"].integer == 4_296_015_890L &&
         report["multi_gib_status"].str == "PASSED_AGAINST_PHOBOS",
         "SHA-256 report status mismatch");

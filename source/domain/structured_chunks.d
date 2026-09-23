@@ -4,7 +4,7 @@ module domain.structured_chunks;
 import domain.document : DocumentId;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 import std.exception : enforce;
 import std.utf : UTFException, validate;
 

@@ -68,7 +68,7 @@ import std.stdio : File, stderr, writefln, writeln;
 import std.string : indexOf, join;
 import std.utf : validate;
 import std.uuid : randomUUID;
-import std.digest.sha : SHA256;
+import crypto.sha256 : Sha256;
 import core.stdc.errno : errno, EINTR;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
 import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
@@ -746,7 +746,7 @@ private ubyte[32] runningExecutableDigest() {
         before.st_dev != opened.st_dev || before.st_ino != opened.st_ino ||
         before.st_size != opened.st_size)
         throw new Exception("running executable changed before hashing");
-    SHA256 digest;
+    auto digest = Sha256.create;
     ubyte[64 * 1024] buffer;
     ulong total;
     while (true) {
@@ -889,7 +889,7 @@ private void explainDispatchInputProblem(ref RuntimePlanV1 plan,
 }
 
 private ubyte[32] durableContentDigest(Content content) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     content.stream((const(ubyte)[] chunk) { digest.put(chunk); });
     return digest.finish();
 }

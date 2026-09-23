@@ -2,7 +2,7 @@
 module domain.shard_format;
 
 import domain.document : DocumentId, OutputName, SourceLocator;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 import std.exception : enforce;
 import std.string : indexOf;
 import std.uni : normalize;

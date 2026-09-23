@@ -14,7 +14,7 @@ import effects.document_shards : DocumentShardReader, JoinedOverlay,
     OverlayReader, OverlayWriter, PublishFault, joinShards, shardDigest;
 import effects.pii_overlay : decodePiiFindings, piiAnalyzerKey,
     piiAnalyzerVersion, piiFieldKey;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 import std.exception : enforce;
 import std.string : toStringz;
 

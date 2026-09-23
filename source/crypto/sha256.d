@@ -116,7 +116,20 @@ private:
     bool active;
 
 public:
-    static Sha256 create(Sha256Backend requested = Sha256Backend.automatic) {
+    static Sha256 create() pure {
+        Sha256 result;
+        result.backendValue = processBackend;
+        final switch (processBackend) {
+        case Sha256Backend.automatic: assert(false);
+        case Sha256Backend.scalar: result.compress = &compressScalar; break;
+        case Sha256Backend.armSha2: result.compress = &compressArmSha2; break;
+        case Sha256Backend.x86ShaNi: result.compress = &compressX86ShaNi; break;
+        }
+        result.start;
+        return result;
+    }
+
+    static Sha256 create(Sha256Backend requested) {
         Sha256 result;
         result.backendValue = requested == Sha256Backend.automatic
             ? processBackend : requested;
@@ -188,4 +201,18 @@ public:
         pending[] = 0;
         return result;
     }
+}
+
+ubyte[32] sha256Of(scope const(ubyte)[] input) pure {
+    auto digest = Sha256.create;
+    digest.put(input);
+    return digest.finish;
+}
+
+unittest {
+    import std.digest.sha : phobosSha256Of = sha256Of;
+
+    foreach (input; [cast(const(ubyte)[])[], cast(const(ubyte)[])"abc",
+            cast(const(ubyte)[])"a 64-byte boundary fixture that crosses padding exactly here......."])
+        assert(sha256Of(input) == phobosSha256Of(input));
 }

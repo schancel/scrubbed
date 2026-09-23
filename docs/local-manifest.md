@@ -21,50 +21,46 @@ fresh v2 path. The remainder of this document describes the retained v1 API
 used by offline migration and predecessor consumers; it is not the canonical
 shipping writer.
 
-`effects.local_manifest.LocalManifest` is the v1 local effects API. The
-`run`/`repair`/no-verb CLI offers an opt-in local-file/tree restart path with
-`--manifest PATH`. Without that flag, existing file/tree and JSONL behavior is
-unchanged. JSONL stdin/stdout cannot use a local manifest.
+## Archival v1 API (not a live CLI route)
 
-The CLI uses `local-files:v1`, the canonical selected input root as source key,
-and a normalized root-relative record path (`.` for one file) for typed
-`DocumentId`. Moving the root intentionally creates a new identity. The one
-output sink is `local-primary:v1`; this does not imply multi-sink completion.
-The input digest is from the same admitted mapping used by the filter chain,
-hashed before transformation and again before publication. A changed size or
-SHA-256 fails. Concurrent in-place writers are not a snapshot guarantee.
+`effects.local_manifest.LocalManifest` is retained for offline migration and
+predecessor consumers. Live `run`/`repair --manifest` refuses its v1 database
+without mutation and requires a fresh manifest-v2 path. The behavior below
+documents the predecessor API; it is not the canonical shipping writer.
 
-The CLI's versioned canonical config bytes include the exact selected filter
-string or config-file bytes used to build the chain, file/tree output policy,
-canonical output route, and a bounded stream SHA-256 of the running executable
-path. `--manifest-retry` is deliberately excluded. The executable path is
-checked for inode and size changes around hashing. On macOS, `thisExePath()`
-resolves a filesystem path rather than a stable mapped-image handle: concurrent
-replacement of the executable is outside this guarantee, including replacement
-before the path is opened. Keep the executable path stable for a run; rebuilt
-executables may safely invalidate old work. No cross-machine equivalence is
-claimed.
+The predecessor route used `local-files:v1`, the canonical selected input root
+as source key, and a normalized root-relative record path (`.` for one file)
+for typed `DocumentId`. Moving the root created a new identity. Its one output
+sink was `local-primary:v1`, without multi-sink completion. The input digest
+came from the same admitted mapping used by its filter chain and was checked
+again before publication. A changed size or SHA-256 failed; concurrent in-place
+writers were not a snapshot guarantee.
 
-An exact committed row skips only after the CLI checks the canonical stored
-destination against its selected output and the API rehashes that output.
-Unresolved failed/uncertain rows or any pre-existing destination fail by
-default. A planned row with no destination can resume. After inspecting a
-destination, `--manifest-retry` explicitly authorizes replacement; it is not
-part of output identity. `--validate` checks paths/config without creating a
-DB, and `--dry-run` runs filters but creates neither DB nor output. `--explain`
-reports one status per input: `skipped` for verified committed output,
+Its versioned config bytes included the exact selected filter string or config
+bytes, file/tree output policy, canonical output route, and running-executable
+digest; `--manifest-retry` was excluded. It checked the executable path around
+hashing, but on macOS `thisExePath()` supplied a filesystem path rather than a
+stable mapped-image handle. Concurrent executable replacement and cross-machine
+equivalence were outside that predecessor guarantee.
+
+An exact committed row skipped only after the predecessor checked the stored
+destination against its selected output and the API rehashed that output.
+Unresolved failed/uncertain rows or any pre-existing destination failed by
+default. A planned row with no destination could resume. After inspecting a
+destination, `--manifest-retry` explicitly authorized replacement; it was not
+part of output identity. Its `--validate` checked paths/config without creating
+a DB, and `--dry-run` ran filters but created neither DB nor output. `--explain`
+reported one status per input: `skipped` for verified committed output,
 `uncertain` for invalidated committed output, `retry-required` for other
 unresolved/pre-existing destinations, and `retry` with a separate
-changed/unchanged detail after authorized replacement. Refused inputs retain
-a nonzero incomplete exit. Manifest DB, `-wal`, and
-`-shm` must lie outside the selected input and output trees; aliases and
-hardlinks are rejected. The first CLI slice serializes manifest work even when
-`--threads` is larger, while preserving bounded input admission. It makes no
-general throughput claim. The existing string pipeline materializes output;
-adapting it to F08's `ContentPiece.own` adds a temporary whole-output copy,
-so the CLI does not claim bounded output memory. The F08 sink publishes before
-the DB commit. A crash in between may require explicit retry; it never grants
-a false committed skip.
+changed/unchanged detail after authorized replacement. Refused inputs retained
+a nonzero incomplete exit. Manifest DB, `-wal`, and `-shm` had to lie outside
+the selected input and output trees; aliases and hardlinks were rejected. That
+predecessor slice serialized manifest work even
+when `--threads` was larger and materialized the string pipeline before adapting
+it to `ContentPiece.own`; those statements do not describe the current compiled
+manifest-v2 route. Its sink published before the DB commit, so a crash could
+require explicit retry without granting a false committed skip.
 
 The v1 schema fixes `application_id=0x53435242` and `user_version=1`.
 `sink_state` is keyed by `(document_id,input_sha256,config_sha256,sink_key)`

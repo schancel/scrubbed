@@ -39,14 +39,16 @@ for explicitly supported document formats are tracked separately (#67, #156).
       mmap/byte views exist in `source/domain/document.d`, with golden ID and
       close/alias tests. Derived children now use a distinct, deterministic
       `child:v1:` identity namespace, so an ordinary source locator cannot
-      collide with them. The CLI and future content/job pipelines do not yet
-      use this module; callers must explicitly close view owners.
+      collide with them. Canonical local, durable, extract, metadata, and
+      selected-field JSONL execution use this identity model; callers at the
+      lower-level view boundary must explicitly close view owners.
 - [~] Ordered borrowed/owned content pieces and bounded streaming exist in
       `source/content/pieces.d`; a D experiment compares list and rope edits.
-      `Content.pieces()` now exposes a lazy Phobos InputRange. Neither content
-      nor document stages are integrated into CLI filters/output; optimized
-      wired-list evidence shows high-edit scaling unsuitable for a throughput
-      path until representation/backpressure is revisited.
+      `Content.pieces()` now exposes a lazy Phobos InputRange. Canonical compiled
+      document stages and their before/after filter placement run through this
+      representation and the atomic piece sink; optimized wired-list evidence
+      shows high-edit scaling unsuitable for a throughput path until
+      representation/backpressure is revisited.
 - [~] Pure structured chunking and canonical JSONL export now provide stable
       document/revision-bound chunk identities, UTF-8 byte spans, bounded
       hierarchy depth, and output caps (`docs/structured-chunks.md`; #42
@@ -340,24 +342,23 @@ is useful, but it is not sufficient on its own.
       lost-ledger failures stop with exit 2. Keyed `--explain` and release-active
       actual-binary fault tests cover verified skips, unsafe routes, canceled
       later files, and missing-vs-unsafe output parents (`docs/failure-policy.md`).
-      The separate opt-in v2 journal now supplies structured errors (F13/#18),
-      but targeted F14/#19 retry and JSONL stdin/stdout policy remain open.
-- [x] Emit structured errors and outstanding failures (F13/#18). An
-      opt-in v2 SQLite journal supports fixed-code events, exact-key
-      outstanding state, durable publication intent/recovery, stable opaque
-      public sink IDs, and explicit offline copy from v1
-      (`docs/error-events.md`). Opt-in bounded JSONL history/outstanding
-      export and SHA-256 sidecar verification have landed; each file is
-      atomically replaced, but the pair is not atomic. V2 sink labels are
-      limited to 256 UTF-8 bytes while legacy v1 retains longer keys. The
-      default `run`/`repair` path still uses v1; explicit `--error-journal`
-      and `--error-retry` opt into live local-file/tree v2 processing. V2
-      `errors-init`, `errors-copy`, `errors-export`, and `errors-verify`
-      management verbs are available. Opt-in local-primary targeted retry
-      has landed; non-seekable/S3 retry and JSONL stdin/stdout journaling
-      are not included.
-- [~] Retry exact failed records and sinks (F14/#19). A read-only-after-open
-      v2 visitor now streams current outstanding full keys in stable order,
+      The opt-in current-v3 journal supplies structured errors (F13/#18) and
+      exact local targeted retry; non-seekable/S3 retry and JSONL stdin/stdout
+      journaling remain open.
+- [x] Emit structured errors and outstanding failures (F13/#18). The
+      current-v3 SQLite journal supports fixed-code events, exact-key
+      outstanding state, canonical final-event workflow recovery, stable opaque
+      public sink IDs, and targeted local retry (`docs/error-events.md`).
+      Opt-in bounded JSONL history/outstanding export and SHA-256 sidecar
+      verification have landed; each file is
+      atomically replaced, but the pair is not atomic. `errors-init` creates
+      only v3; `errors-copy --from-v1` creates an archival v2 database, while
+      export/verify accept archival v2 and current v3. Live processing refuses
+      v2 without mutation. Runs without a durability flag are non-durable.
+      Opt-in local-primary targeted retry has landed; non-seekable/S3 retry and
+      JSONL stdin/stdout journaling are not included.
+- [~] Retry exact failed records and sinks (F14/#19). The archival v2 API's
+      read-only visitor streams outstanding full keys in stable order,
       rejecting malformed stored identities and reentrant journal calls
       (`docs/error-events.md`). Opt-in `--error-targeted` selects local
       file/tree documents before content admission and requires the exact

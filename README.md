@@ -168,10 +168,11 @@ The [bounded-input contract](docs/bounded-input.md) and `TODO.md` describe
 the remaining scale-readiness gates. Scrubbed is not yet a proven
 terabyte-scale engine.
 
-Standalone POSIX effects now demonstrate [bounded mapped windows](docs/windowed-input.md)
-and [atomic streaming of content pieces](docs/atomic-piece-output.md), including
-a verified 1.075 GB output without an output-sized D allocation. Neither
-effect is wired into the CLI or proves that context-heavy filters can stream.
+The standalone [bounded mapped-window](docs/windowed-input.md) reader remains
+separate from CLI admission. [Atomic streaming of content pieces](docs/atomic-piece-output.md)
+is wired into canonical local and durable publication and has verified a
+1.075 GB output without an output-sized D allocation. This does not prove that
+context-heavy filters can stream.
 A [statically linked local SQLite manifest](docs/local-manifest.md) now
 records versioned per-sink state, verifies destination bytes before a skip,
 and passes bounded replay and process-kill tests. Opt-in file/tree CLI

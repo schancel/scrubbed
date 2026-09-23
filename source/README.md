@@ -108,8 +108,8 @@ production document-stage backpressure; F04's high-edit content path still
 needs measurement. The CLI's bounded local file queue is a separate seam.
 [`stages/text_transform.d`](stages/text_transform.d) is the self-registering
 no-op document map used by compiled jobs whose content work is an ordered
-filter chain. Its declared `before` placement is metadata until execution is
-wired.
+filter chain. Compiled execution applies its declared `before` placement before
+the document map.
 
 [`effects/runner.d`](effects/runner.d) defines typed `Source`, `Parser`, and
 `Sink` ports and the one-document-at-a-time `runEffects` composition root.

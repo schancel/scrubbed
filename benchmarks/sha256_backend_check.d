@@ -46,7 +46,7 @@ private immutable InventoryEntry[] expectedInventory = [
     InventoryEntry("source/domain/structured_chunks.d", 2),
     InventoryEntry("source/effects/dispatch_record.d", 4),
     InventoryEntry("source/effects/document_shards.d", 4),
-    InventoryEntry("source/effects/durable_job.d", 11),
+    InventoryEntry("source/effects/durable_job.d", 12),
     InventoryEntry("source/effects/error_export.d", 4),
     InventoryEntry("source/effects/exact_dedup_overlay.d", 4),
     InventoryEntry("source/effects/independent_sinks.d", 2),
@@ -122,10 +122,10 @@ private JSONValue inventoryEvidence() {
             enforce((path in expected) !is null,
                 "new production SHA-256 caller is outside the frozen inventory: " ~ path);
     }
-    enforce(total == 75 && rows.length == 21,
+    enforce(total == 76 && rows.length == 21,
         "production SHA-256 inventory cardinality drift");
     JSONValue result;
-    result["base"] = "c46abf30872ffd213801babd442835aaa15d692f";
+    result["base"] = "cd15948466509055ae0431439f651ecba8a301f6";
     result["module_count"] = cast(long)rows.length;
     result["occurrence_count"] = cast(long)total;
     result["modules"] = rows;
@@ -306,10 +306,74 @@ private string sourceHash(string path) {
     return hex(digest);
 }
 
-private JSONValue disassemblyEvidence() {
+private string commandValue(string[] command, string label) {
+    auto result = execute(command);
+    enforce(result.status == 0 && result.output.strip.length != 0,
+        "cannot identify host " ~ label);
+    return result.output.strip;
+}
+
+private JSONValue hostIdentity() {
+    auto os = commandValue(["/usr/bin/uname", "-s"], "operating system");
+    auto release = commandValue(["/usr/bin/uname", "-r"], "OS release");
+    auto architecture = commandValue(["/usr/bin/uname", "-m"], "architecture");
+    auto cpu = commandValue(["/usr/sbin/sysctl", "-n",
+        "machdep.cpu.brand_string"], "CPU");
+    enforce(os == "Darwin", "SHA-256 evidence requires Darwin host identity");
+    version (AArch64)
+        enforce(architecture == "arm64",
+            "compiled AArch64 does not match host architecture");
+    else version (X86_64)
+        enforce(architecture == "x86_64",
+            "compiled x86-64 does not match host architecture");
+    else
+        enforce(false, "unsupported SHA-256 evidence host architecture");
     JSONValue result;
-    auto arm = execute(["/usr/bin/otool", "-tvV", thisExePath]);
-    enforce(arm.status == 0, "ARM disassembly failed");
+    result["os"] = os;
+    result["os_release"] = release;
+    result["architecture"] = architecture;
+    result["cpu"] = cpu;
+    return result;
+}
+
+private string armExecutionStatus(const JSONValue host) {
+    if (host["architecture"].str != "arm64") {
+        enforce(!sha256BackendAvailable(Sha256Backend.armSha2),
+            "ARM SHA2 backend available on a non-ARM host");
+        return "BLOCKED_EXTERNAL_ARCHITECTURE_MISMATCH_FEATURE_UNKNOWN";
+    }
+    return sha256BackendAvailable(Sha256Backend.armSha2)
+        ? "SUPPORTED_AND_PASSED"
+        : "BLOCKED_EXTERNAL_NATIVE_ARM_SHA2_UNAVAILABLE";
+}
+
+private string x86ExecutionStatus(const JSONValue host) {
+    if (host["architecture"].str != "x86_64") {
+        enforce(!sha256BackendAvailable(Sha256Backend.x86ShaNi),
+            "x86 SHA-NI backend available on a non-x86 host");
+        return "BLOCKED_EXTERNAL_ARCHITECTURE_MISMATCH_CPUID_UNKNOWN";
+    }
+    return sha256BackendAvailable(Sha256Backend.x86ShaNi)
+        ? "SUPPORTED_AND_PASSED"
+        : "BLOCKED_EXTERNAL_NATIVE_X86_CPUID_HAS_NO_SHA";
+}
+
+private JSONValue disassemblyEvidence(const JSONValue host) {
+    JSONValue result;
+    auto root = buildPath("/tmp", "scrubbed-sha256-disassembly-" ~
+        randomUUID.toString);
+    import std.file : mkdir;
+    mkdir(root);
+    scope(exit) rmdirRecurse(root);
+
+    auto armObject = buildPath(root, "sha256_arm64.o");
+    auto armBuild = execute(["ldc2", "-O3", "-release",
+        "-mtriple=arm64-apple-darwin", "-Isource", "-c",
+        "source/crypto/sha256_arm64.d", "-of=" ~ armObject]);
+    enforce(armBuild.status == 0, "ARM SHA2 cross-compile failed");
+    auto arm = execute(["/opt/homebrew/opt/llvm/bin/llvm-objdump", "-d",
+        "--arch=arm64", armObject]);
+    enforce(arm.status == 0, "ARM SHA2 disassembly failed");
     foreach (instruction; ["sha256h.4s", "sha256h2.4s", "sha256su0.4s",
             "sha256su1.4s"])
         result["arm_" ~ instruction] = cast(long)arm.output.count(instruction);
@@ -318,11 +382,8 @@ private JSONValue disassemblyEvidence() {
         result["arm_sha256su0.4s"].integer > 0 &&
         result["arm_sha256su1.4s"].integer > 0,
         "ARM SHA2 instruction proof missing");
+    result["arm_object_sha256"] = sourceHash(armObject);
 
-    auto root = buildPath("/tmp", "scrubbed-sha256-x86-" ~ randomUUID.toString);
-    import std.file : mkdir;
-    mkdir(root);
-    scope(exit) rmdirRecurse(root);
     auto object = buildPath(root, "sha256_x86_64.o");
     auto build = execute(["ldc2", "-O3", "-release",
         "-mtriple=x86_64-apple-darwin", "-Isource", "-c",
@@ -334,8 +395,7 @@ private JSONValue disassemblyEvidence() {
         "x86 SHA-NI instruction proof missing");
     result["x86_sha256rnds2"] = cast(long)dump.output.count("sha256rnds2");
     result["x86_object_sha256"] = sourceHash(object);
-    result["x86_execution"] = sha256BackendAvailable(Sha256Backend.x86ShaNi)
-        ? "SUPPORTED_AND_PASSED" : "BLOCKED_EXTERNAL_HOST_CPUID_HAS_NO_SHA";
+    result["x86_execution"] = x86ExecutionStatus(host);
     return result;
 }
 
@@ -343,17 +403,18 @@ private void writeReport(string path) {
     selfTest;
     longTest;
     JSONValue report;
-    report["schema"] = "scrubbed-sha256-backend-evidence-v1";
-    report["base_source_sha"] = "c46abf30872ffd213801babd442835aaa15d692f";
+    report["schema"] = "scrubbed-sha256-backend-evidence-v2";
+    report["base_source_sha"] = "cd15948466509055ae0431439f651ecba8a301f6";
     report["compiler"] = expectedCompiler;
     report["frontend"] = cast(long)__VERSION__;
     report["build_recipe"] = buildRecipe;
     report["selected_backend"] = sha256BackendName(selectedSha256Backend);
-    report["arm_sha2_execution"] = sha256BackendAvailable(Sha256Backend.armSha2)
-        ? "SUPPORTED_AND_PASSED" : "BLOCKED_EXTERNAL_UNAVAILABLE_HOST";
-    report["x86_sha_ni_execution"] = sha256BackendAvailable(Sha256Backend.x86ShaNi)
-        ? "SUPPORTED_AND_PASSED" : "BLOCKED_EXTERNAL_UNAVAILABLE_HOST";
-    report["production_migration"] = "PROHIBITED_WHILE_ISSUE_184_ACTIVE";
+    auto host = hostIdentity;
+    report["host_identity"] = host;
+    report["arm_sha2_execution"] = armExecutionStatus(host);
+    report["x86_sha_ni_execution"] = x86ExecutionStatus(host);
+    report["production_migration"] =
+        "DEFERRED_PENDING_NATIVE_X86_PROOF_AND_COMBINED_GATES";
     report["multi_gib_logical_bytes"] = 4_296_015_890L;
     report["multi_gib_status"] = "PASSED_AGAINST_PHOBOS";
     report["inventory"] = inventoryEvidence;
@@ -370,10 +431,9 @@ private void writeReport(string path) {
     report["compiler_executable"] = compilerPath.output.strip;
     report["compiler_executable_sha256"] =
         sourceHash(compilerPath.output.strip);
-    report["otool_sha256"] = sourceHash("/usr/bin/otool");
     report["llvm_objdump_sha256"] =
         sourceHash("/opt/homebrew/opt/llvm/bin/llvm-objdump");
-    report["disassembly"] = disassemblyEvidence;
+    report["disassembly"] = disassemblyEvidence(host);
     JSONValue[] rows;
     foreach (bytes; [64, 1024, 8192, 1024 * 1024]) {
         foreach (sample; 0 .. 5) foreach (pairOrdinal, backend;
@@ -405,23 +465,22 @@ private void writeReport(string path) {
 
 private void validateReport(string path) {
     auto report = parseJSON(readText(path));
-    enforce(report["schema"].str == "scrubbed-sha256-backend-evidence-v1" &&
+    enforce(report["schema"].str == "scrubbed-sha256-backend-evidence-v2" &&
         report["base_source_sha"].str ==
-            "c46abf30872ffd213801babd442835aaa15d692f" &&
+            "cd15948466509055ae0431439f651ecba8a301f6" &&
         report["compiler"].str == expectedCompiler &&
         report["frontend"].integer == __VERSION__ &&
         report["build_recipe"].str == buildRecipe,
         "SHA-256 report identity mismatch");
+    auto host = hostIdentity;
+    enforce(report["host_identity"].toString == host.toString,
+        "SHA-256 report host identity mismatch");
     enforce(report["selected_backend"].str ==
         sha256BackendName(selectedSha256Backend) &&
-        report["arm_sha2_execution"].str ==
-            (sha256BackendAvailable(Sha256Backend.armSha2)
-                ? "SUPPORTED_AND_PASSED" : "BLOCKED_EXTERNAL_UNAVAILABLE_HOST") &&
-        report["x86_sha_ni_execution"].str ==
-            (sha256BackendAvailable(Sha256Backend.x86ShaNi)
-                ? "SUPPORTED_AND_PASSED" : "BLOCKED_EXTERNAL_UNAVAILABLE_HOST") &&
+        report["arm_sha2_execution"].str == armExecutionStatus(host) &&
+        report["x86_sha_ni_execution"].str == x86ExecutionStatus(host) &&
         report["production_migration"].str ==
-            "PROHIBITED_WHILE_ISSUE_184_ACTIVE" &&
+            "DEFERRED_PENDING_NATIVE_X86_PROOF_AND_COMBINED_GATES" &&
         report["multi_gib_logical_bytes"].integer == 4_296_015_890L &&
         report["multi_gib_status"].str == "PASSED_AGAINST_PHOBOS",
         "SHA-256 report status mismatch");
@@ -445,11 +504,10 @@ private void validateReport(string path) {
         report["system_oracle_sha256"].str == sourceHash("/usr/bin/shasum") &&
         report["compiler_executable_sha256"].str ==
             sourceHash(report["compiler_executable"].str) &&
-        report["otool_sha256"].str == sourceHash("/usr/bin/otool") &&
         report["llvm_objdump_sha256"].str ==
             sourceHash("/opt/homebrew/opt/llvm/bin/llvm-objdump"),
         "SHA-256 report tool/binary hash mismatch");
-    enforce(report["disassembly"].toString == disassemblyEvidence.toString,
+    enforce(report["disassembly"].toString == disassemblyEvidence(host).toString,
         "SHA-256 report disassembly mismatch");
 
     immutable sizes = [64, 1024, 8192, 1024 * 1024];

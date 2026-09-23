@@ -597,8 +597,8 @@ any cross-tool comparison. No HTML extractor or trafilatura parity is claimed.
 ## SHA-256 backend-only evidence
 
 `sha256_backend_check.d` exercises the private incremental facade introduced
-for #185 without migrating any production caller. The frozen base is
-`c46abf30872ffd213801babd442835aaa15d692f`: 75 `SHA256`/`sha256Of`
+for #185 without migrating any production caller. The current evidence base is
+`cd15948466509055ae0431439f651ecba8a301f6`: 76 `SHA256`/`sha256Of`
 occurrences in 21 production modules. The committed evidence records each
 module's source hash and preserves representative document, child, and v3 job
 identity fixtures. No file outside `source/crypto`, this harness, this README,
@@ -631,19 +631,24 @@ selection. The x86 function alone has `@target("sha")`; normal x86 builds use
 their compression function is called. Scalar is always compiled and
 forceable, and digest state belongs to each facade instance.
 
-On the recorded Apple M4 host, ARM execution and disassembly prove
+The evidence binds a sanitized host identity: Darwin release, architecture,
+and CPU brand, with no serial number or other private identifier. On the
+recorded Apple M4 AArch64 host, ARM execution and disassembly prove
 `sha256h`, `sha256h2`, `sha256su0`, and `sha256su1`. The D source also
 cross-compiles to x86-64 Mach-O and Linux objects whose disassembly contains
-32 `sha256rnds2` instructions. Rosetta's exposed x86 CPUID has no SHA feature,
-so x86 execution is `BLOCKED_EXTERNAL_HOST_CPUID_HAS_NO_SHA`, not passed or
-substituted. A capable native x86-64 host must run the same KAT/chunk/alignment
-suite before production migration.
+32 `sha256rnds2` instructions. Because this process is AArch64, x86 execution
+is `BLOCKED_EXTERNAL_ARCHITECTURE_MISMATCH_CPUID_UNKNOWN`: no x86 CPUID query
+was made, and no x86 result was substituted. On native x86-64, the report
+instead distinguishes CPUID without SHA-NI from executed-and-passed SHA-NI. A
+capable native x86-64 host must run the same KAT/chunk/alignment suite before
+production migration.
 
 `sha256-backend-evidence.json` contains five interleaved scalar/selected
 samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,
-and instruction counts. These timings are descriptive: cache and frequency
+and instruction counts. The validator re-derives the host identity and
+architecture-conditioned execution statuses. These timings are descriptive:
+cache and frequency
 state are uncontrolled, and this backend-only landing makes no production or
-full-CLI speed claim. #184 owns removal of redundant durable work. Production
-SHA call-site migration remains prohibited until #184 is integrated and both
-architecture backends have passed execution, equivalence, instruction, and
-combined full-CLI/durable gates.
+full-CLI speed claim. Production SHA call-site migration remains deferred
+until native x86 proof and combined full-CLI/durable gates pass; #184 landing
+alone does not authorize migration.

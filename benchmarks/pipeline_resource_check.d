@@ -29,10 +29,17 @@ int main(string[] args) {
         if (attested &&
             (report["source_binary_mapping"].str != "ATTESTED" ||
              report["build_attestation"]["schema"].str !=
-                "scrubbed-build-attestation-v1" ||
+                "scrubbed-build-attestation-v3" ||
              report["build_attestation"]["target_sha256"].str !=
                 report["binary_sha256"].str ||
-             !digest(report["build_attestation"]["source_archive_sha256"].str, 64)))
+             !digest(report["build_attestation"]["source_archive_sha256"].str, 64) ||
+             !digest(report["build_attestation"]["argparse_inputs_sha256"].str, 64) ||
+             report["build_attestation"]["argparse_version"].str != "2.0.2" ||
+             report["build_attestation"]["native_tools"].array.length != 8 ||
+             !digest(report["build_attestation"]
+                ["native_prebuild_commands_sha256"].str, 64) ||
+             report["build_attestation"]["target_relative_path"].str !=
+                "scrubbed"))
             throw new Exception("inconsistent v6 build attestation");
         writeln("RAM bytes: ", report["ram_bytes"].integer);
         writeln("Harness SHA-256: ", report["harness_sha256"].str);

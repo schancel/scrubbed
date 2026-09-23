@@ -30,6 +30,11 @@ ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
 /tmp/scrubbed-pipeline --self-test
 /tmp/scrubbed-pipeline --self-test-attestation \
   benchmarks/pipeline_attestation_check.d
+/tmp/scrubbed-pipeline --self-test-build-isolation "$(pwd)"
+ldc2 -O3 -release benchmarks/pipeline_build_attestation_check.d \
+  -of=/tmp/scrubbed-pipeline-build-attestation-check
+/tmp/scrubbed-pipeline-build-attestation-check \
+  /tmp/scrubbed-pipeline "$(pwd)"
 /tmp/scrubbed-pipeline --self-test-snapshot "$(pwd)/scrubbed" \
   /tmp/dos2unix-7.5.7/dos2unix
 /tmp/scrubbed-pipeline "$(pwd)/scrubbed" > /tmp/scrubbed-pipeline-result.json
@@ -121,18 +126,46 @@ manifest's entire effective canonical configuration (which also includes
 output route, binary and other policy bytes).
 
 The opt-in `--attested-build` path emits version 5 for the small corpus and
-version 6 for `--large`. It refuses a dirty source checkout, records the exact
-source commit/tree plus SHA-256 of a Git source archive, `dub.json`, and
-`dub.selections.json`, hashes the resolved `ldc2` executable, records its
-version and fixed release build command/status, and verifies the source inputs
-again after building. The target is built in private scratch, hashed, copied
-to a read-only snapshot, and accepted only when the built-target and snapshot
-hashes match. Every timed case, manifest transition, replay, and skip in v5/v6
-carries that target hash. The embedded changed-executable control retains both
-distinct variant hashes and raw A/B/A/B sample attribution. Supplied binaries
-remain v3/v4 and explicitly `UNVERIFIED`; adding an attestation to an old
-schema, spoofing compiler/flags, or mixing a sample hash causes rejection.
-Reports contain only path tokens and hashes, never checkout or scratch paths.
+version 6 for `--large`. It refuses tracked or untracked source changes,
+records the exact source commit/tree and SHA-256 of its Git archive, then
+extracts that already-hashed archive into UUID-named, user-private scratch.
+The release build runs only there; ignored caller `.dub`, native-object, and
+target artifacts are neither copied nor consumed. DUB resolution uses a
+private `DUB_HOME` and `--cache=local` beneath the private extracted source.
+
+Build attestation v3 records hashes of `dub.json`, `dub.selections.json`, the
+resolved compiler and DUB executables, their versions, and the complete
+versioned argparse recipe/input set named by DUB's release build description.
+It also records the fixed native pre-build command digest and exact identities
+(name, role, version, and executable SHA-256) of the ambient `cc`, `ar`, and
+`ranlib` selectors; their `xcrun`-selected Clang/archive executables; and
+`cmake` and `make`. The private commands invoke the selected executables
+directly. The material tools are
+resolved before building, exposed through a
+private pinned-tool directory and fixed system PATH, and accompanied by exact
+`CC`, `AR`, and `RANLIB` environment values. Their identities are verified
+again after compilation. The selected macOS SDK version/build is recorded and
+its exact root is supplied privately through `SDKROOT`; the report omits that
+host path. The Lexbor CMake cache must name the attested C
+compiler, archive tools, and pinned make executable. A D-only negative swaps
+ambient PATH to executable poison tools after resolution and requires the
+private build and emitted attestation to remain bound to the resolved set.
+The argparse input digest is likewise verified after compilation. The supported DUB
+1.42.0 target path is derived from the described root `targetPath` plus
+`targetFileName`, required to remain the private relative path `scrubbed`, and
+verified before snapshotting. The D-only build-attestation check poisons caller
+ignored artifacts, mutates a private argparse source to prove digest change and
+rejection, exercises target discovery, and requires actual v5 report
+publication. Attestation v2 and inconsistent v3 records are rejected.
+
+The target is hashed, copied to a read-only snapshot, and accepted only when
+the built-target and snapshot hashes match. Every timed case, manifest
+transition, replay, and skip in v5/v6 carries that target hash. The embedded
+changed-executable control retains both distinct variant hashes and raw A/B/A/B
+sample attribution. Supplied binaries remain v3/v4 and explicitly
+`UNVERIFIED`; adding an attestation to an old schema, spoofing compiler/flags,
+or mixing a sample hash causes rejection. Reports contain only path tokens and
+hashes, never checkout or scratch paths.
 
 On Linux, the D harness reads `model name`, `Hardware`, or `Processor` from
 `/proc/cpuinfo` and `MemTotal` in `kB` from `/proc/meminfo`. If either cannot

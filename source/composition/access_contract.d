@@ -2,6 +2,8 @@
 module composition.access_contract;
 
 import composition.compiler : CompiledJob, CompiledStage;
+import composition.dispatch_compiler : CompiledDispatchJobV1,
+    CompiledDispatchRouteV1;
 import pipeline : Pipeline;
 import stages.contract : StageDeclaration;
 import stages.registry : ConfiguredStageTransform, FilterPlacement;
@@ -15,6 +17,8 @@ static assert(!__traits(compiles,
         FilterPlacement.none, Pipeline.init)));
 static assert(!__traits(compiles, { CompiledJob forged; }));
 static assert(!__traits(compiles, { CompiledStage forged; }));
+static assert(!__traits(compiles, { CompiledDispatchJobV1 forged; }));
+static assert(!__traits(compiles, { CompiledDispatchRouteV1 forged; }));
 
 private void publicReadContract(CompiledJob compiled) {
     auto identity = compiled.identity;
@@ -32,4 +36,6 @@ unittest {
     assertThrown(CompiledJob.init.stages);
     assertThrown(CompiledStage.init.id);
     assertThrown(CompiledStage.init.transform);
+    assertThrown(CompiledDispatchJobV1.init.identity);
+    assertThrown(CompiledDispatchRouteV1.init.name);
 }

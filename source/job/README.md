@@ -25,3 +25,12 @@ legacy execution model here.
 Runtime factory resolution and document/effect execution do not belong in
 this subtree. A later composition root may depend on `job`, `stages`, and
 `pipeline`; `job` must not import any of them or concrete I/O.
+
+The additive `dispatch_spec.d`, `dispatch_json.d`, and
+`dispatch_cli_tokens.d` modules own the pure v4 dispatch-plan format. Its
+roots are exactly `version`, `dispatch`, and `common`; the latter is one
+nested canonical v3 job. Detector/container limits and every route, typed
+route option, and normalized-outcome action are materialized. Canonical JSON
+sorts routes and option keys, emits actions in enum order, and derives a
+`job:v4:` identity. These pure token/JSON boundaries are intentionally not
+accepted by the shipping argparse surface in this slice.

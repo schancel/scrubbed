@@ -19,7 +19,9 @@ enum DetectionOutcomeV1 : ubyte {
     ambiguous,
     malformed,
     encrypted,
-    unsupported
+    unsupported,
+    genericZip,
+    ooxmlWord
 }
 
 /// Why a detector associated an input with a normalized outcome.
@@ -27,7 +29,8 @@ enum EvidenceKindV1 : ubyte {
     signature,
     textualContent,
     declaredMediaType,
-    fileExtension
+    fileExtension,
+    containerStructure
 }
 
 /// One bounded, normalized item of detector evidence.
@@ -133,7 +136,8 @@ struct DetectionResultV1 {
         foreach (item; evidenceValue) {
             item.validateEvidence;
             if (item.kind == EvidenceKindV1.signature ||
-                    item.kind == EvidenceKindV1.textualContent)
+                    item.kind == EvidenceKindV1.textualContent ||
+                    item.kind == EvidenceKindV1.containerStructure)
                 authoritative[cast(size_t) item.outcome] = true;
         }
         foreach (warning; warningsValue)
@@ -141,8 +145,12 @@ struct DetectionResultV1 {
         size_t authoritativeOutcomes;
         foreach (present; authoritative) if (present) ++authoritativeOutcomes;
         if (isConcreteMediaV1(outcomeValue)) {
-            enforce(authoritativeOutcomes == 1 &&
-                authoritative[cast(size_t) outcomeValue],
+            auto refinedWord = outcomeValue == DetectionOutcomeV1.ooxmlWord &&
+                authoritativeOutcomes == 2 &&
+                authoritative[cast(size_t) DetectionOutcomeV1.genericZip] &&
+                authoritative[cast(size_t) DetectionOutcomeV1.ooxmlWord];
+            enforce((authoritativeOutcomes == 1 &&
+                authoritative[cast(size_t) outcomeValue]) || refinedWord,
                 "concrete outcome must match its sole authoritative evidence");
         } else if (outcomeValue == DetectionOutcomeV1.ambiguous) {
             enforce(authoritativeOutcomes >= 2,
@@ -333,6 +341,14 @@ struct TextContentV1 {
         enforce(snapshot !is null, "text content is not initialized");
         snapshot.stream(sink, chunkSize);
     }
+
+    /// Return another descriptor snapshot without copying payload bytes.
+    Content toContent() {
+        enforce(snapshot !is null, "text content is not initialized");
+        ContentPiece[] pieces;
+        foreach (offset, piece; snapshot) pieces ~= piece;
+        return new Content(pieces);
+    }
 }
 
 /// Checked stable UTF-8 text plus unchanged source identity and presentation.
@@ -379,6 +395,7 @@ struct TextDocumentV1 {
     Document document() const pure { return documentValue; }
     DocumentId id() const pure { return documentValue.id; }
     OutputName outputName() const pure { return documentValue.outputName; }
+    TextContentV1 content() pure { return contentValue; }
     const(TextContentV1) content() const pure { return contentValue; }
     const(DetectionResultV1) detection() const pure { return detectionValue; }
     string extractor() const pure { return extractorValue; }
@@ -388,7 +405,10 @@ struct TextDocumentV1 {
 }
 
 bool isConcreteMediaV1(DetectionOutcomeV1 outcome) pure {
-    return outcome >= DetectionOutcomeV1.plainText && outcome <= DetectionOutcomeV1.gif;
+    return (outcome >= DetectionOutcomeV1.plainText &&
+            outcome <= DetectionOutcomeV1.gif) ||
+        outcome == DetectionOutcomeV1.genericZip ||
+        outcome == DetectionOutcomeV1.ooxmlWord;
 }
 
 private string checkedLabel(string value, string field, size_t maxBytes) {

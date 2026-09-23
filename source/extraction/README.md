@@ -28,8 +28,16 @@ it performs no file, process, network, CLI, or adapter I/O.
   names; entry bytes remain behind scoped, read-only logical windows capped at
   64 KiB. Retained windows never alias a reusable buffer, while borrowed
   backing stays caller-owned and closing its owner invalidates access.
+- `refinement.d` admits only a strong generic-ZIP detection to one bounded
+  container inspection, maps the closed refusal vocabulary to normalized
+  policy outcomes, and retains the inspector's complete accounting and
+  optional admitted-byte capability.
+- `port.d` defines the injected finite extractor registry. Registrations carry
+  canonical implementation/version identity, accepted outcomes, descriptive
+  resources, a typed option schema, and one configured source-to-text apply
+  function; there is no global registry or discovery mechanism.
 
 These contracts still have no concrete Office, PDF, image, or OCR adapter,
-executor wiring, CLI/JSON syntax, fan-out, join, DEFLATE support, or general
+shipping executor wiring, fan-out, join, DEFLATE support, or general
 workflow graph. Later slices may consume them without changing shipping
 behavior introduced here.

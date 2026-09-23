@@ -41,3 +41,19 @@ compiled filters are its only eventual content transform.
 Dependency direction is `composition -> job/pipeline/stages/domain/content`.
 CLI parsing, concrete registrations, effects, scheduling, mappings, sinks,
 and transport remain outside this subtree.
+
+[`dispatch_compiler.d`](dispatch_compiler.d) validates a complete v4 plan,
+checks route/outcome compatibility against an injected finite extractor
+registry, invokes every referenced extractor factory once, and compiles the
+nested v3 common job once. Its opaque result binds canonical identity, bounded
+detection/container limits, the complete action declaration, configured
+routes, and the common plan.
+
+[`dispatch_executor.d`](dispatch_executor.d) detects, refines, and selects
+once. Route actions invoke one configured extractor and converge its checked
+`TextDocumentV1` through the common plan without copying text payload bytes at
+the boundary. Split/derived common output fails closed. Reject, quarantine,
+and pass actions are terminal and skip extractor/common execution; pass keeps
+the original document and `Content` object. Structured events retain source,
+refined/container evidence, action, extractor identity, warnings, and
+provenance, while borrowed owners remain caller-owned.

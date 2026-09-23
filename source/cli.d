@@ -1,7 +1,9 @@
 /// Command-line orchestration and filesystem boundary for scrubbed.
 module cli;
 
+import composition.compiler : CompiledJob, compileJob;
 import core.sync.mutex : Mutex;
+import core.sync.condition : Condition;
 import effects.bounded_input : BoundedInput, InputLimits;
 import effects.jsonl_stream : JsonlFailure, JsonlLimits;
 import effects.stdio_stream : processStandardJsonl;
@@ -11,6 +13,8 @@ import effects.failure_journal : FailureJournal;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.failure_policy : recordDocumentFailure;
+import effects.local_job : LocalJobOutcome, runLocalJob;
+import effects.runner : EffectFailure, EffectPhase;
 import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
@@ -18,27 +22,35 @@ import effects.html_tree : checkedHtmlByteLimit, defaultExtractHtmlBytes;
 import effects.html_tree_json_stage : htmlTreeJsonPlan;
 import effects.html_markdown_stage : htmlMarkdownPlan;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
-    StageDocument, runStage;
+    StageDocument, StageEvent, runStage;
 import stages.config : buildConfigV2;
+import stages.text_transform;
+import job.cli_tokens : parseJobTokens;
+import job.json : jobIdentity, parseJobJson;
+import job.legacy : lowerLegacyDefault, lowerLegacyJson, lowerLegacyNames;
+import job.spec : JobSpec;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
 import filters.punctuation;
 import pipeline;
 import std.algorithm.searching : canFind, startsWith;
-import std.array : split;
+import std.algorithm.iteration : map;
+import std.algorithm.sorting : sort;
+import std.array : array, split;
 import std.conv : to;
 import std.file : FileException, SpanMode, dirEntries, exists, getAttributes,
     getSize, isDir, isFile, isSymlink, mkdir, mkdirRecurse, remove, rename, readText,
     setAttributes, write, thisExePath;
 import std.getopt : config, defaultGetoptPrinter, getopt;
-import std.json : JSONType, JSONValue, parseJSON;
+import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
 import std.mmfile : MmFile;
 import std.parallelism : totalCPUs;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
-import std.string : join;
+import std.string : indexOf, join;
+import std.typecons : Nullable;
 import std.utf : UTFException, validate;
 import std.uuid : randomUUID;
 import std.digest.sha : SHA256;
@@ -412,6 +424,49 @@ bool processOne(string file, string inputRoot, string outputRoot,
     return changed;
 }
 
+private LocalJobOutcome processCompiledOne(string file, string inputRoot,
+        string outputRoot, bool inputIsDir, const ref CompiledJob job,
+        ulong reservedBytes, bool dryRun, PublicationOrder publication) {
+    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
+    auto rootDestination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
+    auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
+        OutputName(inputIsDir ? relative : baseName(outputRoot)));
+    auto ordinal = publication.ordinal(file);
+    bool entered;
+    try {
+        auto result = runLocalJob(file, reservedBytes, document, job,
+            (const ref StageEvent event) {
+                if (!event.isChild) return rootDestination;
+                auto selectedRoot = inputIsDir ? outputRoot : dirName(outputRoot);
+                return buildPath(selectedRoot,
+                    checkedOutputName(event.payload.document.outputName.text));
+            },
+            (string destination, const ref StageEvent event) {
+                auto selectedRoot = inputIsDir ? outputRoot : dirName(outputRoot);
+                publication.reserve(normalizedAbsolute(destination));
+                if (event.isChild && exists(destination))
+                    throw new OutputPolicyViolation(
+                        "derived output already exists: " ~ destination);
+                preflightDestination(destination, selectedRoot);
+                if (!dryRun)
+                    ensurePlainDirectory(selectedRoot,
+                        dirName(normalizedAbsolute(destination)));
+            },
+            () {
+                publication.enter(ordinal);
+                entered = true;
+            }, dryRun);
+        // Every valid compiled job emits at least one terminal event, so entering
+        // publication is part of completing a root.
+        if (!entered) throw new Exception("compiled job produced no terminal decision");
+        publication.complete();
+        return result;
+    } catch (Throwable error) {
+        publication.fail(ordinal);
+        throw error;
+    }
+}
+
 private string explanationRecord(string file, string destination, string chain,
                                  string decision, string reason = "",
                                  string detail = "", string documentId = "",
@@ -469,6 +524,171 @@ private bool canFindOption(const string[] args, string option) {
     foreach (arg; args)
         if (arg == option || arg.startsWith(option ~ "=")) return true;
     return false;
+}
+
+private bool isCompositionOption(string value, out string name) {
+    foreach (candidate; ["--stage", "--stage-option", "--filter", "--filter-option"])
+        if (value == candidate || value.startsWith(candidate ~ "=")) {
+            name = candidate;
+            return true;
+        }
+    return false;
+}
+
+/// Remove composition-only options before std.getopt while retaining their
+/// exact cross-option declaration order for the canonical token parser.
+private string[] takeCompositionTokens(ref string[] args) {
+    string[] kept = args.length ? [args[0]] : null;
+    string[] tokens;
+    for (size_t i = args.length ? 1 : 0; i < args.length; ++i) {
+        string name;
+        if (!isCompositionOption(args[i], name)) {
+            kept ~= args[i];
+            continue;
+        }
+        auto separator = args[i].indexOf('=');
+        if (separator >= 0) {
+            tokens ~= [name, args[i][separator + 1 .. $]];
+        } else {
+            if (i + 1 >= args.length)
+                throw new Exception("missing value for " ~ name);
+            tokens ~= [name, args[++i]];
+        }
+    }
+    args = kept;
+    return tokens;
+}
+
+private bool hasJobVersion(string json) {
+    auto root = parseJSON(json, 16,
+        JSONOptions.strictParsing | JSONOptions.preserveObjectOrder);
+    if (root.type != JSONType.object) return false;
+    foreach (ref member; root.orderedObject)
+        if (member.key == "version") return true;
+    return false;
+}
+
+private JobSpec selectedJob(string[] compositionTokens, bool filtersExplicit,
+        string filterList, bool configExplicit, string configContents,
+        bool versionedConfig) {
+    if (compositionTokens.length) return parseJobTokens(compositionTokens);
+    if (configExplicit)
+        return versionedConfig ? parseJobJson(configContents) :
+            lowerLegacyJson(configContents);
+    if (filtersExplicit) return lowerLegacyNames(filterList.split(","));
+    return lowerLegacyDefault();
+}
+
+private final class PublicationOrder {
+    private Mutex mutex;
+    private Condition changed;
+    private size_t next;
+    private bool stopped;
+    private bool[string] destinations;
+    private size_t[string] ordinals;
+    private size_t assigned;
+
+    this() {
+        mutex = new Mutex;
+        changed = new Condition(mutex);
+    }
+
+    void enter(size_t ordinal) {
+        mutex.lock();
+        while (!stopped && ordinal != next) changed.wait();
+        if (stopped) {
+            mutex.unlock();
+            throw new OrderedPublicationCanceled;
+        }
+        mutex.unlock();
+    }
+
+    void assign(string path) {
+        mutex.lock();
+        ordinals[path] = assigned++;
+        mutex.unlock();
+    }
+
+    size_t ordinal(string path) {
+        mutex.lock();
+        auto found = path in ordinals;
+        if (found is null) {
+            mutex.unlock();
+            throw new Exception("missing publication ordinal");
+        }
+        auto result = *found;
+        mutex.unlock();
+        return result;
+    }
+
+    void reserve(string destination) {
+        mutex.lock();
+        scope(exit) mutex.unlock();
+        if (destination in destinations)
+            throw new OutputPolicyViolation("output collision: " ~ destination);
+        destinations[destination] = true;
+    }
+
+    void complete() {
+        mutex.lock();
+        ++next;
+        changed.notifyAll();
+        mutex.unlock();
+    }
+
+    /// Sequence a processing failure behind every earlier canonical root.
+    /// The winning failure stops later publication; later failures and
+    /// waiters become cancellation outcomes so they cannot replace its cause.
+    void fail(size_t ordinal) {
+        mutex.lock();
+        while (!stopped && ordinal != next) changed.wait();
+        if (stopped) {
+            mutex.unlock();
+            throw new OrderedPublicationCanceled;
+        }
+        stopped = true;
+        changed.notifyAll();
+        mutex.unlock();
+    }
+
+    void abort() {
+        mutex.lock();
+        stopped = true;
+        changed.notifyAll();
+        mutex.unlock();
+    }
+}
+
+private final class OrderedPublicationCanceled : Exception {
+    this() { super("ordered publication canceled after an earlier fatal root"); }
+}
+
+private string effectFailureDetail(EffectFailure failure) {
+    return "completed-root-prefix=" ~ failure.completed.to!string ~
+        ";committed-event-prefix=" ~ failure.eventOrdinal.to!string ~
+        ";partial-write-possible=" ~ failure.partialWritePossible.to!string;
+}
+
+private string checkedOutputName(string name) {
+    if (isAbsolute(name)) throw new OutputPolicyViolation("split output name is absolute");
+    bool previousSeparator = true;
+    foreach (character; name) {
+        version (Windows) const separator = character == '/' || character == '\\';
+        else const separator = character == '/';
+        if (separator && previousSeparator)
+            throw new OutputPolicyViolation("split output name has empty component");
+        previousSeparator = separator;
+    }
+    if (previousSeparator)
+        throw new OutputPolicyViolation("split output name has empty component");
+    string[] parts;
+    foreach (part; pathSplitter(name)) {
+        if (!part.length || part == "." || part == "..")
+            throw new OutputPolicyViolation("split output name has unsafe component");
+        parts ~= part;
+    }
+    if (!parts.length) throw new OutputPolicyViolation("split output name is empty");
+    return buildPath(parts);
 }
 
 private bool sameFile(string a, string b) {
@@ -907,6 +1127,8 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
 }
 
 int runApp(string[] args) {
+    auto compositionTokens = takeCompositionTokens(args);
+    const compositionExplicit = compositionTokens.length != 0;
     string inputPath;
     string outputPath;
     string filterList = "normalize-line-endings,strip-control";
@@ -939,12 +1161,18 @@ int runApp(string[] args) {
         args.canFindOption("--max-queued-docs") ||
         args.canFindOption("--max-input-bytes") || descriptorsExplicit;
 
+    string[] ignoredStages, ignoredStageOptions, ignoredStageFilters,
+        ignoredFilterOptions;
     auto helpInfo = getopt(args,
         config.caseSensitive,
         "input", "Input file or directory tree to process", &inputPath,
         "output", "Output path (mirrors input tree structure when --input is a directory)", &outputPath,
         "filters", "Comma-separated filter chain, applied in order", &filterList,
         "config", "JSON file containing an ordered filter list and per-filter options", &configPath,
+        "stage", "Ordered stage ID=IMPLEMENTATION", &ignoredStages,
+        "stage-option", "Typed option KEY=TYPE:VALUE for the preceding stage", &ignoredStageOptions,
+        "filter", "Filter for the preceding stage", &ignoredStageFilters,
+        "filter-option", "Typed option KEY=TYPE:VALUE for the preceding filter", &ignoredFilterOptions,
         "threads", "Worker thread count for the TaskPool (default: all cores)", &nThreads,
         "max-queued-docs", "Maximum queued input documents (default: 64)", &maxQueuedDocuments,
         "max-input-bytes", "Maximum reserved input bytes (default: 268435456)", &maxInputBytes,
@@ -970,6 +1198,8 @@ int runApp(string[] args) {
     const jsonlOptions = fieldsExplicit || namespaceExplicit || sourceExplicit ||
         lineCapExplicit || outputCapExplicit;
     const jsonlRoute = jsonlOptions || inputPath == "-" || outputPath == "-";
+    string configContents;
+    bool versionedConfig;
     if (manifestExplicit && !manifestPath.length)
         throw new Exception("--manifest path must be nonempty");
     if (manifestRetry && !manifestPath.length)
@@ -1008,6 +1238,10 @@ int runApp(string[] args) {
         SourceLocator(datasetNamespace, sourceKey, "1");
         if (configPath.length && filtersExplicit)
             throw new Exception("--config and --filters are mutually exclusive");
+        configContents = configPath.length ? readText(configPath) : "";
+        versionedConfig = configContents.length && hasJobVersion(configContents);
+        if (compositionExplicit || versionedConfig)
+            throw new Exception("canonical v3 jobs are not migrated to JSONL in Stage 5a");
         auto chain = configPath.length
             ? Pipeline.buildConfigured(loadFilterConfig(configPath))
             : Pipeline.build(filterList.split(","));
@@ -1046,6 +1280,8 @@ int runApp(string[] args) {
         throw new Exception("input limits must be positive");
     if (configPath.length && filtersExplicit)
         throw new Exception("--config and --filters are mutually exclusive");
+    if (compositionExplicit && (configPath.length || filtersExplicit))
+        throw new Exception("composition options are mutually exclusive with --config and --filters");
     if (!exists(inputPath))
         throw new Exception("input path does not exist: " ~ inputPath);
     if (isSymlink(inputPath))
@@ -1057,14 +1293,30 @@ int runApp(string[] args) {
     inputPath = resolveExistingPrefix(inputPath);
     outputPath = resolveExistingPrefix(outputPath);
 
-    auto configContents = (manifestPath.length || errorJournalPath.length) && configPath.length
-        ? readText(configPath) : "";
-    auto chain = configPath.length
-        ? Pipeline.buildConfigured((manifestPath.length || errorJournalPath.length)
-            ? parseFilterConfig(configContents) : loadFilterConfig(configPath))
-        : Pipeline.build(filterList.split(","));
+    configContents = configPath.length ? readText(configPath) : "";
+    versionedConfig = configContents.length && hasJobVersion(configContents);
+
+    const durableRoute = manifestPath.length || errorJournalPath.length;
+    if (durableRoute && (compositionExplicit || versionedConfig))
+        throw new Exception("canonical v3 jobs are not migrated to durable routes in Stage 5a");
+    Pipeline chain;
+    Nullable!CompiledJob compiledJob;
+    string chainLabel;
+    if (durableRoute) {
+        chain = configPath.length
+            ? Pipeline.buildConfigured(parseFilterConfig(configContents))
+            : Pipeline.build(filterList.split(","));
+        chainLabel = chain.names.join(" -> ");
+    } else {
+        auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
+            configPath.length != 0, configContents, versionedConfig);
+        compiledJob = compileJob(spec);
+        chainLabel = versionedConfig || compositionExplicit ? compiledJob.get.identity :
+            spec.stages[0].filters.map!(filter => filter.name).join(" -> ");
+    }
     if (!errorJournalPath.length)
-        writeln("filter chain: ", chain.names.join(" -> "));
+        writeln(versionedConfig || compositionExplicit ? "job: " : "filter chain: ",
+            chainLabel);
 
     const inputIsDir = isDir(inputPath);
     if (!inputIsDir && !isFile(inputPath))
@@ -1107,8 +1359,10 @@ int runApp(string[] args) {
     if (!dryRun && !errorTargeted)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
-    const chainLabel = chain.names.join(" -> ");
     auto pending = explain ? new PendingExplanations : null;
+    auto publication = durableRoute ? null : new PublicationOrder;
+    auto decisionMutex = new Mutex;
+    size_t terminalDecisions;
     size_t manifestCompletedPrefix;
     auto scheduler = new BoundedInput(
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs),
@@ -1123,15 +1377,24 @@ int runApp(string[] args) {
                 decision = processV2One(errorJournal, errorJournalPath, file, inputPath,
                     outputPath, inputIsDir, chain, bytes, configHash, errorRetry,
                     errorTargeted);
-            else
-                decision.status = processOne(file, inputPath, outputPath, inputIsDir,
-                    chain, bytes, dryRun) ? "changed" : "unchanged";
+            else {
+                auto local = processCompiledOne(file, inputPath, outputPath,
+                    inputIsDir, compiledJob.get, bytes, dryRun, publication);
+                decision.status = local.status;
+                decision.detail = local.firstReason;
+                if (local.rejected || local.quarantined) {
+                    decisionMutex.lock();
+                    ++terminalDecisions;
+                    decisionMutex.unlock();
+                }
+            }
             if (explain && errorJournalPath.length)
                 v2Explain(decision.status, decision.key,
                     errorJournal.publicSinkId(decision.key.sink));
             else if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
-                    chainLabel, decision.status, "", decision.detail,
+                    chainLabel, decision.status,
+                    !durableRoute ? decision.detail : "", durableRoute ? decision.detail : "",
                     decision.hasKey ? decision.key.document.text : "",
                     decision.hasKey ? decision.key.sink : "");
             if (explain) pending.remove(file);
@@ -1144,6 +1407,8 @@ int runApp(string[] args) {
             auto fatalPreFilter = cast(FatalManifestPreFilter)error;
             auto fatalPlanned = cast(FatalPlannedFailure)error;
             auto v2Decision = cast(V2DocumentFailure)error;
+            auto effectFailure = cast(EffectFailure)error;
+            auto orderedCanceled = cast(OrderedPublicationCanceled)error;
             if (errorJournalPath.length) {
                 stderr.writeln("scrubbed: ", v2Decision !is null ?
                     v2Decision.code : "error-journal-fatal");
@@ -1155,9 +1420,19 @@ int runApp(string[] args) {
                 if (explain) pending.remove(file);
                 return;
             }
+            if (orderedCanceled !is null) {
+                stderr.writefln("CANCELED %s: %s", file, error.msg);
+                if (explain)
+                    explainOne(file, destinationFor(file, inputPath, outputPath,
+                        inputIsDir), chainLabel, "canceled", error.msg);
+                if (explain) pending.remove(file);
+                return;
+            }
+            auto renderedError = effectFailure is null ? error.msg :
+                error.msg ~ " (" ~ effectFailureDetail(effectFailure) ~ ")";
             stderr.writefln("%s %s: %s",
                 documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
-                file, error.msg);
+                file, renderedError);
             if (explain) {
                 string status = "failure", detail, documentId, sinkKey;
                 if (documentFailure !is null) {
@@ -1185,6 +1460,10 @@ int runApp(string[] args) {
                     detail = "manifest-state=planned";
                     documentId = fatalPlanned.key.document.text;
                     sinkKey = fatalPlanned.key.sink;
+                } else if (effectFailure !is null) {
+                    status = effectFailure.partialWritePossible ? "uncertain" : "failure";
+                    detail = effectFailureDetail(effectFailure);
+                    documentId = effectFailure.documentId.text;
                 }
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, status, error.msg, detail, documentId, sinkKey);
@@ -1192,14 +1471,59 @@ int runApp(string[] args) {
             if (explain) pending.remove(file);
             if (documentFailure !is null) ++manifestCompletedPrefix;
         }, (Throwable error) {
-            return cast(V2DocumentFailure)error is null &&
+            return cast(OrderedPublicationCanceled)error is null &&
+                cast(V2DocumentFailure)error is null &&
                 cast(DocumentFailure)error is null &&
                 cast(ManifestDecisionFailure)error is null;
         });
     bool workerFatalAdmission;
+    void submitPath(string file) {
+        bool admissionCanceled;
+        try {
+            if (explain) pending.add(file);
+            if (!durableRoute) publication.assign(file);
+            auto bytes = getSize(file);
+            if (!scheduler.submit(file, bytes)) {
+                admissionCanceled = true;
+                workerFatalAdmission = true;
+                throw new Exception("input admission canceled: " ~ file);
+            }
+        } catch (Exception error) {
+            if (explain && !admissionCanceled && !errorJournalPath.length) {
+                pending.remove(file);
+                explainOne(file, destinationFor(file, inputPath, outputPath,
+                    inputIsDir), chainLabel, "failure", error.msg);
+            }
+            throw error;
+        }
+    }
+    void walkCanonical(string directory) {
+        auto entries = dirEntries(directory, SpanMode.shallow, false).array;
+        auto orderKey = (ref typeof(entries[0]) entry) {
+            auto relative = relativePath(entry.name, inputPath);
+            return !entry.isSymlink && entry.isDir ?
+                relative ~ dirSeparator : relative;
+        };
+        sort!((left, right) => orderKey(left) < orderKey(right))(entries);
+        foreach (entry; entries) {
+            if (entry.isSymlink) {
+                auto reason = "refusing symlink in input tree: " ~ entry.name;
+                if (explain && !errorJournalPath.length)
+                    explainOne(entry.name, destinationFor(entry.name, inputPath,
+                        outputPath, inputIsDir), chainLabel, "failure", reason);
+                throw new Exception(reason);
+            }
+            if (entry.isFile) {
+                submitPath(entry.name);
+                continue;
+            }
+            if (entry.isDir) walkCanonical(entry.name);
+        }
+    }
     try {
         if (inputIsDir) {
-            foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
+            if (!durableRoute) walkCanonical(inputPath);
+            else foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
                 if (entry.isSymlink) {
                     auto reason = "refusing symlink in input tree: " ~ entry.name;
                     if (explain && !errorJournalPath.length)
@@ -1210,48 +1534,14 @@ int runApp(string[] args) {
                 if (!entry.isFile) continue;
                 if (errorTargeted && !isLocalPrimaryTarget(errorJournal,
                     entry.name, inputPath, inputIsDir)) continue;
-                bool admissionCanceled;
-                try {
-                    if (explain) pending.add(entry.name);
-                    auto bytes = getSize(entry.name);
-                    if (!scheduler.submit(entry.name, bytes)) {
-                        admissionCanceled = true;
-                        workerFatalAdmission = true;
-                        throw new Exception("input admission canceled: " ~ entry.name);
-                    }
-                }
-                catch (Exception error) {
-                    if (explain && !admissionCanceled && !errorJournalPath.length) {
-                        pending.remove(entry.name);
-                        explainOne(entry.name, destinationFor(entry.name, inputPath,
-                            outputPath, inputIsDir), chainLabel, "failure", error.msg);
-                    }
-                    throw error;
-                }
+                submitPath(entry.name);
             }
         } else {
             if (!errorTargeted || isLocalPrimaryTarget(errorJournal,
-                    inputPath, inputPath, inputIsDir)) {
-                bool admissionCanceled;
-                try {
-                    if (explain) pending.add(inputPath);
-                    auto bytes = getSize(inputPath);
-                    if (!scheduler.submit(inputPath, bytes)) {
-                        admissionCanceled = true;
-                        workerFatalAdmission = true;
-                        throw new Exception("input admission canceled: " ~ inputPath);
-                    }
-                }
-                catch (Exception error) {
-                    if (explain && !admissionCanceled && !errorJournalPath.length) {
-                        pending.remove(inputPath);
-                        explainOne(inputPath, outputPath, chainLabel, "failure", error.msg);
-                    }
-                    throw error;
-                }
-            }
+                    inputPath, inputPath, inputIsDir)) submitPath(inputPath);
         }
     } catch (Exception error) {
+        if (!durableRoute) publication.abort();
         scheduler.cancel();
         scheduler.finish();
         if (explain && !errorJournalPath.length)
@@ -1260,6 +1550,9 @@ int runApp(string[] args) {
                     chainLabel, workerFatalAdmission ? "canceled" : "failure",
                     workerFatalAdmission ? "canceled after fatal processing failure" :
                         "canceled after traversal error");
+        auto workerFatal = scheduler.fatal();
+        if (workerFatalAdmission && workerFatal !is null)
+            throw new Exception("fatal file processing failure: " ~ workerFatal.msg);
         throw error;
     }
     const counts = scheduler.finish();
@@ -1274,7 +1567,7 @@ int runApp(string[] args) {
     const failures = counts.failed;
     if (!errorJournalPath.length)
         writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");
-    return failures == 0 ? 0 : 1;
+    return failures == 0 && terminalDecisions == 0 ? 0 : 1;
 }
 
 unittest {
@@ -1315,6 +1608,13 @@ unittest {
         `"options": { "max-pass": 0 } }] }`);
     assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
         "--config", badConfig, "--threads", "1"]));
+
+    auto emptyConfig = buildPath(root, "empty-config.json");
+    write(emptyConfig, "");
+    write(emptyOut, "sentinel");
+    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
+        "--config", emptyConfig, "--threads", "1"]));
+    assert(readText(emptyOut) == "sentinel");
 
     auto invalidValueConfig = buildPath(root, "invalid-value.json");
     write(invalidValueConfig, `{ "filters": [{ "name": "fix-mojibake", ` ~
@@ -1471,12 +1771,33 @@ unittest {
     requireCli(explanationRecord("in", "out", "strip-control", "failure", "bad\tdata") ==
         "EXPLAIN\tinput=\"in\"\toutput=\"out\"\tchain=\"strip-control\"\tstatus=failure\treason=\"bad\\tdata\"",
         "failure record format");
+    foreach (unsafeName; ["a//b", "a/b/", "/a/b"])
+        assertThrown(checkedOutputName(unsafeName));
+    requireCli(checkedOutputName("a/b") == buildPath("a", "b"),
+        "safe split output name retained");
+    auto splitDocument = Document(SourceLocator("test", "split", "root"),
+        OutputName("a/b"));
+    auto splitFailure = new EffectFailure(EffectPhase.sink, 0, 1,
+        splitDocument.id, true, new Exception("second child failed"));
+    requireCli(effectFailureDetail(splitFailure) ==
+        "completed-root-prefix=0;committed-event-prefix=1;partial-write-possible=true",
+        "split failure retains committed prefix");
 
     auto plainOutput = buildPath(root, "plain.txt");
     requireCli(runApp(["scrubbed", "--input", input, "--output", plainOutput,
         "--filters", "normalize-line-endings", "--threads", "1"]) == 0,
         "legacy invocation exit");
     requireCli(readText(plainOutput) == "line\n", "legacy invocation output");
+
+    // The test-only fixture stage proves that the switched local sink treats a
+    // terminal rejection as an acknowledged per-document outcome: no output
+    // is published and the invocation exits 1 rather than becoming fatal.
+    auto rejectedOutput = buildPath(root, "rejected.txt");
+    requireCli(runApp(["scrubbed", "--input", input, "--output",
+        rejectedOutput, "--stage", "stop=fixture", "--stage-option",
+        "suffix=text:policy-stop", "--stage-option", "enabled=boolean:true",
+        "--threads", "1"]) == 1, "compiled rejection exit");
+    requireCli(!exists(rejectedOutput), "compiled rejection published output");
 }
 
 // Model the late-traversal-fault boundary deterministically: one worker has

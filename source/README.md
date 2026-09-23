@@ -4,20 +4,21 @@ The executable entry is [`app.d`](app.d): `main(string[] args)` calls the
 [`cli_commands.d`](cli_commands.d) argparse command adapter, reports an
 uncaught exception, and returns exit code 2. The adapter routes implemented
 `run`/`repair` and legacy no-verb flags into `cli.runApp`; opt-in `extract`
-routes local HTML to `cli.runExtract` for selected `tree-json:v1` output only.
+routes local HTML to `cli.runExtract` for selected tree-JSON or Markdown output.
 Command/option-name completion is supported;
 document processing stays in `cli`.
 
 [`cli.d`](cli.d) owns argument and JSON-config parsing, path validation,
-incremental directory traversal, input `MmFile` lifetime, and atomic output
-replacement. [`effects/bounded_input.d`](effects/bounded_input.d) owns the
-local queue and independent queued-document, reserved-byte, and file-work
-callback limits; it invokes `cli.processOne` or the opt-in manifest processor
-through a supplied callback.
-`runApp(string[] args)` builds a `Pipeline` before walking files. Only an
-acknowledged per-document failure in opt-in manifest mode is reported as
-`SKIP` and yields incomplete exit 1. Run-fatal failures, including no-manifest
-worker errors, are reported as `FATAL` and exit 2; a completed run exits 0.
+incremental directory traversal, scheduling, and output policy.
+[`effects/bounded_input.d`](effects/bounded_input.d) owns the local queue and
+independent queued-document, reserved-byte, and file-work callback limits;
+descriptor tokens are granted in submission order so canonical publication
+cannot deadlock behind a later input. Its callback invokes the compiled local
+adapter or a retained durable-route predecessor.
+`runApp(string[] args)` compiles the ordinary local route's canonical job once
+before walking files. A reject or quarantine is an acknowledged per-document
+outcome, publishes no root output, and yields exit 1; run-fatal failures and
+collisions are reported as `FATAL` and exit 2; a completed mapped run exits 0.
 The module imports the implemented filter modules so their `static this()`
 registrations run. It does not contain the filter algorithms.
 
@@ -40,7 +41,8 @@ ordered composition tokens, and predecessor filter-only forms lower to the
 same typed stages, ordered filters, and scalar options; canonical bytes own a
 stable `job:v3:` identity. Stable stage-instance IDs are distinct from
 registered implementation names. This subtree has no registry or I/O import,
-and the shipping CLI does not consume v3 yet.
+and ordinary local file/tree shipping consumes v3 through the compiled effects
+bridge; JSONL and durable routes remain deferred.
 
 [`composition/`](composition/README.md) compiles that model through injected
 stage and filter registries without importing concrete implementations. It
@@ -52,7 +54,8 @@ every compiled stage, retaining terminal decisions, split order and immediate
 parent provenance, and returns only final/terminal events. The effects runner
 can now apply that compiled job once per typed source record, synchronously
 deliver its ordered final events, and close the transferred content owner. The
-shipping CLI remains unwired.
+ordinary local file/tree shipping is wired; later slices own JSONL and durable
+routes.
 
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`
@@ -117,8 +120,9 @@ after the stage decision is synchronously delivered; borrowed content cannot
 be retained by the sink without an explicit copy. Faults surface phase,
 completed-decision count, and possible partial sink-write uncertainty.
 Cancellation never fetches the next lazy input after it is observed. Memory
-and faulting D test adapters use this same path. It is not wired to CLI, and
-does not establish production backpressure or corpus-throughput readiness.
+and faulting D test adapters use this same path. [`effects/local_job.d`](effects/local_job.d)
+binds one admitted local file to that bridge and synchronously publishes final
+events. It does not establish corpus-throughput readiness.
 
 [`effects/windowed_input.d`](effects/windowed_input.d) is a separate POSIX
 single-active-lease mmap reader with checked borrows, bounded owning carry,

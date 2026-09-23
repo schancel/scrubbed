@@ -44,13 +44,19 @@ int main(string[] args) {
         "Usage: scrubbed [-h] <command> [<args>]\n\n" ~
         "Sanitize text through a bounded filter pipeline.\n\n" ~
         "Available commands:\n" ~
-        "  run,clean     Run the bounded filter pipeline (also the no-verb default).\n" ~
-        "  repair,fix    Repair text with the existing filter pipeline.\n" ~
-        "  extract,x     Extract text before filtering (not yet available).\n" ~
-        "  completion    Generate shell setup or command/option-name candidates; use\n" ~
-        "                completion init --bash, --zsh or --fish.\n\n" ~
+        "  run,clean         Run the bounded filter pipeline (also the no-verb default).\n" ~
+        "  repair,fix        Repair text with the existing filter pipeline.\n" ~
+        "  extract,x         Export a bounded selected HTML parse tree or Markdown.\n" ~
+        "  completion        Generate shell setup or command/option-name candidates; use\n" ~
+        "                    completion init --bash, --zsh or --fish.\n" ~
+        "  errors-init       Create a new opt-in v2 error journal.\n" ~
+        "  errors-copy       Copy an existing v1 journal to a new v2 journal.\n" ~
+        "  errors-export     Export a bounded v2 journal snapshot.\n" ~
+        "  errors-verify     Verify exported JSONL and digest sidecars.\n" ~
+        "  route-metadata    Route local HTML content and stage metadata to independent\n" ~
+        "                    sinks.\n\n" ~
         "Optional arguments:\n" ~
-        "  -h, --help    Show this help message and exit\n\n", "root help golden");
+        "  -h, --help        Show this help message and exit\n\n", "root help golden");
     foreach (verb; ["run", "clean", "repair", "fix", "extract", "x", "completion"]) {
         auto help = execute([exe, verb, "--help"]);
         auto canonical = verb == "clean" ? "run" : verb == "fix" ? "repair" :
@@ -120,8 +126,8 @@ int main(string[] args) {
     auto extractOutput = buildPath(root, "extract.txt");
     auto extract = separately([exe, "extract", "--input", input, "--output", extractOutput]);
     check(extract.status == 2 && extract.output == "" &&
-        extract.error == "scrubbed: extract is not yet available\n" &&
-        !exists(extractOutput), "extract unavailable golden");
+        extract.error == "scrubbed: extract requires --input, --output and --format=tree-json|markdown\n" &&
+        !exists(extractOutput), "extract argument golden");
 
     foreach (shell; ["bash", "zsh", "fish"]) {
         auto setup = execute([exe, "completion", "init", "--" ~ shell]);

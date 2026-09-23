@@ -1,7 +1,8 @@
 # Current architecture
 
-Scrubbed is a D executable, not a supported library API. Its pure internal v3
-job model is not yet a shipping CLI format.
+Scrubbed is a D executable, not a supported library API. Its v3 job model is
+the shipping format for ordinary local file/tree processing; JSONL and durable
+routes remain on their predecessor path.
 The [source guide](../source/README.md) describes the current boundary, and
 the [filter guide](../source/filters/README.md) is the shortest path to adding
 one transform.
@@ -13,14 +14,14 @@ app (process exit)
        -> filters/* (imported so their module constructors register)
 filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
-job.* (pure canonical v3 specification and predecessor/token lowering; unwired)
+job.* (pure canonical v3 specification and predecessor/token lowering)
 composition.compiler/executor/job_executor -> job, pipeline, stages
-  (pure registry compilation and one-record execution; effects/CLI unwired)
-domain.document (standalone typed identity/view facade; no current CLI caller)
-content.pieces -> domain.document (checked borrowed content; no current CLI caller)
+  (pure registry compilation and one-record execution)
+domain.document (typed identity/view facade)
+content.pieces -> domain.document (checked borrowed content)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
 stages.config -> stages.registry -> stages.contract (unwired v2 config API)
-effects.runner -> stages.contract, content.pieces, domain.document (standalone effect composition)
+effects.local_job -> effects.runner, mapped_file, atomic_piece_sink
 ```
 
 Keep orchestration and filesystem effects in `cli`, chain composition in
@@ -93,8 +94,8 @@ that model, while v1/default compatibility inputs lower to one implicit
 `legacy-text=text-transform` stage. Canonical fixed-order JSON with sorted
 option keys owns the `job:v3:` digest. Duplicate/unknown keys, duplicate stage
 IDs, ambiguous/orphan CLI options, and non-scalar JSON values fail at this
-boundary. It neither resolves registries nor performs I/O; the shipping CLI
-does not accept v3 until #148's switch slice. See the
+boundary. It neither resolves registries nor performs I/O; the CLI lowers at
+its edge and compiles before opening local document content. See the
 [v3 format guide](job-spec-v3.md).
 
 `composition.compiler` is the only conversion point from `JobOption` to the
@@ -116,8 +117,8 @@ preserves terminal decisions and split-child lineage, and returns only
 final/terminal events. `effects.runner` bridges a compiled job to its typed
 source/parser/sink ports one record at a time, preserving root commit and
 failure accounting while closing the transferred content owner after
-synchronous delivery. It does not reserve resources or expose the still-
-unwired v3 model through the shipping CLI.
+synchronous delivery. `effects.local_job` binds an admitted local record to
+that bridge and atomic sink without duplicating stage traversal.
 
 `content.pieces` is the standalone ordered byte-content facade. A
 `ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one
@@ -180,7 +181,7 @@ corpus-scale throughput claim. The ordered list remains a private, reversible
 representation pending review of the measured wired caller above; its
 high-edit scaling is not assumed adequate for production throughput.
 
-`effects.runner` is an unwired composition root. A `Source` yields one typed
+`effects.runner` is the shared composition root. A `Source` yields one typed
 record and view owner, a `Parser` produces checked `Content`, and a `Sink`
 synchronously consumes each ordered stage event. `runEffects` calls the F04
 decision contract for one document at a time, then delivers all its events
@@ -192,9 +193,10 @@ and before the next fetch after complete delivery. A sink exception reports
 wholly delivered decisions and the failing event ordinal with partial-write
 uncertainty; it promises no rollback, checkpoint, or successful completion.
 
-Only in-memory/faulting adapters exercise the runner path. The separate mapped
-file opener is not a runner `Source` or CLI switch; no S3/parser-library adapter
-is added. F04 materializes events per
+In-memory/faulting adapters and the local-file shipping adapter exercise the
+runner path. The local adapter maps one admitted input, keeps its owner live
+through synchronous atomic publication, and releases it before completion; no
+S3/parser-library adapter is added. F04 materializes events per
 document and ordered-list content has poor high-edit scaling; production
 callers must measure representation and backpressure before using this seam
 for corpus throughput. The checker rejects direct imports from

@@ -11,6 +11,10 @@ private final class MappingLease {
 
     this(string filename) { mapping = new MmFile(filename); }
 
+    this(string filename, ulong expectedBytes) {
+        mapping = new MmFile(filename, MmFile.Mode.read, expectedBytes, null);
+    }
+
     const(ubyte)[] bytes() { return cast(const(ubyte)[]) mapping[]; }
 
     void close() {
@@ -28,6 +32,20 @@ DocumentViewOwner openMappedFile(string filename) {
     enforce(getSize(filename) != 0, "cannot map an empty file");
     auto lease = new MappingLease(filename);
     scope (failure) lease.close();
+    return new DocumentViewOwner(lease.bytes(), &lease.close);
+}
+
+/// Open exactly the bytes admitted by an outer bounded scheduler. Checking on
+/// both sides of the mapping prevents a growth race from extending a fixed
+/// reservation; callers still own the policy for concurrent in-place writes.
+DocumentViewOwner openMappedFile(string filename, ulong expectedBytes) {
+    enforce(expectedBytes != 0, "cannot map an empty file");
+    enforce(getSize(filename) == expectedBytes,
+        "input changed size after admission: " ~ filename);
+    auto lease = new MappingLease(filename, expectedBytes);
+    scope (failure) lease.close();
+    enforce(lease.bytes.length == expectedBytes && getSize(filename) == expectedBytes,
+        "input changed size after admission: " ~ filename);
     return new DocumentViewOwner(lease.bytes(), &lease.close);
 }
 
@@ -67,6 +85,11 @@ unittest {
 
     write(path, "");
     assertThrown(openMappedFile(path));
+
+    write(path, "fixed-size mapping");
+    auto fixed = new MappingLease(path, 5);
+    assert(fixed.bytes == cast(const(ubyte)[])"fixed");
+    fixed.close();
 
     // Sparse input exercises mapping without an input-sized D allocation.
     {

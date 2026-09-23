@@ -7,7 +7,7 @@ import effects.error_cli : runErrorCommand;
 import effects.metadata_route_cli : runMetadataRoute;
 import std.conv : to;
 import std.stdio : stderr;
-import std.string : startsWith;
+import std.string : indexOf, startsWith;
 
 mixin template ProcessingOptions() {
     @(NamedArgument("input", "i").Description("Input file or directory tree"))
@@ -18,6 +18,14 @@ mixin template ProcessingOptions() {
     string filters = "normalize-line-endings,strip-control";
     @(NamedArgument.Description("JSON filter config"))
     string config;
+    @(NamedArgument("stage").Description("Ordered stage ID=IMPLEMENTATION"))
+    string[] stages;
+    @(NamedArgument("stage-option").Description("Typed option KEY=TYPE:VALUE for the preceding stage"))
+    string[] stageOptions;
+    @(NamedArgument("filter").Description("Filter for the preceding stage"))
+    string[] stageFilters;
+    @(NamedArgument("filter-option").Description("Typed option KEY=TYPE:VALUE for the preceding filter"))
+    string[] filterOptions;
     @(NamedArgument.Description("Worker thread count"))
     size_t threads;
     @(NamedArgument("max-queued-docs").Description("Maximum queued documents"))
@@ -132,6 +140,21 @@ private bool present(const string[] args, string name) {
     return false;
 }
 
+private bool compositionFlag(string value) {
+    foreach (name; ["--stage", "--stage-option", "--filter", "--filter-option"])
+        if (value == name || value.startsWith(name ~ "=")) return true;
+    return false;
+}
+
+private void forwardComposition(ref string[] forwarded, const string[] original) {
+    for (size_t i; i < original.length; ++i) {
+        if (!compositionFlag(original[i])) continue;
+        forwarded ~= original[i];
+        if (original[i].indexOf('=') < 0 && i + 1 < original.length)
+            forwarded ~= original[++i];
+    }
+}
+
 private int process(T)(ref T options, const string[] original) {
     string[] forwarded = ["scrubbed", "--input", options.input,
         "--output", options.output];
@@ -143,6 +166,7 @@ private int process(T)(ref T options, const string[] original) {
         forwarded ~= ["--threads", options.threads.to!string];
     if (present(original, "--filters")) forwarded ~= ["--filters", options.filters];
     if (options.config.length) forwarded ~= "--config=" ~ options.config;
+    forwardComposition(forwarded, original);
     if (present(original, "--max-open-inputs"))
         forwarded ~= ["--max-open-inputs", options.maxOpenInputs.to!string];
     if (options.listFilters) forwarded ~= "--list-filters";

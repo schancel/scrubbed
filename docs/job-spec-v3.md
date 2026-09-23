@@ -1,9 +1,9 @@
 # Canonical job specification v3
 
-The v3 job specification is the common typed model for the future `run` CLI
-and persistent JSON configuration. It exists in code now, but the shipping CLI
-does not accept this format yet. The switch is a later reviewed slice of #148;
-today's `--filters` and v1 JSON behavior remains unchanged.
+The v3 job specification is the common typed model for `run` composition
+tokens and persistent JSON configuration. The shipping CLI accepts it for
+ordinary local file/tree processing. JSONL and manifest/error-journal routes
+remain deferred and reject v3 before reading input or mutating output.
 
 ```json
 {
@@ -65,16 +65,24 @@ following `--filter-option` tokens attach to that filter. Option values use
 cannot acquire the same identity by inference. Shell quoting is needed only
 when a value itself contains shell metacharacters or whitespace.
 
-The parser and registry compiler are pure and tested, but these are not advertised
-shipping flags yet. Argparse help and the JSON file route will move together
-when the execution switch is ready; neither surface will own a second model.
+Argparse advertises these shipping flags and preserves their original
+interleaved order for the pure parser. The JSON route and tokens compile to the
+same model; neither surface owns a second grammar.
 
 ## Compatibility lowering and scope
 
 The no-selector default, predecessor `--filters`, and v1 `filters` JSON lower
 to one stage with ID `legacy-text` and implementation `text-transform`.
 Legacy scalar JSON types are retained in the v3 model. The predecessor parser
-remains live only until actual-binary equivalence and removal proofs pass.
+remains live only until actual-binary equivalence and removal proofs pass. An
+explicit `--config` always selects config parsing, including an empty file,
+which is rejected before output mutation rather than falling back to defaults.
+
+Ordinary local tree runs publish roots in global normalized-relative lexical
+order. Fatal processing is sequenced at that boundary, so worker count cannot
+change the committed root prefix. A split sink failure reports the committed
+event prefix and partial-write uncertainty; repeated or trailing separators in
+derived output names are rejected rather than normalized away.
 
 This format is currently a linear document pipeline, not a general workflow
 language. #155 may add a bounded one-of dispatch declaration: detect the input

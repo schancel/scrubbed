@@ -50,7 +50,9 @@ tested; the pure one-stage executor applies before/after filters over checked
 `Content`. A pure one-record job executor now carries emitted documents through
 every compiled stage, retaining terminal decisions, split order and immediate
 parent provenance, and returns only final/terminal events. The effects runner
-and shipping CLI remain unwired.
+can now apply that compiled job once per typed source record, synchronously
+deliver its ordered final events, and close the transferred content owner. The
+shipping CLI remains unwired.
 
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`

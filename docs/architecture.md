@@ -113,9 +113,11 @@ nonempty chains are explicit UTF-8 materialization barriers, while empty
 chains preserve borrowed content. `composition.job_executor` applies those
 compiled stages to one source record in order, advances only emitted events,
 preserves terminal decisions and split-child lineage, and returns only
-final/terminal events. It does not fetch sources, write sinks, close content
-owners, reserve resources, or expose the still-unwired v3 model through the
-shipping CLI.
+final/terminal events. `effects.runner` bridges a compiled job to its typed
+source/parser/sink ports one record at a time, preserving root commit and
+failure accounting while closing the transferred content owner after
+synchronous delivery. It does not reserve resources or expose the still-
+unwired v3 model through the shipping CLI.
 
 `content.pieces` is the standalone ordered byte-content facade. A
 `ContentPiece` is exactly one checked borrowed `DocumentView` subrange or one

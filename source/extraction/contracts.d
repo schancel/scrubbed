@@ -1,7 +1,7 @@
 /// Versioned, pure contracts for bounded media detection and text extraction.
 module extraction.contracts;
 
-import content.pieces : Content;
+import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, OutputName;
 import std.exception : enforce;
 import std.string : indexOf;
@@ -46,6 +46,13 @@ struct MediaEvidenceV1 {
     }
 
     string detail() const pure { return detailValue; }
+
+    private void validateEvidence() const {
+        enforce(kind >= EvidenceKindV1.min && kind <= EvidenceKindV1.max,
+            "invalid evidence kind");
+        enforce(isConcreteMediaV1(outcome), "evidence needs a concrete media outcome");
+        enforce(detailValue.length != 0, "uninitialized detector evidence");
+    }
 }
 
 enum size_t maxDetectionEvidenceV1 = 16;
@@ -54,31 +61,49 @@ enum size_t maxWarningBytesV1 = 256;
 
 /// A normalized result with stable evidence order and explicit scan accounting.
 struct DetectionResultV1 {
+    private enum BuildToken { value }
     private DetectionOutcomeV1 outcomeValue;
     private MediaEvidenceV1[] evidenceValue;
     private string detectorVersionValue;
     private string[] warningsValue;
     private size_t bytesInspectedValue;
+    private size_t inspectionLimitValue;
+    private size_t availableBytesValue;
 
-    this(DetectionOutcomeV1 outcome, MediaEvidenceV1[] evidence,
-            string detectorVersion, string[] warnings, size_t bytesInspected) {
-        enforce(outcome >= DetectionOutcomeV1.min && outcome <= DetectionOutcomeV1.max,
-            "invalid detection outcome");
-        enforce(evidence.length <= maxDetectionEvidenceV1,
-            "too many detector evidence records");
-        enforce(warnings.length <= maxDetectionWarningsV1,
-            "too many detector warnings");
-        foreach (item; evidence)
-            enforce(item.detail.length != 0, "uninitialized detector evidence");
-        foreach (warning; warnings)
-            checkedLabel(warning, "detector warning", maxWarningBytesV1);
-        outcomeValue = outcome;
-        evidenceValue = evidence.dup;
-        detectorVersionValue = checkedLabel(detectorVersion,
-            "detector version", 128);
-        warningsValue = warnings.dup;
-        bytesInspectedValue = bytesInspected;
-        validateResult;
+    /// Build a media, unknown, or ambiguous result. Authoritative evidence
+    /// must agree with the normalized outcome.
+    static DetectionResultV1 detected(DetectionOutcomeV1 outcome,
+            MediaEvidenceV1[] evidence, string detectorVersion,
+            string[] warnings, size_t bytesInspected,
+            size_t inspectionLimit, size_t availableBytes) {
+        enforce(isConcreteMediaV1(outcome) ||
+            outcome == DetectionOutcomeV1.unknown ||
+            outcome == DetectionOutcomeV1.ambiguous,
+            "detected result needs a media, unknown, or ambiguous outcome");
+        return build(outcome, evidence, detectorVersion, warnings,
+            bytesInspected, inspectionLimit, availableBytes);
+    }
+
+    /// Explicit policy outcomes are reserved for detectors that can prove them.
+    static DetectionResultV1 malformed(MediaEvidenceV1[] evidence,
+            string detectorVersion, string[] warnings, size_t bytesInspected,
+            size_t inspectionLimit, size_t availableBytes) {
+        return build(DetectionOutcomeV1.malformed, evidence, detectorVersion,
+            warnings, bytesInspected, inspectionLimit, availableBytes);
+    }
+
+    static DetectionResultV1 encrypted(MediaEvidenceV1[] evidence,
+            string detectorVersion, string[] warnings, size_t bytesInspected,
+            size_t inspectionLimit, size_t availableBytes) {
+        return build(DetectionOutcomeV1.encrypted, evidence, detectorVersion,
+            warnings, bytesInspected, inspectionLimit, availableBytes);
+    }
+
+    static DetectionResultV1 unsupported(MediaEvidenceV1[] evidence,
+            string detectorVersion, string[] warnings, size_t bytesInspected,
+            size_t inspectionLimit, size_t availableBytes) {
+        return build(DetectionOutcomeV1.unsupported, evidence, detectorVersion,
+            warnings, bytesInspected, inspectionLimit, availableBytes);
     }
 
     DetectionOutcomeV1 outcome() const pure { return outcomeValue; }
@@ -87,6 +112,8 @@ struct DetectionResultV1 {
     string detectorVersion() const pure { return detectorVersionValue; }
     const(string)[] warnings() const pure { return warningsValue; }
     size_t bytesInspected() const pure { return bytesInspectedValue; }
+    size_t inspectionLimit() const pure { return inspectionLimitValue; }
+    size_t availableBytes() const pure { return availableBytesValue; }
 
     /// Reject default or corrupted values before they cross the boundary.
     void validateResult() const {
@@ -97,10 +124,62 @@ struct DetectionResultV1 {
         enforce(evidenceValue.length <= maxDetectionEvidenceV1 &&
             warningsValue.length <= maxDetectionWarningsV1,
             "detector result exceeds bounded records");
-        foreach (item; evidenceValue)
-            enforce(item.detail.length != 0, "uninitialized detector evidence");
+        enforce(inspectionLimitValue > 0, "detector result needs an inspection limit");
+        auto expected = availableBytesValue < inspectionLimitValue
+            ? availableBytesValue : inspectionLimitValue;
+        enforce(bytesInspectedValue == expected,
+            "detector byte accounting must equal the bounded available prefix");
+        bool[cast(size_t) DetectionOutcomeV1.max + 1] authoritative;
+        foreach (item; evidenceValue) {
+            item.validateEvidence;
+            if (item.kind == EvidenceKindV1.signature ||
+                    item.kind == EvidenceKindV1.textualContent)
+                authoritative[cast(size_t) item.outcome] = true;
+        }
         foreach (warning; warningsValue)
-            checkedLabel(warning, "detector warning", maxWarningBytesV1);
+            validateLabel(warning, "detector warning", maxWarningBytesV1);
+        size_t authoritativeOutcomes;
+        foreach (present; authoritative) if (present) ++authoritativeOutcomes;
+        if (isConcreteMediaV1(outcomeValue)) {
+            enforce(authoritativeOutcomes == 1 &&
+                authoritative[cast(size_t) outcomeValue],
+                "concrete outcome must match its sole authoritative evidence");
+        } else if (outcomeValue == DetectionOutcomeV1.ambiguous) {
+            enforce(authoritativeOutcomes >= 2,
+                "ambiguous outcome needs conflicting authoritative evidence");
+        } else if (outcomeValue == DetectionOutcomeV1.unknown) {
+            enforce(authoritativeOutcomes == 0,
+                "unknown outcome cannot hide authoritative evidence");
+        } else {
+            enforce(outcomeValue == DetectionOutcomeV1.malformed ||
+                outcomeValue == DetectionOutcomeV1.encrypted ||
+                outcomeValue == DetectionOutcomeV1.unsupported,
+                "invalid policy outcome");
+        }
+    }
+
+    private static DetectionResultV1 build(DetectionOutcomeV1 outcome,
+            MediaEvidenceV1[] evidence, string detectorVersion,
+            string[] warnings, size_t bytesInspected,
+            size_t inspectionLimit, size_t availableBytes) {
+        return DetectionResultV1(BuildToken.value, outcome, evidence,
+            detectorVersion, warnings, bytesInspected, inspectionLimit,
+            availableBytes);
+    }
+
+    private this(BuildToken token, DetectionOutcomeV1 outcome,
+            MediaEvidenceV1[] evidence, string detectorVersion,
+            string[] warnings, size_t bytesInspected,
+            size_t inspectionLimit, size_t availableBytes) {
+        outcomeValue = outcome;
+        evidenceValue = evidence.dup;
+        detectorVersionValue = checkedLabel(detectorVersion,
+            "detector version", 128);
+        warningsValue = warnings.dup;
+        bytesInspectedValue = bytesInspected;
+        inspectionLimitValue = inspectionLimit;
+        availableBytesValue = availableBytes;
+        validateResult;
     }
 }
 
@@ -224,10 +303,37 @@ struct ExtractionProvenanceV1 {
     string routeName() const pure { return routeValue; }
 }
 
-/// Checked UTF-8 text plus the unchanged source identity and presentation name.
+/// A structurally snapshotted, read-only view of owned Content pieces.
+struct TextContentV1 {
+    private Content snapshot;
+
+    private this(Content source) {
+        ContentPiece[] pieces;
+        foreach (offset, piece; source) {
+            enforce(piece.isOwned,
+                "text content requires owned pieces; borrowed content needs a retained lease");
+            pieces ~= piece;
+        }
+        snapshot = new Content(pieces);
+    }
+
+    size_t size() const pure {
+        enforce(snapshot !is null, "text content is not initialized");
+        return snapshot.size;
+    }
+
+    /// The chunk is temporary and the read-only wrapper exposes no edit API.
+    void stream(scope void delegate(const(ubyte)[]) pure sink,
+            size_t chunkSize = 8192) const pure {
+        enforce(snapshot !is null, "text content is not initialized");
+        snapshot.stream(sink, chunkSize);
+    }
+}
+
+/// Checked stable UTF-8 text plus unchanged source identity and presentation.
 struct TextDocumentV1 {
     private Document documentValue;
-    private Content contentValue;
+    private TextContentV1 contentValue;
     private DetectionResultV1 detectionValue;
     private string extractorValue;
     private string extractorVersionValue;
@@ -241,19 +347,23 @@ struct TextDocumentV1 {
         enforce(id.text.length != 0 && document.outputName.text.length != 0,
             "text document needs initialized identity and output name");
         enforce(content !is null, "text document content is required");
-        enforce(validUtf8(content), "text document content must be valid UTF-8");
+        auto stableContent = TextContentV1(content);
+        enforce(validUtf8(stableContent.snapshot),
+            "text document content must be valid UTF-8");
         detection.validateResult;
         enforce(isConcreteMediaV1(detection.outcome),
             "text document needs a concrete detection outcome");
         enforce(detection.outcome == provenance.sourceOutcome,
             "text provenance must match detection outcome");
+        enforce(detection.availableBytes == provenance.sourceBytes,
+            "text provenance must match detected source byte count");
         enforce(warnings.length <= maxDetectionWarningsV1,
             "too many extraction warnings");
         foreach (warning; warnings)
-            checkedLabel(warning, "extraction warning", maxWarningBytesV1);
+            validateLabel(warning, "extraction warning", maxWarningBytesV1);
 
         documentValue = document;
-        contentValue = content;
+        contentValue = stableContent;
         detectionValue = detection;
         extractorValue = checkedLabel(extractor, "extractor name", 128);
         extractorVersionValue = checkedLabel(extractorVersion,
@@ -265,7 +375,7 @@ struct TextDocumentV1 {
     Document document() const pure { return documentValue; }
     DocumentId id() const pure { return documentValue.id; }
     OutputName outputName() const pure { return documentValue.outputName; }
-    Content content() { return contentValue; }
+    const(TextContentV1) content() const pure { return contentValue; }
     const(DetectionResultV1) detection() const pure { return detectionValue; }
     string extractor() const pure { return extractorValue; }
     string extractorVersion() const pure { return extractorVersionValue; }
@@ -278,11 +388,15 @@ bool isConcreteMediaV1(DetectionOutcomeV1 outcome) pure {
 }
 
 private string checkedLabel(string value, string field, size_t maxBytes) {
+    validateLabel(value, field, maxBytes);
+    return value.idup;
+}
+
+private void validateLabel(string value, string field, size_t maxBytes) {
     enforce(value.length != 0 && value.length <= maxBytes,
         field ~ " must be nonempty and bounded");
     validate(value);
     enforce(value.indexOf('\0') < 0, field ~ " must not contain NUL");
-    return value.idup;
 }
 
 /// Validate incrementally so a checked text boundary does not flatten Content.
@@ -364,10 +478,10 @@ unittest {
 
     auto document = Document(SourceLocator("test", "extract", "one"),
         OutputName("original.txt"));
-    auto detection = DetectionResultV1(DetectionOutcomeV1.plainText,
+    auto detection = DetectionResultV1.detected(DetectionOutcomeV1.plainText,
         [MediaEvidenceV1(EvidenceKindV1.textualContent,
             DetectionOutcomeV1.plainText, "valid-utf8")],
-        "test:v1", null, 5);
+        "test:v1", null, 5, 5, 5);
     auto provenance = ExtractionProvenanceV1(DetectionOutcomeV1.plainText,
         "plain-text", 5);
     auto content = new Content([
@@ -379,12 +493,51 @@ unittest {
     assert(text.id == document.id);
     assert(text.outputName == document.outputName);
     assert(text.document.id == document.id);
-    assert(text.content is content);
+    assert(text.content.size == 3);
+    ubyte[] stableBytes;
+    text.content.stream((const(ubyte)[] chunk) { stableBytes ~= chunk; }, 1);
+    assert(stableBytes == [cast(ubyte) 0xe2, 0x82, 0xac]);
     assert(text.provenance.routeName == "plain-text");
+    // Replacing the caller's Content cannot mutate the stable text boundary.
+    content.replace(0, content.size,
+        [ContentPiece.own(cast(const(ubyte)[]) "changed")]);
+    stableBytes.length = 0;
+    text.content.stream((const(ubyte)[] chunk) { stableBytes ~= chunk; }, 2);
+    assert(stableBytes == [cast(ubyte) 0xe2, 0x82, 0xac]);
     assertThrown(TextDocumentV1(document,
         new Content([ContentPiece.own([cast(ubyte) 0xe2, 0x28, 0xa1])]),
         detection, "identity", "identity:v1", null, provenance));
     assertThrown(TextDocumentV1(document, content,
-        DetectionResultV1(DetectionOutcomeV1.unknown, null, "test:v1", null, 1),
+        DetectionResultV1.detected(DetectionOutcomeV1.unknown, null,
+            "test:v1", null, 5, 5, 5),
         "identity", "identity:v1", null, provenance));
+
+    import domain.document : DocumentViewOwner;
+    auto owner = new DocumentViewOwner(cast(ubyte[]) "borrowed".dup);
+    auto borrowed = new Content([ContentPiece.borrow(owner.view(0, 8))]);
+    assertThrown(TextDocumentV1(document, borrowed, detection, "identity",
+        "identity:v1", null, provenance));
+    owner.close();
+    assertThrown(TextDocumentV1(document, borrowed, detection, "identity",
+        "identity:v1", null, provenance));
+
+    auto pdfEvidence = [MediaEvidenceV1(EvidenceKindV1.signature,
+        DetectionOutcomeV1.pdf, "pdf-header")];
+    assert(DetectionResultV1.encrypted(pdfEvidence, "container:v1",
+        ["encrypted"], 8, 8, 20).outcome == DetectionOutcomeV1.encrypted);
+    assert(DetectionResultV1.unsupported(pdfEvidence, "container:v1",
+        ["unsupported"], 8, 8, 20).outcome == DetectionOutcomeV1.unsupported);
+    assert(DetectionResultV1.malformed(null, "container:v1",
+        ["malformed"], 8, 8, 20).outcome == DetectionOutcomeV1.malformed);
+
+    assertThrown(DetectionResultV1.detected(DetectionOutcomeV1.pdf,
+        [MediaEvidenceV1(EvidenceKindV1.textualContent,
+            DetectionOutcomeV1.plainText, "text")],
+        "test:v1", null, 3, 5, 3));
+    assertThrown(DetectionResultV1.detected(DetectionOutcomeV1.unknown,
+        pdfEvidence, "test:v1", null, 3, 5, 3));
+    assertThrown(DetectionResultV1.detected(DetectionOutcomeV1.ambiguous,
+        pdfEvidence, "test:v1", null, 3, 5, 3));
+    assertThrown(DetectionResultV1.detected(DetectionOutcomeV1.unknown,
+        null, "test:v1", null, 2, 5, 3));
 }

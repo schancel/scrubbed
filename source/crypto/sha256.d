@@ -215,4 +215,10 @@ unittest {
     foreach (input; [cast(const(ubyte)[])[], cast(const(ubyte)[])"abc",
             cast(const(ubyte)[])"a 64-byte boundary fixture that crosses padding exactly here......."])
         assert(sha256Of(input) == phobosSha256Of(input));
+
+    ubyte[257] boundary;
+    foreach (index, ref value; boundary) value = cast(ubyte)(index * 37 + 11);
+    foreach (length; [255, 256, 257])
+        assert(sha256Of(boundary[0 .. length]) ==
+            phobosSha256Of(boundary[0 .. length]));
 }

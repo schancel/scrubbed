@@ -630,11 +630,13 @@ controlled throughput claim; it exists to prevent a large-buffer win from
 silently regressing the short identity hashes used by production callers.
 Run `35917242376` found no portable short-message cutoff: hosted ARM64 was
 70--78% faster with hardware and hosted x86-64 was 46--55% faster across the
-entire 32--1,024-byte range. The local Apple M4 result differs, with hardware
-roughly 2.3x slower through 55 bytes, 72--78% slower at 56--65 bytes, 27%
-slower at 128 bytes, and 17% faster at 256 bytes. Any follow-up short-message
-policy must therefore be Darwin/AArch64-specific; a universal size switch is
-rejected by the native evidence.
+entire 32--1,024-byte range. An apparent local Apple M4 crossover came from
+the forced-backend setup path and did not represent production's pure
+automatic constructor. `sha256-apple-m4-short-policy-evidence.json` records
+the rejected follow-up: the proposed scalar policy was 4.1--5.6x slower than
+the production-faithful automatic path below 256 bytes and indistinguishable
+at larger sizes. The production policy therefore remains hardware selection
+at every input size.
 
 The ARM compression function alone has LDC `@target("sha2")`; runtime Darwin
 `sysctl` or Linux `getauxval` detection happens once before automatic

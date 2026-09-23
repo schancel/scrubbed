@@ -375,12 +375,23 @@ interleaved before/after evidence.
 ### Canonical shipping-CLI attribution
 
 `scrubbed-cli-attribution-v1` is an additive companion to the frozen canonical
-profile. It references that report, requires the same executed target hash and
-complete `scrubbed-build-attestation-v4`, and independently pins the existing
+profile. It literal-pins that report and its historical target hash, while each
+new trace binds to the current-base target produced through the same complete
+`scrubbed-build-attestation-v4` closure. This distinction is explicit because
+later additive production modules changed the shipping Mach-O without changing
+the frozen workload or expected output. The companion independently pins the existing
 record table, 524,288 × 256-byte corpus, layouts, scalar/mixed configs, and
 input/scalar/mixed tree and concatenation identities. It does not revise the
 profile schema, fixture frequencies, filter order/options, expected output, or
 durable behavior.
+
+The ancestry record pins historical profile source `61e8ff9c70ff51842c1dd0063dc253fccc29f1dd`,
+accepted attribution base `0fe58a0955e1afe16894c91acfdb7bf59077eee5`, and
+the intervening additive extraction commits `7b0f164` and `fc61fdf`. The bridge
+requires both historical source and accepted base to be ancestors of the clean
+source it builds. The attribution report records that current source/tree/build
+closure and current target on every trace and GC row. Its diagnostic times are
+not merged into, or directly compared with, the historical timing samples.
 
 For each layout, repetitions 0–2 retain exact-PID traces in this order:
 scalar ordinary threads1/open1, mixed ordinary threads1/open1, mixed ordinary

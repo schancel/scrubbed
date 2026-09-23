@@ -76,8 +76,9 @@ support for every ordinary and durable measurement.
 
 `pipeline_attribution_check.d` publishes the evidence-only companion
 `scrubbed-cli-attribution-v1`. It reuses the canonical profile's frozen
-128 MiB fixtures, configs, expected outputs, durable semantics, target hash,
-and full build attestation without changing them. For each layout it records
+128 MiB fixtures, configs, expected outputs, durable semantics, report hash,
+historical target hash, and build-closure schema without changing them. New
+traces bind separately to the current-base attested target. For each layout it records
 three exact-PID `/usr/bin/sample` traces for scalar threads1, mixed threads1,
 mixed threads4, manifest-v2 verified skip, and journal-v3 verified skip. A
 trace is accepted only after exact output and status gates and at least 100
@@ -107,6 +108,8 @@ wall/CPU/RSS, and structured unsupported fields. Sampling is not an exact-call
 counter, and D-GC evidence is not native or total-process allocation evidence.
 The derived conclusion can be a stable named hotspot, distributed cost, or
 unavailable attribution; none authorizes a production edit in this slice.
+Current-revision diagnostic times are never merged with or directly compared
+to the historical canonical timing samples.
 
 ## Fused scalar-filter microbenchmark
 

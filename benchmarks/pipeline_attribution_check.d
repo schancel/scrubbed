@@ -32,6 +32,12 @@ private enum harnessBuildRecipe =
     "ldc2 -O3 -release benchmarks/pipeline_attribution_check.d -of=<STANDARD_TMP>/scrubbed-pipeline-attribution-check";
 private enum canonicalProfilePin =
     "00CFF582B3C93EDA270BF8FAF349AAD53F2EFBA5723112812EA34BC383B75870";
+private enum canonicalProfileBinaryPin =
+    "A606ABF6DF8AC912256B39A213F61E493D6FA9706C237A692EAFE437BEC901A7";
+private enum canonicalProfileSourcePin =
+    "61e8ff9c70ff51842c1dd0063dc253fccc29f1dd";
+private enum acceptedBasePin =
+    "0fe58a0955e1afe16894c91acfdb7bf59077eee5";
 private enum recordBytes = 256L;
 private enum recordCount = 524_288L;
 private enum corpusBytes = recordBytes * recordCount;
@@ -374,6 +380,7 @@ private JSONValue timeProfilerFallback(string[] command, string binary,
 }
 
 private JSONValue traceRun(string[] command, string binary, string binaryHash,
+        string sourceSha, string sourceTree, string attestationHash,
         string input, string output, string layout, bool mixed, string root, long repetition,
         string workload, long threads, string route) {
     auto childLogPath = buildPath(root, "trace-child-" ~ randomUUID.toString ~ ".log");
@@ -417,6 +424,8 @@ private JSONValue traceRun(string[] command, string binary, string binaryHash,
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "sampled_pid": JSONValue(cast(long)pid),
         "target_binary_sha256": JSONValue(binaryHash),
+        "source_sha": JSONValue(sourceSha), "source_tree_id": JSONValue(sourceTree),
+        "build_attestation_sha256": JSONValue(attestationHash),
         "process_exit_code": JSONValue(cast(long)childStatus),
         "process_signal": JSONValue(cast(long)childSignal),
         "exact_output": JSONValue(true),
@@ -503,7 +512,8 @@ private JSONValue parseGc(string raw) {
         "sanitized_sha256": JSONValue(hashBytes(cast(const(ubyte)[])sanitizedText))]);
 }
 
-private JSONValue gcRun(string[] command, string binaryHash, string output,
+private JSONValue gcRun(string[] command, string binaryHash, string sourceSha,
+        string sourceTree, string attestationHash, string output,
         string layout, bool mixed, long repetition) {
     auto result = execute(command);
     need(result.status == 0 && exists(output), "D-GC instrumented child failed");
@@ -515,6 +525,9 @@ private JSONValue gcRun(string[] command, string binaryHash, string output,
     parsed["threads"] = 1L;
     parsed["max_open_inputs"] = 1L;
     parsed["target_binary_sha256"] = binaryHash;
+    parsed["source_sha"] = sourceSha;
+    parsed["source_tree_id"] = sourceTree;
+    parsed["build_attestation_sha256"] = attestationHash;
     parsed["config_sha256"] = mixed ? mixedConfigPin : scalarConfigPin;
     parsed["fixture_table_sha256"] = fixtureTablePin;
     parsed["output_tree_sha256"] = mixed ? mixedTrees[layout] : scalarTrees[layout];
@@ -599,9 +612,10 @@ private void validateAttestation(JSONValue value, string binaryHash) {
         archive["version"].str != unavailableToolVersion,
         "archive suite evidence is not bound to exact evidence tool");
 }
-private void validateCanonical(JSONValue value, string binaryHash) {
+private void validateCanonical(JSONValue value) {
     need(value["schema"].str == "scrubbed-cli-profile-v1" &&
-        value["binary_sha256"].str == binaryHash &&
+        value["binary_sha256"].str == canonicalProfileBinaryPin &&
+        value["build_attestation"]["source_sha"].str == canonicalProfileSourcePin &&
         value["fixture_table_sha256"].str == fixtureTablePin &&
         value["fixture_record_bytes"].integer == recordBytes &&
         value["fixture_record_count"].integer == recordCount &&
@@ -778,11 +792,12 @@ private void prepareDurable(string[] command, string binary, string database,
 private JSONValue runAttribution(string binary, JSONValue attestation,
         string canonicalPath, string harnessPath, string root, long budget) {
     auto binaryHash = hashFile(binary), harnessHash = hashFile(harnessPath);
+    auto attestationHash = hashBytes(cast(const(ubyte)[])attestation.toString);
     validateAttestation(attestation, binaryHash);
     auto canonical = parseJSON(readText(canonicalPath));
     need(hashFile(canonicalPath) == canonicalProfilePin,
         "canonical profile artifact hash drift");
-    validateCanonical(canonical, binaryHash);
+    validateCanonical(canonical);
     auto compilerPath = execute(["which", "ldc2"]);
     auto compilerVersion = execute(["ldc2", "--version"]);
     need(compilerPath.status == 0 && compilerVersion.status == 0 &&
@@ -827,7 +842,9 @@ private JSONValue runAttribution(string binary, JSONValue attestation,
                     command = durableCommand(binary, input, output, mixedConfig, database, kind == 4);
                     prepareDurable(command, binary, database, kind == 4, output, layout.name);
                 }
-                traceCases[name] ~= traceRun(command, binary, binaryHash, input, output,
+                traceCases[name] ~= traceRun(command, binary, binaryHash,
+                    attestation["source_sha"].str, attestation["source_tree_id"].str,
+                    attestationHash, input, output,
                     layout.name, mixed, root, rep, mixed ? "mixed" : "scalar", threads, route);
                 if (exists(output)) rmdirRecurse(output);
             }
@@ -837,7 +854,9 @@ private JSONValue runAttribution(string binary, JSONValue attestation,
                 auto command = ordinaryCommand(binary, input, output,
                     mixed ? mixedConfig : scalarConfig, 1);
                 command = [binary, "--DRT-gcopt=profile:1"] ~ command[1 .. $];
-                auto evidence = gcRun(command, binaryHash, output, layout.name, mixed, rep);
+                auto evidence = gcRun(command, binaryHash, attestation["source_sha"].str,
+                    attestation["source_tree_id"].str, attestationHash,
+                    output, layout.name, mixed, rep);
                 if (mixed) gcMixed ~= evidence; else gcScalar ~= evidence;
                 rmdirRecurse(output);
             }
@@ -873,7 +892,17 @@ private JSONValue runAttribution(string binary, JSONValue attestation,
         "optimization_authorized": JSONValue(false),
         "binary_sha256": JSONValue(binaryHash), "harness_sha256": JSONValue(harnessHash),
         "canonical_profile_sha256": JSONValue(canonicalProfilePin),
+        "canonical_profile_binary_sha256": JSONValue(canonicalProfileBinaryPin),
         "canonical_profile_schema": JSONValue("scrubbed-cli-profile-v1"),
+        "source_ancestry": JSONValue([
+            "canonical_profile_source_sha": JSONValue(canonicalProfileSourcePin),
+            "accepted_attribution_base_sha": JSONValue(acceptedBasePin),
+            "attribution_source_sha": attestation["source_sha"],
+            "relationship": JSONValue(
+                "canonical profile source and accepted attribution base are ancestors of attribution source"),
+            "intervening_production_commits": JSONValue([
+                JSONValue("7b0f164 bounded extraction detection contracts"),
+                JSONValue("fc61fdf bounded ZIP container inspection")])]),
         "harness_executable_name": JSONValue(harnessName),
         "harness_build_recipe": JSONValue(harnessBuildRecipe),
         "harness_compiler_executable_sha256":
@@ -881,6 +910,7 @@ private JSONValue runAttribution(string binary, JSONValue attestation,
         "harness_compiler_version": attestation["compiler_version"],
         "preflight": capacity,
         "build_attestation": attestation,
+        "build_attestation_sha256": JSONValue(attestationHash),
         "frozen_materials": JSONValue(["fixture_table_sha256": JSONValue(fixtureTablePin),
             "record_bytes": JSONValue(recordBytes), "record_count": JSONValue(recordCount),
             "scalar_config_sha256": JSONValue(scalarConfigPin),
@@ -899,6 +929,7 @@ private JSONValue runAttribution(string binary, JSONValue attestation,
         "layouts": JSONValue(layoutReports),
         "nonclaims": JSONValue([JSONValue("no speedup or tuning claim"),
             JSONValue("no exact-call claim"), JSONValue("no native-allocation claim"),
+            JSONValue("no direct timing comparison across source revisions"),
             JSONValue("no cross-platform or greater-than-RAM claim")])]);
     validateReport(report, harnessHash);
     return report;
@@ -918,7 +949,8 @@ private string expectedStatusDigest(size_t files, string status) {
     return toHexString(value.finish()).to!string;
 }
 private void validateTrace(JSONValue trace, string binaryHash, string layout,
-        string caseName, long repetition) {
+        string caseName, long repetition, string sourceSha = "",
+        string sourceTree = "", string attestationHash = "") {
     auto mixed = caseName != "scalar-threads1";
     auto expectedThreads = caseName == "scalar-threads1" ||
         caseName == "mixed-threads1" ? 1L : 4L;
@@ -933,6 +965,9 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
         trace["config_sha256"].str == (mixed ? mixedConfigPin : scalarConfigPin) &&
         trace["fixture_table_sha256"].str == fixtureTablePin &&
         trace["target_binary_sha256"].str == binaryHash &&
+        (!sourceSha.length || (trace["source_sha"].str == sourceSha &&
+            trace["source_tree_id"].str == sourceTree &&
+            trace["build_attestation_sha256"].str == attestationHash)) &&
         trace["process_exit_code"].integer == 0 && trace["process_signal"].integer == 0 &&
         trace["exact_output"].boolean &&
         trace["output_tree_sha256"].str == (mixed ? mixedTrees[layout] : scalarTrees[layout]) &&
@@ -1001,11 +1036,14 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
         "unsupported trace lacks exact fallback evidence");
 }
 private void validateGc(JSONValue item, string binaryHash, string layout,
-        bool mixed, long repetition) {
+        bool mixed, long repetition, string sourceSha, string sourceTree,
+        string attestationHash) {
     need(item["status"].str == "SUPPORTED" && item["repetition"].integer == repetition &&
         item["layout"].str == layout && item["workload"].str == (mixed ? "mixed" : "scalar") &&
         item["threads"].integer == 1 && item["max_open_inputs"].integer == 1 &&
         item["target_binary_sha256"].str == binaryHash &&
+        item["source_sha"].str == sourceSha && item["source_tree_id"].str == sourceTree &&
+        item["build_attestation_sha256"].str == attestationHash &&
         item["config_sha256"].str == (mixed ? mixedConfigPin : scalarConfigPin) &&
         item["fixture_table_sha256"].str == fixtureTablePin &&
         item["exact_output"].boolean &&
@@ -1057,7 +1095,21 @@ private void validateReport(JSONValue report, string expectedHarness = "") {
         report["source_binary_mapping"].str == "ATTESTED" &&
         digest(report["binary_sha256"].str) && digest(report["harness_sha256"].str) &&
         report["canonical_profile_sha256"].str == canonicalProfilePin &&
+        report["canonical_profile_binary_sha256"].str == canonicalProfileBinaryPin &&
         report["canonical_profile_schema"].str == "scrubbed-cli-profile-v1" &&
+        report["source_ancestry"]["canonical_profile_source_sha"].str ==
+            canonicalProfileSourcePin &&
+        report["source_ancestry"]["accepted_attribution_base_sha"].str ==
+            acceptedBasePin &&
+        report["source_ancestry"]["attribution_source_sha"].str ==
+            report["build_attestation"]["source_sha"].str &&
+        report["source_ancestry"]["relationship"].str ==
+            "canonical profile source and accepted attribution base are ancestors of attribution source" &&
+        report["source_ancestry"]["intervening_production_commits"].array.length == 2 &&
+        report["source_ancestry"]["intervening_production_commits"][0].str ==
+            "7b0f164 bounded extraction detection contracts" &&
+        report["source_ancestry"]["intervening_production_commits"][1].str ==
+            "fc61fdf bounded ZIP container inspection" &&
         report["harness_executable_name"].str == harnessName &&
         report["harness_build_recipe"].str == harnessBuildRecipe &&
         report["harness_compiler_executable_sha256"].str ==
@@ -1069,6 +1121,9 @@ private void validateReport(JSONValue report, string expectedHarness = "") {
     if (expectedHarness.length) need(report["harness_sha256"].str == expectedHarness,
         "attribution harness drift");
     validateAttestation(report["build_attestation"], report["binary_sha256"].str);
+    need(report["build_attestation_sha256"].str == hashBytes(
+            cast(const(ubyte)[])report["build_attestation"].toString),
+        "build attestation publication digest differs");
     need(report["frozen_materials"]["fixture_table_sha256"].str == fixtureTablePin &&
         report["frozen_materials"]["record_bytes"].integer == recordBytes &&
         report["frozen_materials"]["record_count"].integer == recordCount &&
@@ -1113,7 +1168,10 @@ private void validateReport(JSONValue report, string expectedHarness = "") {
                 "trace case order/cardinality differs");
             foreach (rep, trace; item["traces"].array)
                 validateTrace(trace, report["binary_sha256"].str, layoutName,
-                    names[caseIndex], rep);
+                    names[caseIndex], rep,
+                    report["build_attestation"]["source_sha"].str,
+                    report["build_attestation"]["source_tree_id"].str,
+                    report["build_attestation_sha256"].str);
             auto summary = item["summary"];
             validateSummary(summary, item["traces"].array);
             allSupported = allSupported && summary["status"].str == "SUPPORTED";
@@ -1124,7 +1182,10 @@ private void validateReport(JSONValue report, string expectedHarness = "") {
             auto values = layout["gc_profiles"][mixed ? "mixed_threads1" : "scalar_threads1"];
             need(values.array.length == repetitions, "D-GC repetition cardinality differs");
             foreach (rep, item; values.array)
-                validateGc(item, report["binary_sha256"].str, layoutName, mixed, rep);
+                validateGc(item, report["binary_sha256"].str, layoutName, mixed, rep,
+                    report["build_attestation"]["source_sha"].str,
+                    report["build_attestation"]["source_tree_id"].str,
+                    report["build_attestation_sha256"].str);
             auto expectedGc = summarizeGc(values.array);
             auto summaryGc = layout["gc_summaries"][
                 mixed ? "mixed_threads1" : "scalar_threads1"];

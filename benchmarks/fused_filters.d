@@ -3,7 +3,9 @@ module fused_filters;
 
 import filters.normalize : normalizeLineEndingsFilter, stripControlCharsFilter;
 import filters.punctuation : uncurlQuotesFilter;
-import pipeline : Pipeline;
+import composition.compiler : compileJob;
+import job.legacy : lowerLegacyNames;
+import stages.text_transform;
 import std.array : appender;
 import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.digest : toHexString;
@@ -21,10 +23,12 @@ void main() {
     foreach (_; 0 .. 131_072)
         builder.put("“alpha”\r\nbe\0ta\r‘gamma’\n");
     const input = builder.data;
-    auto pipeline = Pipeline.build(["normalize-line-endings", "strip-control",
+    auto spec = lowerLegacyNames(["normalize-line-endings", "strip-control",
         "uncurl-quotes"]);
+    auto job = compileJob(spec);
+    auto stage = job.stages[0];
     const expected = legacy(input);
-    if (pipeline.run(input) != expected)
+    if (stage.runFilters(input) != expected)
         throw new Exception("fused and legacy outputs differ");
 
     JSONValue[] samples;
@@ -32,7 +36,7 @@ void main() {
         auto watch = StopWatch(AutoStart.yes);
         string output;
         foreach (_; 0 .. 5)
-            output = name == "legacy" ? legacy(input) : pipeline.run(input);
+            output = name == "legacy" ? legacy(input) : stage.runFilters(input);
         watch.stop();
         if (output != expected) throw new Exception(name ~ " output changed");
         samples ~= JSONValue([

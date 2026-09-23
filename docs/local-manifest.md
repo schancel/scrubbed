@@ -143,12 +143,14 @@ files, path/alias/resource gates and a live SIGKILL after observing a durable
 
 ```sh
 ldc2 -O3 -release -Isource experiments/manifest_cli/check.d \
-  source/domain/document.d source/effects/sqlite_ffi.d \
+  source/domain/document.d source/content/pieces.d \
+  source/effects/atomic_piece_sink.d source/effects/sqlite_ffi.d \
   source/effects/local_manifest.d third_party/sqlite/sqlite3.o \
   -of=/tmp/scrubbed-manifest-cli-check
 ldc2 -i -O3 -release -d-version=ManifestCliHarness -Isource \
   -I"$ARGPARSE_SOURCE" \
   source/app.d third_party/sqlite/sqlite3.o \
+  .dub/lexbor/liblexbor_static.a .dub/zstd/libzstd_decompress.a \
   -of=/tmp/scrubbed-manifest-cli-hook
 /tmp/scrubbed-manifest-cli-check ./scrubbed /tmp/scrubbed-manifest-cli-hook
 ```
@@ -162,6 +164,7 @@ release harness deterministically covers after-plan, before-publish,
 after-publish/before-DB-commit, and after-commit windows. It also drives a
 three-child compiled split through argparse and durable execution, proves the
 complete event set precedes publication, recovers committed/uncertain/planned
-siblings without rewriting the committed inode, and checks reject/quarantine
+siblings without rewriting the committed inode, proves root completion occurs
+after all three final events and restart rewrites none of them, and checks reject/quarantine
 as replay-stable no-output terminals in manifest v2 and journal v3. Neither
 proof is a power-loss guarantee.

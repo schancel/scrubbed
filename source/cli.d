@@ -932,6 +932,8 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         plans[ordinal].sink, failure);
                 }
             }
+            version (ManifestCliHarness) manifestKillAt(databasePath,
+                "before-root-commit");
             ledger.completeRoot(rootKey);
             version (ManifestCliHarness) manifestKillAt(databasePath, "after-root-commit");
         });

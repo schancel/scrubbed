@@ -199,7 +199,7 @@ for explicitly supported document formats are tracked separately (#67, #156).
       checks and unchanged tree-json behavior; the old `filters/html2md.d`
       stub is not the shipping route.
 - [x] `extract` raw and decoded HTML byte caps are configurable together via
-      `--max-html-bytes` or an equivalent single-stage v2 JSON config, with
+      `--max-html-bytes` or an equivalent single-stage canonical v3 JSON job, with
       the same 1..8 MiB validation and a 1 MiB default. The lower-level
       parser and existing metadata route retain their prior 64 KiB default.
       A release-active

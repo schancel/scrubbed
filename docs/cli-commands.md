@@ -24,14 +24,14 @@ scrubbed run -i input.txt -o clean.txt --config job-v3.json
 ```
 
 Composition tokens are mutually exclusive with `--filters` and `--config`.
-Equivalent v3 tokens and JSON compile once to the same job. JSONL and
-manifest/error-journal routes reject v3 as not migrated in Stage 5a.
+Equivalent v3 tokens and JSON compile once to the same job. Selected-field
+JSONL and durable manifest/error-journal routes use the same compiled job.
 
 `extract` (alias `x`) exports a bounded selected HTML parse tree or Markdown.
 It requires `--input`, `--output`, and `--format=tree-json|markdown`; the
 format-specific extraction limits and provenance behavior are documented in
-the HTML parser and Markdown guides. This command is separate from the Stage
-5a local text-composition route above.
+the HTML parser and Markdown guides. Its single selected HTML stage is likewise
+compiled from canonical v3 configuration.
 
 The built-in argparse completer supplies command and option **names only**;
 it does not complete paths, filter names or argument values. Generate setup

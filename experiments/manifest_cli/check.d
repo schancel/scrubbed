@@ -92,7 +92,8 @@ private string[] fixtureCommand(string executable, string input, string output,
 }
 
 private void multiTerminalRecovery(string harness, string root) {
-    foreach (phase; ["after-event-plan", "after-second-publish"]) {
+    foreach (phase; ["after-event-plan", "after-second-publish",
+            "before-root-commit"]) {
         auto folder = buildPath(root, "three-" ~ phase);
         auto outputRoot = buildPath(folder, "out");
         mkdir(folder);
@@ -120,7 +121,7 @@ private void multiTerminalRecovery(string harness, string root) {
                 !exists(buildPath(outputRoot, "part-2.txt")),
                 "event set was not complete before publication");
             expect("three event-set restart", command, 0, "done.");
-        } else {
+        } else if (phase == "after-second-publish") {
             auto first = buildPath(outputRoot, "part-0.txt");
             need(text(database,
                 "SELECT state FROM final_event WHERE ordinal=0") == "committed" &&
@@ -144,6 +145,28 @@ private void multiTerminalRecovery(string harness, string root) {
                 command ~ ["--manifest-retry"], 0, "done.");
             need(inode(first) == firstInode && readText(first) == firstBytes,
                 "committed sibling was rewritten");
+        } else {
+            ulong[] inodes;
+            string[] bytes;
+            foreach (ordinal; 0 .. 3) {
+                auto child = buildPath(outputRoot,
+                    "part-" ~ ordinal.to!string ~ ".txt");
+                need(exists(child), "root-last child is missing");
+                inodes ~= inode(child);
+                bytes ~= readText(child);
+            }
+            need(scalar(database,
+                "SELECT count(*) FROM final_event WHERE state='committed'") == 3 &&
+                text(database, "SELECT state FROM root_state") == "planned",
+                "root completed before all final events committed");
+            expect("root-last restart", command, 0, "done.");
+            foreach (ordinal; 0 .. 3) {
+                auto child = buildPath(outputRoot,
+                    "part-" ~ ordinal.to!string ~ ".txt");
+                need(inode(child) == inodes[ordinal] &&
+                    readText(child) == bytes[ordinal],
+                    "root-last restart rewrote a committed sibling");
+            }
         }
         need(text(database, "SELECT state FROM root_state") == "complete" &&
             scalar(database,

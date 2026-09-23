@@ -46,8 +46,8 @@ shipping consume v3 through compiled effects bridges.
 [`composition/`](composition/README.md) compiles that model through injected
 stage and filter registries without importing concrete implementations. It
 retains stage-instance identity and validates exact option types, relative
-stage order, and declared before/after/no-filter placement. Compilation is
-tested; the pure one-stage executor applies before/after filters over checked
+stage order, and declared before/after/no-filter placement. The pure one-stage
+executor applies before/after filters over checked
 `Content`. A pure one-record job executor now carries emitted documents through
 every compiled stage, retaining terminal decisions, split order and immediate
 parent provenance, and returns only final/terminal events. The effects runner
@@ -74,13 +74,13 @@ canonical key format and lifetime rule are in the
 and content/job stages are not implemented here.
 
 [`content/pieces.d`](content/pieces.d) provides ordered borrowed/owned byte
-pieces. The opt-in manifest CLI wraps the existing string pipeline's output
-as an owned piece for F08 publication; future text and output stages are not
-wired. It depends on `domain.document`'s
+pieces. Canonical compiled local, durable, extract, metadata, and selected-field
+JSONL routes carry stage content through this representation. It depends on
+`domain.document`'s
 checked view, not CLI mapping internals. Edits use byte offsets; `replace`
 can insert, delete, or replace without copying untouched source bytes. `stream`
-emits bounded, temporary chunks to a sink. The filters and no-manifest CLI
-do not use this facade.
+emits bounded, temporary chunks to a sink. Text filters remain explicit
+materialization barriers inside compiled stages.
 
 `Content.pieces()` is a lazy Phobos InputRange of checked piece descriptors.
 It preserves empty descriptors and borrowing checks without flattening bytes.
@@ -126,9 +126,8 @@ events. It does not establish corpus-throughput readiness.
 single-active-lease mmap reader with checked borrows, bounded owning carry,
 and mapped-byte counters. [`effects/atomic_piece_sink.d`](effects/atomic_piece_sink.d)
 streams `Content.pieces()` through a bounded buffer to one atomic local
-destination. The opt-in manifest file/tree CLI uses the atomic piece sink;
-the mapped windowed input remains standalone. Neither is wired to the future
-document-stage runner; their resource bounds do not make
+destination. Canonical local and durable file/tree execution uses the atomic
+piece sink; the mapped windowed input remains standalone. Their resource bounds do not make
 context-heavy filters streaming.
 
 [`effects/html_tree_export.d`](effects/html_tree_export.d) serializes the

@@ -71,8 +71,8 @@ dub build --build=release
 ./scrubbed extract --input page.html --output page.md --format markdown --max-html-bytes 1048576
 ./scrubbed extract --input page.html --output page.md --format markdown --config html-extract.json
 ./scrubbed run --input - --output - --jsonl-fields text,title --dataset-namespace corpus-v1 --source-key shard-0001 --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 < input.jsonl > clean.jsonl
-./scrubbed errors-init --journal path/to/errors-v2.db
-./scrubbed run --input path/to/docs --output path/to/clean --filters normalize-line-endings --error-journal path/to/errors-v2.db
+./scrubbed errors-init --journal path/to/errors-v3.db
+./scrubbed run --input path/to/docs --output path/to/clean --filters normalize-line-endings --error-journal path/to/errors-v3.db
 ```
 
 `--filters` is a comma-separated, ordered chain of registered filter
@@ -118,12 +118,13 @@ help and command/option-name completion. `extract --format=tree-json` exports a
 bounded selected HTML parse tree; `--format=markdown` mechanically renders that
 tree without main-content selection. See the [HTML parser guide](docs/html-parser.md) and
 [command guide](docs/cli-commands.md).
-The optional existing-v2 `--error-journal` records sanitized local file/tree
+The optional current-v3 `--error-journal` records sanitized local file/tree
 failures and publication intent; add `--error-retry` only when explicitly
 reprocessing unresolved output. Add `--error-targeted` with both flags to
 retry only outstanding local-primary file/tree targets; changed input or
-configuration is refused before output mutation. Non-seekable sources and
-other sinks are not selected by this mode. The default remains the v1 path.
+configuration is refused before output mutation. Existing v2 journals are
+export-only and refused by live processing without mutation. Non-seekable
+sources and other sinks are not selected by this mode.
 Exported error-event JSONL and its SHA-256 sidecar are individually atomically
 replaced, not an atomic pair. See the [error journal guide](docs/error-events.md).
 The explicit paired `--input - --output -` JSONL mode transforms selected
@@ -186,10 +187,12 @@ an isolated document failure may continue only after durable failed/uncertain
 state and an injected acknowledgment; run-fatal policy, resource, and lost-ledger
 errors stop with exit 2. Exit 1 means acknowledged failures or unresolved
 retry decisions. Keyed `--explain` records distinguish these outcomes. The
-shipping `run`/`repair` path defaults to the v1 ledger. An [opt-in v2 failure
-journal](docs/error-events.md), explicit CLI init/copy/export/verify commands,
+shipping `run`/`repair` path without a durability flag is non-durable. An
+[opt-in current-v3 failure journal](docs/error-events.md), explicit CLI
+init/copy/export/verify commands,
 and bounded JSONL history/outstanding export with SHA-256 sidecars now exist;
-`--error-journal` and `--error-retry` select live local file/tree v2 processing.
+`--error-journal` and `--error-retry` select canonical compiled local file/tree
+processing. Archival v2 journals remain exportable but cannot be run.
 An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
 commit caller-supplied content and metadata payloads separately. The
 [`route-metadata` CLI](docs/metadata-route.md) now feeds it filtered HTML

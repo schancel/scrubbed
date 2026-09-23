@@ -132,6 +132,22 @@ experiment. In particular, randomizing execution while publication remains
 canonical risks increasing ordered head-of-line pressure; that semantic and
 performance cost is not justified by these measurements.
 
+### Split-condition wakeup experiment
+
+A further isolated candidate replaced `BoundedInput`'s shared condition with
+separate producer-admission and worker-descriptor conditions, so queue-slot
+changes did not wake descriptor waiters and descriptor changes did not wake
+the single producer. The same five-pair comparison used the authorized
+worker-availability binary as its baseline and preserved exact output and all
+resource controls.
+
+`coordination-condition-split-evidence.json` rejects the candidate. The
+many-small four-thread median was effectively unchanged (2.609487 versus
+2.609199 seconds, -0.01%), accepted-to-worker queue residence fell only 0.28%,
+and only two of five target pairs improved. Many-small two-thread wall rose
+0.11% and four-thread CPU rose 1.00%; controls remained within 5%. The added
+synchronization surface is therefore not retained in production.
+
 ## Attested full-process target
 
 `pipeline.d --attested-build` refuses a dirty checkout, builds the release

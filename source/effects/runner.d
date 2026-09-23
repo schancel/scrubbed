@@ -5,6 +5,8 @@ module effects.runner;
 import content.pieces : Content;
 import composition.compiler : CompiledJob;
 import composition.job_executor : runCompiledJob;
+import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1,
+    runRuntimePlanV1;
 import domain.document : Document, DocumentId, DocumentViewOwner;
 import stages.contract : CancellationCheck, EventKind, StageDeclaration,
     StageDocument, StageEvent, StageTransform, runStage;
@@ -392,6 +394,23 @@ RunResult runEffects(Source source, Parser parser, Sink sink,
     job.identity; // Reject an uninitialized plan before touching the source.
     return runEffectRecords(source, parser, sink,
         (StageDocument input) => runCompiledJob(input, job), isCancelled);
+}
+
+alias RuntimeExecutionObserverV1 = void delegate(
+    ref RuntimeExecutionV1 execution);
+
+/// Execute either closed shipping plan through the same lifetime boundary.
+RunResult runEffects(Source source, Parser parser, Sink sink,
+        ref RuntimePlanV1 plan,
+        scope RuntimeExecutionObserverV1 observe = null,
+        scope CancellationCheck isCancelled = null) {
+    plan.identity; // Reject an uninitialized plan before touching the source.
+    return runEffectRecords(source, parser, sink,
+        (StageDocument input) {
+            auto execution = runRuntimePlanV1(input, plan);
+            if (observe !is null) observe(execution);
+            return execution.events;
+        }, isCancelled);
 }
 
 version (unittest) {

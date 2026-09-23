@@ -31,6 +31,17 @@ private Captured separately(string[] command) {
     return result;
 }
 
+private Captured withInput(string[] command, string input) {
+    auto pipes = pipeProcess(command, Redirect.all);
+    pipes.stdin.write(input);
+    pipes.stdin.close();
+    Captured result;
+    foreach (line; pipes.stdout.byLineCopy) result.output ~= line ~ "\n";
+    foreach (line; pipes.stderr.byLineCopy) result.error ~= line ~ "\n";
+    result.status = pipes.pid.wait();
+    return result;
+}
+
 int main(string[] args) {
     check(args.length == 2, "usage: check <release executable>");
     auto exe = args[1];
@@ -123,6 +134,31 @@ int main(string[] args) {
         "--validate"]);
     check(validate.status == 0 && validate.output.canFind("valid. No files processed.") &&
         !exists(dryOutput), "validate no output");
+    auto dispatchOutput = buildPath(root, "dispatch.txt");
+    auto dispatch = separately([exe, "run", "--input", input,
+        "--output", dispatchOutput, "--threads", "1", "--explain",
+        "--config", "scrubbed.dispatch.example.json"]);
+    check(dispatch.status == 0 && readText(dispatchOutput) == "line\r\n" &&
+        dispatch.output.canFind("job: job:v4:") &&
+        dispatch.output.canFind("EXPLAIN\t{\"schema\":\"scrubbed.dispatch.v1\"") &&
+        !dispatch.output.canFind(input), "shipping dispatch v4 config/explain");
+    auto rejectedDispatch = separately([exe, "run", "--input", input,
+        "--output", buildPath(root, "mixed.txt"), "--config",
+        "scrubbed.dispatch.example.json", "--filters", "strip-control"]);
+    check(rejectedDispatch.status == 2 &&
+        rejectedDispatch.error.canFind("mutually exclusive"),
+        "dispatch config/filter pre-effects rejection");
+    auto dispatchJsonl = withInput([exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "example",
+        "--source-key", "stdin", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "1024", "--config",
+        "scrubbed.dispatch.example.json", "--explain"],
+        "{\"text\":\"hello\"}\n");
+    check(dispatchJsonl.status == 0 &&
+        parseJSON(dispatchJsonl.output.splitLines()[0])["text"].str == "hello" &&
+        dispatchJsonl.error.canFind("EXPLAIN\t{\"schema\":\"scrubbed.dispatch.v1\"") &&
+        !dispatchJsonl.output.canFind("EXPLAIN"),
+        "dispatch JSONL whole-line output and stderr explain");
     auto extractOutput = buildPath(root, "extract.txt");
     auto extract = separately([exe, "extract", "--input", input, "--output", extractOutput]);
     check(extract.status == 2 && extract.output == "" &&

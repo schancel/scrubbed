@@ -41,6 +41,10 @@ it performs no file, process, network, CLI, or adapter I/O.
   global registry or discovery mechanism.
 
 These contracts still have no concrete Office, PDF, image, or OCR adapter,
-shipping executor wiring, fan-out, join, DEFLATE support, or general
-workflow graph. Later slices may consume them without changing shipping
-behavior introduced here.
+fan-out, join, DEFLATE support, or general workflow graph.
+# Shipping extractor
+
+`registry.d` constructs the executable's finite registry on demand. It contains
+only `core-plain-text/v1`, whose required `max-output-bytes` is capped at 256
+MiB. `plain_text.d` streams the read-only source once into independently owned
+pieces and validates UTF-8 without flattening a second whole payload.

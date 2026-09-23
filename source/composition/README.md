@@ -17,6 +17,10 @@ aggregate initializer, so callers cannot detach executable behavior from that
 identity. [`access_contract.d`](access_contract.d) pins that external-module
 construction boundary at compile time.
 
+`runtime_plan.d` is the closed shipping seam between unchanged `linearV3` and
+explicit `dispatchV4`. It exposes no registration or general workflow graph;
+dispatch execution still converges to exactly one root terminal event.
+
 [`executor.d`](executor.d) runs one compiled stage over checked documents. A
 nonempty filter chain is an explicit UTF-8 materialization barrier at the
 declared before/after position; an empty chain preserves the original Content

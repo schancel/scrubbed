@@ -351,6 +351,22 @@ struct TextContentV1 {
     }
 }
 
+/// Pure builder whose private descriptors can only be independently owned.
+/// Appending copies each streamed chunk once; later snapshots copy descriptors.
+struct OwnedTextPiecesV1 {
+private:
+    ContentPiece[] piecesValue;
+    size_t sizeValue;
+public:
+    void append(const(ubyte)[] bytes) pure {
+        enforce(bytes.length <= size_t.max - sizeValue,
+            "owned text length overflow");
+        piecesValue ~= ContentPiece.own(bytes);
+        sizeValue += bytes.length;
+    }
+    size_t size() const pure { return sizeValue; }
+}
+
 /// Checked stable UTF-8 text plus unchanged source identity and presentation.
 struct TextDocumentV1 {
     private Document documentValue;
@@ -425,6 +441,42 @@ struct TextDocumentV1 {
         return result;
     }
 
+    /// Pure construction from payloads that are already independently owned.
+    /// Only piece descriptors are snapshotted; payload bytes are not copied.
+    static TextDocumentV1 extractedOwnedPieces(Document document,
+            OwnedTextPiecesV1 ownedUtf8, DetectionResultV1 detection,
+            string extractor, string extractorVersion, string[] warnings,
+            ExtractionProvenanceV1 provenance) pure {
+        auto id = document.id;
+        enforce(id.text.length != 0 && document.outputName.text.length != 0,
+            "text document needs initialized identity and output name");
+        TextContentV1 stableContent;
+        stableContent.snapshot = new Content(ownedUtf8.piecesValue);
+        enforce(validUtf8(stableContent.snapshot),
+            "text document content must be valid UTF-8");
+        detection.validateResult;
+        enforce(isConcreteMediaV1(detection.outcome),
+            "text document needs a concrete detection outcome");
+        enforce(detection.outcome == provenance.sourceOutcome,
+            "text provenance must match detection outcome");
+        enforce(detection.availableBytes == provenance.sourceBytes,
+            "text provenance must match detected source byte count");
+        enforce(warnings.length <= maxDetectionWarningsV1,
+            "too many extraction warnings");
+
+        TextDocumentV1 result;
+        result.documentValue = document;
+        result.contentValue = stableContent;
+        result.detectionValue = detection;
+        result.extractorValue = checkedLabel(extractor, "extractor name", 128);
+        result.extractorVersionValue = checkedLabel(extractorVersion,
+            "extractor version", 128);
+        result.warningsValue = checkedLabels(warnings, "extraction warning",
+            maxWarningBytesV1);
+        result.provenanceValue = provenance;
+        return result;
+    }
+
     Document document() const pure { return documentValue; }
     DocumentId id() const pure { return documentValue.id; }
     OutputName outputName() const pure { return documentValue.outputName; }
@@ -464,12 +516,14 @@ private string[] checkedLabels(string[] values, string field, size_t maxBytes) p
 }
 
 /// Validate incrementally so a checked text boundary does not flatten Content.
-private bool validUtf8(Content content) {
+private bool validUtf8(Content content) pure {
     size_t remaining;
     ubyte nextMin = 0x80;
     ubyte nextMax = 0xbf;
     bool valid = true;
-    foreach (offset, piece; content) {
+    for (auto pieceRange = content.pieces; !pieceRange.empty;
+            pieceRange.popFront) {
+        auto piece = pieceRange.front;
         foreach (index; 0 .. piece.size) {
             auto value = piece.at(index);
             if (remaining) {

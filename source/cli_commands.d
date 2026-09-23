@@ -26,6 +26,16 @@ mixin template ProcessingOptions() {
     string[] stageFilters;
     @(NamedArgument("filter-option").Description("Typed option KEY=TYPE:VALUE for the preceding filter"))
     string[] filterOptions;
+    @(NamedArgument("dispatch-option").Description("V4 dispatch limit KEY=VALUE"))
+    string[] dispatchOptions;
+    @(NamedArgument("route").Description("V4 dispatch route NAME=EXTRACTOR"))
+    string[] routes;
+    @(NamedArgument("route-option").Description("V4 route option KEY=TYPE:VALUE"))
+    string[] routeOptions;
+    @(NamedArgument("action").Description("V4 outcome action OUTCOME=KIND:TARGET"))
+    string[] actions;
+    @(NamedArgument("common").Description("End v4 dispatch declaration; begin common v3 stages"))
+    bool common;
     @(NamedArgument.Description("Worker thread count"))
     size_t threads;
     @(NamedArgument("max-queued-docs").Description("Maximum queued documents"))
@@ -141,7 +151,8 @@ private bool present(const string[] args, string name) {
 }
 
 private bool compositionFlag(string value) {
-    foreach (name; ["--stage", "--stage-option", "--filter", "--filter-option"])
+    foreach (name; ["--stage", "--stage-option", "--filter", "--filter-option",
+            "--dispatch-option", "--route", "--route-option", "--action", "--common"])
         if (value == name || value.startsWith(name ~ "=")) return true;
     return false;
 }
@@ -150,6 +161,7 @@ private void forwardComposition(ref string[] forwarded, const string[] original)
     for (size_t i; i < original.length; ++i) {
         if (!compositionFlag(original[i])) continue;
         forwarded ~= original[i];
+        if (original[i] == "--common") continue;
         if (original[i].indexOf('=') < 0 && i + 1 < original.length)
             forwarded ~= original[++i];
     }

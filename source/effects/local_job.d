@@ -8,6 +8,8 @@ import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1,
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentViewOwner;
 import effects.atomic_piece_sink : writeAtomicPieces;
+import effects.durable_job : DurableMetricPhaseV1, beginDurableMetricV1,
+    recordDurableMetricV1;
 import effects.mapped_file : openMappedFile;
 import effects.runner : Parser, Sink, Source, SourceRecord, runEffects;
 import stages.contract : EventKind, StageDocument, StageEvent;
@@ -25,6 +27,7 @@ alias LocalEventBatch = void delegate(StageEvent[] events,
     ref const ubyte[32] inputHash);
 alias LocalRuntimeBatchV1 = void delegate(ref RuntimeExecutionV1 execution,
     ref const ubyte[32] inputHash);
+alias LocalVerifiedSkipV1 = bool delegate();
 
 struct LocalJobOutcome {
     size_t emitted;
@@ -89,24 +92,48 @@ LocalJobOutcome runLocalJobBatch(string filename, ulong expectedBytes,
 
 LocalJobOutcome runLocalJobBatch(string filename, ulong expectedBytes,
         Document document, ref RuntimePlanV1 plan,
-        scope LocalRootPlan planRoot, scope LocalRuntimeBatchV1 acceptBatch) {
+        scope LocalRootPlan planRoot, scope LocalRuntimeBatchV1 acceptBatch,
+        scope LocalVerifiedSkipV1 verifiedSkip = null) {
     enforce(planRoot !is null && acceptBatch !is null,
         "local runtime batch callbacks are required");
     enforce(!isSymlink(filename), "refusing symlink input: " ~ filename);
     DocumentViewOwner owner;
-    if (expectedBytes == 0) {
-        scope input = File(filename, "rb");
-        enforce(input.size == 0,
-            "input changed size after admission: " ~ filename);
-        owner = new DocumentViewOwner(new ubyte[0]);
-    } else owner = openMappedFile(filename, expectedBytes);
+    {
+        auto openStarted = beginDurableMetricV1();
+        scope(exit) recordDurableMetricV1(DurableMetricPhaseV1.sourceOpen,
+            0, openStarted);
+        if (expectedBytes == 0) {
+            scope input = File(filename, "rb");
+            enforce(input.size == 0,
+                "input changed size after admission: " ~ filename);
+            owner = new DocumentViewOwner(new ubyte[0]);
+        } else owner = openMappedFile(filename, expectedBytes);
+    }
     scope(exit) owner.close();
     auto content = new Content([ContentPiece.borrow(
         owner.view(0, cast(size_t) expectedBytes))]);
-    auto inputHash = contentDigest(content);
+    ubyte[32] inputHash;
+    {
+        auto hashStarted = beginDurableMetricV1();
+        scope(exit) {
+            recordDurableMetricV1(DurableMetricPhaseV1.sourceRead,
+                expectedBytes, hashStarted);
+            recordDurableMetricV1(DurableMetricPhaseV1.sourceHash,
+                expectedBytes, hashStarted);
+        }
+        inputHash = contentDigest(content);
+    }
     planRoot(inputHash);
-    auto execution = runRuntimePlanV1(StageDocument(document, content), plan,
-        null, filename);
+    if (verifiedSkip !is null && verifiedSkip()) return LocalJobOutcome.init;
+    RuntimeExecutionV1 execution;
+    {
+        auto executionStarted = beginDurableMetricV1();
+        scope(exit) recordDurableMetricV1(
+            DurableMetricPhaseV1.compiledExecution, expectedBytes,
+            executionStarted);
+        execution = runRuntimePlanV1(StageDocument(document, content), plan,
+            null, filename);
+    }
     enforce(execution.events.length != 0,
         "compiled job produced no terminal decision");
     acceptBatch(execution, inputHash);

@@ -3,6 +3,32 @@
 All project benchmark and corpus-analysis utilities are written in D. The
 baseline also measures the external ftfy CLI on its task-equivalent fixture.
 
+## Exact durable verified-skip evidence
+
+`durable_skip_check.d` reproduces the frozen 128 MiB many-small (4,096 files)
+and few-large (eight files) layouts for both manifest-v2 and journal-v3. It
+compares the instrumented preflight-disabled control with the candidate in
+three alternating O3/release runs. Every retained run requires exact source
+and output tree/concatenated hashes, the full skipped-status cardinality, one
+exact source and output hash per file, no publication, and compiled execution
+counts of one versus zero. Timings are descriptive local observations, not a
+general performance guarantee.
+
+```sh
+dub build --compiler=ldc2 --build=release --force
+ldc2 -O3 -release benchmarks/durable_skip_check.d \
+  -of=/tmp/scrubbed-durable-skip-check
+/tmp/scrubbed-durable-skip-check ./scrubbed \
+  /tmp/scrubbed-durable-skip-evidence.json
+```
+
+The shipping instrumentation is fixed-cardinality, content-free,
+concurrency-safe, and disabled unless the harness supplies its private metrics
+environment. The evidence contains phase counts, bytes and elapsed time plus
+child wall/CPU/RSS and sampled-FD observations. The first run in each series
+also enables the D runtime's GC summary as a release-active availability
+control. Scratch fixtures and raw logs remain private and are removed.
+
 ## Attested full-process target
 
 `pipeline.d --attested-build` refuses a dirty checkout, builds the release

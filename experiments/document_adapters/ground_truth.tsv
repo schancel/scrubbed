@@ -1,0 +1,5 @@
+sample	tokens	geometry
+pdf-training	TRAINING|PDF|ALPHA|ONE|BETA|TWO	none
+pdf-heldout-layout	LAYOUT|REPORT|LEFT|A|LEFT|B|RIGHT|A|RIGHT|B|FOOTER|END	pdf_row_a_columns;pdf_row_b_columns;pdf_right_column_aligned;pdf_footer_after_columns
+docx-training	TRAINING|DOCX|GAMMA|THREE|DELTA|FOUR	none
+docx-heldout-layout	OFFICE|LAYOUT|ROW1|LEFT|ROW1|RIGHT|ROW2|LEFT|ROW2|RIGHT|OFFICE|END	docx_row1_cells;docx_row2_cells;docx_right_column_aligned;docx_footer_after_table

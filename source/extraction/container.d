@@ -134,6 +134,12 @@ private final class ContentSnapshot {
         return 0;
     }
 
+    void validateRange(size_t start, size_t count) const pure {
+        auto checkedSize = size;
+        enforce(start <= checkedSize && count <= checkedSize - start,
+            "ZIP entry stream outside source");
+    }
+
 }
 
 /// A stable logical window over admitted bytes, never a reusable raw buffer.
@@ -199,6 +205,8 @@ final class AdmittedZipV1 {
             if (entry.evidence.nameValue == canonicalName) {
                 enforce(!entry.evidence.directoryValue,
                     "ZIP directory entries have no byte stream");
+                source.validateRange(entry.payloadOffset,
+                    entry.evidence.compressedValue);
                 auto remaining = entry.evidence.compressedValue;
                 auto offset = entry.payloadOffset;
                 while (remaining) {
@@ -779,8 +787,21 @@ unittest {
         (ZipEntryChunkV1 chunk) { retainedBorrowed = chunk; }, 1);
     owner.close();
     assertThrown(retainedBorrowed.at(0));
+    size_t closedNonemptyCalls;
     assertThrown(borrowedAccepted.admitted.streamEntry("a.txt",
-        (ZipEntryChunkV1 chunk) { chunk.size; }));
+        (ZipEntryChunkV1 chunk) { ++closedNonemptyCalls; }));
+    assert(closedNonemptyCalls == 0);
+
+    auto emptyArchive = zipFixture([FixtureEntry("empty", null)]);
+    auto emptyOwner = new DocumentViewOwner(emptyArchive);
+    auto borrowedEmpty = inspectZipContainerV1(new Content([
+        ContentPiece.borrow(emptyOwner.view(0, emptyArchive.length))
+    ]));
+    emptyOwner.close();
+    size_t closedEmptyCalls;
+    assertThrown(borrowedEmpty.admitted.streamEntry("empty",
+        (ZipEntryChunkV1 chunk) { ++closedEmptyCalls; }));
+    assert(closedEmptyCalls == 0);
 }
 
 unittest {

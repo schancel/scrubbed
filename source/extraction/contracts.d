@@ -19,7 +19,9 @@ enum DetectionOutcomeV1 : ubyte {
     ambiguous,
     malformed,
     encrypted,
-    unsupported
+    unsupported,
+    genericZip,
+    ooxmlWord
 }
 
 /// Why a detector associated an input with a normalized outcome.
@@ -27,7 +29,8 @@ enum EvidenceKindV1 : ubyte {
     signature,
     textualContent,
     declaredMediaType,
-    fileExtension
+    fileExtension,
+    containerStructure
 }
 
 /// One bounded, normalized item of detector evidence.
@@ -47,7 +50,7 @@ struct MediaEvidenceV1 {
 
     string detail() const pure { return detailValue; }
 
-    private void validateEvidence() const {
+    private void validateEvidence() const pure {
         enforce(kind >= EvidenceKindV1.min && kind <= EvidenceKindV1.max,
             "invalid evidence kind");
         enforce(isConcreteMediaV1(outcome), "evidence needs a concrete media outcome");
@@ -116,7 +119,7 @@ struct DetectionResultV1 {
     size_t availableBytes() const pure { return availableBytesValue; }
 
     /// Reject default or corrupted values before they cross the boundary.
-    void validateResult() const {
+    void validateResult() const pure {
         enforce(outcomeValue >= DetectionOutcomeV1.min &&
             outcomeValue <= DetectionOutcomeV1.max, "invalid detection outcome");
         enforce(detectorVersionValue.length != 0,
@@ -133,7 +136,8 @@ struct DetectionResultV1 {
         foreach (item; evidenceValue) {
             item.validateEvidence;
             if (item.kind == EvidenceKindV1.signature ||
-                    item.kind == EvidenceKindV1.textualContent)
+                    item.kind == EvidenceKindV1.textualContent ||
+                    item.kind == EvidenceKindV1.containerStructure)
                 authoritative[cast(size_t) item.outcome] = true;
         }
         foreach (warning; warningsValue)
@@ -141,8 +145,12 @@ struct DetectionResultV1 {
         size_t authoritativeOutcomes;
         foreach (present; authoritative) if (present) ++authoritativeOutcomes;
         if (isConcreteMediaV1(outcomeValue)) {
-            enforce(authoritativeOutcomes == 1 &&
-                authoritative[cast(size_t) outcomeValue],
+            auto refinedWord = outcomeValue == DetectionOutcomeV1.ooxmlWord &&
+                authoritativeOutcomes == 2 &&
+                authoritative[cast(size_t) DetectionOutcomeV1.genericZip] &&
+                authoritative[cast(size_t) DetectionOutcomeV1.ooxmlWord];
+            enforce((authoritativeOutcomes == 1 &&
+                authoritative[cast(size_t) outcomeValue]) || refinedWord,
                 "concrete outcome must match its sole authoritative evidence");
         } else if (outcomeValue == DetectionOutcomeV1.ambiguous) {
             enforce(authoritativeOutcomes >= 2,
@@ -297,7 +305,7 @@ struct ExtractionProvenanceV1 {
     private string routeValue;
     size_t sourceBytes;
 
-    this(DetectionOutcomeV1 sourceOutcome, string routeName, size_t sourceBytes) {
+    this(DetectionOutcomeV1 sourceOutcome, string routeName, size_t sourceBytes) pure {
         enforce(isConcreteMediaV1(sourceOutcome),
             "text provenance needs a concrete source outcome");
         this.sourceOutcome = sourceOutcome;
@@ -332,6 +340,14 @@ struct TextContentV1 {
             size_t chunkSize = 8192) const pure {
         enforce(snapshot !is null, "text content is not initialized");
         snapshot.stream(sink, chunkSize);
+    }
+
+    /// Return another descriptor snapshot without copying payload bytes.
+    Content toContent() {
+        enforce(snapshot !is null, "text content is not initialized");
+        ContentPiece[] pieces;
+        foreach (offset, piece; snapshot) pieces ~= piece;
+        return new Content(pieces);
     }
 }
 
@@ -376,9 +392,43 @@ struct TextDocumentV1 {
         provenanceValue = provenance;
     }
 
+    /// Pure extractor construction from one independently owned UTF-8 value.
+    /// The returned content cannot alias or mutate the source byte view.
+    static TextDocumentV1 extractedOwned(Document document,
+            const(ubyte)[] utf8, DetectionResultV1 detection,
+            string extractor, string extractorVersion, string[] warnings,
+            ExtractionProvenanceV1 provenance) pure {
+        auto id = document.id;
+        enforce(id.text.length != 0 && document.outputName.text.length != 0,
+            "text document needs initialized identity and output name");
+        validate(cast(const(char)[]) utf8);
+        detection.validateResult;
+        enforce(isConcreteMediaV1(detection.outcome),
+            "text document needs a concrete detection outcome");
+        enforce(detection.outcome == provenance.sourceOutcome,
+            "text provenance must match detection outcome");
+        enforce(detection.availableBytes == provenance.sourceBytes,
+            "text provenance must match detected source byte count");
+        enforce(warnings.length <= maxDetectionWarningsV1,
+            "too many extraction warnings");
+
+        TextDocumentV1 result;
+        result.documentValue = document;
+        result.contentValue.snapshot = new Content([ContentPiece.own(utf8)]);
+        result.detectionValue = detection;
+        result.extractorValue = checkedLabel(extractor, "extractor name", 128);
+        result.extractorVersionValue = checkedLabel(extractorVersion,
+            "extractor version", 128);
+        result.warningsValue = checkedLabels(warnings, "extraction warning",
+            maxWarningBytesV1);
+        result.provenanceValue = provenance;
+        return result;
+    }
+
     Document document() const pure { return documentValue; }
     DocumentId id() const pure { return documentValue.id; }
     OutputName outputName() const pure { return documentValue.outputName; }
+    TextContentV1 content() pure { return contentValue; }
     const(TextContentV1) content() const pure { return contentValue; }
     const(DetectionResultV1) detection() const pure { return detectionValue; }
     string extractor() const pure { return extractorValue; }
@@ -388,22 +438,25 @@ struct TextDocumentV1 {
 }
 
 bool isConcreteMediaV1(DetectionOutcomeV1 outcome) pure {
-    return outcome >= DetectionOutcomeV1.plainText && outcome <= DetectionOutcomeV1.gif;
+    return (outcome >= DetectionOutcomeV1.plainText &&
+            outcome <= DetectionOutcomeV1.gif) ||
+        outcome == DetectionOutcomeV1.genericZip ||
+        outcome == DetectionOutcomeV1.ooxmlWord;
 }
 
-private string checkedLabel(string value, string field, size_t maxBytes) {
+private string checkedLabel(string value, string field, size_t maxBytes) pure {
     validateLabel(value, field, maxBytes);
     return value.idup;
 }
 
-private void validateLabel(string value, string field, size_t maxBytes) {
+private void validateLabel(string value, string field, size_t maxBytes) pure {
     enforce(value.length != 0 && value.length <= maxBytes,
         field ~ " must be nonempty and bounded");
     validate(value);
     enforce(value.indexOf('\0') < 0, field ~ " must not contain NUL");
 }
 
-private string[] checkedLabels(string[] values, string field, size_t maxBytes) {
+private string[] checkedLabels(string[] values, string field, size_t maxBytes) pure {
     auto result = new string[values.length];
     foreach (index, value; values)
         result[index] = checkedLabel(value, field, maxBytes);

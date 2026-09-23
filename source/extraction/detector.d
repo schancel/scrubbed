@@ -91,6 +91,10 @@ DetectionResultV1 detectMediaV1(Content content, string declaredMediaType = null
     if (startsWithBytes(prefix, cast(const(ubyte)[]) "GIF87a") ||
             startsWithBytes(prefix, cast(const(ubyte)[]) "GIF89a"))
         addStrong(DetectionOutcomeV1.gif, EvidenceKindV1.signature, "gif-signature");
+    if (startsWithBytes(prefix, [cast(ubyte) 0x50, 0x4b, 0x03, 0x04]) ||
+            startsWithBytes(prefix, [cast(ubyte) 0x50, 0x4b, 0x05, 0x06]))
+        addStrong(DetectionOutcomeV1.genericZip, EvidenceKindV1.signature,
+            "zip-signature");
 
     auto textStart = leadingTextOffset(prefix);
     bool html;
@@ -111,7 +115,9 @@ DetectionResultV1 detectMediaV1(Content content, string declaredMediaType = null
              0x0d, 0x0a, 0x1a, 0x0a]) ||
          partialSignature(prefix, [cast(ubyte) 0xff, 0xd8, 0xff]) ||
          partialSignature(prefix, cast(const(ubyte)[]) "GIF87a") ||
-         partialSignature(prefix, cast(const(ubyte)[]) "GIF89a"));
+         partialSignature(prefix, cast(const(ubyte)[]) "GIF89a") ||
+         partialSignature(prefix, [cast(ubyte) 0x50, 0x4b, 0x03, 0x04]) ||
+         partialSignature(prefix, [cast(ubyte) 0x50, 0x4b, 0x05, 0x06]));
     auto signatureCount = countStrong(strong);
     auto utf8State = utf8TextPrefixState(prefix);
     auto textCompatible = utf8State == Utf8PrefixState.complete ||
@@ -395,6 +401,11 @@ unittest {
         DetectionOutcomeV1.jpeg);
     assert(detected(cast(const(ubyte)[]) "GIF89a...").outcome ==
         DetectionOutcomeV1.gif);
+    assert(detected([cast(ubyte) 0x50, 0x4b, 0x03, 0x04]).outcome ==
+        DetectionOutcomeV1.genericZip);
+    auto partialZip = detected([cast(ubyte) 0x50, 0x4b]);
+    assert(partialZip.outcome == DetectionOutcomeV1.unknown);
+    assert(partialZip.warnings.canFind("truncated-known-signature"));
     assert(detected([cast(ubyte) 0, 1, 2, 3], "text/plain", "x.txt").outcome ==
         DetectionOutcomeV1.unknown);
 

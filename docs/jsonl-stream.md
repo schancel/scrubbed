@@ -9,8 +9,10 @@ scrubbed run --input - --output - --jsonl-fields text,title \
 ```
 
 All five JSONL options and both `-` endpoints are required. Field names are
-unique top-level JSON keys. `--filters` or `--config` uses the same resolved
-filter chain as file processing. File scheduling options, `--list-filters`,
+unique top-level JSON keys. The default, `--filters`, v1 `--config`, v3
+`--config`, and ordered composition tokens all lower to one canonical job that
+is compiled before stdin is read or stdout is written. File scheduling
+options, `--list-filters`,
 and `--explain` are unavailable in this mode. `--validate` checks options,
 identity, config, and filters without reading stdin or writing stdout.
 `--dry-run` processes records and reports the bounded count to stderr but
@@ -24,12 +26,16 @@ physical line ordinal; it does not depend on the transport path. Retry with
 the same key and line positions for stable IDs. Record order and untouched
 parsed JSON values are preserved; object key order, escape spelling,
 whitespace, and formatting are not byte-preserved. Malformed JSON and invalid
-selected text have distinct error categories. Processing stops on the first
+selected text have distinct error categories. A compiled reject, quarantine,
+or split/multiple-final decision has a distinct `rejected`, `quarantined`, or
+`unsupportedFanout` category and writes none of the current record. Processing
+stops on the first
 failed record (exit 1), reporting its line, DocumentId, and number of fully
 flushed prior records. A stdin read fault is also a record-aware processing
 failure at the next physical line, not an invocation error. A broken stdout
 writer may have emitted part of the current record; the current record is
-never reported as completed. There is no atomic rollback or quarantine.
+never reported as completed. There is no atomic rollback or JSONL quarantine
+store.
 Invalid invocation/config exits 2.
 There is no CLI cancel flag in this mode. OS termination may leave a partial
 current stdout record and does not promise a graceful error log, checkpoint,
@@ -51,8 +57,11 @@ an opaque filter callback can allocate beyond the adapter's byte caps.
 delegates, a required stable dataset namespace and source key, selected
 top-level field names, a text-transform delegate, and positive byte caps.
 `effects.stdio_stream` binds the same operation to caller-owned `File` handles
-or process stdin/stdout. The CLI delegates to this adapter and shares the
-existing filter-chain builder; it does not introduce a second JSONL parser.
+or process stdin/stdout. The locator-aware variant supplies the same validated
+line `SourceLocator` to `effects.jsonl_job`, which executes one selected field
+through the existing compiled-job runner and copies its sole mapped result
+before the input owner closes. JSON framing and value preservation remain here;
+there is no second JSON parser or legacy execution path on the shipping route.
 
 Each physical line is one object. LF and CRLF are accepted, as is a final
 record without a newline. Empty lines are malformed records. The source
@@ -60,8 +69,10 @@ locator uses the namespace, caller-supplied source key, and 1-based physical
 line ordinal (decimal string). Neither an output name nor a transport path
 enters the ID. A retry with the same source key and lines gives the same IDs.
 Selected fields must be JSON strings when present; absent fields are left
-untouched. The delegate sees the selected field name, decoded string, and
-`DocumentId`. All other fields retain their parsed JSON semantic values,
+untouched. The compatibility delegate sees the selected field name, decoded
+string, and `DocumentId`; the compiled facade sees the equivalent
+`SourceLocator` and uses the selected field as `OutputName`. All other fields
+retain their parsed JSON semantic values,
 including nested arrays/objects, booleans, null, and supported integers.
 Spelling, whitespace, escape style, and key order are not preserved.
 
@@ -99,4 +110,7 @@ ldc2 -O -release -enable-inlining -i -I=source experiments/jsonl_stream/check.d 
 /tmp/issue16-check
 ldc2 -O -release experiments/jsonl_stream/cli_check.d -of=/tmp/issue16-cli-check
 /tmp/issue16-cli-check ./scrubbed
+ldc2 -O3 -release -i -Isource experiments/jsonl_stream/job_resource_check.d \
+  -of=/tmp/issue148-jsonl-resource-check
+/tmp/issue148-jsonl-resource-check ./scrubbed
 ```

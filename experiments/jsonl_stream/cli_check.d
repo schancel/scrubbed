@@ -40,6 +40,20 @@ private Result invoke(string[] args, string input = "", string workDir = null) {
     return Result(wait(child.pid), output, diagnostics);
 }
 
+private Result invokeWithOpenInput(string[] args) {
+    auto child = pipeProcess(args, Redirect.all);
+    auto exited = new Semaphore(0);
+    int status;
+    auto waiter = new Thread({ status = wait(child.pid); exited.notify(); });
+    waiter.start();
+    auto timely = exited.wait(2.seconds);
+    if (!timely) kill(child.pid);
+    child.stdin.close();
+    waiter.join();
+    return Result(timely ? status : -1, readAll(child.stdout),
+        readAll(child.stderr));
+}
+
 void main(string[] args) {
     if (args.length == 3 && args[1] == "--closed-stdin") {
         version (Posix) {
@@ -161,8 +175,49 @@ void main(string[] args) {
     require(configured.code == 0 &&
         parseJSON(configured.output.splitLines()[0])["text"].str == "clean",
         "JSONL did not use configured filter chain");
+
+    auto selectorInput = "{\"text\":\"\\u0001clean\",\"keep\":[1,true]}\n";
+    auto v1Path = buildPath(root, "v1.json");
+    auto v3Path = buildPath(root, "v3.json");
+    write(v1Path, "{\"filters\":[\"strip-control\"]}");
+    write(v3Path, "{\"version\":3,\"stages\":[{\"id\":\"clean\","
+        ~ "\"implementation\":\"text-transform\",\"options\":{},\"filters\":[{"
+        ~ "\"name\":\"strip-control\",\"options\":{}}]}]}");
+    auto byFlags = invoke(base ~ ["--filters", "strip-control"], selectorInput);
+    auto byV1 = invoke(base ~ ["--config", v1Path], selectorInput);
+    auto byV3 = invoke(base ~ ["--config", v3Path], selectorInput);
+    auto byTokens = invoke(base ~ ["--stage", "clean=text-transform",
+        "--filter", "strip-control"], selectorInput);
+    require(byFlags.code == 0 && byV1.code == 0 && byV3.code == 0 &&
+        byTokens.code == 0 && byFlags.output == byV1.output &&
+        byFlags.output == byV3.output && byFlags.output == byTokens.output,
+        "canonical JSONL selectors diverged");
+
     require(invoke(base ~ ["--config", configPath, "--filters", "strip-control"],
         "").code == 2, "config/filter conflict accepted");
+    require(invoke(base ~ ["--stage", "clean=text-transform", "--filters",
+        "strip-control"], "").code == 2,
+        "composition/filter conflict accepted");
+    foreach (badArgs; [
+        ["--filter", "strip-control"],
+        ["--stage-option", "x=text:y"],
+        ["--stage", "clean=text-transform", "--filter-option", "x=text:y"],
+        ["--stage", "clean=unknown-stage"],
+    ]) {
+        auto invalid = invoke(base ~ badArgs, selectorInput);
+        require(invalid.code == 2 && invalid.output.length == 0,
+            "invalid canonical JSONL selector read/wrote records");
+    }
+    auto unsupportedPath = buildPath(root, "unsupported.json");
+    write(unsupportedPath, "{\"version\":4,\"stages\":[]}");
+    require(invoke(base ~ ["--config", unsupportedPath], selectorInput).code == 2,
+        "unsupported job version accepted");
+    auto emptyPath = buildPath(root, "empty.json");
+    write(emptyPath, "");
+    auto emptyPreflight = invokeWithOpenInput(base ~ ["--config", emptyPath]);
+    require(emptyPreflight.code == 2 && emptyPreflight.output.length == 0,
+        "explicit empty config read stdin, wrote stdout, or did not fail promptly: " ~
+        emptyPreflight.diagnostics);
     auto optionLikeConfig = invoke([absolutePath(args[1]), "run", "--input", "-",
         "--output", "-", "--jsonl-fields", "text", "--dataset-namespace", "batch",
         "--source-key", "stable-source", "--max-jsonl-line-bytes", "1024",

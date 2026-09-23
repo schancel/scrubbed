@@ -6,7 +6,8 @@ import core.sync.mutex : Mutex;
 import core.sync.condition : Condition;
 import effects.bounded_input : BoundedInput, InputLimits;
 import effects.jsonl_stream : JsonlFailure, JsonlLimits;
-import effects.stdio_stream : processStandardJsonl;
+import effects.jsonl_job : runJsonlField;
+import effects.stdio_stream : processStandardJsonlDocuments;
 import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
     configDigest, inputDigest, outputDigest;
 import effects.failure_journal : FailureJournal;
@@ -1238,20 +1239,22 @@ int runApp(string[] args) {
         SourceLocator(datasetNamespace, sourceKey, "1");
         if (configPath.length && filtersExplicit)
             throw new Exception("--config and --filters are mutually exclusive");
+        if (compositionExplicit && (configPath.length || filtersExplicit))
+            throw new Exception("composition options are mutually exclusive with --config and --filters");
         configContents = configPath.length ? readText(configPath) : "";
         versionedConfig = configContents.length && hasJobVersion(configContents);
-        if (compositionExplicit || versionedConfig)
-            throw new Exception("canonical v3 jobs are not migrated to JSONL in Stage 5a");
-        auto chain = configPath.length
-            ? Pipeline.buildConfigured(loadFilterConfig(configPath))
-            : Pipeline.build(filterList.split(","));
+        auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
+            configPath.length != 0, configContents, versionedConfig);
+        auto compiledJob = compileJob(spec);
         if (validateOnly) {
             stderr.writeln("valid JSONL invocation; no stdin read.");
             return 0;
         }
         try {
-            const completed = processStandardJsonl(datasetNamespace, sourceKey,
-                fields, (string field, string text, DocumentId id) => chain.run(text),
+            const completed = processStandardJsonlDocuments(datasetNamespace,
+                sourceKey, fields,
+                (string field, string text, SourceLocator source) =>
+                    runJsonlField(source, field, text, compiledJob),
                 JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun);
             stderr.writeln("JSONL done. ", completed, " records processed", dryRun ? "; dry-run, no stdout." : ".");
             return 0;

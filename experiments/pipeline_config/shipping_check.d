@@ -3,7 +3,7 @@ module experiments.pipeline_config.shipping_check;
 
 import std.file : exists, mkdir, readText, rmdirRecurse, tempDir, write;
 import std.path : buildPath;
-import std.process : execute;
+import std.process : Redirect, execute, pipeProcess, wait;
 import std.stdio : writeln;
 import std.uuid : randomUUID;
 
@@ -120,11 +120,18 @@ void main(string[] args) {
         !parallel.output.canFind("input admission canceled"),
         "fatal publication prefix changed with worker count");
 
-    auto jsonl = execute([executable, "run", "--input", "-", "--output", "-",
+    auto jsonl = pipeProcess([executable, "run", "--input", "-", "--output", "-",
         "--jsonl-fields", "text", "--dataset-namespace", "d", "--source-key", "s",
-        "--max-jsonl-line-bytes", "10", "--max-jsonl-output-bytes", "20"] ~ tokens);
-    need(jsonl.status == 2 && jsonl.output.canFind("not migrated"),
-        "v3 JSONL route was not refused");
+        "--max-jsonl-line-bytes", "1024", "--max-jsonl-output-bytes", "2048"] ~
+        tokens, Redirect.stdin | Redirect.stdout);
+    jsonl.stdin.rawWrite(cast(const(ubyte)[])
+        "{\"text\":\"l’humanitÃ©\\r\\nA\\u0000&amp;\"}\n");
+    jsonl.stdin.close();
+    string jsonlOutput;
+    foreach (line; jsonl.stdout.byLineCopy()) jsonlOutput ~= line ~ "\n";
+    need(wait(jsonl.pid) == 0 &&
+        jsonlOutput == "{\"text\":\"l'humanité\\nA&\"}\n",
+        "v3 JSONL exact output diverged");
 
     writeln("shipping pipeline config: CLI/JSON, preflight, and ordered failure passed");
 }

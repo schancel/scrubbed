@@ -4,6 +4,11 @@ module experiments.jsonl_stream.check;
 
 import domain.document : DocumentId, SourceLocator;
 import effects.jsonl_stream;
+import effects.jsonl_job : runJsonlField;
+import composition.compiler : compileJob;
+import job.legacy : lowerLegacyNames;
+import filters.normalize;
+import stages.text_transform;
 import core.memory : GC;
 import core.sync.semaphore : Semaphore;
 import core.thread : Thread;
@@ -99,6 +104,15 @@ void main(string[] args) {
     });
     require(retryIds == seen && retry.output == fixture.output, "retry stability");
 
+    auto orderedFields = Fixture("{\"second\":\"b\",\"first\":\"a\"}\n");
+    string[] fieldOrder;
+    orderedFields.run(["first", "second"],
+        (string field, string text, DocumentId id) {
+            fieldOrder ~= field;
+            return text;
+        });
+    require(fieldOrder == ["first", "second"], "selected-field order");
+
     foreach (bad; ["{oops}\n", "[]\n", "{\"a\":1,\"a\":2}\n",
                    "{\"a\":1,\"\\u0061\":2}\n",
                    "{\"a\":{\"x\":1,\"x\":2}}\n",
@@ -121,6 +135,26 @@ void main(string[] args) {
         "valid JSON/text error distinction");
     auto nonText = Fixture("{\"text\":3}\n");
     expectFailure(nonText, JsonlFailureKind.invalidText);
+    foreach (decision, expected; [
+        JsonlDecisionKind.rejected: JsonlFailureKind.rejected,
+        JsonlDecisionKind.quarantined: JsonlFailureKind.quarantined,
+        JsonlDecisionKind.unsupportedFanout: JsonlFailureKind.unsupportedFanout,
+    ]) {
+        auto decided = Fixture("{\"text\":\"value\"}\n");
+        try processJsonlDocuments(&decided.read, &decided.write, "batch",
+            "stable-source", ["text"],
+            (string field, string text, SourceLocator source) {
+                require(DocumentId.from(source).text == DocumentId.from(
+                    SourceLocator("batch", "stable-source", "1")).text,
+                    "typed transform locator changed");
+                throw new JsonlDecisionFailure(decision, "typed decision");
+                return string.init;
+            }, JsonlLimits(1024, 2048));
+        catch (JsonlFailure error) {
+            require(error.kind == expected && decided.output.length == 0,
+                "typed decision classification/output");
+        }
+    }
 
     auto tooLong = Fixture("{\"text\":\"123456789\"}\n");
     auto limitError = expectFailure(tooLong, JsonlFailureKind.inputLimit, ["text"], null,
@@ -223,11 +257,14 @@ void main(string[] args) {
 
     // Generate records at the reader boundary instead of constructing a file.
     // Force collection periodically: retained adapter state must not grow with
-    // record count, including when the sink keeps no output.
+    // record count through the reused compiled plan, including when the sink
+    // keeps no output.
     enum record = "{\"text\":\"x\",\"nested\":[1,true,null]}\n";
+    auto streamSpec = lowerLegacyNames(["normalize-line-endings"]);
+    auto compiled = compileJob(streamSpec);
     size_t supplied, discarded, peakUsed;
     auto baseline = GC.stats().usedSize;
-    auto streamed = processJsonl((ubyte[] dst) {
+    auto streamed = processJsonlDocuments((ubyte[] dst) {
         if (supplied == 20_000) return 0;
         auto bytes = cast(const(ubyte)[]) record;
         dst[0 .. bytes.length] = bytes;
@@ -241,7 +278,8 @@ void main(string[] args) {
             if (used > peakUsed) peakUsed = used;
         }
     }, "batch", "bounded-source", ["text"],
-       (string field, string text, DocumentId id) => text,
+       (string field, string text, SourceLocator source) =>
+           runJsonlField(source, field, text, compiled),
        JsonlLimits(64, 128));
     require(streamed == 20_000 && discarded == 20_000, "large stream count");
     require(peakUsed <= baseline + 16 * 1024 * 1024,

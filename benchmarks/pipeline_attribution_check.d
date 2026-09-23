@@ -336,6 +336,31 @@ private string derivedDominantPartition(JSONValue sample) {
     return result;
 }
 
+private void validateRankedSymbols(JSONValue rows, long accepted, string label) {
+    auto values = rows.array;
+    need(values.length > 0 && values.length <= 20,
+        label ~ " top-symbol cardinality differs");
+    bool[string] seen;
+    long previousCount = long.max;
+    string previousKey;
+    foreach (index, row; values) {
+        auto count = row["count"].integer;
+        auto key = row["symbol"].str ~ "\t" ~ row["image"].str;
+        need(row["symbol"].str.length && row["image"].str.length && count > 0 &&
+            isFinite(number(row["fraction"])) && number(row["fraction"]) > 0 &&
+            sameFraction(number(row["fraction"]), cast(double)count / accepted),
+            "invalid " ~ label ~ " top-symbol accounting");
+        need((key in seen) is null, "duplicate " ~ label ~ " top-symbol row");
+        if (index != 0)
+            need(previousCount > count ||
+                    (previousCount == count && previousKey < key),
+                label ~ " top-symbol rows are not canonically ranked");
+        seen[key] = true;
+        previousCount = count;
+        previousKey = key;
+    }
+}
+
 private string sanitizedSampleDigest(JSONValue value) {
     SHA256 result;
     digestPart(result, value["accepted_stacks"].integer.to!string);
@@ -1123,25 +1148,13 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
             "supported stack path binding semantics differ");
         need(digest(trace["raw_private_sha256"].str),
             "supported stack raw digest is invalid");
-        need(sample["inclusive_top"].array.length > 0 &&
-            sample["inclusive_top"].array.length <= 20,
-            "supported stack inclusive top cardinality differs");
-        need(sample["leaf_top"].array.length > 0 &&
-            sample["leaf_top"].array.length <= 20,
-            "supported stack leaf top cardinality differs");
+        validateRankedSymbols(sample["inclusive_top"],
+            sample["accepted_stacks"].integer, "inclusive");
+        validateRankedSymbols(sample["leaf_top"],
+            sample["accepted_stacks"].integer, "leaf");
         need(sample["dominant_leaf_component"].str ==
                 derivedDominantLeafComponent(sample),
             "supported stack dominant component is not derived from leaf evidence");
-        foreach (collection; [sample["inclusive_top"], sample["leaf_top"]])
-            foreach (symbol; collection.array)
-                need(symbol["symbol"].str.length && symbol["image"].str.length &&
-                    symbol["count"].integer >= 0 &&
-                    isFinite(number(symbol["fraction"])) &&
-                    number(symbol["fraction"]) >= 0 &&
-                    sameFraction(number(symbol["fraction"]),
-                        cast(double)symbol["count"].integer /
-                            sample["accepted_stacks"].integer),
-                    "invalid top-symbol accounting");
         long total; double fraction = 0;
         foreach (name; ["kernel", "system", "runtime", "project", "unresolved"]) {
             auto part = sample["partitions"][name];
@@ -1358,11 +1371,12 @@ private void selfTest() {
         "    120 Thread_1\n      120 work  (in sleep) + 4  [0x1]\n" ~
         "Total number in stack (recursive counted multiple, when >=5):\n\n" ~
         "Sort by top of stack, same collapsed (when >= 5):\n" ~
-        "        work  (in sleep)        120\n\nBinary Images:\n";
+        "        alpha  (in sleep)        70\n" ~
+        "        work  (in sleep)        50\n\nBinary Images:\n";
     auto parsed = parseSample(raw, 123, "/bin/sleep");
     need(parsed["accepted_stacks"].integer == 120, "valid sample parser control failed");
     need(parsed["inclusive_top"].array.length == 1 &&
-        parsed["leaf_top"].array.length == 1,
+        parsed["leaf_top"].array.length == 2,
         "valid sample top-symbol parser control failed");
     need(parsed["sanitized_sha256"].str ==
             sanitizedSampleDigest(parseJSON(parsed.toString)),
@@ -1394,7 +1408,7 @@ private void selfTest() {
     mustThrow(() { parseSample(raw.replace("every 10 milliseconds",
         "every 20 milliseconds"), 123, "/bin/sleep"); },
         "wrong sampling settings accepted");
-    mustThrow(() { parseSample(raw.replace("(in sleep)        120",
+    mustThrow(() { parseSample(raw.replace("(in sleep)        70",
         "(in sleep)        121"), 123, "/bin/sleep"); },
         "over-accounted leaf stacks accepted");
     auto gc = "\tNumber of collections:  2\n\tGrand total GC time:  3 milliseconds\n" ~
@@ -1464,6 +1478,22 @@ private void selfTest() {
         t["sample"]["dominant_partition"] = "kernel";
     }, "fabricated dominant partition accepted");
     mustRejectTrace(trace, (ref JSONValue t) {
+        auto rows = t["sample"]["leaf_top"].array;
+        rows[0]["count"] = 60L; rows[0]["fraction"] = 0.5;
+        rows[1]["count"] = 60L; rows[1]["fraction"] = 0.5;
+        auto first = rows[0]; rows[0] = rows[1]; rows[1] = first;
+        t["sample"]["leaf_top"] = rows;
+        t["sample"]["dominant_leaf_component"] =
+            derivedDominantLeafComponent(t["sample"]);
+        t["sample"]["sanitized_sha256"] = sanitizedSampleDigest(t["sample"]);
+    }, "equal-count reverse tie order accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
+        auto rows = t["sample"]["leaf_top"].array;
+        rows[1] = rows[0];
+        t["sample"]["leaf_top"] = rows;
+        t["sample"]["sanitized_sha256"] = sanitizedSampleDigest(t["sample"]);
+    }, "duplicate leaf top row accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
         t["sample"]["leaf_top"][0]["symbol"] = "replacement";
     }, "changed sanitized symbol accepted");
     JSONValue[] sequence;
@@ -1472,6 +1502,21 @@ private void selfTest() {
         item["repetition"] = rep;
         sequence ~= item;
     }
+    auto swappedSequence = parseJSON(JSONValue(sequence).toString).array;
+    auto rows = swappedSequence[0]["sample"]["leaf_top"].array;
+    auto first = rows[0]; rows[0] = rows[1]; rows[1] = first;
+    swappedSequence[0]["sample"]["leaf_top"] = rows;
+    swappedSequence[0]["sample"]["dominant_leaf_component"] =
+        derivedDominantLeafComponent(swappedSequence[0]["sample"]);
+    swappedSequence[0]["sample"]["sanitized_sha256"] =
+        sanitizedSampleDigest(swappedSequence[0]["sample"]);
+    auto swappedSummary = summarizeTraces(swappedSequence);
+    mustThrow(() {
+        foreach (rep, item; swappedSequence)
+            validateTrace(item, "A".replicate(64), "many-small",
+                "scalar-threads1", rep);
+        validateSummary(swappedSummary, swappedSequence);
+    }, "self-consistent reordered leaf leader and summary accepted");
     auto summary = summarizeTraces(sequence);
     validateSummary(summary, sequence);
     auto mixedSequence = sequence.dup;
@@ -1486,7 +1531,7 @@ private void selfTest() {
     mustThrow(() { need(gcEvidence["sanitized_sha256"].str ==
             gcStructuredDigest(gcEvidence), "GC evidence digest differs"); },
         "changed D-GC collection time accepted without raw-derived digest change");
-    writeln("canonical attribution self-test passed (27 release-active negatives)");
+    writeln("canonical attribution self-test passed (30 release-active negatives)");
 }
 
 private void selfTestLiveSample(string self) {

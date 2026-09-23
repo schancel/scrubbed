@@ -10,7 +10,7 @@ import std.string : replace, split, splitLines, strip;
 
 private bool projectModule(string name) {
     foreach (prefix; ["app", "cli", "pipeline", "filters", "job",
-            "composition", "domain", "content", "stages", "effects"])
+            "composition", "domain", "content", "extraction", "stages", "effects"])
         if (name == prefix || name.startsWith(prefix ~ "."))
             return true;
     return false;
@@ -28,12 +28,13 @@ private string modulePath(string root, string path) {
 private string importRule(string owner, string dependency) {
     if (inLayer(owner, "job") || inLayer(owner, "composition") ||
             inLayer(owner, "domain") ||
-            inLayer(owner, "content") || inLayer(owner, "stages")) {
+            inLayer(owner, "content") || inLayer(owner, "extraction") ||
+            inLayer(owner, "stages")) {
         if (inLayer(dependency, "effects") ||
             inLayer(dependency, "std.file") || inLayer(dependency, "std.mmfile") ||
             inLayer(dependency, "std.socket") || inLayer(dependency, "std.net") ||
             inLayer(dependency, "std.stdio") || inLayer(dependency, "std.process"))
-            return "job/composition/domain/content/stages must not import effects or concrete I/O";
+            return "job/composition/domain/content/extraction/stages must not import effects or concrete I/O";
     }
     if (!projectModule(dependency)) return null;
     if (owner == "app" && dependency != "cli")
@@ -46,8 +47,8 @@ private string importRule(string owner, string dependency) {
     if (inLayer(owner, "composition") && !inLayer(dependency, "composition") &&
         !inLayer(dependency, "job") && !inLayer(dependency, "pipeline") &&
         !inLayer(dependency, "stages") && !inLayer(dependency, "domain") &&
-        !inLayer(dependency, "content"))
-        return "composition may import only job, pipeline, stages, domain and content project modules";
+        !inLayer(dependency, "content") && !inLayer(dependency, "extraction"))
+        return "composition may import only job, pipeline, stages, extraction, domain and content project modules";
     if (owner == "domain" || owner.startsWith("domain.")) {
         if (dependency != "domain" && !dependency.startsWith("domain."))
             return "domain modules must remain independent of other project layers";
@@ -58,14 +59,17 @@ private string importRule(string owner, string dependency) {
         if (!inLayer(dependency, "domain") && !inLayer(dependency, "content"))
             return "content may import only domain and content project modules";
     }
+    if (inLayer(owner, "extraction") && !inLayer(dependency, "extraction") &&
+        !inLayer(dependency, "domain") && !inLayer(dependency, "content"))
+        return "extraction may import only extraction, domain and content project modules";
     if (inLayer(owner, "stages") && !inLayer(dependency, "stages") &&
         !inLayer(dependency, "domain") && !inLayer(dependency, "content"))
         return "stages may import only stages, domain and content project modules";
     if (inLayer(owner, "effects") && !inLayer(dependency, "effects") &&
         !inLayer(dependency, "stages") && !inLayer(dependency, "domain") &&
         !inLayer(dependency, "content") && !inLayer(dependency, "job") &&
-        !inLayer(dependency, "composition"))
-        return "effects may import only effects, composition, job, stages, domain and content project modules";
+        !inLayer(dependency, "composition") && !inLayer(dependency, "extraction"))
+        return "effects may import only effects, composition, job, stages, extraction, domain and content project modules";
     if (owner == "filters" || owner.startsWith("filters.")) {
         if (inLayer(dependency, "app") || inLayer(dependency, "cli"))
             return "filters must not import app or cli";
@@ -87,6 +91,7 @@ unittest {
     assert(importRule("effects.runner", "content.pieces").length == 0);
     assert(importRule("effects.runner", "job.spec").length == 0);
     assert(importRule("effects.runner", "composition.compiler").length == 0);
+    assert(importRule("effects.runner", "extraction.contracts").length == 0);
     assert(importRule("domain.document", "effects.runner").length != 0);
     assert(importRule("content.pieces", "effects.runner").length != 0);
     assert(importRule("stages.contract", "effects.runner").length != 0);
@@ -98,6 +103,11 @@ unittest {
     assert(importRule("composition.compiler", "job.spec").length == 0);
     assert(importRule("composition.compiler", "pipeline").length == 0);
     assert(importRule("composition.compiler", "effects.runner").length != 0);
+    assert(importRule("composition.compiler", "extraction.contracts").length == 0);
+    assert(importRule("extraction.detector", "domain.document").length == 0);
+    assert(importRule("extraction.detector", "content.pieces").length == 0);
+    assert(importRule("extraction.detector", "effects.runner").length != 0);
+    assert(importRule("extraction.detector", "std.file").length != 0);
     assert(importRule("effects.runner", "cli").length != 0);
 
     auto fixtureRoot = buildPath(tempDir(), "scrubbed-effects-check-" ~ randomUUID().toString());

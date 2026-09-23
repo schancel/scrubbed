@@ -1,0 +1,4 @@
+phase	signal	index_present	shard_present	pending_present	reused_shards	recomputed_shards	result_sha256
+pending	SIGKILL	false	false	true	0	9	7c879bfce0552b1e644857ef6950130537e16b6fa3703737be8b3c334f660799
+orphan	SIGKILL	false	true	false	0	9	7c879bfce0552b1e644857ef6950130537e16b6fa3703737be8b3c334f660799
+committed	SIGKILL	true	true	false	1	8	7c879bfce0552b1e644857ef6950130537e16b6fa3703737be8b3c334f660799

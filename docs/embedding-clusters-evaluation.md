@@ -18,8 +18,10 @@ The native candidate is llama.cpp b11115 (`d5f66492e`) serving the 384-wide
 F16 `all-MiniLM-L6-v2` GGUF from the immutable Ollama `all-minilm:22m`
 manifest. The exact artifact, license, and license-file hashes are recorded in
 `experiments/embedding_clusters/provenance.tsv`; exact inference arguments and
-caps are in `options.tsv`. The MIT tool and Apache-2.0 model remain external and
-are not shipped by this repository.
+caps are in `options.tsv`. Their entire schemas, row order, and values are
+frozen in D and cross-bound to the runner's actual localhost/no-device argument
+vector and resource constants. The MIT tool and Apache-2.0 model remain external
+and are not shipped by this repository.
 
 ## Frozen result
 
@@ -42,20 +44,28 @@ shard bytes.
 
 ## Resource and restart evidence
 
-The first run was deliberately stopped with exit 86 immediately after atomically
-publishing shard 0 (four stable IDs). The resumed run validated and reused that
-shard, computed the remaining eight shards, and observed:
+The D parent performed three genuine abrupt evaluator terminations with SIGKILL.
+It owned and reaped the model server and sampled its RSS while waiting for each
+deterministic publication signal. A kill after writing `shard-000.tsv.pending`
+left only incomplete state; restart ignored it and recomputed all nine shards.
+A kill after renaming that shard but before indexing it left an orphan; restart
+ignored it and recomputed all nine. A kill after atomically committing shard 0's
+index row left four committed stable IDs; restart validated and reused only that
+shard, computed the remaining eight, and observed:
 
-- 637 ms total runner time, including local server startup and inference;
-- 136,757,248 bytes child high-water RSS, below the 512 MiB guarded ceiling;
+- 664 ms total runner time, including local server startup and inference;
+- 138,526,720 bytes child high-water RSS, below the 512 MiB guarded ceiling;
 - four maximum live embedding records, matching the shard ceiling;
-- 651,346 bytes of experiment output.
+- 651,186 bytes of experiment output before the parent wrote its two small
+  crash-observation records.
 
 The following replay reused all nine committed shards, computed none, completed
-in 8 ms, and produced the same result digest. Shards are immutable versioned
+in 11 ms, and produced the same result digest. Shards are immutable versioned
 payloads whose index binds model hash, corpus hash, payload hash, row count, and
 first/last typed IDs. A changed version, digest, duplicate ID, missing ID, or ID
-order is rejected before reuse.
+order is rejected before reuse. Newly published vectors are reloaded from their
+serialized shard before any scoring, so fresh and resumed evaluation use the
+same precision and deterministic bytes.
 
 Package/acquisition evidence: the signed-by-hash release archive was 11,205,309
 bytes; its extracted directory was 28,131,328 bytes; the model was 45,949,216

@@ -1,6 +1,10 @@
 /// Run the bounded local embedding and clustering feasibility evaluation.
 module experiments.embedding_clusters.run_evaluation;
 
+import experiments.embedding_clusters.contract : dimension, maxCpuSeconds,
+    maxLiveEmbeddings, maxLogBytes, maxOutputBytes, maxRssBytes, modelDigest,
+    port, serverArguments, serverDigest, shardSize, wallSeconds;
+
 version (OSX) {} else static assert(0,
     "embedding evaluation resource limits are verified only on macOS");
 
@@ -10,7 +14,7 @@ import core.sys.posix.sys.resource : RLIMIT_CPU, RLIMIT_FSIZE,
     RUSAGE_CHILDREN, getrlimit, getrusage, rlimit, rusage, setrlimit;
 import core.sys.posix.sys.wait : WNOHANG, waitpid;
 import core.sys.posix.unistd : _exit, close, dup2, execvp, fork, getpid, setpgid,
-    usleep;
+    pause, posixWrite = write, usleep;
 import core.time : MonoTime, msecs, seconds;
 import core.thread : Thread;
 import std.algorithm : all, canFind, sort;
@@ -33,19 +37,6 @@ import std.string : indexOf, representation, split, splitLines, strip,
 
 enum shardVersion = "embedding-shard:v1";
 enum indexVersion = "embedding-index:v1";
-enum modelDigest =
-    "797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662";
-enum serverDigest =
-    "4216ddf73348bd30d4ced17e510ee57edf597181ca009635d33a0bf26b33b5d2";
-enum dimension = 384;
-enum shardSize = 4;
-enum maxLiveEmbeddings = 4;
-enum maxAddressBytes = 512UL * 1024 * 1024;
-enum maxLogBytes = 8UL * 1024 * 1024;
-enum maxCpuSeconds = 60UL;
-enum wallSeconds = 60;
-enum port = 18066;
-
 // Layout and flavor are from the public macOS libproc headers.
 private extern(C) int proc_pid_rusage(int pid, int flavor, void* buffer);
 private struct RusageV0 {
@@ -119,12 +110,7 @@ private int startServer(string executable, string model, string logPath) {
             _exit(123);
         if (log > 2)
             close(log);
-        string[] arguments = [executable, "--model", model, "--embedding",
-            "--pooling", "mean", "--embd-normalize", "2", "--host",
-            "127.0.0.1", "--port", port.to!string, "--threads", "1",
-            "--threads-batch", "1", "--parallel", "1", "--ctx-size",
-            "512", "--batch-size", "512", "--ubatch-size", "512",
-            "--load-mode", "none", "--device", "none", "--no-webui"];
+        auto arguments = serverArguments(executable, model);
         auto argv = new const(char)*[arguments.length + 1];
         foreach (index, argument; arguments)
             argv[index] = argument.toStringz;
@@ -143,7 +129,7 @@ private int startMemoryGuard(int serverPid) {
             RusageV0 usage;
             if (proc_pid_rusage(serverPid, 0, &usage) != 0)
                 _exit(0);
-            if (usage.residentSize > maxAddressBytes) {
+            if (usage.residentSize > maxRssBytes) {
                 kill(-serverPid, SIGKILL);
                 _exit(125);
             }
@@ -222,6 +208,19 @@ private void waitReady(int pid, MonoTime deadline) {
         Thread.sleep(100.msecs);
     }
     throw new Exception("embedding server startup exceeded wall limit");
+}
+
+private void waitReadyExternal(MonoTime deadline) {
+    while (MonoTime.currTime < deadline) {
+        try {
+            auto health = parseJSON(http("GET", "/health"));
+            if (health.type == JSONType.object)
+                return;
+        }
+        catch (Exception) {}
+        Thread.sleep(100.msecs);
+    }
+    throw new Exception("external embedding server startup exceeded wall limit");
 }
 
 private double[] embed(string text) {
@@ -317,6 +316,22 @@ private void publish(string path, string contents) {
     auto temporary = path ~ ".pending";
     write(temporary, contents);
     rename(temporary, path);
+}
+
+private void crashBoundary(int fd, string phase, size_t ordinal,
+        size_t committedShards, size_t committedIds) {
+    if (fd < 0) return;
+    auto message = phase ~ "\t" ~ ordinal.to!string ~ "\t" ~
+        committedShards.to!string ~ "\t" ~ committedIds.to!string ~ "\n";
+    auto bytes = cast(const(ubyte)[]) message;
+    size_t offset;
+    while (offset < bytes.length) {
+        auto count = posixWrite(fd, bytes.ptr + offset, bytes.length - offset);
+        enforce(count > 0, "cannot signal crash publication boundary");
+        offset += count;
+    }
+    close(fd);
+    while (true) pause();
 }
 
 private double cosine(const double[] left, const double[] right) {
@@ -428,23 +443,35 @@ private string hexBytes(const(ubyte)[] bytes) {
 
 int main(string[] arguments) {
     enforce(arguments.length >= 7,
-        "usage: run_evaluation SERVER MODEL CORPUS TRAIN HELDOUT WORKDIR [--kill-after-shards=N] [--observation=NAME]");
+        "usage: run_evaluation SERVER MODEL CORPUS TRAIN HELDOUT WORKDIR [--observation=NAME] [--external-server --crash-phase=pending|orphan|committed --control-fd=N]");
     const server = arguments[1];
     const model = arguments[2];
     const corpusPath = arguments[3];
     const trainPath = arguments[4];
     const heldoutPath = arguments[5];
     const workdir = arguments[6];
-    size_t killAfter;
     string observation = "run";
+    string crashPhase;
+    int controlFd = -1;
+    bool externalServer;
     foreach (argument; arguments[7 .. $]) {
-        if (argument.indexOf("--kill-after-shards=") == 0)
-            killAfter = argument[20 .. $].to!size_t;
-        else if (argument.indexOf("--observation=") == 0)
+        if (argument.indexOf("--observation=") == 0)
             observation = argument[14 .. $];
+        else if (argument == "--external-server")
+            externalServer = true;
+        else if (argument.indexOf("--crash-phase=") == 0)
+            crashPhase = argument[14 .. $];
+        else if (argument.indexOf("--control-fd=") == 0)
+            controlFd = argument[13 .. $].to!int;
         else
             enforce(false, "unknown runner option");
     }
+    enforce(crashPhase.length == 0 ||
+        ["pending", "orphan", "committed"].canFind(crashPhase),
+        "invalid crash phase");
+    enforce((crashPhase.length == 0 && controlFd < 0) ||
+        (externalServer && crashPhase.length != 0 && controlFd >= 0),
+        "crash boundary requires an external server and control fd");
     enforce(isFile(server) && isFile(model), "tool/model path missing");
     enforce(fileDigest(server) == serverDigest, "unexpected llama-server hash");
     enforce(fileDigest(model) == modelDigest, "unexpected model hash");
@@ -505,15 +532,21 @@ int main(string[] arguments) {
     int guardPid;
     auto started = MonoTime.currTime;
     scope(exit) {
-        stopServer(serverPid);
-        waitMemoryGuard(guardPid);
+        if (!externalServer) {
+            stopServer(serverPid);
+            waitMemoryGuard(guardPid);
+        }
     }
     if (embeddings.length < records.length) {
-        auto privateLog = buildPath(tempDir(),
-            "embedding-clusters-server-" ~ getpid.to!string ~ ".log");
-        serverPid = startServer(server, model, privateLog);
-        guardPid = startMemoryGuard(serverPid);
-        waitReady(serverPid, started + wallSeconds.seconds);
+        if (externalServer) {
+            waitReadyExternal(started + wallSeconds.seconds);
+        } else {
+            auto privateLog = buildPath(tempDir(),
+                "embedding-clusters-server-" ~ getpid.to!string ~ ".log");
+            serverPid = startServer(server, model, privateLog);
+            guardPid = startMemoryGuard(serverPid);
+            waitReady(serverPid, started + wallSeconds.seconds);
+        }
         while (embeddings.length < records.length) {
             enforce(MonoTime.currTime < started + wallSeconds.seconds,
                 "evaluation exceeded wall limit");
@@ -529,34 +562,36 @@ int main(string[] arguments) {
             const ordinal = reusedShards + recomputedShards;
             const name = format("shard-%03d.tsv", ordinal);
             auto payload = shardPayload(live);
-            publish(buildPath(workdir, name), payload);
+            auto shardPath = buildPath(workdir, name);
+            auto pendingPath = shardPath ~ ".pending";
+            write(pendingPath, payload);
+            if (crashPhase == "pending" && ordinal == 0)
+                crashBoundary(controlFd, crashPhase, ordinal, reusedShards,
+                    embeddings.length);
+            rename(pendingPath, shardPath);
+            if (crashPhase == "orphan" && ordinal == 0)
+                crashBoundary(controlFd, crashPhase, ordinal, reusedShards,
+                    embeddings.length);
+            // All downstream evidence must derive from the immutable bytes a
+            // restart reads, never higher-precision transient response values.
+            auto committedLive = parseShard(shardPath);
             index ~= name ~ "\t" ~ digest(payload.representation) ~ "\t" ~
-                live.length.to!string ~ "\t" ~ live[0].id ~ "\t" ~
-                live[$ - 1].id ~ "\n";
+                committedLive.length.to!string ~ "\t" ~ committedLive[0].id ~
+                "\t" ~ committedLive[$ - 1].id ~ "\n";
             publish(indexPath, index);
-            embeddings ~= live;
+            embeddings ~= committedLive;
             ++recomputedShards;
-            if (killAfter && reusedShards + recomputedShards >= killAfter) {
-                string killed = "schema\tcommitted_shards\tcommitted_ids\tindex_sha256\texit_code\n" ~
-                    "embedding-injected-kill:v1\t" ~
-                    (reusedShards + recomputedShards).to!string ~ "\t" ~
-                    embeddings.length.to!string ~ "\t" ~ fileDigest(indexPath) ~
-                    "\t86\n";
-                publish(buildPath(workdir, "kill-observation.tsv"), killed);
-                stopServer(serverPid);
-                serverPid = 0;
-                waitMemoryGuard(guardPid);
-                guardPid = 0;
-                writeln("injected_kill_after_committed_shards=", killAfter,
-                    " committed_ids=", embeddings.length);
-                return 86;
-            }
+            if (crashPhase == "committed" && ordinal == 0)
+                crashBoundary(controlFd, crashPhase, ordinal,
+                    reusedShards + recomputedShards, embeddings.length);
         }
     }
-    stopServer(serverPid);
-    serverPid = 0;
-    waitMemoryGuard(guardPid);
-    guardPid = 0;
+    if (!externalServer) {
+        stopServer(serverPid);
+        serverPid = 0;
+        waitMemoryGuard(guardPid);
+        guardPid = 0;
+    }
 
     enforce(embeddings.length == records.length,
         "embedding index is incomplete");
@@ -678,12 +713,12 @@ int main(string[] arguments) {
     enforce(getrusage(RUSAGE_CHILDREN, &usage) == 0,
         "cannot measure child resource usage");
     const peakRss = cast(ulong) usage.ru_opaque[0];
-    enforce(peakRss <= maxAddressBytes, "embedding child exceeded RSS cap");
+    enforce(peakRss <= maxRssBytes, "embedding child exceeded RSS cap");
     ulong diskBytes;
     foreach (entry; dirEntries(workdir, SpanMode.shallow))
         if (entry.isFile)
             diskBytes += entry.size;
-    enforce(diskBytes <= 128UL * 1024 * 1024,
+    enforce(diskBytes <= maxOutputBytes,
         "evaluation output exceeded 128 MiB disk cap");
     auto elapsedMs = (MonoTime.currTime - started).total!"msecs";
     string run = "schema\ttool_sha256\tmodel_sha256\tcorpus_sha256\ttrain_sha256\theldout_sha256\tshard_size\tmax_live_embeddings\treused_shards\trecomputed_shards\tresult_sha256\telapsed_ms\tpeak_rss_bytes\tdisk_bytes\n" ~

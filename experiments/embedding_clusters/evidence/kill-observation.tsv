@@ -1,2 +1,2 @@
-schema	committed_shards	committed_ids	index_sha256	exit_code
-embedding-injected-kill:v1	1	4	c5e4817223ea425d7148833427b4550e1cc690eda774131f8f331233bdacdb38	86
+schema	phase	signal	committed_shards	committed_ids	index_sha256
+embedding-abrupt-kill:v2	committed	SIGKILL	1	4	22553749a7b79babbdfcde5d32d8cca39aa5d5a9e1a3d37033151f550d394c35

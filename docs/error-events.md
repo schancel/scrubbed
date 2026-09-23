@@ -18,6 +18,12 @@ compiled failure keeps job/stage attribution in the live diagnostic and a
 bounded persisted code. No journal operation claims filesystem rollback or
 power-loss atomicity.
 
+Canonical live processing accepts unchanged v3 or explicit v4 plans. The root
+binds the selected readable job identity, canonical plan bytes, output route,
+and executable; a journal bound to one plan refuses another before recovery or
+publication. V4 reject/quarantine decisions persist as acknowledged no-output
+events, while route/pass use the existing emitted sink kind.
+
 ## F14 Stage 1 retry-target visitor
 
 `FailureJournal.visitOutstandingTargets` is an internal, read-only stream of
@@ -137,6 +143,13 @@ state in an acknowledged transaction. A failed acknowledgment stops the run.
 Publication intent is acknowledged before sink bytes; on restart, unresolved
 intent becomes uncertain and requires explicit retry. This is process-crash
 recovery, not a power-loss or JSONL pair atomicity guarantee.
+
+With explicit v4, dispatch explain/error records retain bounded outcome,
+action, detector/extractor versions, warning codes, provenance, and accounting.
+They omit paths, untrusted hints, source/extracted bytes, archive entry names,
+private sink keys, and exception strings. Diagnostic stderr may repeat after
+restart; durable event state remains the authority. Targeted retry requires the
+same v4 plan/executable binding as the outstanding key.
 
 The release-active binary proof is `experiments/errors/live_cli_check.d`.
 Compile it with `ldc2 -O3 -release -of=.dub/live-v3-cli-check

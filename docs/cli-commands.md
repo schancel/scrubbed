@@ -74,3 +74,17 @@ ldc2 -O -of=.dub/cli-command-check examples/cli/check.d
 `--config` or `--filters`. See [job-spec-v4.md](job-spec-v4.md) and the root
 `scrubbed.dispatch.example.json`. Existing no-config, filter, legacy, and v3
 invocations are unchanged.
+
+```sh
+scrubbed run --input input.txt --output clean.txt \
+  --config scrubbed.dispatch.example.json --explain
+scrubbed run --input input.txt --output clean.txt \
+  --config scrubbed.dispatch.example.json --validate
+```
+
+The checked-in example routes only detected UTF-8 plain text through the
+shipping `core-plain-text/v1` extractor and rejects all other outcomes. V4 is
+also available to selected-field JSONL and the opt-in manifest-v2 and
+failure-journal-v3 local routes. JSONL v4 explain records go to stderr;
+ordinary local and durable diagnostics retain their existing streams. No
+Office, PDF, image, OCR, or general archive extractor is registered.

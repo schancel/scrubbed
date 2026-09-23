@@ -35,13 +35,14 @@ state is created anew by each run. `Pipeline.run` passes whole-buffer results
 between materialization
 barriers; consecutive bounded scalar registrations share one lazy traversal.
 
-[`job/`](job/README.md) owns the pure v3 linear-job model. Strict JSON,
-ordered composition tokens, and predecessor filter-only forms lower to the
-same typed stages, ordered filters, and scalar options; canonical bytes own a
-stable `job:v3:` identity. Stable stage-instance IDs are distinct from
-registered implementation names. This subtree has no registry or I/O import,
-and ordinary local file/tree, durable file/tree, and selected-field JSONL
-shipping consume v3 through compiled effects bridges.
+[`job/`](job/README.md) owns the pure v3 linear-job model and additive explicit
+v4 dispatch root. Strict v3 JSON, ordered composition tokens, and predecessor
+filter-only forms lower to the same typed stages, ordered filters, and scalar
+options; canonical bytes own a stable `job:v3:` identity. Strict v4 JSON and
+dispatch tokens bind finite detector/container limits, routes, actions, and a
+complete v3 common plan into `job:v4:`. This subtree has no registry or I/O
+import. Ordinary local file/tree, durable file/tree, and selected-field JSONL
+shipping consume the selected v3 or v4 runtime plan through effects bridges.
 
 [`composition/`](composition/README.md) compiles that model through injected
 stage and filter registries without importing concrete implementations. It
@@ -52,9 +53,12 @@ executor applies before/after filters over checked
 every compiled stage, retaining terminal decisions, split order and immediate
 parent provenance, and returns only final/terminal events. The effects runner
 can now apply that compiled job once per typed source record, synchronously
-deliver its ordered final events, and close the transferred content owner. The
-ordinary local file/tree, durable file/tree, and selected-field JSONL shipping
-are wired.
+deliver its ordered final events, and close the transferred content owner.
+`composition.runtime_plan` is the closed choice between unchanged v3 and
+explicit v4. The dispatch compiler resolves bounded detection, routes, the
+extractor registry, and the nested common job; its executor produces exactly
+one route/pass/reject/quarantine result. Ordinary local file/tree, durable
+file/tree, and selected-field JSONL shipping are wired to both plans.
 
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`
@@ -88,8 +92,8 @@ It preserves empty descriptors and borrowing checks without flattening bytes.
 map/reject/quarantine/split decisions, child provenance, cancellation safe
 points, and validated descriptive resources. Its pass-mode metadata describes
 single-pass or resumable stage behavior; it does not implement checkpoints or
-scheduling. Canonical compiled jobs execute these contracts for shipping
-file/tree and JSONL routes.
+scheduling. Canonical compiled v3 jobs and the v3 common plan inside v4 execute
+these contracts for shipping file/tree and JSONL routes.
 
 [`stages/registry.d`](stages/registry.d) adds typed stage declarations, option
 schemas, factory registration, and relative ordering metadata. A concrete
@@ -145,13 +149,16 @@ namespace/source keys and line-ordinal `DocumentId`s. There is no JSONL
 checkpoint or graceful signal cancellation.
 [`effects/jsonl_job.d`](effects/jsonl_job.d) is the narrow selected-field
 facade over `effects.runner`: it assigns the field as `OutputName`, transfers
-one checked content owner, copies the sole mapped result synchronously, and
-refuses rejection, quarantine, or fanout without emitting the current record.
+one checked content owner, executes the selected runtime plan, copies the sole
+mapped result synchronously, and refuses rejection, quarantine, or fanout
+without emitting the current record. V4 explain records use the configured
+field ordinal and are written to stderr by the CLI wrapper.
 
 [`effects/durable_job.d`](effects/durable_job.d) owns canonical compiled-job
 durability: manifest v2 and failure-journal v3 root records, complete ordered
 final-event plans, per-event publication intents, exact retry, and root-last
-completion. It accepts only caller-derived identity and never imports `job`.
+completion. It accepts caller-derived v3 or v4 plan identity and never imports
+`job`; existing stores refuse a different plan or executable before mutation.
 [`effects/local_manifest.d`](effects/local_manifest.d) remains the predecessor
 v1 API for offline copy and retained consumers; canonical `--manifest` runs
 refuse it rather than upgrading it. See

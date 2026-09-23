@@ -5,8 +5,11 @@
 Shipping `--manifest` now creates only `application_id=0x53435242`,
 `user_version=2` state through `effects.durable_job`. One root row is keyed by
 `(DocumentId,input_sha256,config_sha256)`; the config digest binds canonical v3
-job JSON, readable `job:v3:` identity, file/tree mode, canonical output route,
-`compiled-final-events:v1`, and the exact executable digest. The complete
+job JSON and readable `job:v3:` identity, or the explicit canonical v4 plan
+and `job:v4:` identity, plus file/tree mode, canonical output route,
+`compiled-final-events:v1`, and the exact executable digest. A store bound to
+v3 refuses v4 and a v4 store accepts only the identical plan and executable
+before recovery or publication. The complete
 ordered final-event set is recorded transactionally before publication.
 Emitted events own stable sinks, destinations, and expected output digests;
 reject/quarantine events are acknowledged no-output terminals. The root becomes
@@ -164,3 +167,12 @@ siblings without rewriting the committed inode, proves root completion occurs
 after all three final events and restart rewrites none of them, and checks reject/quarantine
 as replay-stable no-output terminals in manifest v2 and journal v3. Neither
 proof is a power-loss guarantee.
+
+For explicit v4, route and pass remain one-root final decisions; reject and
+quarantine are replay-stable acknowledged no-output terminals. A routed
+plain-text result records extraction provenance before the common v3 plan.
+Restart may repeat bounded diagnostic records, but verified committed output
+is not rewritten. The manifest retains its existing private destination
+authority; public dispatch explain records contain no paths, source bytes, raw
+detector evidence, or archive entry names. Only `core-plain-text/v1` is a
+shipping extraction route.

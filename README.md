@@ -71,6 +71,7 @@ dub build --build=release
 ./scrubbed extract --input page.html --output page.md --format markdown --max-html-bytes 1048576
 ./scrubbed extract --input page.html --output page.md --format markdown --config html-extract.json
 ./scrubbed run --input - --output - --jsonl-fields text,title --dataset-namespace corpus-v1 --source-key shard-0001 --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 < input.jsonl > clean.jsonl
+./scrubbed run --input path/to/docs --output path/to/clean --config scrubbed.dispatch.example.json --explain
 ./scrubbed errors-init --journal path/to/errors-v3.db
 ./scrubbed run --input path/to/docs --output path/to/clean --filters normalize-line-endings --error-journal path/to/errors-v3.db
 ```
@@ -80,8 +81,14 @@ names. New filters register themselves via `static this()` in their own
 module (see `filters/normalize.d`) — nothing in `app.d` or `pipeline.d`
 needs to change to add one.
 
-`--config` accepts the canonical version-3 job JSON shown in
-`scrubbed.example.json`. The predecessor version-1 object containing only an
+`--config` accepts the canonical linear version-3 job JSON shown in
+`scrubbed.example.json` or the explicit opt-in version-4 dispatch root shown in
+`scrubbed.dispatch.example.json`. Version 4 selects one bounded detection
+outcome and action before its nested v3 `common` plan. The shipping extractor
+registry contains only `core-plain-text/v1`; the example rejects every other
+detected family rather than pretending to extract Office, PDF, image, or
+archive content. See the [v4 dispatch specification](docs/job-spec-v4.md).
+The predecessor version-1 object containing only an
 ordered `filters` array remains accepted as an edge compatibility syntax.
 `fix-mojibake` supports `encodings` (`latin1`, `cp1252`, or both) and
 `max-passes`. Unknown option names are errors, and `--config` cannot be
@@ -132,7 +139,9 @@ top-level text fields through the same filter chain. It requires a stable
 dataset namespace, source key, and input/output record byte caps. Untouched
 values are preserved semantically, not byte-for-byte or in original key order;
 stdout contains records only. `--validate` does not read stdin and `--dry-run`
-emits no stdout. It has no graceful cancellation, checkpoint, or restart
+emits no stdout. Linear v3 still rejects `--explain` in this mode; explicit v4
+allows it and writes bounded `scrubbed.dispatch.v1` records to stderr so stdout
+remains whole-record JSONL. It has no graceful cancellation, checkpoint, or restart
 guarantee; OS termination can leave a partial current record. See the
 [JSONL stream guide](docs/jsonl-stream.md).
 
@@ -193,7 +202,10 @@ shipping `run`/`repair` path without a durability flag is non-durable. An
 init/copy/export/verify commands,
 and bounded JSONL history/outstanding export with SHA-256 sidecars now exist;
 `--error-journal` and `--error-retry` select canonical compiled local file/tree
-processing. Archival v2 journals remain exportable but cannot be run.
+processing. Canonical durable ledgers bind either the unchanged v3 identity or
+the explicit v4 plan and executable; a ledger bound to one refuses the other
+before recovery or publication. Archival v2 journals remain exportable but
+cannot be run.
 An [opt-in independent local-sinks adapter](docs/independent-sinks.md) can
 commit caller-supplied content and metadata payloads separately. The
 [`route-metadata` CLI](docs/metadata-route.md) now feeds it filtered HTML
@@ -223,13 +235,14 @@ The [release execution plan](docs/release-execution-plan.md) orders the work
 from one canonical CLI/JSON document pipeline through transform completeness,
 quality-matched optimization, and clean-machine packages; direct S3 and
 distributed execution are not on the first-release critical path.
-Heterogeneous input dispatch is now an explicit planned prerequisite (#155):
-bounded media/container detection will select exactly one extraction route,
-and every accepted route must converge on a common text-document contract
-before mojibake and other Unicode filters run. Production Office/PDF/image
-support remains unimplemented; #67 evaluates specialist adapters and #156 owns
-bounded adoption for only the formats that pass those gates. This is not a
-claim of Tika, Docling, Pandoc, or general OCR parity.
+Heterogeneous input dispatch is now a shipped, explicit opt-in v4 composition
+root (#155). Bounded media/container detection selects exactly one route,
+pass, reject, or quarantine action; a routed result crosses the extracted-text
+boundary before the nested common v3 filters run. Only
+`core-plain-text/v1` is registered, so production Office/PDF/image extraction
+remains unimplemented; #67 evaluates specialist adapters and #156 owns bounded
+adoption for only the formats that pass those gates. This is not a claim of
+Tika, Docling, Pandoc, or general OCR parity.
 Optional metadata enrichments keep unlike evidence separate: #167 owns
 source-declared versus inferred topical tags, #168 owns a named
 compressor-specific per-document measurement rather than an “exact Kolmogorov
@@ -242,7 +255,8 @@ describe the current module boundaries. A typed document-identity and borrowed
 view module, ordered borrowed/owned content-piece module with a lazy range,
 standalone document stage contracts, a typed self-registering stage registry,
 and typed source/parser/sink ports with a per-document runner are wired through
-canonical v3 compilation into the bounded local scheduler. The predecessor v2
+canonical v3 or explicit v4 compilation into local, selected-field JSONL, and
+durable execution. The predecessor v2
 configuration facade and direct pipeline orchestration are deleted. The
 file-mapping opener lives in the effects layer. High-edit list scaling is not
 ready for a throughput path. D module-boundary and predecessor-reachability
@@ -281,6 +295,12 @@ capacity-gated D run adds matched many-small/few-large 16 MiB and 128 MiB
 local trees with repeated samples, exact-output gates, and process CPU/RSS
 measurements. It does not establish broad speed parity; larger-than-RAM,
 OS-cold, FD/GC/syscall-byte metrics, and HTML extraction comparisons remain open.
+The separate [dispatch shipping harness](experiments/dispatch_shipping/README.md)
+compares unchanged v3 common transforms with explicit v4
+`core-plain-text` plus the same common plan on deterministic 32 MiB many-small
+and few-large layouts. It records three interleaved O3/release observations,
+exact output hashes, CPU/RSS/descriptor and dispatch/copy accounting. The
+results are descriptive evidence, not a speed threshold or optimization win.
 
 An [evidence-only native HTML parser evaluation](docs/html-parser-evaluation.md)
 compares pinned Lexbor and Gumbo on authored cases, then tests one pinned public

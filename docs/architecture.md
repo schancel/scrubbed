@@ -1,8 +1,8 @@
 # Current architecture
 
-Scrubbed is a D executable, not a supported library API. Its v3 job model is
-the shipping format for ordinary and durable local file/tree plus
-selected-field JSONL processing.
+Scrubbed is a D executable, not a supported library API. Its linear v3 job
+model and explicit opt-in v4 dispatch root are the shipping formats for
+ordinary and durable local file/tree plus selected-field JSONL processing.
 The [source guide](../source/README.md) describes the current boundary, and
 the [filter guide](../source/filters/README.md) is the shortest path to adding
 one transform.
@@ -14,9 +14,11 @@ app (process exit)
        -> filters/* (imported so their module constructors register)
 filters/* -> pipeline (registration and filter types)
 filters.entities -> filters.mojibake (CP1252 character mapping)
-job.* (pure canonical v3 specification and predecessor/token lowering)
+job.* (pure canonical v3 plus additive v4 dispatch specifications and lowering)
 composition.compiler/executor/job_executor -> job, pipeline, stages
   (pure registry compilation and one-record execution)
+composition.dispatch_compiler/dispatch_executor/runtime_plan -> job, extraction, composition
+extraction.detector/zip_inspector/plain_text -> content, domain.document
 domain.document (typed identity/view facade)
 content.pieces -> domain.document (checked borrowed content)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
@@ -41,8 +43,9 @@ queues live in the returned value on the caller side, with no per-group stage
 heap allocation. The source remains borrowed and must outlive consumption;
 the current `Pipeline.run` still materializes the fused result as one output
 string. Runs longer than 16 transducers split at a materialization boundary to
-bound recursive pull depth. This filter fusion is not yet the unwired
-`Document`/`Content`/effects pipeline described below.
+bound recursive pull depth. Canonical compiled v3 and v4 common plans invoke
+this filter machinery at explicit `Content` materialization barriers rather
+than through a second orchestration path.
 
 Filter lookup is injectable through `FilterRegistry`; the process-global
 instance is exposed read-only after module-constructor registration. The v3
@@ -67,9 +70,10 @@ the input tree.
 parallel-tree, invalid-input, and symlink cases. `dub build --build=release`
 builds the executable; both commands are defined by the current `dub.json`.
 
-The new `domain.document` module defines `SourceLocator`, `DocumentId`,
+The `domain.document` module defines `SourceLocator`, `DocumentId`,
 `OutputName`, `Document`, and an owner-checked borrowed view. It has no import
-from `cli`, `pipeline`, or `filters`; none of those modules imports it yet.
+from `cli`, `pipeline`, or `filters`; shipping effects and CLI adapters depend
+on this domain facade, never the reverse.
 `DocumentId` is a durable logical-record key, not a path, output name, worker
 assignment, source revision, or content hash. Its `doc:v1:` text consists of
 lowercase SHA-256 hex of `scrubbed:document-id:v1\0`, followed by three
@@ -98,6 +102,18 @@ IDs, ambiguous/orphan CLI options, and non-scalar JSON values fail at this
 boundary. It neither resolves registries nor performs I/O; the CLI lowers at
 its edge and compiles before opening local document content. See the
 [v3 format guide](job-spec-v3.md).
+
+The additive v4 root owns bounded detector and ZIP-refinement limits, finite
+routes, an explicit action for every detection outcome, and one complete v3
+`common` plan. Strict JSON and ordered dispatch tokens canonicalize to the same
+`job:v4:` identity. `composition.dispatch_compiler` resolves the detector,
+extractor, and common plan through injected registries; `runtime_plan` is the
+closed shipping choice between unchanged linear v3 and explicit dispatch v4.
+The executor makes exactly one route/pass/reject/quarantine decision while
+preserving document identity and output name. Routed content crosses the
+versioned extracted-text contract, then runs the common plan once. Only
+`core-plain-text/v1` ships; recognizing another signature permits explicit
+policy for it and does not imply that its extractor exists.
 
 `composition.compiler` is the only conversion point from `JobOption` to the
 registry-owned stage/filter scalar types. It resolves injected registries,
@@ -138,8 +154,9 @@ must consume each chunk before returning because the buffer is reused. This
 descriptors: it does not flatten bytes, preserves empty pieces, and checks a
 borrowed owner's lifetime when `front` or `popFront` touches that descriptor.
 Edits after obtaining the range do not alter that descriptor snapshot.
-The content module points only toward `domain.document`; neither CLI nor
-filters use it yet.
+The content module points only toward `domain.document`; canonical local,
+durable, extract, metadata, and selected-field JSONL execution use it through
+their effects adapters.
 
 `stages.contract` accepts a document range and makes one complete decision per
 visited document: map (same identity), reject with reason, quarantine with
@@ -165,7 +182,8 @@ schema, factory and relative `before`/`after` constraints. Stage modules
 self-register when imported; the registry does not import their names. A
 factory returns a pure context-free stage function and transitive-immutable typed
 configuration rather than a configured delegate.
-Canonical version-3 JSON and CLI tokens compile through this registry. The
+Canonical version-3 JSON and CLI tokens, including the v3 `common` plan nested
+inside v4, compile through this registry. The
 compiler rejects unknown names, missing or mistyped options, duplicate stage
 IDs, invalid filter placement, and relative-order violations before any
 document is read. The predecessor v2 config facade is deleted. A test-only

@@ -104,13 +104,14 @@ few-large wall/CPU/RSS/FD median paired ratios avoid regressions above 5%.
 Pairing prevents host drift across the long run from mismatching unrelated raw
 medians.
 
-The recorded run passed all gates: five of five target pairs improved;
-many-small four-thread median wall fell from 3.119 to 2.689 seconds (13.8%),
-and accepted-to-worker queue residence fell 15.9%. Many-small two-thread wall
-fell from 7.981 to 4.234 seconds. Few-large medians were 6.758/3.631/2.386
-seconds versus 6.842/3.607/2.475 for base at threads 1/2/4, with all control
-resources inside the 5% ceiling. The report therefore records
-`AUTHORIZED_BOUNDED_WORKER_AVAILABILITY`.
+The retained JSON records the original pre-review run: five of five target
+pairs improved, many-small four-thread wall fell 13.8%, and queue residence
+fell 15.9%. It is now historical rather than authorizing evidence because it
+predates immutable executable snapshots, true transform-CPU accounting,
+strict phase validation, paired control ratios, and the bounded pool repair.
+A controlled idle-host rerun is required before the worker-availability change
+can be integrated; runs observed while unrelated model training was active are
+intentionally not retained.
 
 Size-aware randomized execution remains a separate potential optimization for
 heterogeneous inputs. It is intentionally absent here: all files in the

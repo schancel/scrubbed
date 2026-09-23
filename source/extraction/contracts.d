@@ -127,8 +127,8 @@ struct DetectionResultV1 {
         enforce(inspectionLimitValue > 0, "detector result needs an inspection limit");
         auto expected = availableBytesValue < inspectionLimitValue
             ? availableBytesValue : inspectionLimitValue;
-        enforce(bytesInspectedValue == expected,
-            "detector byte accounting must equal the bounded available prefix");
+        enforce(bytesInspectedValue <= expected,
+            "detector byte accounting exceeds the available inspection cap");
         bool[cast(size_t) DetectionOutcomeV1.max + 1] authoritative;
         foreach (item; evidenceValue) {
             item.validateEvidence;
@@ -171,11 +171,16 @@ struct DetectionResultV1 {
             MediaEvidenceV1[] evidence, string detectorVersion,
             string[] warnings, size_t bytesInspected,
             size_t inspectionLimit, size_t availableBytes) {
+        enforce(evidence.length <= maxDetectionEvidenceV1,
+            "too many detector evidence records");
+        enforce(warnings.length <= maxDetectionWarningsV1,
+            "too many detector warnings");
         outcomeValue = outcome;
         evidenceValue = evidence.dup;
         detectorVersionValue = checkedLabel(detectorVersion,
             "detector version", 128);
-        warningsValue = warnings.dup;
+        warningsValue = checkedLabels(warnings, "detector warning",
+            maxWarningBytesV1);
         bytesInspectedValue = bytesInspected;
         inspectionLimitValue = inspectionLimit;
         availableBytesValue = availableBytes;
@@ -359,8 +364,6 @@ struct TextDocumentV1 {
             "text provenance must match detected source byte count");
         enforce(warnings.length <= maxDetectionWarningsV1,
             "too many extraction warnings");
-        foreach (warning; warnings)
-            validateLabel(warning, "extraction warning", maxWarningBytesV1);
 
         documentValue = document;
         contentValue = stableContent;
@@ -368,7 +371,8 @@ struct TextDocumentV1 {
         extractorValue = checkedLabel(extractor, "extractor name", 128);
         extractorVersionValue = checkedLabel(extractorVersion,
             "extractor version", 128);
-        warningsValue = warnings.dup;
+        warningsValue = checkedLabels(warnings, "extraction warning",
+            maxWarningBytesV1);
         provenanceValue = provenance;
     }
 
@@ -397,6 +401,13 @@ private void validateLabel(string value, string field, size_t maxBytes) {
         field ~ " must be nonempty and bounded");
     validate(value);
     enforce(value.indexOf('\0') < 0, field ~ " must not contain NUL");
+}
+
+private string[] checkedLabels(string[] values, string field, size_t maxBytes) {
+    auto result = new string[values.length];
+    foreach (index, value; values)
+        result[index] = checkedLabel(value, field, maxBytes);
+    return result;
 }
 
 /// Validate incrementally so a checked text boundary does not flatten Content.
@@ -478,18 +489,24 @@ unittest {
 
     auto document = Document(SourceLocator("test", "extract", "one"),
         OutputName("original.txt"));
+    char[] resultWarning = "result-warning".dup;
     auto detection = DetectionResultV1.detected(DetectionOutcomeV1.plainText,
         [MediaEvidenceV1(EvidenceKindV1.textualContent,
             DetectionOutcomeV1.plainText, "valid-utf8")],
-        "test:v1", null, 5, 5, 5);
+        "test:v1", [cast(string) resultWarning], 5, 5, 5);
+    resultWarning[0] = cast(char) 0xff;
+    assert(detection.warnings[0] == "result-warning");
     auto provenance = ExtractionProvenanceV1(DetectionOutcomeV1.plainText,
         "plain-text", 5);
     auto content = new Content([
         ContentPiece.own([cast(ubyte) 0xe2]),
         ContentPiece.own([cast(ubyte) 0x82, 0xac])
     ]);
+    char[] textWarning = "text-warning".dup;
     auto text = TextDocumentV1(document, content, detection, "identity",
-        "identity:v1", ["already text"], provenance);
+        "identity:v1", [cast(string) textWarning], provenance);
+    textWarning[0] = cast(char) 0xff;
+    assert(text.warnings[0] == "text-warning");
     assert(text.id == document.id);
     assert(text.outputName == document.outputName);
     assert(text.document.id == document.id);
@@ -538,6 +555,11 @@ unittest {
         pdfEvidence, "test:v1", null, 3, 5, 3));
     assertThrown(DetectionResultV1.detected(DetectionOutcomeV1.ambiguous,
         pdfEvidence, "test:v1", null, 3, 5, 3));
+    auto early = DetectionResultV1.detected(DetectionOutcomeV1.unknown,
+        null, "test:v1", null, 2, 5, 3);
+    assert(early.bytesInspected == 2);
     assertThrown(DetectionResultV1.detected(DetectionOutcomeV1.unknown,
-        null, "test:v1", null, 2, 5, 3));
+        null, "test:v1", null, 4, 5, 3));
+    assertThrown(DetectionResultV1.detected(DetectionOutcomeV1.unknown,
+        null, "test:v1", null, 4, 3, 10));
 }

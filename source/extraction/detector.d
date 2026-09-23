@@ -60,6 +60,8 @@ DetectionResultV1 detectMediaV1(Content content, string declaredMediaType = null
         }
         if (prefix.length == inspected) break;
     }
+    enforce(prefix.length == inspected,
+        "bounded detector must inspect the complete declared prefix");
 
     MediaEvidenceV1[] evidence;
     string[] warnings;
@@ -104,7 +106,7 @@ DetectionResultV1 detectMediaV1(Content content, string declaredMediaType = null
     }
 
     auto incompleteSignature =
-        (partialSignature(prefix, cast(const(ubyte)[]) "%PDF-") ||
+        (partialPdfHeader(prefix) ||
          partialSignature(prefix, [cast(ubyte) 0x89, 0x50, 0x4e, 0x47,
              0x0d, 0x0a, 0x1a, 0x0a]) ||
          partialSignature(prefix, [cast(ubyte) 0xff, 0xd8, 0xff]) ||
@@ -175,6 +177,21 @@ private bool startsWithBytes(const(ubyte)[] input, const(ubyte)[] expected) pure
 private bool partialSignature(const(ubyte)[] input, const(ubyte)[] signature) pure {
     return input.length > 0 && input.length < signature.length &&
         input == signature[0 .. input.length];
+}
+
+/// A PDF header may begin at any byte offset through 1024. Only a matching
+/// suffix that ends at the inspection boundary is incomplete.
+private bool partialPdfHeader(const(ubyte)[] input) pure {
+    auto signature = cast(const(ubyte)[]) "%PDF-";
+    if (!input.length) return false;
+    auto earliest = input.length >= signature.length
+        ? input.length - (signature.length - 1) : 0;
+    auto latest = input.length - 1;
+    if (latest > 1024) latest = 1024;
+    if (earliest > latest) return false;
+    foreach (start; earliest .. latest + 1)
+        if (partialSignature(input[start .. $], signature)) return true;
+    return false;
 }
 
 private ptrdiff_t findSequence(const(ubyte)[] input, const(ubyte)[] needle,
@@ -384,6 +401,37 @@ unittest {
     auto truncated = detected(cast(const(ubyte)[]) "%PD");
     assert(truncated.outcome == DetectionOutcomeV1.unknown);
     assert(truncated.warnings.canFind("truncated-known-signature"));
+    auto offsetTruncated = detected(cast(const(ubyte)[]) "a%P");
+    assert(offsetTruncated.outcome == DetectionOutcomeV1.unknown);
+    assert(offsetTruncated.warnings.canFind("truncated-known-signature"));
+    auto offsetBounded = detected(cast(const(ubyte)[]) "a%PDF-1.7",
+        null, null, 3);
+    assert(offsetBounded.outcome == DetectionOutcomeV1.unknown);
+    assert(offsetBounded.warnings.canFind("bounded-incomplete-signature"));
+
+    auto legalOffsetPartial = new ubyte[1026];
+    legalOffsetPartial[0 .. 1024] = cast(ubyte) 'a';
+    legalOffsetPartial[1024] = '%';
+    legalOffsetPartial[1025] = 'P';
+    auto legalPartial = detected(legalOffsetPartial);
+    assert(legalPartial.outcome == DetectionOutcomeV1.unknown);
+    assert(legalPartial.warnings.canFind("truncated-known-signature"));
+    auto outsideOffsetPartial = new ubyte[1027];
+    outsideOffsetPartial[0 .. 1025] = cast(ubyte) 'a';
+    outsideOffsetPartial[1025] = '%';
+    outsideOffsetPartial[1026] = 'P';
+    auto outsidePartial = detected(outsideOffsetPartial);
+    assert(outsidePartial.outcome == DetectionOutcomeV1.plainText);
+    assert(!outsidePartial.warnings.canFind("truncated-known-signature"));
+
+    auto legalOffsetFull = new ubyte[1029];
+    legalOffsetFull[0 .. 1024] = cast(ubyte) 'a';
+    legalOffsetFull[1024 .. $] = cast(const(ubyte)[]) "%PDF-";
+    assert(detected(legalOffsetFull).outcome == DetectionOutcomeV1.pdf);
+    auto outsideOffsetFull = new ubyte[1030];
+    outsideOffsetFull[0 .. 1025] = cast(ubyte) 'a';
+    outsideOffsetFull[1025 .. $] = cast(const(ubyte)[]) "%PDF-";
+    assert(detected(outsideOffsetFull).outcome == DetectionOutcomeV1.plainText);
 
     // A PDF header may legally occur within the leading 1024 bytes. A leading
     // HTML document plus that header is conflicting strong evidence.

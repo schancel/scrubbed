@@ -110,6 +110,28 @@ heterogeneous inputs. It is intentionally absent here: all files in the
 many-small fixture have equal size, and combining scheduling policies would
 make this candidate's causal result uninterpretable.
 
+### Heterogeneous size-order experiment
+
+The separate `--size-order` harness mode tests the same 127 MiB logical input
+as 4,032 16-KiB files and 64 1-MiB files. It compares canonical admission with
+the large files clustered last, clustered first, or placed by a fixed seeded
+permutation. Five runs at threads 2 and 4 are rotated and interleaved across
+all three variants; output identity is stable within each variant.
+
+```sh
+/tmp/scrubbed-coordination-profile --size-order ./scrubbed \
+  benchmarks/size-order-evidence.json
+```
+
+The recorded four-thread medians were 4.893 seconds with large files last,
+7.021 seconds with large files first, and 6.986 seconds with seeded placement.
+Two-thread medians were 6.634, 9.129, and 8.329 seconds respectively. Sample
+variance was high, but neither proposed ordering beat the existing canonical
+small-first case. No production ordering change is authorized from this
+experiment. In particular, randomizing execution while publication remains
+canonical risks increasing ordered head-of-line pressure; that semantic and
+performance cost is not justified by these measurements.
+
 ## Attested full-process target
 
 `pipeline.d --attested-build` refuses a dirty checkout, builds the release

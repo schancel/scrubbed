@@ -111,6 +111,26 @@ private void makeFixture(string root, ref const Layout layout) {
     need(ordinal == recordCount, "fixture cardinality differs");
 }
 
+private void makeSizeOrderFixture(string root, string variant) {
+    enum files = 4096;
+    enum largeFiles = 64;
+    enum smallRecords = 64; // 16 KiB
+    enum largeRecords = 4096; // 1 MiB
+    mkdirRecurse(root);
+    size_t recordOrdinal;
+    foreach (index; 0 .. files) {
+        bool large;
+        if (variant == "clustered-late") large = index >= files - largeFiles;
+        else if (variant == "largest-first") large = index < largeFiles;
+        else if (variant == "seeded-distribution")
+            large = ((index * 4051) % files) < largeFiles;
+        else throw new Exception("unknown size-order fixture");
+        auto file = File(buildPath(root, "doc-" ~ index.to!string ~ ".txt"), "wb");
+        foreach (_; 0 .. (large ? largeRecords : smallRecords))
+            file.rawWrite(inputRecord(recordOrdinal++));
+    }
+}
+
 private struct Tree { ulong bytes; string tree; string concatenated; }
 private Tree identify(string root) {
     string[] names;
@@ -382,6 +402,84 @@ private void runComparison(string[] args) {
     writeln("coordination comparison: wrote ", reportPath);
 }
 
+private void runSizeOrder(string[] args) {
+    auto binary = absolutePath(args[2]);
+    auto reportPath = absolutePath(args[3]);
+    need(exists(binary) && !exists(reportPath),
+        "size-order binary missing or report exists");
+    need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
+    auto root = buildPath(tempDir, "scrubbed-size-order-" ~ randomUUID.toString);
+    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto config = buildPath(root, "mixed-v3.json");
+    write(config, configText());
+    need(fileDigest(config) == configPin, "config pin differs");
+    static immutable variants = ["clustered-late", "largest-first",
+        "seeded-distribution"];
+    string[string] inputs;
+    Tree[string] inputIds;
+    JSONValue[][string] samples;
+    string[string] expectedOutputTrees;
+    ulong[string] expectedOutputBytes;
+    foreach (variant; variants) {
+        auto input = buildPath(root, variant ~ "-input");
+        makeSizeOrderFixture(input, variant);
+        inputs[variant] = input;
+        inputIds[variant] = identify(input);
+    }
+    foreach (round; 0 .. runs) foreach (threads; [2, 4])
+    foreach (offset; 0 .. variants.length) {
+            auto variant = variants[(round + offset +
+                (threads == 4 ? 1 : 0)) % variants.length];
+            auto output = buildPath(root, variant ~ "-output-" ~
+                threads.to!string ~ "-" ~ round.to!string);
+            auto sample = invoke(binary, inputs[variant], output, config, threads,
+                round, root, false);
+            auto outputId = identify(output);
+            if ((variant in expectedOutputTrees) is null) {
+                expectedOutputTrees[variant] = outputId.tree;
+                expectedOutputBytes[variant] = outputId.bytes;
+            }
+            need(outputId.tree == expectedOutputTrees[variant],
+                "size-order output tree differs between samples");
+            need(outputId.bytes == expectedOutputBytes[variant],
+                "size-order output byte count differs between samples");
+            sample["output_bytes"] = cast(long)outputId.bytes;
+            sample["output_tree_sha256"] = outputId.tree;
+            sample["output_concatenated_sha256"] = outputId.concatenated;
+            samples[variant] ~= sample;
+            rmdirRecurse(output);
+    }
+    JSONValue[] variantReports;
+    foreach (variant; variants) {
+        variantReports ~= JSONValue([
+            "variant": JSONValue(variant),
+            "files": JSONValue(4096),
+            "large_files": JSONValue(64),
+            "input_bytes": JSONValue(cast(long)inputIds[variant].bytes),
+            "input_tree_sha256": JSONValue(inputIds[variant].tree),
+            "output_tree_sha256": JSONValue(expectedOutputTrees[variant]),
+            "samples": JSONValue(samples[variant])]);
+    }
+    auto report = JSONValue([
+        "schema": JSONValue("scrubbed.size-order-profile.v1"),
+        "host_os": JSONValue(commandOutput(["uname", "-s"])),
+        "host_architecture": JSONValue(commandOutput(["uname", "-m"])),
+        "host_cpu": JSONValue(commandOutput(
+            ["sysctl", "-n", "machdep.cpu.brand_string"])),
+        "shipping_binary_sha256": JSONValue(fileDigest(binary)),
+        "harness_sha256": JSONValue(fileDigest(args[0])),
+        "fixture_table_sha256": JSONValue(fixtureTablePin),
+        "config_sha256": JSONValue(configPin),
+        "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
+        "variants": JSONValue(variantReports)]);
+    auto text = report.toString;
+    need(!text.canFind(root), "size-order report leaked temporary path");
+    parseJSON(text);
+    write(reportPath, text ~ "\n");
+    need(readText(reportPath) == text ~ "\n", "size-order report reopen differs");
+    writeln("size-order profile: wrote ", reportPath);
+}
+
 private void runAttribution(string[] args) {
     auto binary = absolutePath(args[1]);
     auto reportPath = absolutePath(args[2]);
@@ -473,7 +571,9 @@ private void runAttribution(string[] args) {
 void main(string[] args) {
     need(args.length == 3 || args.length == 4,
         "usage: coordination_profile <release-binary> <report> | " ~
-        "<baseline-binary> <candidate-binary> <report>");
-    if (args.length == 4) runComparison(args);
+        "<baseline-binary> <candidate-binary> <report> | " ~
+        "--size-order <release-binary> <report>");
+    if (args.length == 4 && args[1] == "--size-order") runSizeOrder(args);
+    else if (args.length == 4) runComparison(args);
     else runAttribution(args);
 }

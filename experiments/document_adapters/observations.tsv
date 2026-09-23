@@ -1,0 +1,13 @@
+adapter	sample	timeout_ms	argv	boundary_outcome	boundary_exit	elapsed_ms	peak_rss_bytes	extracted_hex
+poppler-pdftotext	pdf-training	5000	pdftotext|-layout|{input}|{output}	exit	0	11	9814016	545241494e494e47205044460a0a414c504841204f4e450a424554412054574f0a0c
+poppler-pdftotext	pdf-heldout-layout	5000	pdftotext|-layout|{input}|{output}	exit	0	38	9863168	4c41594f5554205245504f52540a0a0a4c454654204120202020202020202020524947485420410a4c454654204220202020202020202020524947485420420a0a0a0a0a464f4f54455220454e440a0c
+poppler-pdftotext	pdf-malformed	5000	pdftotext|-layout|{input}|{output}	exit	1	15	8699904	-
+mupdf-mutool	pdf-training	5000	mutool|draw|-q|-F|txt|-o|{output}|{input}	exit	0	15	5062656	545241494e494e47205044460a0a414c504841204f4e450a0a424554412054574f0a0a0c0a
+mupdf-mutool	pdf-heldout-layout	5000	mutool|draw|-q|-F|txt|-o|{output}|{input}	exit	0	14	5029888	4c41594f5554205245504f52540a0a4c45465420410a0a4c45465420420a0a524947485420410a0a524947485420420a0a464f4f54455220454e440a0a0c0a
+mupdf-mutool	pdf-malformed	5000	mutool|draw|-q|-F|txt|-o|{output}|{input}	exit	1	10	3735552	-
+pandoc-docx	docx-training	5000	pandoc|-f|docx|-t|plain|--wrap=none|{input}|-o|{output}	exit	0	27	43253760	545241494e494e4720444f43580a0a47414d4d412054485245450a0a44454c544120464f55520a
+pandoc-docx	docx-heldout-layout	5000	pandoc|-f|docx|-t|plain|--wrap=none|{input}|-o|{output}	exit	0	99	43974656	4f4646494345204c41594f55540a0a20202d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d202d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d0a2020524f5731204c4546542020202020202020202020202020524f57312052494748540a0a2020524f5732204c4546542020202020202020202020202020524f57322052494748540a20202d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d202d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d0a0a4f464649434520454e440a
+pandoc-docx	docx-malformed	5000	pandoc|-f|docx|-t|plain|--wrap=none|{input}|-o|{output}	exit	63	45	40517632	-
+libreoffice-writer	docx-training	10000	soffice|-env:UserInstallation=file://{profile}|--headless|--nologo|--nodefault|--nolockcheck|--norestore|--convert-to|txt:Text|--outdir|{output_dir}|{input}	timeout	124	10004	98402304	-
+libreoffice-writer	docx-heldout-layout	10000	soffice|-env:UserInstallation=file://{profile}|--headless|--nologo|--nodefault|--nolockcheck|--norestore|--convert-to|txt:Text|--outdir|{output_dir}|{input}	timeout	124	10017	98107392	-
+libreoffice-writer	docx-malformed	10000	soffice|-env:UserInstallation=file://{profile}|--headless|--nologo|--nodefault|--nolockcheck|--norestore|--convert-to|txt:Text|--outdir|{output_dir}|{input}	timeout	124	10015	98172928	-

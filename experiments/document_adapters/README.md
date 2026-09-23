@@ -29,8 +29,13 @@ The tab-separated files are the reviewable evidence surface:
   held-out execution.
 - `adapters.tsv` pins artifact/source hashes, licenses, dependency provenance,
   package size, and unsupported reasons.
-- `results.tsv` is the sanitized raw report. Diagnostics are categories rather
-  than input paths or engine messages.
+- `observations.tsv` preserves each exact adapter argument vector, subprocess
+  boundary result, resource observation, and extracted bytes as lossless
+  lowercase hex. Placeholders replace private scratch paths only; diagnostics
+  and observations contain no source paths or engine messages.
+- `results.tsv` is the derived summary. The checker decodes every observation
+  and recomputes its output hash, tokens, order errors, and four named layout
+  predicates before accepting the corresponding row.
 
 Rollback is deletion of this directory and
 `docs/document-adapters-evaluation.md`; there is no persisted or user-visible

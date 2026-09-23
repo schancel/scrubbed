@@ -31,11 +31,14 @@ engines never used a network runtime path.
 
 The exact evidence is in
 [`experiments/document_adapters`](../experiments/document_adapters/README.md).
-The release-active checker validates the fixture and artifact provenance,
-coverage matrix, text occurrence counts, token-order inversions, malformed
-failure status, startup/RSS/package measurements, and six deliberate negative
-controls: wrong text/order, missing sample hash, malformed success, crash,
-timeout, and missing provenance.
+`observations.tsv` preserves the exact adapter argument vectors, sanitized
+subprocess outcomes, and lossless hex of every extracted output. The
+release-active checker decodes those bytes and recomputes all output hashes,
+token streams, occurrence counts, token-order inversions, and layout scores;
+`results.tsv` must match. Thirteen deliberate negative controls cover wrong
+text/order, missing sample/hash/provenance/observation/arguments, malformed
+success, crash, timeout, fabricated output hash/tokens/geometry, unknown
+geometry structure, and malformed preserved bytes.
 
 ## Candidate provenance and licensing
 
@@ -59,21 +62,28 @@ These are engineering provenance findings, not legal advice.
 
 Text accuracy is matched expected token occurrences over total expected
 occurrences. Order errors are inversions against the frozen semantic order.
-Geometry hits are four fixture-specific layout facts. Times and RSS are single
-cold observations, not performance benchmarks.
+Geometry hits are four explicitly named, fixture-specific predicates derived
+from line structure in the preserved output bytes. PDF checks are
+`pdf_row_a_columns`, `pdf_row_b_columns`, `pdf_right_column_aligned`, and
+`pdf_footer_after_columns`. DOCX checks are `docx_row1_cells`,
+`docx_row2_cells`, `docx_right_column_aligned`, and
+`docx_footer_after_table`. They describe this command output only, not source
+document coordinates. Times and RSS are single cold observations, not
+performance benchmarks.
 
 | Candidate / held-out sample | Text | Order errors | Geometry | Cold elapsed | Peak RSS | Malformed case |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | Poppler / PDF layout | 12/12 | 4 | 4/4 | 38 ms | 9,863,168 B | rejected, exit 1 in 15 ms |
-| MuPDF / PDF layout | 12/12 | 0 | 0/4 | 14 ms | 5,029,888 B | rejected, exit 1 in 10 ms |
+| MuPDF / PDF layout | 12/12 | 0 | 1/4 | 14 ms | 5,029,888 B | rejected, exit 1 in 10 ms |
 | Pandoc / DOCX table | 12/12 | 0 | 4/4 | 99 ms | 43,974,656 B | rejected, exit 63 in 45 ms |
 | LibreOffice / DOCX table | no output | not scored | not scored | isolated at 10,017 ms | 98,107,392 B | isolated at 10,015 ms |
 
 Poppler's `-layout` output retained the two visual columns but interleaved the
 rows, producing four token-order inversions against column-major reading.
 MuPDF preserved semantic order but its plain-text mode carried no horizontal
-layout evidence. Pandoc retained the DOCX table's row-major structure. Training
-documents were also complete and ordered for all three feasible candidates.
+column evidence; only the footer-after-columns line-order predicate passed.
+Pandoc retained the DOCX table's row-major structure. Training documents were
+also complete and ordered for all three feasible candidates.
 
 LibreOffice timed out on training, held-out, and malformed DOCX inputs in the
 same fresh-profile, read-only-image setup. Each process group was terminated at

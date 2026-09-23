@@ -1408,6 +1408,7 @@ int runApp(string[] args) {
             auto fatalPlanned = cast(FatalPlannedFailure)error;
             auto v2Decision = cast(V2DocumentFailure)error;
             auto effectFailure = cast(EffectFailure)error;
+            auto orderedCanceled = cast(OrderedPublicationCanceled)error;
             if (errorJournalPath.length) {
                 stderr.writeln("scrubbed: ", v2Decision !is null ?
                     v2Decision.code : "error-journal-fatal");
@@ -1416,6 +1417,14 @@ int runApp(string[] args) {
                         v2Decision.hasPublicSink ?
                             errorJournal.publicSinkId(v2Decision.key.sink) : "",
                         v2Decision.phase, v2Decision.code);
+                if (explain) pending.remove(file);
+                return;
+            }
+            if (orderedCanceled !is null) {
+                stderr.writefln("CANCELED %s: %s", file, error.msg);
+                if (explain)
+                    explainOne(file, destinationFor(file, inputPath, outputPath,
+                        inputIsDir), chainLabel, "canceled", error.msg);
                 if (explain) pending.remove(file);
                 return;
             }
@@ -1452,7 +1461,7 @@ int runApp(string[] args) {
                     documentId = fatalPlanned.key.document.text;
                     sinkKey = fatalPlanned.key.sink;
                 } else if (effectFailure !is null) {
-                    status = effectFailure.partialWritePossible ? "uncertain" : "failed";
+                    status = effectFailure.partialWritePossible ? "uncertain" : "failure";
                     detail = effectFailureDetail(effectFailure);
                     documentId = effectFailure.documentId.text;
                 }
@@ -1541,6 +1550,9 @@ int runApp(string[] args) {
                     chainLabel, workerFatalAdmission ? "canceled" : "failure",
                     workerFatalAdmission ? "canceled after fatal processing failure" :
                         "canceled after traversal error");
+        auto workerFatal = scheduler.fatal();
+        if (workerFatalAdmission && workerFatal !is null)
+            throw new Exception("fatal file processing failure: " ~ workerFatal.msg);
         throw error;
     }
     const counts = scheduler.finish();

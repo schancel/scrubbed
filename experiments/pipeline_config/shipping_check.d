@@ -99,15 +99,25 @@ void main(string[] args) {
     large[] = 'x';
     write(buildPath(orderedInput, "a.txt"), large);
     write(buildPath(orderedInput, "z.txt"), [cast(ubyte) 0xff]);
+    write(buildPath(orderedInput, "zz.txt"), "later");
+    write(buildPath(orderedInput, "zzz.txt"), "later still");
     auto serial = execute([executable, "run", "--input", orderedInput,
-        "--output", serialOutput, "--threads", "1", "--max-open-inputs", "4"]);
+        "--output", serialOutput, "--threads", "1", "--max-open-inputs", "4",
+        "--explain"]);
     auto parallel = execute([executable, "run", "--input", orderedInput,
-        "--output", parallelOutput, "--threads", "4", "--max-open-inputs", "4"]);
+        "--output", parallelOutput, "--threads", "4", "--max-open-inputs", "4",
+        "--explain"]);
     need(serial.status == 2 && parallel.status == 2 &&
         exists(buildPath(serialOutput, "a.txt")) &&
         exists(buildPath(parallelOutput, "a.txt")) &&
         readText(buildPath(serialOutput, "a.txt")) ==
-            readText(buildPath(parallelOutput, "a.txt")),
+            readText(buildPath(parallelOutput, "a.txt")) &&
+        serial.output.canFind("effect stage failure") &&
+        parallel.output.canFind("effect stage failure") &&
+        serial.output.canFind("status=canceled") &&
+        parallel.output.canFind("status=canceled") &&
+        !serial.output.canFind("input admission canceled") &&
+        !parallel.output.canFind("input admission canceled"),
         "fatal publication prefix changed with worker count");
 
     auto jsonl = execute([executable, "run", "--input", "-", "--output", "-",

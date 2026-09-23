@@ -26,3 +26,7 @@ Descriptor evidence requires at least one successful child sample. The copy
 probe uses the runtime's cumulative current-thread allocation counter and also
 rehashes the retained output after closing the mapped input. The destination
 must not already exist.
+
+`accounting_deltas_vs_v3` reports the additional v4 dispatch records,
+inspected bytes, source-emission accounting bytes, and owned extraction bytes;
+the v3 path emits no dispatch accounting records.

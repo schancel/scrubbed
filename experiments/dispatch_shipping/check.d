@@ -376,7 +376,9 @@ private string fixtureJson(ref const FixtureEvidence fixture) {
     output.put(fixture.count.to!string);
     output.put(`,"inspection_bytes":`);
     output.put((cast(ulong)fixture.count * detectorPrefixBytes).to!string);
-    output.put(`,"emission_bytes":0,"owned_extraction_bytes":`);
+    output.put(`,"emission_bytes":`);
+    output.put(fixture.input.bytes.to!string);
+    output.put(`,"owned_extraction_bytes":`);
     output.put(fixture.input.bytes.to!string);
     output.put(`}`);
     output.put(`,"runs":[`);
@@ -465,7 +467,8 @@ private void validateEvidence(string text, string binaryHash,
         need(deltas["detection_records"].integer == fixture["documents"].integer &&
             deltas["inspection_bytes"].integer ==
                 fixture["documents"].integer * detectorPrefixBytes &&
-            deltas["emission_bytes"].integer == 0 &&
+            deltas["emission_bytes"].integer ==
+                fixture["input_bytes"].integer &&
             deltas["owned_extraction_bytes"].integer ==
                 fixture["input_bytes"].integer,
             "accounting delta mismatch");
@@ -694,6 +697,10 @@ void main(string[] args) {
     expectedFailure(() => validateEvidence(replaceFirst(reopened,
         `"dispatch_records":0`, `"dispatch_records":1`), binaryHash,
         v3Hash, v4Hash, fixtures, copies), "run accounting");
+    expectedFailure(() => validateEvidence(replaceFirst(reopened,
+        `"emission_bytes":` ~ fixtures[0].input.bytes.to!string,
+        `"emission_bytes":0`), binaryHash, v3Hash, v4Hash, fixtures, copies),
+        "emission accounting delta");
 
     writeln("dispatch shipping evidence: wrote ", evidencePath);
     writeln("dispatch shipping evidence: copy probe source_bytes=",

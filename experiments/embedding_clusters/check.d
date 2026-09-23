@@ -2,9 +2,9 @@
 module experiments.embedding_clusters.check;
 
 import experiments.embedding_clusters.contract : dimension, maxCpuSeconds,
-    maxLiveEmbeddings, maxLogBytes, maxOutputBytes, maxRssBytes, modelDigest,
-    optionsText, port, provenanceText, runtimeTemplate, serverArguments,
-    serverDigest, shardSize, wallSeconds;
+    DecodedVectorBudget, maxLiveEmbeddings, maxLogBytes, maxOutputBytes,
+    maxRssBytes, modelDigest, optionsText, port, provenanceText,
+    runtimeTemplate, serverArguments, serverDigest, shardSize, wallSeconds;
 
 import std.algorithm : canFind, sort;
 import std.array : array, join, replace;
@@ -43,6 +43,31 @@ private void expectReject(scope void delegate() operation, string label) {
     bool rejected;
     try operation(); catch (Exception) rejected = true;
     need(rejected, "negative accepted: " ~ label);
+}
+
+private void verifyDecodedVectorAdmission() {
+    DecodedVectorBudget budget;
+    double[][] retained;
+    bool rejected;
+    try {
+        foreach (_; 0 .. maxLiveEmbeddings + 1) {
+            budget.admit();
+            // Deliberately model the broken lifetime: completed vectors remain
+            // owned while the next vector is requested.
+            retained ~= new double[dimension];
+        }
+    }
+    catch (Exception) {
+        rejected = true;
+    }
+    need(rejected && retained.length == maxLiveEmbeddings &&
+        budget.live == maxLiveEmbeddings && budget.peak == maxLiveEmbeddings,
+        "fifth decoded vector rejected before allocation");
+    foreach (ref vector; retained) {
+        vector = null;
+        budget.release();
+    }
+    need(budget.live == 0, "decoded-vector ownership released");
 }
 
 private void verifyMetadata(string provenance, string options) {
@@ -341,7 +366,8 @@ private string[] observation(string text) {
         f[1] == serverDigest && f[2] == modelDigest && f[3] == corpusDigest &&
         f[4] == trainDigest && f[5] == heldoutDigest && f[6] == "4",
         "observation provenance");
-    need(f[7].to!size_t <= 4 && f[11].to!ulong <= 60_000 &&
+    need(f[7].to!size_t > 0 && f[7].to!size_t <= 4 &&
+        f[11].to!ulong <= 60_000 &&
         f[12].to!ulong <= 536_870_912 && f[13].to!ulong <= 134_217_728,
         "resource ceilings");
     return f.array;
@@ -351,6 +377,8 @@ private void verifyObservations(string resumeText, string replayText) {
     auto resume = observation(resumeText), replay = observation(replayText);
     need(resume[8] == "1" && resume[9] == "8", "resume reused committed shard");
     need(replay[8] == "9" && replay[9] == "0", "replay recomputed nothing");
+    need(resume[7] == "2" && replay[7] == "2",
+        "fresh and replay decoded-vector peaks");
     need(resume[10] == resultDigest && replay[10] == resultDigest,
         "deterministic replay digest");
 }
@@ -377,6 +405,7 @@ private void verifyCrashEvidence(string killedText, string crashText,
 }
 
 void main(string[] args) {
+    verifyDecodedVectorAdmission();
     auto base = args.length > 1 ? args[1] : "experiments/embedding_clusters";
     auto fixture = buildPath(base, "fixtures"), evidence = buildPath(base, "evidence");
     auto provenance = readText(buildPath(base, "provenance.tsv"));
@@ -433,7 +462,7 @@ void main(string[] args) {
         "replay-observation.tsv")).replace(resultDigest, corpusDigest)); },
         "nondeterministic replay");
     expectReject({ observation(readText(buildPath(evidence,
-        "resume-observation.tsv")).replace("\t4\t1\t8\t", "\t5\t1\t8\t")); },
+        "resume-observation.tsv")).replace("\t2\t1\t8\t", "\t5\t1\t8\t")); },
         "all-document buffering ceiling");
     expectReject({ verifyQuality(summary.replace("\t8\t8\t3\t", "\t8\t7\t3\t"),
         scoreRows); }, "false quality claim");

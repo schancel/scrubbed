@@ -2,6 +2,7 @@
 module experiments.embedding_clusters.contract;
 
 import std.conv : to;
+import std.exception : enforce;
 
 enum modelDigest =
     "797b70c4edf85907fe0a49eb85811256f65fa0f7bf52166b147fd16be2be4662";
@@ -16,6 +17,27 @@ enum maxOutputBytes = 128UL * 1024 * 1024;
 enum maxCpuSeconds = 60UL;
 enum wallSeconds = 60;
 enum port = 18066;
+
+/// Tracks decoded-vector ownership. Admit before allocating a vector and
+/// release only after every reference to that vector has been dropped.
+struct DecodedVectorBudget {
+    private size_t ceiling = maxLiveEmbeddings;
+    size_t live;
+    size_t peak;
+
+    void admit() {
+        enforce(live < ceiling,
+            "decoded-vector working set exceeded ceiling before allocation");
+        ++live;
+        if (live > peak)
+            peak = live;
+    }
+
+    void release() {
+        enforce(live > 0, "decoded-vector budget release underflow");
+        --live;
+    }
+}
 
 enum provenanceText =
 `kind	name	version_or_revision	sha256	bytes	license	license_sha256	source

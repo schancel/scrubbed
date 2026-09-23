@@ -53,19 +53,20 @@ ignored it and recomputed all nine. A kill after atomically committing shard 0's
 index row left four committed stable IDs; restart validated and reused only that
 shard, computed the remaining eight, and observed:
 
-- 664 ms total runner time, including local server startup and inference;
-- 138,526,720 bytes child high-water RSS, below the 512 MiB guarded ceiling;
-- four maximum live embedding records, matching the shard ceiling;
+- 891 ms total runner time, including local server startup and inference;
+- 137,756,672 bytes child high-water RSS, below the 512 MiB guarded ceiling;
+- two maximum live decoded vectors, below the configured ceiling of four;
 - 651,186 bytes of experiment output before the parent wrote its two small
   crash-observation records.
 
 The following replay reused all nine committed shards, computed none, completed
-in 11 ms, and produced the same result digest. Shards are immutable versioned
-payloads whose index binds model hash, corpus hash, payload hash, row count, and
-first/last typed IDs. A changed version, digest, duplicate ID, missing ID, or ID
-order is rejected before reuse. Newly published vectors are reloaded from their
-serialized shard before any scoring, so fresh and resumed evaluation use the
-same precision and deterministic bytes.
+in 77 ms, loaded at most two decoded vectors for the current scoring pair, and
+produced the same result digest. Shards are immutable versioned payloads whose
+index binds model hash, corpus hash, payload hash, row count, and first/last
+typed IDs. A changed version, digest, duplicate ID, missing ID, or ID order is
+rejected before reuse. Newly published vectors are released after serialization
+and reloaded in bounded pairs from their immutable shard for scoring, so fresh,
+resumed, and replay evaluation use the same precision and deterministic bytes.
 
 Package/acquisition evidence: the signed-by-hash release archive was 11,205,309
 bytes; its extracted directory was 28,131,328 bytes; the model was 45,949,216

@@ -2,7 +2,7 @@
 module experiments.embedding_clusters.run_evaluation;
 
 import experiments.embedding_clusters.contract : dimension, maxCpuSeconds,
-    maxLiveEmbeddings, maxLogBytes, maxOutputBytes, maxRssBytes, modelDigest,
+    DecodedVectorBudget, maxLogBytes, maxOutputBytes, maxRssBytes, modelDigest,
     port, serverArguments, serverDigest, shardSize, wallSeconds;
 
 version (OSX) {} else static assert(0,
@@ -60,9 +60,10 @@ private struct Judgment {
     string split;
 }
 
-private struct Embedding {
-    string id;
-    double[] values;
+private struct ShardMetadata {
+    string path;
+    size_t firstPosition;
+    size_t count;
 }
 
 private struct Thresholds {
@@ -223,7 +224,7 @@ private void waitReadyExternal(MonoTime deadline) {
     throw new Exception("external embedding server startup exceeded wall limit");
 }
 
-private double[] embed(string text) {
+private string embedEncoded(string text) {
     JSONValue request;
     request["model"] = "all-minilm-l6-v2-f16";
     request["input"] = text;
@@ -231,10 +232,12 @@ private double[] embed(string text) {
     auto response = parseJSON(http("POST", "/v1/embeddings", request.toString));
     auto values = response["data"].array[0]["embedding"].array;
     enforce(values.length == dimension, "unexpected embedding dimension");
-    double[] result;
-    result.reserve(values.length);
-    foreach (value; values)
-        result ~= value.floating;
+    string result;
+    foreach (index, value; values) {
+        if (index)
+            result ~= ",";
+        result ~= format("%.9g", value.floating);
+    }
     return result;
 }
 
@@ -280,36 +283,99 @@ private Judgment[] loadJudgments(string trainPath, string heldoutPath) {
     return result;
 }
 
-private string shardPayload(Embedding[] embeddings) {
-    string payload = shardVersion ~ "\t" ~ modelDigest ~ "\t" ~
-        dimension.to!string ~ "\n";
-    foreach (embedding; embeddings) {
-        string[] values;
-        values.reserve(embedding.values.length);
-        foreach (value; embedding.values)
-            values ~= format("%.9g", value);
-        payload ~= embedding.id ~ "\t" ~ values.join(",") ~ "\n";
-    }
-    return payload;
-}
-
-private Embedding[] parseShard(string path) {
+private void inspectShard(string path, const Record[] records,
+        size_t firstPosition, size_t expectedCount, string expectedFirst,
+        string expectedLast) {
     auto lines = readText(path).splitLines;
     enforce(lines.length > 1 && lines[0] == shardVersion ~ "\t" ~
         modelDigest ~ "\t" ~ dimension.to!string,
         "wrong shard version/model/dimension");
-    Embedding[] result;
-    foreach (line; lines[1 .. $]) {
+    enforce(lines.length - 1 == expectedCount && expectedCount > 0 &&
+        firstPosition + expectedCount <= records.length,
+        "committed shard row count mismatch");
+    foreach (offset, line; lines[1 .. $]) {
         auto fields = line.split('\t');
-        enforce(fields.length == 2, "malformed shard row");
+        enforce(fields.length == 2 &&
+            fields[0] == records[firstPosition + offset].id,
+            "malformed or out-of-order shard row");
         auto encoded = fields[1].split(',');
         enforce(encoded.length == dimension, "malformed shard vector");
-        double[] values;
         foreach (value; encoded)
-            values ~= value.to!double;
-        result ~= Embedding(fields[0], values);
+            cast(void) value.to!double;
     }
-    return result;
+    enforce(records[firstPosition].id == expectedFirst &&
+        records[firstPosition + expectedCount - 1].id == expectedLast,
+        "committed shard index mismatch");
+}
+
+private string generateShardPayload(const Record[] records, size_t begin,
+        size_t end, ref DecodedVectorBudget budget) {
+    string payload = shardVersion ~ "\t" ~ modelDigest ~ "\t" ~
+        dimension.to!string ~ "\n";
+    foreach (position; begin .. end) {
+        // Admission precedes the HTTP/JSON decode. The decoded response is
+        // serialized before release and never coexists with another vector.
+        budget.admit();
+        try payload ~= records[position].id ~ "\t" ~
+            embedEncoded(records[position].text) ~ "\n";
+        catch (Exception error) {
+            budget.release();
+            throw error;
+        }
+        budget.release();
+    }
+    return payload;
+}
+
+private ShardMetadata shardForPosition(const ShardMetadata[] shards,
+        size_t position) {
+    foreach (shard; shards)
+        if (position >= shard.firstPosition &&
+                position < shard.firstPosition + shard.count)
+            return shard;
+    throw new Exception("embedding index has no shard for document");
+}
+
+private double[] decodeVector(ShardMetadata shard, size_t position,
+        const Record[] records) {
+    auto lines = readText(shard.path).splitLines;
+    enforce(lines.length == shard.count + 1 &&
+        lines[0] == shardVersion ~ "\t" ~ modelDigest ~ "\t" ~
+            dimension.to!string,
+        "committed shard changed during scoring");
+    const offset = position - shard.firstPosition;
+    auto fields = lines[offset + 1].split('\t');
+    enforce(fields.length == 2 && fields[0] == records[position].id,
+        "committed shard ID changed during scoring");
+    auto encoded = fields[1].split(',');
+    enforce(encoded.length == dimension, "malformed scoring vector");
+    double[] values;
+    values.reserve(dimension);
+    foreach (value; encoded)
+        values ~= value.to!double;
+    return values;
+}
+
+private double embeddingScore(size_t leftPosition, size_t rightPosition,
+        const ShardMetadata[] shards, const Record[] records,
+        ref DecodedVectorBudget budget) {
+    budget.admit();
+    double[] left;
+    scope(exit) {
+        left = null;
+        budget.release();
+    }
+    left = decodeVector(shardForPosition(shards, leftPosition), leftPosition,
+        records);
+    budget.admit();
+    double[] right;
+    scope(exit) {
+        right = null;
+        budget.release();
+    }
+    right = decodeVector(shardForPosition(shards, rightPosition), rightPosition,
+        records);
+    return cosine(left, right);
 }
 
 private void publish(string path, string contents) {
@@ -493,8 +559,8 @@ int main(string[] arguments) {
     const indexPath = buildPath(workdir, "index.tsv");
     string index = indexVersion ~ "\t" ~ modelDigest ~ "\t" ~
         fileDigest(corpusPath) ~ "\t" ~ shardSize.to!string ~ "\n";
-    Embedding[] embeddings;
-    bool[string] committedIds;
+    ShardMetadata[] shards;
+    size_t committedCount;
     size_t reusedShards;
     if (exists(indexPath)) {
         auto lines = readText(indexPath).splitLines;
@@ -506,28 +572,20 @@ int main(string[] arguments) {
             auto path = buildPath(workdir, fields[0]);
             enforce(isFile(path) && fileDigest(path) == fields[1],
                 "committed shard digest mismatch");
-            auto shard = parseShard(path);
-            enforce(shard.length == fields[2].to!size_t && shard.length > 0 &&
-                shard[0].id == fields[3] && shard[$ - 1].id == fields[4],
-                "committed shard index mismatch");
-            foreach (embedding; shard) {
-                enforce(!(embedding.id in committedIds),
-                    "duplicate ID across committed shards");
-                committedIds[embedding.id] = true;
-                embeddings ~= embedding;
-            }
+            const count = fields[2].to!size_t;
+            inspectShard(path, records, committedCount, count, fields[3],
+                fields[4]);
+            shards ~= ShardMetadata(path, committedCount, count);
+            committedCount += count;
             index ~= line ~ "\n";
             ++reusedShards;
         }
     }
 
-    enforce(embeddings.length <= records.length, "too many indexed embeddings");
-    foreach (position, embedding; embeddings)
-        enforce(embedding.id == records[position].id,
-            "committed shard ID drift");
+    enforce(committedCount <= records.length, "too many indexed embeddings");
 
     size_t recomputedShards;
-    size_t maxLive;
+    DecodedVectorBudget vectorBudget;
     int serverPid;
     int guardPid;
     auto started = MonoTime.currTime;
@@ -537,7 +595,7 @@ int main(string[] arguments) {
             waitMemoryGuard(guardPid);
         }
     }
-    if (embeddings.length < records.length) {
+    if (committedCount < records.length) {
         if (externalServer) {
             waitReadyExternal(started + wallSeconds.seconds);
         } else {
@@ -547,43 +605,43 @@ int main(string[] arguments) {
             guardPid = startMemoryGuard(serverPid);
             waitReady(serverPid, started + wallSeconds.seconds);
         }
-        while (embeddings.length < records.length) {
+        while (committedCount < records.length) {
             enforce(MonoTime.currTime < started + wallSeconds.seconds,
                 "evaluation exceeded wall limit");
-            Embedding[] live;
-            const end = (embeddings.length + shardSize) < records.length ?
-                embeddings.length + shardSize : records.length;
-            foreach (position; embeddings.length .. end)
-                live ~= Embedding(records[position].id,
-                    embed(records[position].text));
-            maxLive = maxLive > live.length ? maxLive : live.length;
-            enforce(maxLive <= maxLiveEmbeddings,
-                "all-document embedding buffering exceeded ceiling");
+            const begin = committedCount;
+            const end = (begin + shardSize) < records.length ?
+                begin + shardSize : records.length;
+            auto payload = generateShardPayload(records, begin, end,
+                vectorBudget);
+            enforce(vectorBudget.live == 0,
+                "generated vectors escaped their bounded window");
             const ordinal = reusedShards + recomputedShards;
             const name = format("shard-%03d.tsv", ordinal);
-            auto payload = shardPayload(live);
             auto shardPath = buildPath(workdir, name);
             auto pendingPath = shardPath ~ ".pending";
             write(pendingPath, payload);
             if (crashPhase == "pending" && ordinal == 0)
                 crashBoundary(controlFd, crashPhase, ordinal, reusedShards,
-                    embeddings.length);
+                    committedCount);
             rename(pendingPath, shardPath);
             if (crashPhase == "orphan" && ordinal == 0)
                 crashBoundary(controlFd, crashPhase, ordinal, reusedShards,
-                    embeddings.length);
+                    committedCount);
             // All downstream evidence must derive from the immutable bytes a
             // restart reads, never higher-precision transient response values.
-            auto committedLive = parseShard(shardPath);
+            const count = end - begin;
+            inspectShard(shardPath, records, begin, count, records[begin].id,
+                records[end - 1].id);
             index ~= name ~ "\t" ~ digest(payload.representation) ~ "\t" ~
-                committedLive.length.to!string ~ "\t" ~ committedLive[0].id ~
-                "\t" ~ committedLive[$ - 1].id ~ "\n";
+                count.to!string ~ "\t" ~ records[begin].id ~ "\t" ~
+                records[end - 1].id ~ "\n";
             publish(indexPath, index);
-            embeddings ~= committedLive;
+            shards ~= ShardMetadata(shardPath, begin, count);
+            committedCount = end;
             ++recomputedShards;
             if (crashPhase == "committed" && ordinal == 0)
                 crashBoundary(controlFd, crashPhase, ordinal,
-                    reusedShards + recomputedShards, embeddings.length);
+                    reusedShards + recomputedShards, committedCount);
         }
     }
     if (!externalServer) {
@@ -593,17 +651,18 @@ int main(string[] arguments) {
         guardPid = 0;
     }
 
-    enforce(embeddings.length == records.length,
+    enforce(committedCount == records.length,
         "embedding index is incomplete");
-    double[][string] vectors;
-    foreach (embedding; embeddings)
-        vectors[embedding.id] = embedding.values;
+    size_t[string] positions;
+    foreach (position, record; records)
+        positions[record.id] = position;
 
     ScoreRow[] embeddingRows;
     ScoreRow[] lexicalRows;
     foreach (judgment; judgments) {
         embeddingRows ~= ScoreRow("embedding", judgment,
-            cosine(vectors[judgment.left], vectors[judgment.right]));
+            embeddingScore(positions[judgment.left], positions[judgment.right],
+                shards, records, vectorBudget));
         lexicalRows ~= ScoreRow("lexical", judgment,
             lexical(recordsById[judgment.left].text,
                 recordsById[judgment.right].text));
@@ -641,7 +700,8 @@ int main(string[] arguments) {
                 if (records[leftIndex].split != records[rightIndex].split)
                     continue;
                 double score = method == "embedding" ?
-                    cosine(vectors[records[leftIndex].id], vectors[records[rightIndex].id]) :
+                    embeddingScore(leftIndex, rightIndex, shards, records,
+                        vectorBudget) :
                     lexical(records[leftIndex].text, records[rightIndex].text);
                 auto kind = classify(score, thresholds);
                 if (kind != "unrelated")
@@ -725,13 +785,13 @@ int main(string[] arguments) {
         "embedding-evaluation:v1\t" ~ serverDigest ~ "\t" ~ modelDigest ~
         "\t" ~ fileDigest(corpusPath) ~ "\t" ~ fileDigest(trainPath) ~
         "\t" ~ fileDigest(heldoutPath) ~ "\t" ~ shardSize.to!string ~
-        "\t" ~ maxLive.to!string ~ "\t" ~ reusedShards.to!string ~ "\t" ~
+        "\t" ~ vectorBudget.peak.to!string ~ "\t" ~ reusedShards.to!string ~ "\t" ~
         recomputedShards.to!string ~ "\t" ~ resultDigest ~ "\t" ~
         elapsedMs.to!string ~ "\t" ~ peakRss.to!string ~ "\t" ~
         diskBytes.to!string ~ "\n";
     publish(buildPath(workdir, observation ~ "-observation.tsv"), run);
     writeln("result_sha256=", resultDigest, " reused_shards=", reusedShards,
-        " recomputed_shards=", recomputedShards, " max_live=", maxLive,
+        " recomputed_shards=", recomputedShards, " max_live=", vectorBudget.peak,
         " elapsed_ms=", elapsedMs, " peak_rss_bytes=", peakRss,
         " disk_bytes=", diskBytes);
     return 0;

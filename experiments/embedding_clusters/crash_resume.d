@@ -37,6 +37,7 @@ private struct Restart {
     string result;
     size_t reused;
     size_t recomputed;
+    size_t maxLive;
 }
 
 private void setLimit(int resource, ulong amount) {
@@ -186,7 +187,8 @@ private Restart restart(string workdir, string observation) {
     enforce(rows.length == 2, "restart observation shape");
     auto field = rows[1].split('\t');
     enforce(field.length == 14, "restart observation columns");
-    return Restart(field[10], field[8].to!size_t, field[9].to!size_t);
+    return Restart(field[10], field[8].to!size_t, field[9].to!size_t,
+        field[7].to!size_t);
 }
 
 private string digestFile(string path) {
@@ -217,6 +219,8 @@ int main(string[] args) {
         enforce(resumed.reused == (phase == "committed" ? 1 : 0) &&
             resumed.recomputed == (phase == "committed" ? 8 : 9),
             "restart reused uncommitted state");
+        enforce(resumed.maxLive == 2,
+            "restart decoded-vector working-set evidence drift");
         summary ~= phase ~ "\tSIGKILL\t" ~ indexPresent.to!string ~ "\t" ~
             shardPresent.to!string ~ "\t" ~ pendingPresent.to!string ~ "\t" ~
             resumed.reused.to!string ~ "\t" ~ resumed.recomputed.to!string ~
@@ -227,7 +231,8 @@ int main(string[] args) {
     runNormal(finalBase, "replay", buildPath(scratch, "replay.log"));
     auto replay = restart(evidence, "replay");
     enforce(replay.result == expectedResult && replay.reused == 9 &&
-        replay.recomputed == 0, "post-crash replay drift");
+        replay.recomputed == 0 && replay.maxLive == 2,
+        "post-crash replay drift");
     write(buildPath(evidence, "crash-observations.tsv"), summary);
     auto indexHash = digestFile(buildPath(evidence, "index.tsv"));
     write(buildPath(evidence, "kill-observation.tsv"),

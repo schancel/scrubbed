@@ -34,7 +34,10 @@ hashes, and limits consumed by the runner, crash parent, and verifier. The
 runner verifies the binary and model hashes before starting, binds only
 localhost, disables devices and the web UI, limits CPU/log/output/HTTP/wall
 resources, and uses a 10 ms macOS `proc_pid_rusage` guard that kills the process
-group above 512 MiB RSS. Inputs are embedded four at a time.
+group above 512 MiB RSS. Inputs are serialized directly into four-row shards,
+one decoded server response at a time. Scoring reloads only the two vectors for
+the current pair from immutable shards; the runner admits every decoded vector
+before allocation and releases each bounded window.
 
 ## Reproduction
 

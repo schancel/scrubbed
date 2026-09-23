@@ -1,6 +1,7 @@
 /// Bounded, local-only admission for the CLI's file walk.
 module effects.bounded_input;
 
+import core.atomic : atomicLoad, atomicOp;
 import core.sync.condition : Condition;
 import core.sync.mutex : Mutex;
 import core.time : MonoTime, ticksToNSecs;
@@ -54,54 +55,48 @@ struct CoordinationMetricValueV1 {
 }
 
 final class CoordinationMetricsV1 {
-    private Mutex mutex;
-    private CoordinationMetricValueV1[CoordinationPhaseV1.count] values;
+    private shared ulong[CoordinationPhaseV1.count] calls;
+    private shared ulong[CoordinationPhaseV1.count] units;
+    private shared ulong[CoordinationPhaseV1.count] nanoseconds;
     private InputLimits limits;
     private InputCounts counts;
     private long wallStarted;
     private ulong wallNanoseconds;
 
     this() {
-        mutex = new Mutex;
         wallStarted = MonoTime.currTime.ticks;
     }
 
     void setLimits(InputLimits value) {
-        mutex.lock(); limits = value; mutex.unlock();
+        limits = value;
     }
 
     void setCounts(InputCounts value) {
-        mutex.lock(); counts = value; mutex.unlock();
+        counts = value;
     }
 
     void finishWall() {
         auto elapsed = MonoTime.currTime.ticks - wallStarted;
-        mutex.lock();
         if (wallNanoseconds == 0 && elapsed > 0)
             wallNanoseconds = ticksToNanoseconds(elapsed);
-        mutex.unlock();
     }
 
     void record(CoordinationPhaseV1 phase, ulong units = 0,
             long started = 0) {
         auto elapsed = started == 0 ? 0L : MonoTime.currTime.ticks - started;
-        mutex.lock();
-        auto value = &values[phase];
-        ++value.calls;
-        value.units += units;
-        if (elapsed > 0) value.nanoseconds += ticksToNanoseconds(elapsed);
-        mutex.unlock();
+        calls[phase].atomicOp!"+="(1);
+        this.units[phase].atomicOp!"+="(units);
+        if (elapsed > 0)
+            nanoseconds[phase].atomicOp!"+="(ticksToNanoseconds(elapsed));
     }
 
     void recordThreadCpu(CoordinationPhaseV1 phase, ulong units,
             long startedNanoseconds) {
         auto elapsed = threadCpuNanoseconds() - startedNanoseconds;
-        mutex.lock();
-        auto value = &values[phase];
-        ++value.calls;
-        value.units += units;
-        if (elapsed > 0) value.nanoseconds += cast(ulong)elapsed;
-        mutex.unlock();
+        calls[phase].atomicOp!"+="(1);
+        this.units[phase].atomicOp!"+="(units);
+        if (elapsed > 0)
+            nanoseconds[phase].atomicOp!"+="(cast(ulong)elapsed);
     }
 
     string json() {
@@ -113,12 +108,14 @@ final class CoordinationMetricsV1 {
         InputLimits capturedLimits;
         InputCounts capturedCounts;
         ulong capturedWall;
-        mutex.lock();
-        snapshot[] = values[];
+        foreach (index; 0 .. cast(size_t)CoordinationPhaseV1.count)
+            snapshot[index] = CoordinationMetricValueV1(
+                calls[index].atomicLoad,
+                units[index].atomicLoad,
+                nanoseconds[index].atomicLoad);
         capturedLimits = limits;
         capturedCounts = counts;
         capturedWall = wallNanoseconds;
-        mutex.unlock();
         enforce(capturedCounts.submitted == capturedCounts.succeeded +
             capturedCounts.failed + capturedCounts.skipped,
             "coordination metrics terminal count mismatch");
@@ -233,11 +230,16 @@ final class BoundedInput {
         if (metrics !is null) metrics.setLimits(limits);
         mutex = new Mutex;
         changed = new Condition(mutex);
-        // Keep every requested worker available while the producer is still
-        // admitting paths. finish(true) may enlist its caller later, so the
-        // processing gate below remains the authoritative --threads cap.
-        if (threads > 1)
-            pool = new TaskPool(processingLimit);
+        // Workers that have dequeued a task release its queue slot before
+        // waiting for a descriptor. Keep enough workers to cover both active
+        // callbacks and the bounded queued set, without creating more than the
+        // requested thread count. finish(true) may enlist its caller later, so
+        // processingLimit remains the authoritative callback cap.
+        if (threads > 1) {
+            auto extraWorkers = threads - processingLimit < limits.queuedDocuments ?
+                threads - processingLimit : limits.queuedDocuments;
+            pool = new TaskPool(processingLimit + extraWorkers);
+        }
     }
 
     /// false means a prior fault or explicit cancellation stopped admission.
@@ -424,7 +426,7 @@ unittest {
     auto cappedPool = new BoundedInput(InputLimits(1, 1, 1), 8,
         (string path, ulong bytes) {},
         (string path, Throwable error) { assert(0, error.msg); });
-    assert(cappedPool.pool.size == 1);
+    assert(cappedPool.pool.size == 2);
     cappedPool.finish();
 
     foreach (threads; [1, 4]) {

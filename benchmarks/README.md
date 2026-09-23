@@ -52,7 +52,10 @@ first sample per thread also records a D-GC availability control and attempts
 a one-second `/usr/bin/sample` trace. Darwin `wait4` supplies direct-child CPU
 and peak RSS. FD counts are sampled with `lsof`, and exact child syscall counts
 are explicitly unsupported. OS cache state is uncontrolled and is never
-described as cold.
+described as cold. Transform nanoseconds use the executing worker's thread CPU
+clock; the remaining phase durations use a monotonic elapsed clock. The harness
+copies each supplied executable into private scratch before sampling, records
+the snapshot digest up front, and executes only that immutable snapshot.
 
 On the recorded Apple M4/macOS 26.6.2/LDC 1.43.0 run, uninstrumented median
 wall times in seconds were many-small 8.091/8.115/3.590 and few-large
@@ -75,10 +78,12 @@ allocated and no instrumentation clock or mutex is touched.
 ### Bounded worker-availability candidate
 
 The follow-up comparison fixes the diagnosed producer-phase worker deficit:
-`BoundedInput` now creates the requested number of background workers instead
-of reserving one for a producer that only enters the pool during final join.
-An explicit `min(threads, worker-descriptor-cap)` processing gate continues to
-bound callbacks when `finish(true)` temporarily enlists its caller. A
+`BoundedInput` now creates the effective
+`min(threads, worker-descriptor-cap)` number of background workers instead of
+reserving one for a producer that only enters the pool during final join. The
+same effective limit remains the processing gate when `finish(true)`
+temporarily enlists its caller, avoiding unusable threads when the descriptor
+cap is lower than `--threads`. A
 fail-before unit test requires both configured workers to enter admitted work
 before `finish()` begins.
 
@@ -95,7 +100,9 @@ on both frozen layouts, exact-gates every output, and separately interleaves
 five instrumented many-small four-thread pairs. It authorizes production only
 when at least four pairs improve, the target median wall improvement is at
 least 10%, attributed queue residence falls, and single-thread plus all
-few-large wall/CPU/RSS/FD medians avoid regressions above 5%.
+few-large wall/CPU/RSS/FD median paired ratios avoid regressions above 5%.
+Pairing prevents host drift across the long run from mismatching unrelated raw
+medians.
 
 The recorded run passed all gates: five of five target pairs improved;
 many-small four-thread median wall fell from 3.119 to 2.689 seconds (13.8%),
@@ -123,14 +130,16 @@ all three variants; output identity is stable within each variant.
   benchmarks/size-order-evidence.json
 ```
 
-The recorded four-thread medians were 4.893 seconds with large files last,
-7.021 seconds with large files first, and 6.986 seconds with seeded placement.
-Two-thread medians were 6.634, 9.129, and 8.329 seconds respectively. Sample
-variance was high, but neither proposed ordering beat the existing canonical
-small-first case. No production ordering change is authorized from this
-experiment. In particular, randomizing execution while publication remains
-canonical risks increasing ordered head-of-line pressure; that semantic and
-performance cost is not justified by these measurements.
+The corrected fixture uses zero-padded names and asserts the actual canonical
+large-file ranks before timing. The recorded four-thread medians were 4.958
+seconds with large files last, 4.808 seconds with large files first, and 7.559
+seconds with seeded placement. Two-thread medians were 7.400, 7.367, and 8.678
+seconds respectively. Largest-first won four of five paired runs at both
+thread counts, but improved the medians by only 3.0% and 0.5%, below the 10%
+production threshold. Seeded scattering was materially slower. No production
+ordering change is authorized: deterministic largest-first remains a measured
+follow-up opportunity, while randomized scattering is rejected for this
+workload.
 
 ### Split-condition wakeup experiment
 
@@ -147,6 +156,8 @@ many-small four-thread median was effectively unchanged (2.609487 versus
 and only two of five target pairs improved. Many-small two-thread wall rose
 0.11% and four-thread CPU rose 1.00%; controls remained within 5%. The added
 synchronization surface is therefore not retained in production.
+The exact experimental source was not retained, so this report is diagnostic
+history rather than reproducible release-gate evidence.
 
 ### Canonical-key caching experiment
 
@@ -161,6 +172,8 @@ four-thread wall improved 8.04%, only four of five pairs won, and aggregate
 queue residence fell 1.17%. The few-large one-thread CPU control was 4.85%
 higher, too close to the 5% ceiling to provide useful margin. Exact outputs
 and resource caps passed, but the per-entry cached state is not retained.
+The exact experimental source was not retained, so this report is likewise
+diagnostic history rather than reproducible release-gate evidence.
 
 ## Attested full-process target
 

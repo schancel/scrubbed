@@ -3,6 +3,7 @@ module benchmarks.coordination_profile;
 
 import core.atomic : atomicLoad, atomicStore;
 import core.stdc.errno : EINTR, errno;
+import core.sys.posix.signal : SIGKILL;
 import core.sys.posix.sys.resource : rusage;
 import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED;
 import core.thread : Thread;
@@ -14,11 +15,13 @@ import std.conv : to;
 import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : SHA256, sha256Of;
-import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
-    remove, rmdirRecurse, tempDir, write;
+import std.file : SpanMode, copy, dirEntries, exists, getAttributes, isFile,
+    isSymlink, mkdirRecurse, read, readText, remove, rmdirRecurse,
+    setAttributes, tempDir, write;
+import std.format : format;
 import std.json : JSONValue, parseJSON;
 import std.path : absolutePath, buildPath, relativePath;
-import std.process : execute, spawnProcess;
+import std.process : execute, kill, spawnProcess;
 import std.stdio : File, writeln;
 import std.string : splitLines, strip;
 import std.uuid : randomUUID;
@@ -67,6 +70,22 @@ private string hexDigest(const(ubyte)[] value) {
 
 private string fileDigest(string path) {
     return hexDigest(cast(const(ubyte)[])read(path));
+}
+
+private struct ExecutableSnapshot { string path, digest; }
+
+private ExecutableSnapshot snapshotExecutable(string source, string root,
+        string label) {
+    need(isFile(source) && !isSymlink(source),
+        label ~ " binary must be a regular non-symlink file");
+    auto destination = buildPath(root, label ~ "-executable");
+    copy(source, destination);
+    setAttributes(destination, getAttributes(source));
+    need(isFile(destination) && !isSymlink(destination),
+        label ~ " executable snapshot differs");
+    auto digest = fileDigest(destination);
+    need(digest == fileDigest(source), label ~ " binary changed while snapshotting");
+    return ExecutableSnapshot(destination, digest);
 }
 
 private string commandOutput(string[] command) {
@@ -125,10 +144,30 @@ private void makeSizeOrderFixture(string root, string variant) {
         else if (variant == "seeded-distribution")
             large = ((index * 4051) % files) < largeFiles;
         else throw new Exception("unknown size-order fixture");
-        auto file = File(buildPath(root, "doc-" ~ index.to!string ~ ".txt"), "wb");
+        auto file = File(buildPath(root, format!"doc-%04d.txt"(index)), "wb");
         foreach (_; 0 .. (large ? largeRecords : smallRecords))
             file.rawWrite(inputRecord(recordOrdinal++));
     }
+    string[] names;
+    foreach (entry; dirEntries(root, SpanMode.shallow, false))
+        names ~= relativePath(entry.name, root);
+    names.sort();
+    size_t[] largeRanks;
+    foreach (rank, name; names) {
+        auto index = name[4 .. 8].to!size_t;
+        bool large = variant == "clustered-late" ? index >= files - largeFiles :
+            variant == "largest-first" ? index < largeFiles :
+            ((index * 4051) % files) < largeFiles;
+        if (large) largeRanks ~= rank;
+    }
+    need(largeRanks.length == largeFiles, "size-order large-file count differs");
+    if (variant == "clustered-late")
+        foreach (offset, rank; largeRanks)
+            need(rank == files - largeFiles + offset,
+                "clustered-late canonical ranks differ");
+    else if (variant == "largest-first")
+        foreach (offset, rank; largeRanks)
+            need(rank == offset, "largest-first canonical ranks differ");
 }
 
 private struct Tree { ulong bytes; string tree; string concatenated; }
@@ -181,6 +220,14 @@ private JSONValue invoke(string binary, string input, string output,
     auto timer = StopWatch(AutoStart.yes);
     auto child = spawnProcess(command, stdinFile, stdoutFile, stderrFile);
     stdinFile.close(); stdoutFile.close(); stderrFile.close();
+    bool childReaped;
+    scope(failure) if (!childReaped) {
+        try kill(child, SIGKILL); catch (Exception) {}
+        int cleanupStatus; rusage cleanupUsage; int cleanupWaited;
+        do cleanupWaited = wait4(child.processID, &cleanupStatus, 0,
+            &cleanupUsage);
+        while (cleanupWaited < 0 && errno == EINTR);
+    }
     shared bool stopped;
     shared size_t peakFd;
     auto sampler = new Thread({
@@ -195,6 +242,11 @@ private JSONValue invoke(string binary, string input, string output,
         }
     });
     sampler.start();
+    bool samplerJoined;
+    scope(exit) if (!samplerJoined) {
+        atomicStore(stopped, true);
+        sampler.join();
+    }
     string stackStatus = "not-attempted", stackHash;
     if (instrumented && ordinal == 0) {
         auto stackPath = buildPath(root, label ~ ".sample.txt");
@@ -209,7 +261,9 @@ private JSONValue invoke(string binary, string input, string output,
     int status; rusage usage; int waited;
     do waited = wait4(child.processID, &status, 0, &usage);
     while (waited < 0 && errno == EINTR);
+    childReaped = waited == child.processID;
     atomicStore(stopped, true); sampler.join(); timer.stop();
+    samplerJoined = true;
     need(waited == child.processID && WIFEXITED(status) && WEXITSTATUS(status) == 0,
         "child failed: " ~ readText(stderrPath));
     auto log = readText(stdoutPath);
@@ -237,6 +291,37 @@ private JSONValue invoke(string binary, string input, string output,
         result["metrics"] = metrics;
     }
     return result;
+}
+
+private void validateMetrics(ref JSONValue sample, size_t expectedFiles,
+        ulong expectedBytes) {
+    auto metrics = sample["metrics"];
+    auto counts = metrics["counts"];
+    need(counts["submitted"].integer == expectedFiles &&
+        counts["succeeded"].integer == expectedFiles &&
+        counts["failed"].integer == 0 && counts["skipped"].integer == 0 &&
+        counts["queued_documents"].integer == 0 &&
+        counts["reserved_bytes"].integer == 0 &&
+        counts["worker_descriptors"].integer == 0,
+        "terminal/reservation accounting differs");
+    auto phases = metrics["phases"];
+    foreach (name; ["source_stat", "ordinal_assignment", "admission_wait",
+            "accepted_worker_queue", "descriptor_wait", "descriptor_hold",
+            "transform", "ordered_result_wait", "atomic_publication"])
+        need(phases[name]["calls"].integer == expectedFiles,
+            name ~ " root count differs");
+    need(phases["accepted_worker_queue"]["units"].integer == expectedBytes &&
+        phases["accepted_worker_queue"]["nanoseconds"].integer > 0,
+        "accepted-worker queue accounting differs");
+    need(phases["transform"]["units"].integer == expectedBytes,
+        "transform byte accounting differs");
+    need(phases["shutdown_join"]["calls"].integer == 1,
+        "shutdown count differs");
+    auto processCpuNanoseconds =
+        (sample["user_us"].integer + sample["system_us"].integer) * 1_000;
+    need(phases["transform"]["nanoseconds"].integer <=
+        processCpuNanoseconds + 1_000_000,
+        "transform CPU exceeds whole-process CPU");
 }
 
 private long[] values(JSONValue[] samples, size_t threads, string field) {
@@ -267,8 +352,17 @@ private long sampleValue(JSONValue[] samples, size_t threads,
     throw new Exception("comparison sample missing");
 }
 
-private bool withinFivePercent(long candidate, long baseline) {
-    return candidate * 100 <= baseline * 105;
+private bool pairedMedianWithinFivePercent(JSONValue[] baseline,
+        JSONValue[] candidate, size_t threads, string field) {
+    long[] ratiosBasisPoints;
+    foreach (round; 0 .. runs) {
+        auto base = sampleValue(baseline, threads, round, field);
+        auto changed = sampleValue(candidate, threads, round, field);
+        need(base > 0, "comparison control baseline must be positive");
+        ratiosBasisPoints ~= changed * 10_000 / base;
+    }
+    ratiosBasisPoints.sort();
+    return ratiosBasisPoints[runs / 2] <= 10_500;
 }
 
 private void runComparison(string[] args) {
@@ -281,6 +375,11 @@ private void runComparison(string[] args) {
     auto root = buildPath(tempDir, "scrubbed-coordination-compare-" ~
         randomUUID.toString);
     mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto baselineSnapshot = snapshotExecutable(baseline, root, "baseline");
+    auto candidateSnapshot = snapshotExecutable(candidate, root, "candidate");
+    baseline = baselineSnapshot.path;
+    candidate = candidateSnapshot.path;
+    auto harnessDigest = fileDigest(absolutePath(args[0]));
     auto config = buildPath(root, "mixed-v3.json");
     write(config, configText());
     need(fileDigest(config) == configPin, "config pin differs");
@@ -329,9 +428,8 @@ private void runComparison(string[] args) {
             if (threads == 1 || layout.name == "few-large") {
                 foreach (field; ["wall_us", "cpu_us", "peak_rss_bytes",
                         "sampled_fd_peak"])
-                    controlsPass = controlsPass && withinFivePercent(
-                        median(candidateSamples, threads, field),
-                        median(baselineSamples, threads, field));
+                    controlsPass = controlsPass && pairedMedianWithinFivePercent(
+                        baselineSamples, candidateSamples, threads, field);
             }
         }
         if (layout.name == "many-small")
@@ -343,6 +441,7 @@ private void runComparison(string[] args) {
                 (isCandidate ? "candidate-" : "baseline-") ~ round.to!string);
             auto sample = invoke(binary, input, output, config, 4, round,
                 root, true);
+            validateMetrics(sample, layout.files, inputId.bytes);
             auto outputId = identify(output);
             need(outputId.tree == outputTreePins[layout.name],
                 "comparison attribution output tree pin differs");
@@ -375,12 +474,14 @@ private void runComparison(string[] args) {
         "host_architecture": JSONValue(commandOutput(["uname", "-m"])),
         "host_cpu": JSONValue(commandOutput(
             ["sysctl", "-n", "machdep.cpu.brand_string"])),
-        "baseline_binary_sha256": JSONValue(fileDigest(baseline)),
-        "candidate_binary_sha256": JSONValue(fileDigest(candidate)),
-        "harness_sha256": JSONValue(fileDigest(args[0])),
+        "baseline_binary_sha256": JSONValue(baselineSnapshot.digest),
+        "candidate_binary_sha256": JSONValue(candidateSnapshot.digest),
+        "harness_sha256": JSONValue(harnessDigest),
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "config_sha256": JSONValue(configPin),
         "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
+        "control_method": JSONValue(
+            "median paired candidate-to-baseline ratio <= 1.05"),
         "target_wins": JSONValue(cast(long)targetWins),
         "target_baseline_median_wall_us": JSONValue(targetBaselineWall),
         "target_candidate_median_wall_us": JSONValue(targetCandidateWall),
@@ -402,6 +503,78 @@ private void runComparison(string[] args) {
     writeln("coordination comparison: wrote ", reportPath);
 }
 
+private void runDisabledMetricsOverhead(string[] args) {
+    auto baseline = absolutePath(args[2]);
+    auto candidate = absolutePath(args[3]);
+    auto reportPath = absolutePath(args[4]);
+    need(exists(baseline) && exists(candidate) && !exists(reportPath),
+        "overhead binary missing or report exists");
+    need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
+    auto root = buildPath(tempDir, "scrubbed-coordination-overhead-" ~
+        randomUUID.toString);
+    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto baselineSnapshot = snapshotExecutable(baseline, root, "baseline");
+    auto candidateSnapshot = snapshotExecutable(candidate, root, "candidate");
+    baseline = baselineSnapshot.path;
+    candidate = candidateSnapshot.path;
+    auto harnessDigest = fileDigest(absolutePath(args[0]));
+    auto config = buildPath(root, "mixed-v3.json");
+    write(config, configText());
+    need(fileDigest(config) == configPin, "config pin differs");
+    auto layout = layouts[0];
+    auto input = buildPath(root, layout.name ~ "-input");
+    makeFixture(input, layout);
+    auto inputId = identify(input);
+    need(inputId.tree == inputTreePins[layout.name], "input tree pin differs");
+    JSONValue[] baselineSamples, candidateSamples;
+    foreach (round; 0 .. runs) foreach (threads; [1, 4])
+    foreach (candidateFirst; [round % 2 == 1, round % 2 == 0]) {
+        auto isCandidate = candidateFirst;
+        auto binary = isCandidate ? candidate : baseline;
+        auto output = buildPath(root, (isCandidate ? "candidate-" : "baseline-") ~
+            threads.to!string ~ "-" ~ round.to!string);
+        auto sample = invoke(binary, input, output, config, threads,
+            round, root, false);
+        auto outputId = identify(output);
+        need(outputId.tree == outputTreePins[layout.name],
+            "overhead exact output tree pin differs");
+        sample["output_bytes"] = cast(long)outputId.bytes;
+        sample["output_tree_sha256"] = outputId.tree;
+        if (isCandidate) candidateSamples ~= sample;
+        else baselineSamples ~= sample;
+        rmdirRecurse(output);
+    }
+    bool accepted = true;
+    foreach (threads; [1, 4]) foreach (field;
+            ["wall_us", "cpu_us", "peak_rss_bytes", "sampled_fd_peak"])
+        accepted = accepted && pairedMedianWithinFivePercent(
+            baselineSamples, candidateSamples, threads, field);
+    auto report = JSONValue([
+        "schema": JSONValue("scrubbed.coordination-disabled-overhead.v1"),
+        "host_os": JSONValue(commandOutput(["uname", "-s"])),
+        "host_architecture": JSONValue(commandOutput(["uname", "-m"])),
+        "host_cpu": JSONValue(commandOutput(
+            ["sysctl", "-n", "machdep.cpu.brand_string"])),
+        "baseline_binary_sha256": JSONValue(baselineSnapshot.digest),
+        "candidate_binary_sha256": JSONValue(candidateSnapshot.digest),
+        "harness_sha256": JSONValue(harnessDigest),
+        "fixture_table_sha256": JSONValue(fixtureTablePin),
+        "config_sha256": JSONValue(configPin),
+        "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
+        "control_method": JSONValue(
+            "median paired candidate-to-baseline ratio <= 1.05"),
+        "metrics_environment": JSONValue("absent for every child"),
+        "disabled_metrics_overhead_accepted": JSONValue(accepted),
+        "baseline_samples": JSONValue(baselineSamples),
+        "candidate_samples": JSONValue(candidateSamples)]);
+    auto text = report.toString;
+    need(!text.canFind(root), "overhead report leaked temporary path");
+    parseJSON(text);
+    write(reportPath, text ~ "\n");
+    need(readText(reportPath) == text ~ "\n", "overhead report reopen differs");
+    writeln("coordination disabled-overhead: wrote ", reportPath);
+}
+
 private void runSizeOrder(string[] args) {
     auto binary = absolutePath(args[2]);
     auto reportPath = absolutePath(args[3]);
@@ -410,6 +583,9 @@ private void runSizeOrder(string[] args) {
     need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
     auto root = buildPath(tempDir, "scrubbed-size-order-" ~ randomUUID.toString);
     mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto binarySnapshot = snapshotExecutable(binary, root, "shipping");
+    binary = binarySnapshot.path;
+    auto harnessDigest = fileDigest(absolutePath(args[0]));
     auto config = buildPath(root, "mixed-v3.json");
     write(config, configText());
     need(fileDigest(config) == configPin, "config pin differs");
@@ -466,8 +642,8 @@ private void runSizeOrder(string[] args) {
         "host_architecture": JSONValue(commandOutput(["uname", "-m"])),
         "host_cpu": JSONValue(commandOutput(
             ["sysctl", "-n", "machdep.cpu.brand_string"])),
-        "shipping_binary_sha256": JSONValue(fileDigest(binary)),
-        "harness_sha256": JSONValue(fileDigest(args[0])),
+        "shipping_binary_sha256": JSONValue(binarySnapshot.digest),
+        "harness_sha256": JSONValue(harnessDigest),
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "config_sha256": JSONValue(configPin),
         "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
@@ -487,6 +663,9 @@ private void runAttribution(string[] args) {
     need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
     auto root = buildPath(tempDir, "scrubbed-coordination-" ~ randomUUID.toString);
     mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto binarySnapshot = snapshotExecutable(binary, root, "shipping");
+    binary = binarySnapshot.path;
+    auto harnessDigest = fileDigest(absolutePath(args[0]));
     auto config = buildPath(root, "mixed-v3.json");
     write(config, configText());
     need(fileDigest(config) == configPin, "config pin differs");
@@ -508,25 +687,7 @@ private void runAttribution(string[] args) {
             need(outputId.tree == outputTreePins[layout.name],
                 "exact output tree pin differs");
             if (instrumented) {
-                auto metrics = sample["metrics"];
-                auto counts = metrics["counts"];
-                need(counts["submitted"].integer == layout.files &&
-                    counts["succeeded"].integer == layout.files &&
-                    counts["failed"].integer == 0 &&
-                    counts["skipped"].integer == 0 &&
-                    counts["queued_documents"].integer == 0 &&
-                    counts["reserved_bytes"].integer == 0 &&
-                    counts["worker_descriptors"].integer == 0,
-                    "terminal/reservation accounting differs");
-                auto phases = metrics["phases"];
-                foreach (name; ["source_stat", "ordinal_assignment",
-                        "admission_wait", "accepted_worker_queue",
-                        "descriptor_wait", "descriptor_hold", "transform",
-                        "ordered_result_wait", "atomic_publication"])
-                    need(phases[name]["calls"].integer == layout.files,
-                        name ~ " root count differs");
-                need(phases["shutdown_join"]["calls"].integer == 1,
-                    "shutdown count differs");
+                validateMetrics(sample, layout.files, inputId.bytes);
             }
             sample["output_bytes"] = cast(long)outputId.bytes;
             sample["output_tree_sha256"] = outputId.tree;
@@ -552,8 +713,8 @@ private void runAttribution(string[] args) {
         "host_cpu": JSONValue(commandOutput(
             ["sysctl", "-n", "machdep.cpu.brand_string"])),
         "compiler": JSONValue(commandOutput(["ldc2", "--version"])),
-        "shipping_binary_sha256": JSONValue(fileDigest(binary)),
-        "harness_sha256": JSONValue(fileDigest(args[0])),
+        "shipping_binary_sha256": JSONValue(binarySnapshot.digest),
+        "harness_sha256": JSONValue(harnessDigest),
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "config_sha256": JSONValue(configPin),
         "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
@@ -569,11 +730,14 @@ private void runAttribution(string[] args) {
 }
 
 void main(string[] args) {
-    need(args.length == 3 || args.length == 4,
+    need(args.length == 3 || args.length == 4 || args.length == 5,
         "usage: coordination_profile <release-binary> <report> | " ~
         "<baseline-binary> <candidate-binary> <report> | " ~
-        "--size-order <release-binary> <report>");
-    if (args.length == 4 && args[1] == "--size-order") runSizeOrder(args);
+        "--size-order <release-binary> <report> | " ~
+        "--disabled-overhead <baseline-binary> <candidate-binary> <report>");
+    if (args.length == 5 && args[1] == "--disabled-overhead")
+        runDisabledMetricsOverhead(args);
+    else if (args.length == 4 && args[1] == "--size-order") runSizeOrder(args);
     else if (args.length == 4) runComparison(args);
     else runAttribution(args);
 }

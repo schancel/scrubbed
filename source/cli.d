@@ -14,6 +14,7 @@ import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.failure_policy : recordDocumentFailure;
 import effects.local_job : LocalJobOutcome, runLocalJob;
+import effects.runner : EffectFailure, EffectPhase;
 import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
@@ -432,34 +433,38 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         OutputName(inputIsDir ? relative : baseName(outputRoot)));
     auto ordinal = publication.ordinal(file);
     bool entered;
-    scope(failure) publication.abort();
-    auto result = runLocalJob(file, reservedBytes, document, job,
-        (const ref StageEvent event) {
-            if (!event.isChild) return rootDestination;
-            auto selectedRoot = inputIsDir ? outputRoot : dirName(outputRoot);
-            return buildPath(selectedRoot,
-                checkedOutputName(event.payload.document.outputName.text));
-        },
-        (string destination, const ref StageEvent event) {
-            auto selectedRoot = inputIsDir ? outputRoot : dirName(outputRoot);
-            publication.reserve(normalizedAbsolute(destination));
-            if (event.isChild && exists(destination))
-                throw new OutputPolicyViolation(
-                    "derived output already exists: " ~ destination);
-            preflightDestination(destination, selectedRoot);
-            if (!dryRun)
-                ensurePlainDirectory(selectedRoot,
-                    dirName(normalizedAbsolute(destination)));
-        },
-        () {
-            publication.enter(ordinal);
-            entered = true;
-        }, dryRun);
-    // Every valid compiled job emits at least one terminal event, so entering
-    // publication is part of completing a root.
-    if (!entered) throw new Exception("compiled job produced no terminal decision");
-    publication.complete();
-    return result;
+    try {
+        auto result = runLocalJob(file, reservedBytes, document, job,
+            (const ref StageEvent event) {
+                if (!event.isChild) return rootDestination;
+                auto selectedRoot = inputIsDir ? outputRoot : dirName(outputRoot);
+                return buildPath(selectedRoot,
+                    checkedOutputName(event.payload.document.outputName.text));
+            },
+            (string destination, const ref StageEvent event) {
+                auto selectedRoot = inputIsDir ? outputRoot : dirName(outputRoot);
+                publication.reserve(normalizedAbsolute(destination));
+                if (event.isChild && exists(destination))
+                    throw new OutputPolicyViolation(
+                        "derived output already exists: " ~ destination);
+                preflightDestination(destination, selectedRoot);
+                if (!dryRun)
+                    ensurePlainDirectory(selectedRoot,
+                        dirName(normalizedAbsolute(destination)));
+            },
+            () {
+                publication.enter(ordinal);
+                entered = true;
+            }, dryRun);
+        // Every valid compiled job emits at least one terminal event, so entering
+        // publication is part of completing a root.
+        if (!entered) throw new Exception("compiled job produced no terminal decision");
+        publication.complete();
+        return result;
+    } catch (Throwable error) {
+        publication.fail(ordinal);
+        throw error;
+    }
 }
 
 private string explanationRecord(string file, string destination, string chain,
@@ -564,9 +569,10 @@ private bool hasJobVersion(string json) {
 }
 
 private JobSpec selectedJob(string[] compositionTokens, bool filtersExplicit,
-        string filterList, string configContents, bool versionedConfig) {
+        string filterList, bool configExplicit, string configContents,
+        bool versionedConfig) {
     if (compositionTokens.length) return parseJobTokens(compositionTokens);
-    if (configContents.length)
+    if (configExplicit)
         return versionedConfig ? parseJobJson(configContents) :
             lowerLegacyJson(configContents);
     if (filtersExplicit) return lowerLegacyNames(filterList.split(","));
@@ -592,7 +598,7 @@ private final class PublicationOrder {
         while (!stopped && ordinal != next) changed.wait();
         if (stopped) {
             mutex.unlock();
-            throw new Exception("ordered publication canceled");
+            throw new OrderedPublicationCanceled;
         }
         mutex.unlock();
     }
@@ -630,6 +636,21 @@ private final class PublicationOrder {
         mutex.unlock();
     }
 
+    /// Sequence a processing failure behind every earlier canonical root.
+    /// The winning failure stops later publication; later failures and
+    /// waiters become cancellation outcomes so they cannot replace its cause.
+    void fail(size_t ordinal) {
+        mutex.lock();
+        while (!stopped && ordinal != next) changed.wait();
+        if (stopped) {
+            mutex.unlock();
+            throw new OrderedPublicationCanceled;
+        }
+        stopped = true;
+        changed.notifyAll();
+        mutex.unlock();
+    }
+
     void abort() {
         mutex.lock();
         stopped = true;
@@ -638,8 +659,28 @@ private final class PublicationOrder {
     }
 }
 
+private final class OrderedPublicationCanceled : Exception {
+    this() { super("ordered publication canceled after an earlier fatal root"); }
+}
+
+private string effectFailureDetail(EffectFailure failure) {
+    return "completed-root-prefix=" ~ failure.completed.to!string ~
+        ";committed-event-prefix=" ~ failure.eventOrdinal.to!string ~
+        ";partial-write-possible=" ~ failure.partialWritePossible.to!string;
+}
+
 private string checkedOutputName(string name) {
     if (isAbsolute(name)) throw new OutputPolicyViolation("split output name is absolute");
+    bool previousSeparator = true;
+    foreach (character; name) {
+        version (Windows) const separator = character == '/' || character == '\\';
+        else const separator = character == '/';
+        if (separator && previousSeparator)
+            throw new OutputPolicyViolation("split output name has empty component");
+        previousSeparator = separator;
+    }
+    if (previousSeparator)
+        throw new OutputPolicyViolation("split output name has empty component");
     string[] parts;
     foreach (part; pathSplitter(name)) {
         if (!part.length || part == "." || part == "..")
@@ -1268,7 +1309,7 @@ int runApp(string[] args) {
         chainLabel = chain.names.join(" -> ");
     } else {
         auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
-            configContents, versionedConfig);
+            configPath.length != 0, configContents, versionedConfig);
         compiledJob = compileJob(spec);
         chainLabel = versionedConfig || compositionExplicit ? compiledJob.get.identity :
             spec.stages[0].filters.map!(filter => filter.name).join(" -> ");
@@ -1366,6 +1407,7 @@ int runApp(string[] args) {
             auto fatalPreFilter = cast(FatalManifestPreFilter)error;
             auto fatalPlanned = cast(FatalPlannedFailure)error;
             auto v2Decision = cast(V2DocumentFailure)error;
+            auto effectFailure = cast(EffectFailure)error;
             if (errorJournalPath.length) {
                 stderr.writeln("scrubbed: ", v2Decision !is null ?
                     v2Decision.code : "error-journal-fatal");
@@ -1377,9 +1419,11 @@ int runApp(string[] args) {
                 if (explain) pending.remove(file);
                 return;
             }
+            auto renderedError = effectFailure is null ? error.msg :
+                error.msg ~ " (" ~ effectFailureDetail(effectFailure) ~ ")";
             stderr.writefln("%s %s: %s",
                 documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
-                file, error.msg);
+                file, renderedError);
             if (explain) {
                 string status = "failure", detail, documentId, sinkKey;
                 if (documentFailure !is null) {
@@ -1407,6 +1451,10 @@ int runApp(string[] args) {
                     detail = "manifest-state=planned";
                     documentId = fatalPlanned.key.document.text;
                     sinkKey = fatalPlanned.key.sink;
+                } else if (effectFailure !is null) {
+                    status = effectFailure.partialWritePossible ? "uncertain" : "failed";
+                    detail = effectFailureDetail(effectFailure);
+                    documentId = effectFailure.documentId.text;
                 }
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, status, error.msg, detail, documentId, sinkKey);
@@ -1414,7 +1462,8 @@ int runApp(string[] args) {
             if (explain) pending.remove(file);
             if (documentFailure !is null) ++manifestCompletedPrefix;
         }, (Throwable error) {
-            return cast(V2DocumentFailure)error is null &&
+            return cast(OrderedPublicationCanceled)error is null &&
+                cast(V2DocumentFailure)error is null &&
                 cast(DocumentFailure)error is null &&
                 cast(ManifestDecisionFailure)error is null;
         });
@@ -1441,8 +1490,12 @@ int runApp(string[] args) {
     }
     void walkCanonical(string directory) {
         auto entries = dirEntries(directory, SpanMode.shallow, false).array;
-        sort!((left, right) => relativePath(left.name, inputPath) <
-            relativePath(right.name, inputPath))(entries);
+        auto orderKey = (ref typeof(entries[0]) entry) {
+            auto relative = relativePath(entry.name, inputPath);
+            return !entry.isSymlink && entry.isDir ?
+                relative ~ dirSeparator : relative;
+        };
+        sort!((left, right) => orderKey(left) < orderKey(right))(entries);
         foreach (entry; entries) {
             if (entry.isSymlink) {
                 auto reason = "refusing symlink in input tree: " ~ entry.name;
@@ -1543,6 +1596,13 @@ unittest {
         `"options": { "max-pass": 0 } }] }`);
     assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
         "--config", badConfig, "--threads", "1"]));
+
+    auto emptyConfig = buildPath(root, "empty-config.json");
+    write(emptyConfig, "");
+    write(emptyOut, "sentinel");
+    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
+        "--config", emptyConfig, "--threads", "1"]));
+    assert(readText(emptyOut) == "sentinel");
 
     auto invalidValueConfig = buildPath(root, "invalid-value.json");
     write(invalidValueConfig, `{ "filters": [{ "name": "fix-mojibake", ` ~
@@ -1699,6 +1759,17 @@ unittest {
     requireCli(explanationRecord("in", "out", "strip-control", "failure", "bad\tdata") ==
         "EXPLAIN\tinput=\"in\"\toutput=\"out\"\tchain=\"strip-control\"\tstatus=failure\treason=\"bad\\tdata\"",
         "failure record format");
+    foreach (unsafeName; ["a//b", "a/b/", "/a/b"])
+        assertThrown(checkedOutputName(unsafeName));
+    requireCli(checkedOutputName("a/b") == buildPath("a", "b"),
+        "safe split output name retained");
+    auto splitDocument = Document(SourceLocator("test", "split", "root"),
+        OutputName("a/b"));
+    auto splitFailure = new EffectFailure(EffectPhase.sink, 0, 1,
+        splitDocument.id, true, new Exception("second child failed"));
+    requireCli(effectFailureDetail(splitFailure) ==
+        "completed-root-prefix=0;committed-event-prefix=1;partial-write-possible=true",
+        "split failure retains committed prefix");
 
     auto plainOutput = buildPath(root, "plain.txt");
     requireCli(runApp(["scrubbed", "--input", input, "--output", plainOutput,

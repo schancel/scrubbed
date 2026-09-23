@@ -53,7 +53,10 @@ The checker runs the actual binary and pins:
 - an order-sensitive entity-decoding/mojibake example;
 - numeric `max-passes` and candidate-selecting `encodings` behavior; and
 - rejection of malformed JSON, malformed/unknown options, unknown filters,
-  root/entry keys, and ambiguous selectors without destination mutation.
+  root/entry keys, ambiguous selectors, and an explicitly selected empty
+  config without destination mutation; and
+- global normalized-relative lexical publication plus an identical committed
+  prefix when a later root fails with one or several workers.
 
 These remain compatibility constraints, not an endorsement of the v1 shape.
 Stage 5a adds actual-binary CLI/JSON and process-resource checks in

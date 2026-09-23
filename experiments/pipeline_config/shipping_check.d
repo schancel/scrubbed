@@ -68,13 +68,55 @@ void main(string[] args) {
         ["--stage-option", "x=text:y"]) == 2 &&
         readText(prior) == "sentinel", "orphan option mutated destination");
 
+    write(config, "");
+    write(prior, "sentinel");
+    need(run(executable, input, prior, ["--config", config]) == 2 &&
+        readText(prior) == "sentinel",
+        "explicit empty config selected defaults or mutated destination");
+
+    // A directory sorts at its normalized relative prefix, not merely before
+    // every sibling. `a.txt` must fail before traversal can publish `a/z.txt`.
+    auto lexicalInput = buildPath(root, "lexical-input");
+    auto lexicalDirectory = buildPath(lexicalInput, "a");
+    auto lexicalOutput = buildPath(root, "lexical-output");
+    mkdir(lexicalInput);
+    mkdir(lexicalDirectory);
+    write(buildPath(lexicalDirectory, "z.txt"), "valid\r\n");
+    write(buildPath(lexicalInput, "a.txt"), [cast(ubyte) 0xff]);
+    auto lexical = execute([executable, "run", "--input", lexicalInput,
+        "--output", lexicalOutput, "--threads", "1"]);
+    need(lexical.status == 2 &&
+        !exists(buildPath(lexicalOutput, "a", "z.txt")),
+        "tree publication did not follow global relative lexical order");
+
+    // A later fast fatal root must wait behind the same canonical committed
+    // prefix regardless of worker count.
+    auto orderedInput = buildPath(root, "ordered-input");
+    auto serialOutput = buildPath(root, "ordered-serial");
+    auto parallelOutput = buildPath(root, "ordered-parallel");
+    mkdir(orderedInput);
+    auto large = new char[6 * 1024 * 1024];
+    large[] = 'x';
+    write(buildPath(orderedInput, "a.txt"), large);
+    write(buildPath(orderedInput, "z.txt"), [cast(ubyte) 0xff]);
+    auto serial = execute([executable, "run", "--input", orderedInput,
+        "--output", serialOutput, "--threads", "1", "--max-open-inputs", "4"]);
+    auto parallel = execute([executable, "run", "--input", orderedInput,
+        "--output", parallelOutput, "--threads", "4", "--max-open-inputs", "4"]);
+    need(serial.status == 2 && parallel.status == 2 &&
+        exists(buildPath(serialOutput, "a.txt")) &&
+        exists(buildPath(parallelOutput, "a.txt")) &&
+        readText(buildPath(serialOutput, "a.txt")) ==
+            readText(buildPath(parallelOutput, "a.txt")),
+        "fatal publication prefix changed with worker count");
+
     auto jsonl = execute([executable, "run", "--input", "-", "--output", "-",
         "--jsonl-fields", "text", "--dataset-namespace", "d", "--source-key", "s",
         "--max-jsonl-line-bytes", "10", "--max-jsonl-output-bytes", "20"] ~ tokens);
     need(jsonl.status == 2 && jsonl.output.canFind("not migrated"),
         "v3 JSONL route was not refused");
 
-    writeln("shipping pipeline config: CLI/JSON, same-file, and preflight passed");
+    writeln("shipping pipeline config: CLI/JSON, preflight, and ordered failure passed");
 }
 
 private import std.algorithm.searching : canFind;

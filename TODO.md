@@ -304,17 +304,20 @@ is useful, but it is not sufficient on its own.
       UTF-8 traversal with inline caller-owned state and one final
       materialization. An exact-output 4.06 MiB synthetic `-O3 -release`
       microbenchmark is about 1.9x faster than the former three-materialization
-      chain. Entity decoding, mojibake, HTML, CLI `Document`/`Content` wiring,
+      chain. Canonical local, selected-field JSONL, and durable routes already
+      use typed `Document`/`Content` execution. Entity decoding, mojibake, HTML,
       huge-input proof, and contextual spill policy remain.
 - [ ] Add backpressure-aware output and configurable concurrency for storage
       topology (local SSD, network filesystem, object-store staging). Verify
       actual OS descriptor and mapping counts stay bounded under low OS limits;
       the current local callback and input-byte tokens are narrower evidence.
-- [~] Stream ordered content pieces to atomic local output. A standalone
-      POSIX one-destination sink uses a bounded buffer and same-directory
-      rename, with injected-fault rollback and 1.075/2.149 GB D evidence
-      (`docs/atomic-piece-output.md`). It is not CLI-wired; parent-directory
-      crash durability, concurrent writers, and S3 commits remain open.
+- [~] Stream ordered content pieces to atomic local output. The POSIX
+      one-destination `writeAtomicPieces` sink ships in canonical local,
+      durable, and extract publication, using a bounded buffer and
+      same-directory rename with injected-fault rollback and 1.075/2.149 GB D
+      evidence (`docs/atomic-piece-output.md`). Parent-directory crash
+      durability, concurrent writers, and S3 commits remain open; the separate
+      mapped-window input is not integrated into CLI admission.
 - [~] Evaluate a direct S3 client/auth/capability boundary. A D-only local
       probe now tests fake credential precedence, fail-closed options, loopback
       endpoint/TLS behavior, and publication-safe error labels
@@ -326,16 +329,17 @@ is useful, but it is not sufficient on its own.
       unframed, so only framed formats (for example WARC) may safely use that
       route without an explicit manifest/framing adapter.
 - [~] Add a durable run manifest with input identity/checksum, selected filter
-      config, per-sink state and safe resume/retry. A statically linked local
-      SQLite v1 API is implemented and tested with destination rehash before
-      skip, two independent sinks, bounded 10,100-row replay, foreign-DB
-      refusal and process-kill windows (`docs/local-manifest.md`). Its pinned
-      prerequisite experiment remains in `docs/sqlite-manifest-evaluation.md`.
-      Opt-in file/tree `--manifest PATH` now uses the ledger for verified skips
-      and explicit `--manifest-retry` on unresolved output, with real-binary
-      crash/restart tests. JSONL and unflagged runs have no resume. This is a
-      serial local path, not power-loss durability, a concurrent input snapshot,
-      or bounded output materialization.
+      config, per-sink state and safe resume/retry. The retained statically
+      linked SQLite v1 API is archival/predecessor-only; live file/tree
+      `--manifest PATH` creates and runs the canonical manifest-v2 ledger and
+      refuses v1 without mutation (`docs/local-manifest.md`). V1 retains its
+      destination-rehash, two-sink, bounded 10,100-row replay, foreign-DB, and
+      process-kill tests. The v2 route has verified skips, explicit
+      `--manifest-retry`, ordered final-event recovery, and real-binary crash
+      tests. Its pinned prerequisite experiment remains in
+      `docs/sqlite-manifest-evaluation.md`. JSONL and unflagged runs have no
+      resume. This is a serial local path, not power-loss durability, a
+      concurrent input snapshot, or end-to-end bounded materialization.
 - [x] Classify opt-in local-manifest file failures (F12/#17). Typed per-document
       failures continue only after durable failed/uncertain ledger state and
       injected acknowledgment; run-fatal policy, observation, resource, and

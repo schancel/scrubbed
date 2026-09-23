@@ -1,0 +1,10 @@
+# Authored fixtures only. Markers are synthetic test text, not license grants.
+# file	sha256	language	expected-route	syntax-annotation	license-marker	proxy-token	fixture-rights
+mixed_d.md	ca55a35031d6eee1ddc6314b59ff1d975ce2e137b2f27e06cd3a549d87cdd497	d	yes	balanced-braces-parens-semicolon	SPDX-License-Identifier: MIT	boundedCount	CC0-1.0
+mixed_python.md	a40b85d11c5f4e3494fa21476ce7efa532a79f6a60bcc3e388b30395e632ccd5	python	yes	balanced-parens-colon-indent	SPDX-License-Identifier: Apache-2.0	keep_labels	CC0-1.0
+mixed_json.md	f4a3b0be019b2cd277755b5273efdd8728404557216606c6ab6a3425356ed00d	json	yes	balanced-braces-brackets-colon	SPDX-License-Identifier: CC0-1.0	workers	CC0-1.0
+prose_inline.md	08bad6217df0d37599498b77acf6cbb1d8597403e7b0b178e1e222e8cfe455f8	none	no	none		value	CC0-1.0
+prose_license.md	9eb1e9d722b17a2fd299bb141f1df5aa21363b4b25e4a20c0df02903f7ae2322	none	no	none	SPDX-License-Identifier: MIT	metadata	CC0-1.0
+unclosed_fence.md	7b68ea0d294286b53f7b56ade409f95fbffca7f59ff9cc380737d548b0c61407	d	no	unclosed-fence		incomplete	CC0-1.0
+fenced_text.md	997d86eade4d8c83f022c61cbea2838ce89d2fe81bf41afdaf1443f726b42dd2	text	no	non-code-fence		status	CC0-1.0
+code_only.md	5dfa21969225277ce317bd03b4c655b46bb4b2c5254121e315e2b038a3978dce	d	no	no-surrounding-prose		add	CC0-1.0

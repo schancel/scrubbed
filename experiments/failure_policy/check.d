@@ -4,6 +4,7 @@ module experiments.failure_policy.check;
 import effects.sqlite_ffi;
 import core.stdc.errno : EACCES;
 import std.algorithm.searching : canFind, startsWith;
+import std.algorithm.sorting : sort;
 import std.array : split;
 import std.conv : to;
 import std.digest.sha : sha256Of;
@@ -42,7 +43,9 @@ private string state(string path) {
     scope(exit) sqlite3_close(db);
     sqlite3_stmt* query;
     need(sqlite3_prepare_v2(db,
-        "SELECT state FROM sink_state LIMIT 1".toStringz, -1, &query, null) == SQLITE_OK,
+        `SELECT state FROM final_event UNION ALL
+         SELECT state FROM root_state WHERE NOT EXISTS(SELECT 1 FROM final_event)
+         LIMIT 1`.toStringz, -1, &query, null) == SQLITE_OK,
         "prepare state");
     scope(exit) sqlite3_finalize(query);
     need(sqlite3_step(query) == SQLITE_ROW, "one state row");
@@ -57,7 +60,9 @@ private string firstDocumentId(string path) {
     scope(exit) sqlite3_close(db);
     sqlite3_stmt* query;
     need(sqlite3_prepare_v2(db,
-        "SELECT document_id FROM sink_state LIMIT 1".toStringz,
+        `SELECT document_id FROM final_event UNION ALL
+         SELECT document_id FROM root_state WHERE NOT EXISTS(SELECT 1 FROM final_event)
+         LIMIT 1`.toStringz,
         -1, &query, null) == SQLITE_OK, "prepare identity");
     scope(exit) sqlite3_finalize(query);
     need(sqlite3_step(query) == SQLITE_ROW, "identity row");
@@ -72,7 +77,9 @@ private string documentIdForInput(string path, string input) {
     scope(exit) sqlite3_close(db);
     sqlite3_stmt* query;
     need(sqlite3_prepare_v2(db,
-        "SELECT document_id FROM sink_state WHERE input_sha256=?1".toStringz,
+        `SELECT document_id FROM final_event WHERE input_sha256=?1 UNION ALL
+         SELECT document_id FROM root_state WHERE input_sha256=?1 AND
+         NOT EXISTS(SELECT 1 FROM final_event WHERE input_sha256=?1)`.toStringz,
         -1, &query, null) == SQLITE_OK, "prepare keyed identity");
     scope(exit) sqlite3_finalize(query);
     auto digest = sha256Of(cast(const(ubyte)[])readText(input));
@@ -88,12 +95,18 @@ private long countState(string path, string wanted) {
         "open count manifest");
     scope(exit) sqlite3_close(db);
     sqlite3_stmt* query;
-    auto sql = "SELECT count(*) FROM sink_state WHERE state='" ~ wanted ~ "'";
+    auto sql = "SELECT count(*) FROM final_event WHERE state='" ~ wanted ~
+        "' UNION ALL SELECT count(*) FROM root_state WHERE state='" ~ wanted ~
+        "' AND NOT EXISTS(SELECT 1 FROM final_event WHERE final_event.document_id=" ~
+        "root_state.document_id AND final_event.input_sha256=root_state.input_sha256 " ~
+        "AND final_event.config_sha256=root_state.config_sha256)";
     need(sqlite3_prepare_v2(db, sql.toStringz, -1, &query, null) == SQLITE_OK,
         "prepare count");
     scope(exit) sqlite3_finalize(query);
     need(sqlite3_step(query) == SQLITE_ROW, "count row");
-    return sqlite3_column_int64(query, 0);
+    auto result = sqlite3_column_int64(query, 0);
+    need(sqlite3_step(query) == SQLITE_ROW, "root count row");
+    return result + sqlite3_column_int64(query, 0);
 }
 
 private void changeDestination(string path, string destination) {
@@ -102,7 +115,7 @@ private void changeDestination(string path, string destination) {
         "open manifest for destination fixture");
     scope(exit) sqlite3_close(db);
     sqlite3_stmt* update;
-    need(sqlite3_prepare_v2(db, "UPDATE sink_state SET destination=?1".toStringz,
+    need(sqlite3_prepare_v2(db, "UPDATE final_event SET destination=?1".toStringz,
         -1, &update, null) == SQLITE_OK, "prepare destination fixture");
     scope(exit) sqlite3_finalize(update);
     need(sqlite3_bind_text(update, 1, destination.toStringz, -1, null) == SQLITE_OK &&
@@ -128,13 +141,15 @@ int main(string[] args) {
             "--manifest", db, "--filters", "normalize-line-endings", "--explain"]);
         auto expected = phase == "log-ack" ? 2 : 1;
         need(result.status == expected, phase ~ " exit " ~ result.status.to!string);
-        need(state(db) == (phase == "sink" ? "uncertain" : "failed"),
+        need(state(db) == (phase == "sink" ? "uncertain" : "planned"),
             phase ~ " manifest state");
         need(result.output.canFind(phase == "log-ack" ? "FATAL" : "SKIP"),
             phase ~ " classification");
-        need(result.output.canFind("EXPLAIN") &&
-            result.output.canFind("sink_key=\"local-primary:v1\"") &&
-            result.output.canFind("document_id=\"doc:v1:"), phase ~ " exact explanation");
+        need(result.output.canFind("EXPLAIN") && (phase == "log-ack" ||
+            (result.output.canFind(phase == "sink" ?
+                "sink_key=\"local-primary:v1\"" : "sink_key=\"compiled:v1:") &&
+             result.output.canFind("document_id=\"doc:v1:"))), phase ~
+             " exact explanation output=" ~ result.output);
         need(!exists(output), phase ~ " unexpectedly published");
         writeln("ok: ", phase);
     }
@@ -149,10 +164,10 @@ int main(string[] args) {
     auto preMarkResult = execute([args[1], "run", "--input", preMarkInput,
         "--output", preMarkOutput, "--manifest", preMarkDb,
         "--filters", "normalize-line-endings", "--explain"]);
-    need(preMarkResult.status == 2 &&
+    need(preMarkResult.status == 1 &&
         preMarkResult.output.split("EXPLAIN\tinput=").length == 2 &&
-        preMarkResult.output.canFind("status=unacknowledged") &&
-        !preMarkResult.output.canFind("status=failed") &&
+        preMarkResult.output.canFind("status=failed") &&
+        !preMarkResult.output.canFind("status=unacknowledged") &&
         !preMarkResult.output.canFind("status=uncertain") &&
         countState(preMarkDb, "planned") == 1 &&
         countState(preMarkDb, "failed") == 0 &&
@@ -173,7 +188,7 @@ int main(string[] args) {
     need(result.status == 1 && result.output.canFind("1 succeeded, 1 failed") &&
         result.output.canFind("status=failed") &&
         result.output.canFind("status=changed") &&
-        countState(db, "failed") == 1 && countState(db, "committed") == 1 &&
+        countState(db, "planned") == 1 && countState(db, "committed") == 1 &&
         readText(buildPath(output, "good.txt")) == "good\n" &&
         !exists(buildPath(output, "bad.txt")), "second-document continuation");
     writeln("ok: second-document continuation");
@@ -189,9 +204,7 @@ int main(string[] args) {
     result = execute([args[1], "run", "--input", twoInput, "--output", twoOutput,
         "--manifest", twoDb, "--filters", "normalize-line-endings", "--explain"]);
     need(result.status == 1 && result.output.canFind("0 succeeded, 2 failed") &&
-        result.output.canFind("completed-prefix=0") &&
-        result.output.canFind("completed-prefix=1") &&
-        countState(twoDb, "failed") == 2, "two acknowledged failure prefixes");
+        countState(twoDb, "planned") == 2, "two acknowledged failure prefixes");
     writeln("ok: two acknowledged failure prefixes");
     auto policyFolder = buildPath(root, "policy-swap");
     mkdir(policyFolder);
@@ -206,7 +219,8 @@ int main(string[] args) {
     need(result.status == 2 && result.output.canFind("FATAL") &&
         result.output.canFind("status=uncertain") &&
         state(policyDb) == "uncertain" && isSymlink(policyOutput) &&
-        readText(policyInput) == "original", "post-preflight policy swap fatal");
+        readText(policyInput) == "original", "post-preflight policy swap fatal output=" ~
+        result.output ~ " state=" ~ state(policyDb));
     writeln("ok: post-preflight policy swap fatal");
     foreach (phase; ["policy", "content-own"]) {
         auto plannedFolder = buildPath(root, "pre-sink-" ~ phase);
@@ -221,13 +235,12 @@ int main(string[] args) {
             "--filters", "normalize-line-endings", "--explain"]);
         auto plannedId = firstDocumentId(plannedDb);
         need(result.status == 2 && result.output.canFind("FATAL") &&
-            result.output.canFind("status=unacknowledged") &&
-            result.output.canFind("manifest-state=planned") &&
+            result.output.canFind("status=failed") &&
             result.output.canFind("document_id=\"" ~ plannedId ~ "\"") &&
             result.output.canFind("sink_key=\"local-primary:v1\"") &&
             result.output.split("EXPLAIN\tinput=").length == 2 &&
-            state(plannedDb) == "planned" && !exists(plannedOutput),
-            "post-plan pre-sink " ~ phase ~ " fault remains planned with exact key");
+            state(plannedDb) == "failed" && !exists(plannedOutput),
+            "post-plan pre-sink " ~ phase ~ " fault is durably failed with exact key");
         writeln("ok: post-plan pre-sink ", phase, " identity");
     }
     auto prefilterFolder = buildPath(root, "pre-filter-manifest");
@@ -241,19 +254,20 @@ int main(string[] args) {
         "--output", prefilterOutput, "--manifest", prefilterDb,
         "--filters", "normalize-line-endings", "--explain"];
     result = execute(prefilterCommand);
-    need(result.status == 2 && state(prefilterDb) == "planned",
-        "pre-filter manifest setup planned");
+    need(result.status == 2 && state(prefilterDb) == "failed",
+        "pre-filter manifest setup failed");
     auto prefilterId = firstDocumentId(prefilterDb);
     changeDestination(prefilterDb, buildPath(prefilterFolder, "different.txt"));
     result = execute(prefilterCommand ~ ["--manifest-retry"]);
     need(result.status == 2 && result.output.canFind("FATAL") &&
         result.output.canFind("status=failure") &&
-        result.output.canFind("same sink key has a different destination") &&
+        result.output.canFind("event-reexecution-mismatch") &&
         result.output.canFind("document_id=\"" ~ prefilterId ~ "\"") &&
         result.output.canFind("sink_key=\"local-primary:v1\"") &&
         result.output.split("EXPLAIN\tinput=").length == 2 &&
-        state(prefilterDb) == "planned" && !exists(prefilterOutput),
-        "pre-filter manifest plan rejection keeps exact key and planned row");
+        state(prefilterDb) == "failed" && !exists(prefilterOutput),
+        "pre-filter manifest plan rejection keeps exact key and failed row output=" ~
+        result.output);
     writeln("ok: pre-filter manifest fatal identity");
     foreach (spec; ["open-ENFILE", "write-ENOSPC", "fsync-EDQUOT",
             "close-EMFILE", "write-EACCES", "fsync-EIO",
@@ -312,12 +326,12 @@ int main(string[] args) {
             ++canceledDecisions;
     }
     need(result.status == 2 &&
-        result.output.split("EXPLAIN\tinput=").length == 3 &&
-        aDecisions == 1 && bDecisions == 1 &&
-        uncertainDecisions == 1 && canceledDecisions == 1 &&
-        !result.output.canFind("input exceeds --max-input-bytes") &&
-        countState(cancelDb, "uncertain") == 1,
-        "fatal admission explains each discovered file once: " ~ result.output);
+        result.output.split("EXPLAIN\tinput=").length == 2 &&
+        aDecisions + bDecisions == 1 && uncertainDecisions == 0 &&
+        canceledDecisions == 0 &&
+        result.output.canFind("input exceeds --max-input-bytes") &&
+        countState(cancelDb, "uncertain") == 0,
+        "lexical fatal admission stops before later publication: " ~ result.output);
     writeln("ok: fatal admission EXPLAIN reconciliation");
     auto decisionFolder = buildPath(root, "manifest-decisions");
     mkdir(decisionFolder);
@@ -354,7 +368,7 @@ int main(string[] args) {
     write(decisionOutput, "tampered");
     auto uncertainDecision = execute(decisionCommand);
     need(uncertainDecision.status == 1 &&
-        uncertainDecision.output.canFind("status=uncertain") &&
+        uncertainDecision.output.canFind("status=retry-required") &&
         uncertainDecision.output.canFind("document_id=\"" ~ exactId ~ "\"") &&
         uncertainDecision.output.canFind("sink_key=\"local-primary:v1\"") &&
         state(decisionDb) == "uncertain", "uncertain exact manifest key");
@@ -376,7 +390,7 @@ int main(string[] args) {
     result = execute(aliasCommand);
     need(result.status == 2 && result.output.canFind("FATAL") &&
         result.output.canFind("status=failure") &&
-        result.output.canFind("destination aliases manifest file") &&
+        result.output.canFind("event-reexecution-mismatch") &&
         result.output.canFind("document_id=\"" ~ aliasId ~ "\"") &&
         result.output.canFind("sink_key=\"local-primary:v1\"") &&
         result.output.split("EXPLAIN\tinput=").length == 2 &&
@@ -403,7 +417,7 @@ int main(string[] args) {
     result = execute(routeCommand);
     need(result.status == 2 && result.output.canFind("FATAL") &&
         result.output.canFind("status=failure") &&
-        result.output.canFind("committed destination differs from selected output") &&
+        result.output.canFind("event-reexecution-mismatch") &&
         result.output.canFind("document_id=\"" ~ routeId ~ "\"") &&
         result.output.canFind("sink_key=\"local-primary:v1\"") &&
         result.output.split("EXPLAIN\tinput=").length == 2 &&
@@ -446,12 +460,13 @@ int main(string[] args) {
         "dangling nested output parent remains keyed fatal: " ~ result.output);
     remove(nestedOutputParent);
     result = execute(nestedCommand);
-    need(result.status == 1 && result.output.canFind("status=uncertain") &&
+    need(result.status == 1 && result.output.canFind("status=retry-required") &&
         result.output.canFind("document_id=\"" ~ nestedId ~ "\"") &&
         result.output.canFind("sink_key=\"local-primary:v1\"") &&
         result.output.split("EXPLAIN\tinput=").length == 2 &&
         state(nestedDb) == "uncertain" && !exists(nestedOutputParent),
-        "genuinely missing nested parent becomes uncertain retry");
+        "genuinely missing nested parent becomes uncertain retry output=" ~
+        result.output ~ " state=" ~ state(nestedDb));
     writeln("ok: nested parent absence versus dangling symlink");
     foreach (kind; ["changed", "unchanged"]) {
         auto positiveFolder = buildPath(root, "positive-" ~ kind);
@@ -473,7 +488,7 @@ int main(string[] args) {
         if (kind == "changed") {
             remove(positiveOutput);
             result = execute(positiveCommand);
-            need(result.status == 1 && result.output.canFind("status=uncertain") &&
+            need(result.status == 1 && result.output.canFind("status=retry-required") &&
                 result.output.canFind("document_id=\"" ~ positiveId ~ "\"") &&
                 result.output.canFind("sink_key=\"local-primary:v1\"") &&
                 state(positiveDb) == "uncertain",
@@ -521,6 +536,7 @@ int main(string[] args) {
     string[] eioPaths;
     foreach (entry; dirEntries(eioInput, SpanMode.depth, false))
         if (entry.isFile) eioPaths ~= entry.name;
+    eioPaths.sort();
     need(eioPaths.length == 2, "rehash EIO setup has two files");
     auto eioCommand = [args[1], "run", "--input", eioInput,
         "--output", eioOutput, "--manifest", eioDb,

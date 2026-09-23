@@ -49,9 +49,9 @@ int main(string[] args) {
         "  extract,x         Export a bounded selected HTML parse tree or Markdown.\n" ~
         "  completion        Generate shell setup or command/option-name candidates; use\n" ~
         "                    completion init --bash, --zsh or --fish.\n" ~
-        "  errors-init       Create a new opt-in v2 error journal.\n" ~
+        "  errors-init       Create a new opt-in v3 error journal.\n" ~
         "  errors-copy       Copy an existing v1 journal to a new v2 journal.\n" ~
-        "  errors-export     Export a bounded v2 journal snapshot.\n" ~
+        "  errors-export     Export a bounded v2 or v3 journal snapshot.\n" ~
         "  errors-verify     Verify exported JSONL and digest sidecars.\n" ~
         "  route-metadata    Route local HTML content and stage metadata to independent\n" ~
         "                    sinks.\n\n" ~

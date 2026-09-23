@@ -1,139 +1,111 @@
-/// Release-active end-user manifest smoke and restart matrix.
+/// Release-active canonical manifest-v2 CLI and crash/retry matrix.
 module manifest_cli.check;
 
-import core.sys.posix.signal : kill, SIGKILL;
-import core.thread : Thread;
-import effects.local_manifest : LocalManifest, SinkState;
+import core.sys.posix.signal : SIGKILL;
+import effects.local_manifest : LocalManifest;
 import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
-import std.array : split;
 import std.conv : to;
-import std.datetime : dur;
-import std.file : copy, exists, getAttributes, getSize, mkdir, readText, remove,
-    rmdirRecurse, setAttributes, tempDir, write;
+import std.digest.sha : sha256Of;
+import std.file : exists, mkdir, read, readText, remove, rmdirRecurse,
+    tempDir, write;
 import std.path : buildPath;
-import std.process : execute, spawnProcess, wait;
-import std.stdio : File, writeln;
-import std.string : toStringz;
+import std.process : execute;
+import std.stdio : writeln;
+import std.string : fromStringz, toStringz;
 import std.uuid : randomUUID;
 
 private void need(bool okay, string label) {
     if (!okay) throw new Exception("manifest CLI check: " ~ label);
 }
-
 private struct Result { int status; string output; }
-
 private Result run(string[] args) {
     auto result = execute(args);
     return Result(result.status, result.output);
 }
-
 private void expect(string label, string[] args, int status, string fragment) {
     auto result = run(args);
     need(result.status == status && result.output.canFind(fragment),
         label ~ ": exit " ~ result.status.to!string ~ ", output " ~ result.output);
     writeln("ok: ", label);
 }
-
-private void expectOneDecision(string label, string[] args, int exitStatus,
-        string decision, string detail = "") {
-    auto result = run(args);
-    need(result.status == exitStatus &&
-        result.output.canFind("status=" ~ decision) &&
-        (!detail.length || result.output.canFind("detail=\"" ~ detail ~ "\"")) &&
-        result.output.split("EXPLAIN\tinput=").length == 2,
-        label ~ ": expected one " ~ decision ~ " record, got " ~ result.output);
-    writeln("ok: ", label);
-}
-
-private bool hasPlanned(string path) {
-    if (!exists(path)) return false;
+private long scalar(string path, string sql) {
     sqlite3* db;
-    if (sqlite3_open_v2(path.toStringz, &db, 0x00000001, null) != SQLITE_OK) {
-        if (db !is null) sqlite3_close(db);
-        return false;
-    }
+    need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READONLY, null) == SQLITE_OK,
+        "open state");
     scope(exit) sqlite3_close(db);
-    sqlite3_stmt* query;
-    if (sqlite3_prepare_v2(db, "SELECT 1 FROM sink_state WHERE state='planned' LIMIT 1".toStringz,
-        -1, &query, null) != SQLITE_OK) return false;
-    scope(exit) sqlite3_finalize(query);
-    return sqlite3_step(query) == SQLITE_ROW;
+    sqlite3_stmt* statement;
+    need(sqlite3_prepare_v2(db, sql.toStringz, -1, &statement, null) == SQLITE_OK,
+        "prepare scalar");
+    scope(exit) sqlite3_finalize(statement);
+    need(sqlite3_step(statement) == SQLITE_ROW, "read scalar");
+    return sqlite3_column_int64(statement, 0);
+}
+private string text(string path, string sql) {
+    sqlite3* db;
+    need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READONLY, null) == SQLITE_OK,
+        "open text state");
+    scope(exit) sqlite3_close(db);
+    sqlite3_stmt* statement;
+    need(sqlite3_prepare_v2(db, sql.toStringz, -1, &statement, null) == SQLITE_OK,
+        "prepare text");
+    scope(exit) sqlite3_finalize(statement);
+    need(sqlite3_step(statement) == SQLITE_ROW, "read text");
+    return sqlite3_column_text(statement, 0).fromStringz.idup;
+}
+private ubyte[32] blob(string path, string sql) {
+    sqlite3* db;
+    need(sqlite3_open_v2(path.toStringz, &db, SQLITE_OPEN_READONLY, null) == SQLITE_OK,
+        "open blob state");
+    scope(exit) sqlite3_close(db);
+    sqlite3_stmt* statement;
+    need(sqlite3_prepare_v2(db, sql.toStringz, -1, &statement, null) == SQLITE_OK,
+        "prepare blob");
+    scope(exit) sqlite3_finalize(statement);
+    need(sqlite3_step(statement) == SQLITE_ROW &&
+        sqlite3_column_bytes(statement, 0) == 32, "read blob");
+    ubyte[32] result;
+    result[] = (cast(const(ubyte)*)sqlite3_column_blob(statement, 0))[0 .. 32];
+    return result;
+}
+private string[] baseCommand(string executable, string input, string output,
+        string db) {
+    return [executable, "run", "--input", input, "--output", output,
+        "--manifest", db, "--filters", "normalize-line-endings", "--explain",
+        "--threads", "2", "--max-queued-docs", "2",
+        "--max-open-inputs", "1", "--max-input-bytes", "1048576"];
 }
 
-private void crashAfterPlan(string executable, string root) {
-    auto input = buildPath(root, "crash-input.txt");
-    auto output = buildPath(root, "crash-output.txt");
-    auto db = buildPath(root, "crash.db");
-    {
-        auto file = File(input, "wb");
-        auto chunk = new char[1024 * 1024];
-        chunk[] = 'x';
-        foreach (_; 0 .. 16) file.rawWrite(chunk);
-    }
-    auto command = [executable, "run", "--input", input, "--output", output,
-        "--manifest", db, "--filters", "normalize-line-endings",
-        "--max-input-bytes", "134217728", "--threads", "1"];
-    auto child = spawnProcess(command);
-    bool planned;
-    foreach (_; 0 .. 250) {
-        if (hasPlanned(db)) { planned = true; break; }
-        Thread.sleep(dur!"msecs"(4));
-    }
-    need(kill(child.processID, SIGKILL) == 0, "kill exact child PID");
-    need(wait(child) == -SIGKILL, "SIGKILL child result");
-    need(planned, "live process did not expose a planned row");
-    auto manifest = new LocalManifest(db);
-    need(manifest.replay(SinkState.planned, 2).rows.length == 1,
-        "killed CLI had no durable planned row");
-    manifest.close();
-    if (exists(output)) {
-        expect("crash with output requires explicit retry", command, 1,
-            "--manifest-retry");
-        expect("crash reconcile", command ~ ["--manifest-retry"], 0, "done.");
-    } else {
-        expect("crash with no output safely restarts", command, 0, "done.");
-    }
-    need(getSize(output) == 16UL * 1024 * 1024, "crash recovery output size");
-    expect("crash recovery committed skip", command ~ ["--explain"], 0,
-        "status=skipped");
-    writeln("ok: live-process SIGKILL after durable plan");
-}
-
-private void deterministicCrashWindows(string hookExecutable, string root) {
-    foreach (phase; ["after-plan", "before-publish", "after-publish",
-                     "after-commit"]) {
-        auto folder = buildPath(root, "window-" ~ phase);
+private void deterministicCrashWindows(string harness, string root) {
+    foreach (phase; ["after-root-plan", "after-event-plan", "after-first-intent",
+            "after-first-publish", "after-first-commit", "after-root-commit"]) {
+        auto folder = buildPath(root, "crash-" ~ phase);
         mkdir(folder);
         auto input = buildPath(folder, "input.txt");
         auto output = buildPath(folder, "output.txt");
         auto db = buildPath(folder, "state.db");
         write(input, "window\r\n");
-        auto command = [hookExecutable, "run", "--input", input, "--output",
-            output, "--manifest", db, "--filters", "normalize-line-endings",
-            "--explain"];
+        auto command = baseCommand(harness, input, output, db);
         auto marker = db ~ ".kill-" ~ phase;
         write(marker, "");
         auto killed = run(command);
         remove(marker);
-        need(killed.status == -SIGKILL, phase ~ " did not SIGKILL at checkpoint");
-        need(exists(output) == (phase == "after-publish" || phase == "after-commit"),
-            phase ~ " output existence");
-        auto ledger = new LocalManifest(db);
-        need(ledger.replay(SinkState.planned, 2).rows.length ==
-            (phase == "after-commit" ? 0 : 1), phase ~ " durable state");
-        ledger.close();
-        if (phase == "after-publish") {
-            expectOneDecision(phase ~ " default refuses", command, 1,
-                "retry-required");
-            expectOneDecision(phase ~ " explicit reconcile",
-                command ~ ["--manifest-retry"], 0, "retry", "changed");
-        } else if (phase == "after-commit") {
-            expect(phase ~ " verified skip", command, 0, "status=skipped");
+        need(killed.status == -SIGKILL, phase ~ " did not SIGKILL");
+        need(scalar(db, "PRAGMA user_version") == 2, phase ~ " version");
+        auto uncertain = scalar(db,
+            "SELECT count(*) FROM final_event WHERE state='uncertain'");
+        if (phase == "after-first-intent" || phase == "after-first-publish") {
+            expect(phase ~ " default refusal", command, 1, "retry-required");
+            expect(phase ~ " exact retry", command ~ ["--manifest-retry"], 0,
+                "done.");
         } else {
-            expect(phase ~ " restart", command, 0, "status=changed");
+            need(uncertain == 0, phase ~ " unexpected uncertain state");
+            expect(phase ~ " restart", command, 0, "done.");
         }
-        need(readText(output) == "window\n", phase ~ " final bytes");
+        need(readText(output) == "window\n" &&
+            text(db, "SELECT state FROM root_state") == "complete" &&
+            text(db, "SELECT state FROM final_event") == "committed",
+            phase ~ " final state");
         writeln("ok: deterministic ", phase);
     }
 }
@@ -142,154 +114,101 @@ int main(string[] args) {
     need(args.length == 2 || args.length == 3,
         "usage: check <release executable> [release harness executable]");
     auto executable = args[1];
-    auto root = buildPath(tempDir, "scrubbed-manifest-cli-" ~ randomUUID.toString);
+    auto root = buildPath(tempDir, "scrubbed-manifest-v2-" ~ randomUUID.toString);
     mkdir(root);
     scope(exit) if (exists(root)) rmdirRecurse(root);
     auto input = buildPath(root, "input.txt");
     auto output = buildPath(root, "output.txt");
     auto db = buildPath(root, "state.db");
     write(input, "one\r\n");
-    auto command = [executable, "run", "--input", input, "--output", output,
-        "--manifest", db, "--filters", "normalize-line-endings", "--explain",
-        "--threads", "2", "--max-queued-docs", "2", "--max-open-inputs", "1",
-        "--max-input-bytes", "1048576"];
-    expect("validate leaves DB absent", command ~ ["--validate"], 0, "valid.");
+    auto command = baseCommand(executable, input, output, db);
+    expect("validate leaves state absent", command ~ ["--validate"], 0, "valid.");
     need(!exists(db) && !exists(output), "validate mutated state");
-    expect("dry run leaves DB absent", command ~ ["--dry-run"], 0,
-        "dry-run-changed");
+    expect("dry run leaves state absent", command ~ ["--dry-run"], 0,
+        "status=changed");
     need(!exists(db) && !exists(output), "dry run mutated state");
+    expect("first canonical publish", command, 0, "status=changed");
+    need(readText(output) == "one\n" && scalar(db, "PRAGMA application_id") ==
+        0x53435242 && scalar(db, "PRAGMA user_version") == 2 &&
+        scalar(db, "SELECT count(*) FROM root_state") == 1 &&
+        scalar(db, "SELECT count(*) FROM final_event") == 1 &&
+        text(db, "SELECT state FROM root_state") == "complete" &&
+        text(db, "SELECT state FROM final_event") == "committed" &&
+        text(db, "PRAGMA integrity_check") == "ok" &&
+        scalar(db, "SELECT count(*) FROM pragma_foreign_key_check") == 0,
+        "canonical schema/state");
+    expect("verified committed replay", command, 0, "done.");
+
+    write(output, "tampered");
+    expect("tampered output requires exact retry", command, 1,
+        "retry-required");
+    need(text(db, "SELECT state FROM root_state") == "planned" &&
+        text(db, "SELECT state FROM final_event") == "uncertain",
+        "tamper did not reopen only its root/event");
+    write(input, "two\r\n");
+    expect("new input requires replacement authority", command, 1,
+        "retry-required");
+    expect("new input explicit retry", command ~ ["--manifest-retry"], 0,
+        "done.");
+    need(readText(output) == "two\n", "retry output");
+
+    auto equivalentDb = buildPath(root, "equivalent.db");
+    auto config = buildPath(root, "job.json");
+    write(config, `{"version":3,"stages":[{"id":"legacy-text",` ~
+        `"implementation":"text-transform","options":{},"filters":[` ~
+        `{"name":"normalize-line-endings","options":{}}]}]}`);
+    auto jsonCommand = [executable, "run", "--input", input, "--output", output,
+        "--manifest", equivalentDb, "--config", config, "--manifest-retry"];
+    expect("v3 JSON durable route", jsonCommand, 0, "done.");
+    need(blob(db, `SELECT config_sha256 FROM root_state WHERE input_sha256=(SELECT
+        input_sha256 FROM root_state ORDER BY updated_utc_ms DESC LIMIT 1) LIMIT 1`) ==
+        blob(equivalentDb, "SELECT config_sha256 FROM root_state"),
+        "equivalent selectors changed durable identity");
+    auto tokenDb = buildPath(root, "tokens.db");
+    auto tokenCommand = [executable, "run", "--input", input, "--output", output,
+        "--manifest", tokenDb, "--stage", "legacy-text=text-transform",
+        "--filter", "normalize-line-endings", "--manifest-retry"];
+    expect("token durable route", tokenCommand, 0, "done.");
+    need(blob(tokenDb, "SELECT config_sha256 FROM root_state") ==
+        blob(equivalentDb, "SELECT config_sha256 FROM root_state"),
+        "tokens changed durable identity");
+
     auto preexistingInput = buildPath(root, "preexisting-input.txt");
     auto preexistingOutput = buildPath(root, "preexisting-output.txt");
     auto preexistingDb = buildPath(root, "preexisting.db");
-    write(preexistingInput, "preexisting\r\n");
-    write(preexistingOutput, "user-owned output");
-    auto preexistingCommand = [executable, "run", "--input", preexistingInput,
-        "--output", preexistingOutput, "--manifest", preexistingDb,
-        "--filters", "normalize-line-endings", "--explain"];
-    expectOneDecision("unrecorded destination refuses by default",
-        preexistingCommand, 1, "retry-required");
-    need(readText(preexistingOutput) == "user-owned output",
-        "unrecorded destination was replaced without authorization");
-    auto preexistingLedger = new LocalManifest(preexistingDb);
-    need(preexistingLedger.replay(SinkState.planned, 2).rows.length == 0,
-        "unrecorded destination was planned before rejection");
-    preexistingLedger.close();
-    expectOneDecision("unrecorded destination explicit reconcile",
-        preexistingCommand ~ ["--manifest-retry"], 0, "retry", "changed");
-    need(readText(preexistingOutput) == "preexisting\n",
-        "explicit reconcile did not publish expected output");
-    expect("retry control excluded from output identity", preexistingCommand,
-        0, "status=skipped");
-    auto unchangedInput = buildPath(root, "unchanged-input.txt");
-    auto unchangedOutput = buildPath(root, "unchanged-output.txt");
-    write(unchangedInput, "already clean");
-    write(unchangedOutput, "unrecorded bytes");
-    expectOneDecision("retry preserves unchanged detail", [executable,
-        "run", "--input", unchangedInput, "--output", unchangedOutput,
-        "--manifest", buildPath(root, "unchanged.db"), "--filters",
-        "normalize-line-endings", "--explain", "--manifest-retry"],
-        0, "retry", "unchanged");
-    expect("first publish", command, 0, "status=changed");
-    need(readText(output) == "one\n", "first output bytes");
-    expect("exact committed skip", command, 0, "status=skipped");
-    write(output, "tampered");
-    expectOneDecision("tampered output refuses", command, 1, "uncertain");
-    need(readText(output) == "tampered", "tamper overwritten without retry");
-    expectOneDecision("explicit reconcile", command ~ ["--manifest-retry"],
-        0, "retry", "changed");
-    need(readText(output) == "one\n", "reconcile output");
-    write(input, "two\r\n");
-    expect("changed input refuses existing output", command, 1, "--manifest-retry");
-    expectOneDecision("changed input explicit retry", command ~ ["--manifest-retry"],
-        0, "retry", "changed");
-    need(readText(output) == "two\n", "changed input output");
-    write(input, "abc\r\n");
-    expect("same-size mutation refuses", command, 1, "--manifest-retry");
-    need(readText(output) == "two\n", "same-size mutation overwrote output");
-    write(input, "expanded\r\n");
-    expect("growth refuses prior output", command, 1, "--manifest-retry");
-    write(input, "x");
-    expect("shrink refuses prior output", command, 1, "--manifest-retry");
-    write(input, "abc\r\n");
-    auto config = buildPath(root, "filters.json");
-    write(config, `{"filters":["normalize-line-endings"]}`);
-    auto configured = [executable, "run", "--input", input, "--output", output,
-        "--manifest", db, "--config", config, "--explain"];
-    expect("config bytes change identity", configured, 1, "--manifest-retry");
-    expectOneDecision("new config explicit retry", configured ~ ["--manifest-retry"],
-        0, "retry", "changed");
-    write(config, `{"filters": ["normalize-line-endings"]}`);
-    expect("same filter with changed config bytes", configured, 1,
-        "--manifest-retry");
-    auto movedOutput = buildPath(root, "moved.txt");
-    auto differentRoute = [executable, "run", "--input", input, "--output",
-        movedOutput, "--manifest", db, "--filters", "normalize-line-endings",
-        "--explain"];
-    expect("new output route publishes separately", differentRoute, 0,
-        "status=changed");
-    need(readText(movedOutput) == "abc\n", "new output route bytes");
-    auto rebuilt = buildPath(root, "different-executable");
-    copy(executable, rebuilt);
-    { auto file = File(rebuilt, "ab"); file.write("\n"); }
-    setAttributes(rebuilt, getAttributes(executable));
-    auto changedExecutable = [rebuilt, "run", "--input", input, "--output",
-        movedOutput, "--manifest", db, "--filters", "normalize-line-endings"];
-    expect("changed executable refuses existing sink", changedExecutable, 1,
-        "--manifest-retry");
-    need(readText(movedOutput) == "abc\n", "binary change overwrote sink");
-    auto insideDb = buildPath(root, "input-tree");
-    mkdir(insideDb);
-    auto treeFile = buildPath(insideDb, "a.txt");
-    write(treeFile, "tree\r\n");
-    auto treeOut = buildPath(root, "output-tree");
-    expect("manifest inside input tree rejected", [executable, "run", "--input",
-        insideDb, "--output", treeOut, "--manifest", buildPath(insideDb, "db")],
-        2, "outside input and output");
-    expect("manifest inside output tree rejected", [executable, "run", "--input",
-        insideDb, "--output", treeOut, "--manifest", buildPath(treeOut, "db")],
-        2, "outside input and output");
-    auto second = buildPath(insideDb, "b.txt");
-    write(second, "other\r\n");
-    auto treeCommand = [executable, "run", "--input", insideDb, "--output",
-        treeOut, "--manifest", buildPath(root, "tree.db"), "--explain",
-        "--max-input-bytes", "1048576", "--threads", "4", "--max-queued-docs",
-        "1", "--max-open-inputs", "1"];
-    expect("two independent tree files", treeCommand, 0, "2 succeeded");
-    expect("tree restart both skip", treeCommand, 0, "status=skipped");
-    write(second, "alter\r\n");
-    auto mixed = run(treeCommand);
-    need(mixed.status == 1 && mixed.output.canFind("status=skipped") &&
-        mixed.output.canFind("--manifest-retry"), "one changed record blocked independently");
-    expect("tree explicit retry", treeCommand ~ ["--manifest-retry"], 0,
-        "status=retry");
-    need(readText(buildPath(treeOut, "a.txt")) == "tree\n" &&
-        readText(buildPath(treeOut, "b.txt")) == "alter\n",
-        "independent tree output bytes");
-    auto linkedDb = buildPath(root, "linked-state.db");
-    import core.sys.posix.unistd : link;
-    need(link(db.toStringz, linkedDb.toStringz) == 0, "create DB hardlink fixture");
-    expect("DB hardlink rejected", [executable, "run", "--input", input,
-        "--output", buildPath(root, "alias-output.txt"), "--manifest", linkedDb],
-        2, "hard-link alias");
-    remove(linkedDb);
-    auto inputLink = buildPath(insideDb, "linked.txt");
-    import std.file : symlink;
-    symlink(treeFile, inputLink);
-    expect("symlink tree input rejected", treeCommand, 2, "refusing symlink");
-    remove(inputLink);
-    expect("input byte cap breach is fatal", [executable, "run", "--input", input,
-        "--output", buildPath(root, "cap-output"), "--manifest",
-        buildPath(root, "cap.db"), "--max-input-bytes", "1"],
-        2, "exceeds --max-input-bytes");
-    expect("manifest JSONL rejected", [executable, "run", "--input", "-", "--output",
-        "-", "--manifest", db], 2, "unavailable in JSONL");
-    expect("empty manifest path rejected", [executable, "run", "--input", input,
-        "--output", buildPath(root, "empty-manifest-output"), "--manifest", ""],
-        2, "Missing value for argument --manifest");
-    expect("no-manifest legacy", [executable, "run", "--input", input,
-        "--output", buildPath(root, "legacy.txt")], 0, "done.");
-    crashAfterPlan(executable, root);
+    write(preexistingInput, "safe\r\n");
+    write(preexistingOutput, "user-owned");
+    auto preexisting = baseCommand(executable, preexistingInput,
+        preexistingOutput, preexistingDb);
+    expect("unowned destination refuses", preexisting, 1, "retry-required");
+    need(readText(preexistingOutput) == "user-owned", "unowned bytes replaced");
+    expect("unowned destination explicit replacement",
+        preexisting ~ ["--manifest-retry"], 0, "done.");
+
+    auto old = buildPath(root, "old-v1.db");
+    { scope legacy = new LocalManifest(old); }
+    auto oldBytes = sha256Of(read(old));
+    auto oldOutput = buildPath(root, "old-output.txt");
+    expect("v1 manifest fixed refusal", baseCommand(executable, input,
+        oldOutput, old), 2, "manifest-v1-requires-fresh-v2");
+    need(sha256Of(read(old)) == oldBytes && !exists(oldOutput),
+        "v1 refusal mutated state/output");
+
+    auto tree = buildPath(root, "tree");
+    auto treeOut = buildPath(root, "tree-out");
+    mkdir(tree);
+    mkdir(buildPath(tree, "a"));
+    write(buildPath(tree, "a.txt"), "first\r\n");
+    write(buildPath(tree, "a", "z.txt"), "second\r\n");
+    auto treeDb = buildPath(root, "tree.db");
+    expect("canonical tree order", [executable, "run", "--input", tree,
+        "--output", treeOut, "--manifest", treeDb, "--filters",
+        "normalize-line-endings"], 0, "2 succeeded");
+    need(readText(buildPath(treeOut, "a.txt")) == "first\n" &&
+        readText(buildPath(treeOut, "a", "z.txt")) == "second\n",
+        "tree output bytes");
+
     if (args.length == 3) deterministicCrashWindows(args[2], root);
-    writeln("manifest CLI checks passed");
+    writeln("canonical manifest-v2 CLI checks passed");
     return 0;
 }

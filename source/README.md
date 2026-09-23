@@ -14,8 +14,8 @@ incremental directory traversal, scheduling, and output policy.
 independent queued-document, reserved-byte, and file-work callback limits;
 descriptor tokens are granted in submission order so canonical publication
 cannot deadlock behind a later input. Its callback invokes the compiled local
-adapter or a retained durable-route predecessor.
-`runApp(string[] args)` compiles the ordinary local route's canonical job once
+adapter for ordinary and durable routes.
+`runApp(string[] args)` compiles the selected local route's canonical job once
 before walking files. A reject or quarantine is an acknowledged per-document
 outcome, publishes no root output, and yields exit 1; run-fatal failures and
 collisions are reported as `FATAL` and exit 2; a completed mapped run exits 0.
@@ -41,8 +41,8 @@ ordered composition tokens, and predecessor filter-only forms lower to the
 same typed stages, ordered filters, and scalar options; canonical bytes own a
 stable `job:v3:` identity. Stable stage-instance IDs are distinct from
 registered implementation names. This subtree has no registry or I/O import,
-and ordinary local file/tree plus selected-field JSONL shipping consume v3
-through compiled effects bridges; durable routes remain deferred.
+and ordinary local file/tree, durable file/tree, and selected-field JSONL
+shipping consume v3 through compiled effects bridges.
 
 [`composition/`](composition/README.md) compiles that model through injected
 stage and filter registries without importing concrete implementations. It
@@ -54,8 +54,8 @@ every compiled stage, retaining terminal decisions, split order and immediate
 parent provenance, and returns only final/terminal events. The effects runner
 can now apply that compiled job once per typed source record, synchronously
 deliver its ordered final events, and close the transferred content owner. The
-ordinary local file/tree and selected-field JSONL shipping are wired; later
-slices own durable routes.
+ordinary local file/tree, durable file/tree, and selected-field JSONL shipping
+are wired.
 
 [`filters/`](filters/README.md) owns text transforms and local registration.
 The intended dependency direction is `app -> cli -> pipeline`, with `cli`
@@ -68,8 +68,8 @@ for its CP1252 mapping helper.
 facade for logical `SourceLocator`/`DocumentId` identity, distinct `OutputName`,
 and owner-checked zero-copy byte views with explicit selected-range copying.
 It supplies stable line-ordinal IDs to JSONL CLI mode and root-relative IDs
-to local file/tree processing. Compiled JSONL and ordinary local execution use
-this facade; retained durable predecessors do not. Its
+to local file/tree processing. Compiled JSONL and all current local execution
+use this facade. Its
 canonical key format and lifetime rule are in the
 [architecture map](../docs/architecture.md); transport-specific source keys
 and content/job stages are not implemented here.
@@ -151,10 +151,13 @@ facade over `effects.runner`: it assigns the field as `OutputName`, transfers
 one checked content owner, copies the sole mapped result synchronously, and
 refuses rejection, quarantine, or fanout without emitting the current record.
 
-[`effects/local_manifest.d`](effects/local_manifest.d) is a standalone,
-versioned local SQLite sink ledger with independent per-sink states and bounded
-replay. It verifies observed output bytes before a committed skip. The
-file/tree CLI wires it only in opt-in `--manifest PATH` mode; see
+[`effects/durable_job.d`](effects/durable_job.d) owns canonical compiled-job
+durability: manifest v2 and failure-journal v3 root records, complete ordered
+final-event plans, per-event publication intents, exact retry, and root-last
+completion. It accepts only caller-derived identity and never imports `job`.
+[`effects/local_manifest.d`](effects/local_manifest.d) remains the predecessor
+v1 API for offline copy and retained consumers; canonical `--manifest` runs
+refuse it rather than upgrading it. See
 [local manifest restart behavior and crash limits](../docs/local-manifest.md).
 
 [`effects/zstd_ffi.d`](effects/zstd_ffi.d) declares the narrow ABI for the

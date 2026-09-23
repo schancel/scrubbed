@@ -1,5 +1,23 @@
 # Error events and outstanding failures (F13 staged contract)
 
+## Canonical failure journal v3
+
+`errors-init` creates only a fresh `application_id=0x53435242`,
+`user_version=3` journal. Canonical `run --error-journal` refuses v2 without
+opening it as a writer; retain that file read-only and choose a fresh v3 path.
+V3 adds the same root and ordered-final-event workflow tables as manifest v2
+while retaining the bounded public `error_event` and `outstanding` projections.
+`errors-export` validates and exports either archival v2 or current v3 with the
+unchanged public JSON schemas. `errors-copy --from-v1` remains the explicit
+offline v1-to-v2 archival copy; its result is exportable but not runnable.
+
+Failures persist bounded phase/code values and opaque public sink IDs. The
+private stable sink derives from final kind, final document identity, and event
+ordinal; targeted retry uses it internally but never prints it. A root-level
+compiled failure keeps job/stage attribution in the live diagnostic and a
+bounded persisted code. No journal operation claims filesystem rollback or
+power-loss atomicity.
+
 ## F14 Stage 1 retry-target visitor
 
 `FailureJournal.visitOutstandingTargets` is an internal, read-only stream of

@@ -2,6 +2,7 @@
 module effects.error_cli;
 
 import effects.failure_journal : createV2, copyV1ToV2;
+import effects.durable_job : createJournalV3;
 import effects.error_export : exportV2, verifyV2Export;
 import std.stdio : stderr;
 import std.string : indexOf, startsWith;
@@ -73,7 +74,7 @@ int runErrorCommand(string verb, const string[] args) {
     }
     try {
         switch (verb) {
-        case "errors-init": createV2(options.journal); break;
+        case "errors-init": createJournalV3(options.journal); break;
         case "errors-copy": copyV1ToV2(options.fromV1, options.journal); break;
         case "errors-export":
             exportV2(options.journal, options.errorsJsonl, options.outstandingJsonl);

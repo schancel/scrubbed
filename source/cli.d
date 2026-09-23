@@ -2,6 +2,7 @@
 module cli;
 
 import composition.compiler : CompiledJob, compileJob;
+import composition.job_executor : CompiledJobFailure;
 import core.sync.mutex : Mutex;
 import core.sync.condition : Condition;
 import effects.bounded_input : BoundedInput, InputLimits;
@@ -11,10 +12,13 @@ import effects.stdio_stream : processStandardJsonlDocuments;
 import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
     configDigest, inputDigest, outputDigest;
 import effects.failure_journal : FailureJournal;
+import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
+    DurableIdentity, DurableJobLedger, DurableKind, DurableRootKey, deriveDurableIdentity,
+    derivedSink, reasonDigest;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.failure_policy : recordDocumentFailure;
-import effects.local_job : LocalJobOutcome, runLocalJob;
+import effects.local_job : LocalJobOutcome, runLocalJob, runLocalJobBatch;
 import effects.runner : EffectFailure, EffectPhase;
 import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
@@ -27,7 +31,7 @@ import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
 import stages.config : buildConfigV2;
 import stages.text_transform;
 import job.cli_tokens : parseJobTokens;
-import job.json : jobIdentity, parseJobJson;
+import job.json : canonicalJobJson, jobIdentity, parseJobJson;
 import job.legacy : lowerLegacyDefault, lowerLegacyJson, lowerLegacyNames;
 import job.spec : JobSpec;
 import filters.entities;
@@ -1127,6 +1131,217 @@ private ManifestOutcome processManifestOne(LocalManifest manifest, string databa
     }
 }
 
+private final class DurableDocumentFailure : Exception {
+    DurableRootKey key;
+    string status;
+    string code;
+    string sink;
+    bool fatal;
+    this(DurableRootKey key, string status, string code, string sink,
+            Exception cause, bool fatal = false) {
+        super(cause.msg);
+        this.key = key;
+        this.status = status;
+        this.code = code;
+        this.sink = sink;
+        this.fatal = fatal;
+    }
+}
+
+private ubyte[32] durableContentDigest(Content content) {
+    SHA256 digest;
+    content.stream((const(ubyte)[] chunk) { digest.put(chunk); });
+    return digest.finish();
+}
+
+private ManifestOutcome processDurableOne(DurableJobLedger ledger,
+        string databasePath, string file, string inputRoot, string outputRoot,
+        bool inputIsDir, const ref CompiledJob job, ulong reservedBytes,
+        ref const(ubyte[32]) configHash, bool retry, bool journalRoute,
+        bool targeted) {
+    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
+    auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
+        OutputName(inputIsDir ? relative : baseName(outputRoot)));
+    auto selectedRoot = inputIsDir ? outputRoot : dirName(outputRoot);
+    DurableRootKey rootKey;
+    LocalJobOutcome outcome;
+    bool allEventsPreviouslyTerminal = true;
+    try outcome = runLocalJobBatch(file, reservedBytes, document, job,
+        (ref const ubyte[32] inputHash) {
+            rootKey = DurableRootKey(document.id, inputHash, configHash);
+            if (targeted && !ledger.hasOutstanding(rootKey))
+                throw new DurableDocumentFailure(rootKey,
+                    "target-mismatch", "target-mismatch",
+                    derivedSink("root", rootKey.document, 0),
+                    new Exception("durable job: target-mismatch"));
+            if (journalRoute && !retry &&
+                    ledger.hasOutstanding(rootKey))
+                throw new DurableDocumentFailure(rootKey,
+                    "retry-required", "retry-required",
+                    derivedSink("root", rootKey.document, 0),
+                    new Exception("durable job: retry-required"));
+            ledger.planRoot(rootKey);
+            version (FailurePolicyHarness) {
+                foreach (phase; ["read", "decode", "filter"]) try {
+                    failureAt(databasePath, phase, file);
+                } catch (Exception failure) {
+                    if (exists(databasePath ~ ".fault-v2-arm-ack-on-failure"))
+                        write(databasePath ~ ".fault-v2-ack", "1");
+                    if (journalRoute)
+                        ledger.recordRootFailure(rootKey, phase, phase ~ "-failed");
+                    if (exists(databasePath ~ ".fault-log-ack"))
+                        throw new Exception("durable job: injected-log-ack-failure");
+                    throw new DurableDocumentFailure(rootKey, "failed",
+                        phase ~ "-failed",
+                        derivedSink("root", rootKey.document, 0), failure);
+                }
+            }
+            version (ManifestCliHarness) manifestKillAt(databasePath, "after-root-plan");
+            version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
+        },
+        (StageEvent[] events, ref const ubyte[32] inputHash) {
+            DurableEventPlan[] plans;
+            bool[string] destinations;
+            foreach (ordinal, ref event; events) {
+                DurableEventPlan plan;
+                plan.ordinal = ordinal;
+                final switch (event.kind) {
+                case EventKind.emitted: plan.kind = "emitted"; break;
+                case EventKind.rejected: plan.kind = "rejected"; break;
+                case EventKind.quarantined: plan.kind = "quarantined"; break;
+                }
+                plan.document = event.payload.document.id;
+                plan.outputName = event.payload.document.outputName.text;
+                if (event.kind == EventKind.emitted) {
+                    plan.hasOutput = true;
+                    plan.destination = !event.isChild ?
+                        destinationFor(file, inputRoot, outputRoot, inputIsDir) :
+                        buildPath(selectedRoot, checkedOutputName(plan.outputName));
+                    plan.outputSha256 = durableContentDigest(event.payload.content);
+                    plan.sink = !event.isChild ? "local-primary:v1" :
+                        derivedSink(plan.kind, plan.document, ordinal);
+                    try preflightDestination(plan.destination, selectedRoot);
+                    catch (Exception failure) {
+                        throw new DurableDocumentFailure(rootKey, "failure",
+                            "policy-failed", plan.sink, failure, true);
+                    }
+                    auto normalized = normalizedAbsolute(plan.destination);
+                    if (normalized in destinations)
+                        throw new OutputPolicyViolation(
+                            "output collision: " ~ plan.destination);
+                    destinations[normalized] = true;
+                } else {
+                    plan.hasReason = true;
+                    plan.reasonSha256 = reasonDigest(event.reason);
+                    plan.sink = derivedSink(plan.kind, plan.document, ordinal);
+                }
+                plans ~= plan;
+            }
+            try ledger.planEvents(rootKey, plans);
+            catch (Exception failure) {
+                throw new DurableDocumentFailure(rootKey, "failure",
+                    "manifest-failed", plans.length ? plans[0].sink :
+                        derivedSink("root", rootKey.document, 0), failure, true);
+            }
+            version (ManifestCliHarness) manifestKillAt(databasePath, "after-event-plan");
+            foreach (ordinal, ref event; events) {
+                auto prior = ledger.readEvent(rootKey, ordinal);
+                if (prior.state != DurableEventState.committed &&
+                        prior.state != DurableEventState.acknowledged)
+                    allEventsPreviouslyTerminal = false;
+                DurableAction action;
+                try action = ledger.prepare(rootKey, ordinal, retry);
+                catch (Exception decision) {
+                    if (decision.msg == "durable job: retry-required")
+                        throw new DurableDocumentFailure(rootKey,
+                            "retry-required", "retry-required",
+                            plans[ordinal].sink, decision);
+                    throw new DurableDocumentFailure(rootKey, "failure",
+                        cast(ResourceExhaustion)decision !is null ?
+                            "resource-failed" : "inspect-invalidated",
+                        plans[ordinal].sink, decision, true);
+                }
+                if (action == DurableAction.skip) continue;
+                bool touched;
+                string activePhase = "policy";
+                try {
+                    ensurePlainDirectory(selectedRoot,
+                        dirName(plans[ordinal].destination));
+                    version (FailurePolicyHarness)
+                        failureAt(databasePath, "policy", file);
+                    version (FailurePolicyHarness)
+                        failureAt(databasePath, "content-own", file);
+                    ledger.beginPublication(rootKey, ordinal);
+                    version (ManifestCliHarness) manifestKillAt(databasePath,
+                        ordinal == 0 ? "after-first-intent" : "after-intent");
+                    version (ManifestCliHarness) manifestKillAt(databasePath,
+                        "before-publish");
+                    activePhase = "sink";
+                    touched = true;
+                    version (FailurePolicyHarness) {
+                        if (exists(databasePath ~ ".fault-policy-swap")) {
+                            import std.file : symlink;
+                            symlink(file, plans[ordinal].destination);
+                        }
+                    }
+                    version (FailurePolicyHarness)
+                        failureAt(databasePath, "sink", file);
+                    writeAtomicPieces(plans[ordinal].destination,
+                        event.payload.content.pieces());
+                    version (ManifestCliHarness) manifestKillAt(databasePath,
+                        ordinal == 0 ? "after-first-publish" : "after-last-output");
+                    version (ManifestCliHarness) manifestKillAt(databasePath,
+                        "after-publish");
+                    ledger.commitPublished(rootKey, ordinal);
+                    version (ManifestCliHarness) manifestKillAt(databasePath,
+                        ordinal == 0 ? "after-first-commit" : "after-event-commit");
+                    version (ManifestCliHarness) manifestKillAt(databasePath,
+                        "after-commit");
+                } catch (Exception failure) {
+                    string phase = activePhase;
+                    string code = phase == "sink" ? "sink-write-failed" :
+                        "policy-failed";
+                    if (cast(OutputPolicyViolation)failure !is null) {
+                        phase = "policy"; code = "policy-failed";
+                    } else if (cast(ResourceExhaustion)failure !is null) {
+                        phase = "resource"; code = "resource-failed";
+                    }
+                    try ledger.recordFailure(rootKey, ordinal, touched, phase, code);
+                    catch (Throwable ignored) { throw failure; }
+                    if (phase == "policy" || phase == "resource")
+                        throw new DurableDocumentFailure(rootKey,
+                            touched ? "uncertain" : "failed", code,
+                            plans[ordinal].sink, failure, true);
+                    throw new DurableDocumentFailure(rootKey,
+                        touched ? "uncertain" : "failed", code,
+                        plans[ordinal].sink, failure);
+                }
+            }
+            ledger.completeRoot(rootKey);
+            version (ManifestCliHarness) manifestKillAt(databasePath, "after-root-commit");
+        });
+    catch (CompiledJobFailure failure) {
+        if (rootKey.document.text.length != 0) {
+            try ledger.recordRootFailure(rootKey, "filter", "filter-failed");
+            catch (Exception unavailable) {
+                // Manifest v2 has workflow state but deliberately no failure
+                // history. The planned root remains replayable.
+                if (unavailable.msg != "durable job: root-failure-unavailable")
+                    throw unavailable;
+            }
+            throw new DurableDocumentFailure(rootKey, "failed",
+                "filter-failed", derivedSink("root", rootKey.document, 0),
+                failure);
+        }
+        throw failure;
+    }
+    auto status = allEventsPreviouslyTerminal ? "skipped" :
+        (retry ? "retry" : outcome.status);
+    return manifestOutcome(status, outcome.firstReason,
+        SinkKey(rootKey.document, rootKey.inputSha256, rootKey.configSha256,
+            "local-primary:v1"));
+}
+
 int runApp(string[] args) {
     auto compositionTokens = takeCompositionTokens(args);
     const compositionExplicit = compositionTokens.length != 0;
@@ -1184,9 +1399,9 @@ int runApp(string[] args) {
         "explain", "Print one decision record per input file", &explain,
         "manifest", "Opt-in local SQLite restart manifest path", &manifestPath,
         "manifest-retry", "Inspect and replace unresolved manifest output", &manifestRetry,
-        "error-journal", "Existing opt-in v2 failure journal", &errorJournalPath,
-        "error-retry", "Explicitly retry unresolved v2 outputs", &errorRetry,
-        "error-targeted", "Retry only exact local v2 outstanding targets", &errorTargeted,
+        "error-journal", "Existing opt-in v3 failure journal", &errorJournalPath,
+        "error-retry", "Explicitly retry unresolved v3 outputs", &errorRetry,
+        "error-targeted", "Retry only exact local v3 outstanding targets", &errorTargeted,
         "jsonl-fields", "Comma-separated selected JSONL text fields", &jsonlFields,
         "dataset-namespace", "Stable JSONL dataset namespace", &datasetNamespace,
         "source-key", "Stable JSONL source key", &sourceKey,
@@ -1212,7 +1427,7 @@ int runApp(string[] args) {
     if (errorTargeted && (!errorJournalPath.length || !errorRetry))
         throw new Exception("--error-targeted requires --error-journal and --error-retry");
     if (errorJournalPath.length && (manifestExplicit || manifestRetry || dryRun))
-        throw new Exception("v2 journal is exclusive with manifest and dry-run");
+        throw new Exception("v3 journal is exclusive with manifest and dry-run");
     if (jsonlRoute) {
         if (manifestPath.length || manifestRetry || errorJournalPath.length ||
             errorRetry || errorTargeted)
@@ -1285,6 +1500,16 @@ int runApp(string[] args) {
         throw new Exception("--config and --filters are mutually exclusive");
     if (compositionExplicit && (configPath.length || filtersExplicit))
         throw new Exception("composition options are mutually exclusive with --config and --filters");
+    configContents = configPath.length ? readText(configPath) : "";
+    versionedConfig = configContents.length && hasJobVersion(configContents);
+
+    const durableRoute = (manifestPath.length || errorJournalPath.length) && !dryRun;
+    auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
+        configPath.length != 0, configContents, versionedConfig);
+    auto canonicalSpec = canonicalJobJson(spec);
+    Nullable!CompiledJob compiledJob = compileJob(spec);
+    string chainLabel = versionedConfig || compositionExplicit ? compiledJob.get.identity :
+        spec.stages[0].filters.map!(filter => filter.name).join(" -> ");
     if (!exists(inputPath))
         throw new Exception("input path does not exist: " ~ inputPath);
     if (isSymlink(inputPath))
@@ -1295,28 +1520,6 @@ int runApp(string[] args) {
     rejectUnresolvableAncestorLinks(outputPath);
     inputPath = resolveExistingPrefix(inputPath);
     outputPath = resolveExistingPrefix(outputPath);
-
-    configContents = configPath.length ? readText(configPath) : "";
-    versionedConfig = configContents.length && hasJobVersion(configContents);
-
-    const durableRoute = manifestPath.length || errorJournalPath.length;
-    if (durableRoute && (compositionExplicit || versionedConfig))
-        throw new Exception("canonical v3 jobs are not migrated to durable routes in Stage 5a");
-    Pipeline chain;
-    Nullable!CompiledJob compiledJob;
-    string chainLabel;
-    if (durableRoute) {
-        chain = configPath.length
-            ? Pipeline.buildConfigured(parseFilterConfig(configContents))
-            : Pipeline.build(filterList.split(","));
-        chainLabel = chain.names.join(" -> ");
-    } else {
-        auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
-            configPath.length != 0, configContents, versionedConfig);
-        compiledJob = compileJob(spec);
-        chainLabel = versionedConfig || compositionExplicit ? compiledJob.get.identity :
-            spec.stages[0].filters.map!(filter => filter.name).join(" -> ");
-    }
     if (!errorJournalPath.length)
         writeln(versionedConfig || compositionExplicit ? "job: " : "filter chain: ",
             chainLabel);
@@ -1338,27 +1541,35 @@ int runApp(string[] args) {
         preflightManifest(errorJournalPath, inputPath, outputPath, inputIsDir);
     }
     if (validateOnly) {
-        if (manifestPath.length || errorJournalPath.length)
-            manifestConfig(filterList, configContents, configPath.length != 0,
-                outputPath, inputIsDir);
+        auto executable = runningExecutableDigest();
+        auto durableDigest = deriveDurableIdentity(canonicalSpec,
+            compiledJob.get.identity, inputIsDir ? "tree" : "file",
+            outputPath, executable);
         if (errorJournalPath.length) {
-            auto checkedJournal = new FailureJournal(errorJournalPath);
+            auto checkedJournal = new DurableJobLedger(errorJournalPath,
+                DurableKind.journal,
+                DurableIdentity(durableDigest, compiledJob.get.identity));
             checkedJournal.close();
+        } else if (manifestPath.length && exists(manifestPath)) {
+            auto checkedManifest = new DurableJobLedger(manifestPath,
+                DurableKind.manifest,
+                DurableIdentity(durableDigest, compiledJob.get.identity));
+            checkedManifest.close();
         }
         if (!errorJournalPath.length) writeln("valid. No files processed.");
         return 0;
     }
-    ubyte[32] configHash;
-    LocalManifest manifest;
-    FailureJournal errorJournal;
-    if (manifestPath.length || errorJournalPath.length) {
-        configHash = manifestConfig(filterList, configContents,
-            configPath.length != 0, outputPath, inputIsDir);
-        if (manifestPath.length && !dryRun) manifest = new LocalManifest(manifestPath);
-        if (errorJournalPath.length) errorJournal = new FailureJournal(errorJournalPath);
-    }
-    scope(exit) if (manifest !is null) manifest.close();
-    scope(exit) if (errorJournal !is null) errorJournal.close();
+    auto executable = runningExecutableDigest();
+    ubyte[32] configHash = deriveDurableIdentity(canonicalSpec,
+        compiledJob.get.identity, inputIsDir ? "tree" : "file",
+        outputPath, executable);
+    DurableJobLedger durableLedger;
+    if (durableRoute)
+        durableLedger = new DurableJobLedger(
+            manifestPath.length ? manifestPath : errorJournalPath,
+            manifestPath.length ? DurableKind.manifest : DurableKind.journal,
+            DurableIdentity(configHash, compiledJob.get.identity));
+    scope(exit) if (durableLedger !is null) durableLedger.close();
     if (!dryRun && !errorTargeted)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
@@ -1372,13 +1583,13 @@ int runApp(string[] args) {
         manifestPath.length || errorJournalPath.length ? 1 : nThreads,
         (string file, ulong bytes) {
             ManifestOutcome decision;
-            if (manifestPath.length)
-                decision = processManifestOne(manifest, manifestPath, file, inputPath, outputPath,
-                    inputIsDir, chain, bytes, configHash, manifestRetry, dryRun,
-                    manifestCompletedPrefix);
-            else if (errorJournalPath.length)
-                decision = processV2One(errorJournal, errorJournalPath, file, inputPath,
-                    outputPath, inputIsDir, chain, bytes, configHash, errorRetry,
+            if (durableRoute)
+                decision = processDurableOne(durableLedger,
+                    manifestPath.length ? manifestPath : errorJournalPath,
+                    file, inputPath, outputPath, inputIsDir, compiledJob.get,
+                    bytes, configHash,
+                    manifestPath.length ? manifestRetry : errorRetry,
+                    errorJournalPath.length != 0,
                     errorTargeted);
             else {
                 auto local = processCompiledOne(file, inputPath, outputPath,
@@ -1393,7 +1604,7 @@ int runApp(string[] args) {
             }
             if (explain && errorJournalPath.length)
                 v2Explain(decision.status, decision.key,
-                    errorJournal.publicSinkId(decision.key.sink));
+                    durableLedger.publicSinkId(decision.key.sink));
             else if (explain)
                 explainOne(file, destinationFor(file, inputPath, outputPath, inputIsDir),
                     chainLabel, decision.status,
@@ -1410,16 +1621,20 @@ int runApp(string[] args) {
             auto fatalPreFilter = cast(FatalManifestPreFilter)error;
             auto fatalPlanned = cast(FatalPlannedFailure)error;
             auto v2Decision = cast(V2DocumentFailure)error;
+            auto durableDecision = cast(DurableDocumentFailure)error;
             auto effectFailure = cast(EffectFailure)error;
             auto orderedCanceled = cast(OrderedPublicationCanceled)error;
             if (errorJournalPath.length) {
-                stderr.writeln("scrubbed: ", v2Decision !is null ?
-                    v2Decision.code : "error-journal-fatal");
-                if (explain && v2Decision !is null)
-                    v2Explain(v2Decision.status, v2Decision.key,
-                        v2Decision.hasPublicSink ?
-                            errorJournal.publicSinkId(v2Decision.key.sink) : "",
-                        v2Decision.phase, v2Decision.code);
+                stderr.writeln("scrubbed: ", durableDecision !is null ?
+                    durableDecision.code : "error-journal-fatal");
+                if (explain && durableDecision !is null) {
+                    auto display = SinkKey(durableDecision.key.document,
+                        durableDecision.key.inputSha256,
+                        durableDecision.key.configSha256, durableDecision.sink);
+                    v2Explain(durableDecision.status, display,
+                        durableLedger.publicSinkId(durableDecision.sink),
+                        "sink", durableDecision.code);
+                }
                 if (explain) pending.remove(file);
                 return;
             }
@@ -1434,7 +1649,9 @@ int runApp(string[] args) {
             auto renderedError = effectFailure is null ? error.msg :
                 error.msg ~ " (" ~ effectFailureDetail(effectFailure) ~ ")";
             stderr.writefln("%s %s: %s",
-                documentFailure !is null || manifestDecision !is null ? "SKIP" : "FATAL",
+                documentFailure !is null || manifestDecision !is null ||
+                    (durableDecision !is null && !durableDecision.fatal) ?
+                    "SKIP" : "FATAL",
                 file, renderedError);
             if (explain) {
                 string status = "failure", detail, documentId, sinkKey;
@@ -1455,6 +1672,10 @@ int runApp(string[] args) {
                     status = manifestDecision.status;
                     documentId = manifestDecision.documentId.text;
                     sinkKey = manifestDecision.sinkKey;
+                } else if (durableDecision !is null) {
+                    status = durableDecision.status;
+                    documentId = durableDecision.key.document.text;
+                    sinkKey = durableDecision.sink;
                 } else if (fatalPreFilter !is null) {
                     documentId = fatalPreFilter.key.document.text;
                     sinkKey = fatalPreFilter.key.sink;
@@ -1476,6 +1697,8 @@ int runApp(string[] args) {
         }, (Throwable error) {
             return cast(OrderedPublicationCanceled)error is null &&
                 cast(V2DocumentFailure)error is null &&
+                (cast(DurableDocumentFailure)error is null ||
+                    (cast(DurableDocumentFailure)error).fatal) &&
                 cast(DocumentFailure)error is null &&
                 cast(ManifestDecisionFailure)error is null;
         });
@@ -1483,6 +1706,12 @@ int runApp(string[] args) {
     void submitPath(string file) {
         bool admissionCanceled;
         try {
+            if (errorTargeted) {
+                auto relative = inputIsDir ? relativePath(file, inputPath) : ".";
+                auto id = DocumentId.from(SourceLocator("local-files:v1",
+                    inputPath, relative));
+                if (!durableLedger.hasOutstanding(id, configHash)) return;
+            }
             if (explain) pending.add(file);
             if (!durableRoute) publication.assign(file);
             auto bytes = getSize(file);
@@ -1525,23 +1754,9 @@ int runApp(string[] args) {
     }
     try {
         if (inputIsDir) {
-            if (!durableRoute) walkCanonical(inputPath);
-            else foreach (entry; dirEntries(inputPath, SpanMode.depth, false)) {
-                if (entry.isSymlink) {
-                    auto reason = "refusing symlink in input tree: " ~ entry.name;
-                    if (explain && !errorJournalPath.length)
-                        explainOne(entry.name, destinationFor(entry.name, inputPath,
-                            outputPath, inputIsDir), chainLabel, "failure", reason);
-                    throw new Exception(reason);
-                }
-                if (!entry.isFile) continue;
-                if (errorTargeted && !isLocalPrimaryTarget(errorJournal,
-                    entry.name, inputPath, inputIsDir)) continue;
-                submitPath(entry.name);
-            }
+            walkCanonical(inputPath);
         } else {
-            if (!errorTargeted || isLocalPrimaryTarget(errorJournal,
-                    inputPath, inputPath, inputIsDir)) submitPath(inputPath);
+            submitPath(inputPath);
         }
     } catch (Exception error) {
         if (!durableRoute) publication.abort();
@@ -1566,7 +1781,7 @@ int runApp(string[] args) {
                     chainLabel, "canceled", "fatal processing failure");
         throw new Exception("fatal file processing failure: " ~ scheduler.fatal().msg);
     }
-    if (manifest !is null) manifest.checkpoint();
+    if (durableLedger !is null) durableLedger.checkpoint();
     const failures = counts.failed;
     if (!errorJournalPath.length)
         writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");

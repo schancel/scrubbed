@@ -1,5 +1,16 @@
 # File failure policy
 
+Canonical durable execution records one planned root and its complete ordered
+final-event set. Sink failures bind the exact root and stable event sink;
+failure before publication intent is `failed`, while failure after intent is
+`uncertain`. Acknowledged document/stage/sink failures may allow later roots to
+continue. Output-policy, resource, scheduler, ledger acknowledgment,
+event-set, and destination-ownership failures are run-fatal. Failure-journal
+v3 exposes only opaque public sink IDs; targeted retry selects matching
+outstanding state for the current canonical config and never renders private
+sink labels. The predecessor policy below remains relevant to retained v1/v2
+offline state but is no longer the canonical durable writer.
+
 The opt-in local manifest is the durable failure ledger. An admitted file may
 fail its read, decode, filter, or sink step and allow later files to continue
 only after its exact `DocumentId`/sink row becomes `failed` or `uncertain` and

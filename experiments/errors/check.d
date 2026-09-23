@@ -92,16 +92,15 @@ private void checkAcknowledgment(string executable, string root) {
     auto result = execute([executable, "run", "--input", input, "--output", output,
         "--manifest", db, "--filters", "normalize-line-endings", "--explain"]);
     need(result.status == 2 && result.output.canFind("FATAL") &&
-        result.output.split("status=unacknowledged").length == 2,
-        "lost acknowledgment did not fail-stop truthfully");
+        result.output.split("status=failure").length == 2 &&
+        result.output.split("status=canceled").length == 2,
+        "lost acknowledgment did not fail-stop truthfully output=" ~ result.output);
     need(!exists(buildPath(output, "a.txt")) &&
         !exists(buildPath(output, "b.txt")),
         "post-ack-fault processing published an output");
-    auto manifest = new LocalManifest(db);
-    auto page = manifest.replay(SinkState.failed, 10);
-    need(page.rows.length == 1 && page.rows[0].sink == "local-primary:v1",
-        "failed v1 row missing after acknowledgment fault");
-    manifest.close();
+    need(count(db, "SELECT count(*) FROM root_state WHERE state='planned'") == 1 &&
+        count(db, "SELECT count(*) FROM final_event") == 0,
+        "planned v2 root missing after acknowledgment fault");
 }
 
 private long count(string path, string sql) {

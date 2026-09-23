@@ -1,5 +1,26 @@
 # Local SQLite manifest API (F09 production slice)
 
+## Canonical durable route (Stage 5c)
+
+Shipping `--manifest` now creates only `application_id=0x53435242`,
+`user_version=2` state through `effects.durable_job`. One root row is keyed by
+`(DocumentId,input_sha256,config_sha256)`; the config digest binds canonical v3
+job JSON, readable `job:v3:` identity, file/tree mode, canonical output route,
+`compiled-final-events:v1`, and the exact executable digest. The complete
+ordered final-event set is recorded transactionally before publication.
+Emitted events own stable sinks, destinations, and expected output digests;
+reject/quarantine events are acknowledged no-output terminals. The root becomes
+complete only after every event is committed or acknowledged.
+
+Publication remains per destination, not a multi-file transaction. A durable
+intent recovered after a crash becomes uncertain; default restart refuses
+replacement, while explicit `--manifest-retry` rehashes and skips committed
+siblings, retries only unresolved events, then continues later planned events
+in order. Existing v1 manifests are refused without mutation and require a
+fresh v2 path. The remainder of this document describes the retained v1 API
+used by offline migration and predecessor consumers; it is not the canonical
+shipping writer.
+
 `effects.local_manifest.LocalManifest` is the v1 local effects API. The
 `run`/`repair`/no-verb CLI offers an opt-in local-file/tree restart path with
 `--manifest PATH`. Without that flag, existing file/tree and JSONL behavior is

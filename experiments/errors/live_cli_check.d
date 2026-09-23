@@ -2,6 +2,7 @@
 module experiments.errors.live_cli_check;
 
 import std.algorithm.searching : canFind;
+import std.array : join;
 import std.conv : to;
 import std.file : exists, getSize, mkdir, read, readText, remove,
     rmdirRecurse, tempDir, write;
@@ -127,7 +128,7 @@ void main(string[] args) {
     size_t checks;
     string call(string[] command, int status) {
         auto result = execute([args[1]] ~ command);
-        need(result.status == status, "exit " ~ command[0] ~ " got " ~
+        need(result.status == status, "exit " ~ command.join(" ") ~ " got " ~
             result.status.to!string ~ " expected " ~ status.to!string ~
             " output=" ~ result.output);
         foreach (secret; ["F13_SOURCE_SECRET", "F13_PATH_SECRET",
@@ -173,8 +174,8 @@ void main(string[] args) {
     auto unownedDecision = call(unownedRoute, 1);
     need(unownedDecision.canFind("retry-required") &&
         unownedDecision.canFind("document_id=") &&
-        !unownedDecision.canFind("sink_id="),
-        "unowned output has safe identity-free explanation");
+        unownedDecision.canFind("sink_id="),
+        "unowned output has safe opaque identity explanation");
     need(readText(unownedOutput) == "old bytes", "unowned output untouched");
     call(unownedRoute ~ ["--error-retry"], 0);
     need(readText(unownedOutput) == "new bytes", "explicit unowned retry");

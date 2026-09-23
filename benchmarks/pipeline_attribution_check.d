@@ -336,20 +336,29 @@ private string derivedDominantPartition(JSONValue sample) {
     return result;
 }
 
-private void validateRankedSymbols(JSONValue rows, long accepted, string label) {
+private void validateRankedSymbols(JSONValue rows, long accepted, string label,
+        bool leafOnly) {
     auto values = rows.array;
     need(values.length > 0 && values.length <= 20,
         label ~ " top-symbol cardinality differs");
     bool[string] seen;
     long previousCount = long.max;
+    long cumulative;
     string previousKey;
     foreach (index, row; values) {
         auto count = row["count"].integer;
         auto key = row["symbol"].str ~ "\t" ~ row["image"].str;
         need(row["symbol"].str.length && row["image"].str.length && count > 0 &&
+            (!leafOnly || count <= accepted) &&
             isFinite(number(row["fraction"])) && number(row["fraction"]) > 0 &&
+            (!leafOnly || number(row["fraction"]) <= 1) &&
             sameFraction(number(row["fraction"]), cast(double)count / accepted),
             "invalid " ~ label ~ " top-symbol accounting");
+        if (leafOnly) {
+            need(cumulative <= accepted - count,
+                "published leaf top-symbol counts exceed accepted stacks");
+            cumulative += count;
+        }
         need((key in seen) is null, "duplicate " ~ label ~ " top-symbol row");
         if (index != 0)
             need(previousCount > count ||
@@ -1149,12 +1158,19 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
         need(digest(trace["raw_private_sha256"].str),
             "supported stack raw digest is invalid");
         validateRankedSymbols(sample["inclusive_top"],
-            sample["accepted_stacks"].integer, "inclusive");
+            sample["accepted_stacks"].integer, "inclusive", false);
         validateRankedSymbols(sample["leaf_top"],
-            sample["accepted_stacks"].integer, "leaf");
+            sample["accepted_stacks"].integer, "leaf", true);
         need(sample["dominant_leaf_component"].str ==
                 derivedDominantLeafComponent(sample),
             "supported stack dominant component is not derived from leaf evidence");
+        long[string] visiblePartitions = ["kernel": 0L, "system": 0L,
+            "runtime": 0L, "project": 0L, "unresolved": 0L];
+        foreach (row; sample["leaf_top"].array) {
+            auto item = SymbolCount(row["symbol"].str, row["image"].str,
+                row["count"].integer);
+            visiblePartitions[partition(item)] += item.count;
+        }
         long total; double fraction = 0;
         foreach (name; ["kernel", "system", "runtime", "project", "unresolved"]) {
             auto part = sample["partitions"][name];
@@ -1165,6 +1181,8 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
                     cast(double)part["count"].integer /
                         sample["accepted_stacks"].integer),
                 "stack partition fraction is not derived from its count");
+            need(part["count"].integer >= visiblePartitions[name],
+                "stack partition count is below visible classified leaf evidence");
             total += part["count"].integer; fraction += number(part["fraction"]);
         }
         need(total == sample["accepted_stacks"].integer &&
@@ -1181,6 +1199,14 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
     } else need(trace["status"].str == "UNSUPPORTED" && trace["reason"].str.length &&
         trace["time_profiler_fallback"]["status"].str == "UNSUPPORTED",
         "unsupported trace lacks exact fallback evidence");
+}
+private bool exactGcUnsupportedFields(JSONValue item) {
+    return item["pool_size"]["status"].str == "UNSUPPORTED" &&
+        item["pool_size"]["reason"].str ==
+            "druntime profile summary exposes no pool size" &&
+        item["heap_size"]["status"].str == "UNSUPPORTED" &&
+        item["heap_size"]["reason"].str ==
+            "druntime profile summary exposes no heap size";
 }
 private void validateGc(JSONValue item, string binaryHash, string layout,
         bool mixed, long repetition, string sourceSha, string sourceTree,
@@ -1204,11 +1230,21 @@ private void validateGc(JSONValue item, string binaryHash, string layout,
         item["collection_time_milliseconds"].integer >= 0 &&
         item["semantics"].str ==
             "D runtime GC-only; excludes native and total-process allocations" &&
-        item["pool_size"]["status"].str == "UNSUPPORTED" &&
-        item["heap_size"]["status"].str == "UNSUPPORTED" &&
+        exactGcUnsupportedFields(item) &&
         digest(item["raw_private_sha256"].str) &&
         item["sanitized_sha256"].str == gcStructuredDigest(item),
         "invalid structured D-GC evidence");
+}
+private void validateNonclaims(JSONValue value) {
+    auto expected = ["no speedup or tuning claim", "no exact-call claim",
+        "no native-allocation claim",
+        "no direct timing comparison across source revisions",
+        "no cross-platform or greater-than-RAM claim"];
+    need(value.array.length == expected.length,
+        "attribution nonclaim cardinality differs");
+    foreach (index, item; value.array)
+        need(item.str == expected[index],
+            "attribution nonclaim set/order differs");
 }
 private bool sameRange(JSONValue left, JSONValue right) {
     foreach (key; ["minimum", "median", "maximum"])
@@ -1350,6 +1386,7 @@ private void validateReport(JSONValue report, string expectedHarness = "") {
     auto expectedDecision = !allSupported ? "UNAVAILABLE_ATTRIBUTION" :
         (allStable ? "STABLE_NAMED_HOTSPOT" : "DISTRIBUTED_COST");
     need(report["decision"].str == expectedDecision, "attribution decision is not derived");
+    validateNonclaims(report["nonclaims"]);
     noLeak(report.toString);
 }
 
@@ -1494,6 +1531,23 @@ private void selfTest() {
         t["sample"]["sanitized_sha256"] = sanitizedSampleDigest(t["sample"]);
     }, "duplicate leaf top row accepted");
     mustRejectTrace(trace, (ref JSONValue t) {
+        t["sample"]["leaf_top"][0]["count"] = 121L;
+        t["sample"]["leaf_top"][0]["fraction"] = 121.0 / 120.0;
+        t["sample"]["sanitized_sha256"] = sanitizedSampleDigest(t["sample"]);
+    }, "individual leaf count above accepted stacks accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
+        t["sample"]["leaf_top"][1]["count"] = 60L;
+        t["sample"]["leaf_top"][1]["fraction"] = 0.5;
+        t["sample"]["sanitized_sha256"] = sanitizedSampleDigest(t["sample"]);
+    }, "cumulative published leaf count above accepted stacks accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
+        t["sample"]["partitions"]["project"]["count"] = 119L;
+        t["sample"]["partitions"]["project"]["fraction"] = 119.0 / 120.0;
+        t["sample"]["partitions"]["unresolved"]["count"] = 1L;
+        t["sample"]["partitions"]["unresolved"]["fraction"] = 1.0 / 120.0;
+        t["sample"]["sanitized_sha256"] = sanitizedSampleDigest(t["sample"]);
+    }, "partition below visible classified leaf evidence accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
         t["sample"]["leaf_top"][0]["symbol"] = "replacement";
     }, "changed sanitized symbol accepted");
     JSONValue[] sequence;
@@ -1531,7 +1585,21 @@ private void selfTest() {
     mustThrow(() { need(gcEvidence["sanitized_sha256"].str ==
             gcStructuredDigest(gcEvidence), "GC evidence digest differs"); },
         "changed D-GC collection time accepted without raw-derived digest change");
-    writeln("canonical attribution self-test passed (30 release-active negatives)");
+    auto gcReason = parseGc(gc);
+    gcReason["pool_size"]["reason"] = "fabricated unsupported reason";
+    gcReason["sanitized_sha256"] = gcStructuredDigest(gcReason);
+    mustThrow(() { need(exactGcUnsupportedFields(gcReason),
+            "GC unsupported fields differ"); },
+        "self-consistent changed D-GC unsupported reason accepted");
+    auto nonclaims = JSONValue([JSONValue("no speedup or tuning claim"),
+        JSONValue("no exact-call claim"), JSONValue("no native-allocation claim"),
+        JSONValue("no direct timing comparison across source revisions"),
+        JSONValue("no cross-platform or greater-than-RAM claim")]);
+    validateNonclaims(nonclaims);
+    nonclaims[2] = "fabricated nonclaim";
+    mustThrow(() { validateNonclaims(nonclaims); },
+        "changed attribution nonclaim accepted");
+    writeln("canonical attribution self-test passed (35 release-active negatives)");
 }
 
 private void selfTestLiveSample(string self) {

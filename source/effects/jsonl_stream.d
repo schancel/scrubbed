@@ -41,9 +41,11 @@ final class JsonlFailure : Exception {
     size_t completedRecords;
     bool partialOutputPossible;
     Exception original;
+    string unitName;
 
     this(JsonlFailureKind kind, size_t line, DocumentId id, size_t completed,
-        bool partial, string detail, Exception original = null) {
+        bool partial, string detail, Exception original = null,
+        string unitName = "record") {
         super(detail);
         this.kind = kind;
         this.line = line;
@@ -51,6 +53,7 @@ final class JsonlFailure : Exception {
         completedRecords = completed;
         partialOutputPossible = partial;
         this.original = original;
+        this.unitName = unitName;
     }
 }
 
@@ -155,13 +158,15 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
         if (found is null) continue;
         if (found.type != JSONType.string)
             throw new JsonlFailure(JsonlFailureKind.invalidText, ordinal, id,
-                completed, false, "selected field is not text: " ~ field);
+                completed, false, "selected field is not text: " ~ field,
+                null, field);
         try {
             auto changed = transform(field, found.str, source);
             validate(changed);
             if (changed.length > limits.outputRecordBytes)
                 throw new JsonlFailure(JsonlFailureKind.outputLimit, ordinal, id,
-                    completed, false, "transformed text exceeds output cap");
+                    completed, false, "transformed text exceeds output cap",
+                    null, field);
             *found = JSONValue(changed);
         } catch (JsonlFailure error) { throw error; }
         catch (JsonlDecisionFailure error) {
@@ -182,7 +187,7 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
         catch (Exception error) {
             throw new JsonlFailure(JsonlFailureKind.invalidText, ordinal, id,
                 completed, false, "selected text rejected: " ~ error.msg,
-                error);
+                error, field);
         }
     }
     auto encoded = appender!string();

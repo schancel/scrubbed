@@ -410,7 +410,8 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
                 entered = true;
             }, (ref RuntimeExecutionV1 execution, ref const ubyte[32]) {
                 if (execution.hasDispatch)
-                    dispatchRecord = canonicalDispatchRecordV1(execution.dispatch);
+                    dispatchRecord = canonicalDispatchRecordV1(
+                        execution.dispatch, "root");
             }, dryRun);
         // Every valid compiled job emits at least one terminal event, so entering
         // publication is part of completing a root.
@@ -938,7 +939,8 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
         (ref RuntimeExecutionV1 execution, ref const ubyte[32] inputHash) {
             auto events = execution.events;
             if (execution.hasDispatch)
-                dispatchRecord = canonicalDispatchRecordV1(execution.dispatch);
+                dispatchRecord = canonicalDispatchRecordV1(
+                    execution.dispatch, "root");
             DurableEventPlan[] plans;
             bool[string] destinations;
             foreach (ordinal, ref event; events) {
@@ -1272,7 +1274,8 @@ int runApp(string[] args) {
                             "sink-write-failed" :
                             error.kind == JsonlFailureKind.outputLimit ?
                                 "resource-failed" : "decode-failed"),
-                    dispatchFailure.found ? dispatchFailure.reason : error.msg));
+                    dispatchFailure.found ? dispatchFailure.reason : error.msg,
+                    error.unitName));
             }
             stderr.writefln("JSONL %s at physical line %s, DocumentId %s: %s; %s prior records %s; current record %s",
                 error.kind, error.line, error.documentId.text, error.msg,

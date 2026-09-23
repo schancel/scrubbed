@@ -43,16 +43,21 @@ private Captured withInput(string[] command, string input) {
     return result;
 }
 
-private string dispatchRecord(Captured result) {
-    string record;
+private string[] dispatchRecords(Captured result) {
+    string[] records;
     foreach (line; (result.output ~ result.error).splitLines()) {
         if (!line.startsWith("EXPLAIN\t{")) continue;
-        check(!record.length, "exactly one dispatch explain record");
-        record = line["EXPLAIN\t".length .. $];
+        auto record = line["EXPLAIN\t".length .. $];
+        parseJSON(record);
+        records ~= record;
     }
-    check(record.length != 0, "dispatch explain record present");
-    parseJSON(record);
-    return record;
+    return records;
+}
+
+private string dispatchRecord(Captured result) {
+    auto records = dispatchRecords(result);
+    check(records.length == 1, "exactly one dispatch explain record");
+    return records[0];
 }
 
 int main(string[] args) {
@@ -198,17 +203,71 @@ int main(string[] args) {
         "JSONL dispatch failure has no current-record output");
 
     auto outputCappedJsonl = withInput([exe, "run", "--input", "-",
-        "--output", "-", "--jsonl-fields", "text", "--dataset-namespace",
+        "--output", "-", "--jsonl-fields",
+        "alpha-secret-field,beta-secret-field", "--dataset-namespace",
         "example", "--source-key", "cap8", "--max-jsonl-line-bytes", "1024",
         "--max-jsonl-output-bytes", "8", "--config",
         "scrubbed.dispatch.example.json", "--explain"],
-        `{"text":"hello"}` ~ "\n");
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n");
     auto outputCappedRecord = parseJSON(dispatchRecord(outputCappedJsonl));
     check(outputCappedJsonl.status == 1 && outputCappedJsonl.output.length == 0 &&
         outputCappedRecord["status"].str == "failure" &&
         outputCappedRecord["phase"].str == "resource" &&
         outputCappedRecord["code"].str == "resource-failed",
-        "JSONL output cap emits one committed failure record only");
+        "JSONL output cap after two decisions emits one failure only");
+
+    auto cardinalityArgs = [exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "alpha-secret-field,beta-secret-field",
+        "--dataset-namespace", "example", "--source-key", "cardinality",
+        "--max-jsonl-line-bytes", "1024", "--max-jsonl-output-bytes", "1024",
+        "--config", "scrubbed.dispatch.example.json", "--explain"];
+    auto noFields = withInput(cardinalityArgs, `{"other":"x"}` ~ "\n");
+    auto oneField = withInput(cardinalityArgs,
+        `{"alpha-secret-field":"a"}` ~ "\n");
+    auto twoFields = withInput(cardinalityArgs,
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n");
+    auto oneRecords = dispatchRecords(oneField);
+    auto twoRecords = dispatchRecords(twoFields);
+    check(noFields.status == 0 && dispatchRecords(noFields).length == 0 &&
+        oneField.status == 0 && oneRecords.length == 1 &&
+        twoFields.status == 0 && twoRecords.length == 2,
+        "JSONL absent/one/two selected-field record cardinality");
+    auto firstUnit = parseJSON(twoRecords[0]);
+    auto secondUnit = parseJSON(twoRecords[1]);
+    check(firstUnit["document_id"].str == secondUnit["document_id"].str &&
+        firstUnit["unit_id"].str != secondUnit["unit_id"].str &&
+        firstUnit["unit_id"].str.startsWith("unit:v1:") &&
+        !twoRecords[0].canFind("alpha-secret-field") &&
+        !twoRecords[0].canFind("beta-secret-field") &&
+        !twoRecords[1].canFind("alpha-secret-field") &&
+        !twoRecords[1].canFind("beta-secret-field"),
+        "JSONL unit IDs distinguish fields without leaking names");
+    auto replayRecords = dispatchRecords(withInput(cardinalityArgs,
+        `{"alpha-secret-field":"a","beta-secret-field":"b"}` ~ "\n"));
+    check(replayRecords.length == 2 &&
+        parseJSON(replayRecords[0])["unit_id"].str == firstUnit["unit_id"].str &&
+        parseJSON(replayRecords[1])["unit_id"].str == secondUnit["unit_id"].str,
+        "JSONL unit IDs are deterministic and replay-stable");
+
+    auto mixedArgs = [exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "alpha-secret-field,beta-secret-field",
+        "--dataset-namespace", "example", "--source-key", "mixed",
+        "--max-jsonl-line-bytes", "1024", "--max-jsonl-output-bytes", "1024",
+        "--config", cappedConfig, "--explain"];
+    auto secondFailed = withInput(mixedArgs,
+        `{"alpha-secret-field":"hey","beta-secret-field":"hello"}` ~ "\n");
+    auto secondFailure = parseJSON(dispatchRecord(secondFailed));
+    auto secondOnly = withInput([exe, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "beta-secret-field", "--dataset-namespace", "example",
+        "--source-key", "mixed", "--max-jsonl-line-bytes", "1024",
+        "--max-jsonl-output-bytes", "1024", "--config", cappedConfig,
+        "--explain"], `{"beta-secret-field":"hello"}` ~ "\n");
+    check(secondFailed.status == 1 && secondFailed.output.length == 0 &&
+        secondFailure["unit_id"].str ==
+            parseJSON(dispatchRecord(secondOnly))["unit_id"].str &&
+        secondFailure["outcome"].str == "plain-text" &&
+        secondFailure["code"].str == "decode-failed",
+        "JSONL second-field failure suppresses first speculative success");
 
     // Filename hints are non-authoritative, but must reach detection through
     // both local transports so warnings and all other explain metadata agree.

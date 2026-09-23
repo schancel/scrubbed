@@ -28,6 +28,11 @@ With `--explain`, v4 emits `EXPLAIN\t` followed by one canonical
 `scrubbed.dispatch.v1` JSON record. Records contain bounded outcome,
 provenance, accounting, and stable error vocabulary; they never include source
 or extracted bytes, archive entry names, paths, hints, or exception text.
+Each record represents one dispatched unit. Its fixed-size `unit_id` hashes
+the document identity plus the unit's logical output name, so JSONL fields on
+the same physical line remain distinct without exposing field names. Only
+present selected fields are dispatched and receive records; absent fields do
+not. Local and durable single-document routes use the same logical root unit.
 JSONL explain records use stderr so stdout remains whole-record JSONL.
 
 Durable v4 execution uses the existing manifest/journal schema and final-event

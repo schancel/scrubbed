@@ -19,6 +19,10 @@ ldc2 -i -O3 -release -Isource experiments/dispatch_shipping/check.d \
 The harness creates only deterministic synthetic UTF-8 fixtures in a fresh
 temporary directory, runs a warmup followed by three interleaved v3/v4 pairs,
 checks byte-for-byte tree equivalence and deliberate mismatch controls, writes
-canonical evidence, reopens and validates it, exercises stale/foreign evidence
-negatives, and removes its temporary corpus. The destination must not already
-exist.
+canonical evidence, reopens and binds every fixture, run, metric, accounting
+field, and digest to the observations from that execution, exercises
+stale/foreign/mutated evidence negatives, and removes its temporary corpus.
+Descriptor evidence requires at least one successful child sample. The copy
+probe uses the runtime's cumulative current-thread allocation counter and also
+rehashes the retained output after closing the mapped input. The destination
+must not already exist.

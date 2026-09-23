@@ -160,12 +160,14 @@ private ProcessObservation runChild(string[] command, string stdoutPath,
     output.close();
     diagnostics.close();
     shared bool stopped;
+    shared bool sampled;
     shared size_t sampledPeak;
     auto sampler = new Thread({
         while (!atomicLoad(stopped)) {
             auto observed = execute(["/usr/sbin/lsof", "-p",
                 child.processID.to!string]);
             if (observed.status == 0) {
+                atomicStore(sampled, true);
                 auto lines = observed.output.splitLines.length;
                 auto count = lines > 0 ? lines - 1 : 0;
                 auto prior = atomicLoad(sampledPeak);
@@ -186,6 +188,8 @@ private ProcessObservation runChild(string[] command, string stdoutPath,
     need(waited == child.processID && WIFEXITED(status) &&
         WEXITSTATUS(status) == 0,
         "shipping child failed: " ~ readText(stderrPath));
+    need(atomicLoad(sampled),
+        "shipping child descriptor sampling produced no valid observation");
     return ProcessObservation(wall.peek.total!"usecs",
         cpuMicros(usage.ru_utime), cpuMicros(usage.ru_stime), peakRss(usage),
         before, fdCount(), atomicLoad(sampledPeak));
@@ -252,6 +256,7 @@ private struct CopyEvidence {
 
 private CopyEvidence mappedCopyEvidence(string path) {
     auto sourceBytes = getSize(path);
+    auto sourceDigest = fileDigest(path);
     auto owner = openMappedFile(path, sourceBytes);
     scope(exit) owner.close();
     auto content = new Content([ContentPiece.borrow(owner.view(0,
@@ -278,6 +283,22 @@ private CopyEvidence mappedCopyEvidence(string path) {
     owner.close();
     need(text.content.size == sourceBytes,
         "owned extraction did not outlive the mapping");
+    SHA256 retainedDigest;
+    ubyte[64 * 1024] retainedBuffer;
+    size_t buffered;
+    foreach (_, piece; text.content.toContent) {
+        foreach (index; 0 .. piece.size) {
+            retainedBuffer[buffered++] = piece.at(index);
+            if (buffered == retainedBuffer.length) {
+                retainedDigest.put(retainedBuffer[]);
+                buffered = 0;
+            }
+        }
+    }
+    if (buffered) retainedDigest.put(retainedBuffer[0 .. buffered]);
+    need(toHexString!(LetterCase.lower)(retainedDigest.finish()).idup ==
+            sourceDigest,
+        "owned extraction bytes changed after the mapping closed");
     return CopyEvidence(sourceBytes, allocated, text.content.size, 0);
 }
 
@@ -376,7 +397,9 @@ private void needKeys(ref JSONValue value, string[] expected, string label) {
 }
 
 private void validateEvidence(string text, string binaryHash,
-        string v3Hash, string v4Hash) {
+        string v3Hash, string v4Hash,
+        ref const FixtureEvidence[] expectedFixtures,
+        ref const CopyEvidence expectedCopies) {
     auto root = parseJSON(text);
     needKeys(root, ["copy_accounting", "fixtures", "method", "schema",
         "shipping_binary_sha256", "v3_config_sha256", "v4_config_sha256",
@@ -411,13 +434,27 @@ private void validateEvidence(string text, string binaryHash,
         copies["nonpayload_gc_allocation_bytes"].integer ==
             copies["extractor_gc_allocated_bytes"].integer -
             copies["mapped_source_bytes"].integer &&
-        copies["second_whole_payload_copy_count_upper_bound"].integer == 0,
+            copies["second_whole_payload_copy_count_upper_bound"].integer == 0,
         "copy-accounting invariant mismatch");
-    foreach (fixture; root["fixtures"].array) {
+    need(copies["mapped_source_bytes"].integer == expectedCopies.sourceBytes &&
+        copies["extractor_gc_allocated_bytes"].integer ==
+            expectedCopies.gcAllocatedBytes &&
+        copies["retained_output_bytes"].integer == expectedCopies.retainedBytes,
+        "copy accounting does not match the observed probe");
+    foreach (fixtureIndex, fixture; root["fixtures"].array) {
+        auto expectedFixture = expectedFixtures[fixtureIndex];
         needKeys(fixture, ["accounting_deltas_vs_v3", "bytes_each",
             "documents", "input_bytes", "input_concatenated_sha256",
             "input_tree_sha256", "label", "runs", "v3_identity",
             "v4_identity"], "fixture");
+        need(fixture["label"].str == expectedFixture.label &&
+            fixture["documents"].integer == expectedFixture.count &&
+            fixture["bytes_each"].integer == expectedFixture.bytesEach &&
+            fixture["input_bytes"].integer == expectedFixture.input.bytes &&
+            fixture["input_tree_sha256"].str == expectedFixture.input.tree &&
+            fixture["input_concatenated_sha256"].str ==
+                expectedFixture.input.concatenated,
+            "fixture identity or dimensions do not match observation");
         need(fixture["v3_identity"].str == "job:v3:" ~ v3Hash &&
             fixture["v4_identity"].str == "job:v4:" ~ v4Hash,
             "job identity mismatch");
@@ -437,7 +474,8 @@ private void validateEvidence(string text, string binaryHash,
         auto tree = fixture["runs"].array[0]["tree_sha256"].str;
         auto concatenated = fixture["runs"].array[0]["concatenated_sha256"].str;
         size_t v3Runs, v4Runs;
-        foreach (run; fixture["runs"].array) {
+        foreach (runIndex, run; fixture["runs"].array) {
+            auto expectedRun = expectedFixture.runs[runIndex];
             needKeys(run, ["available_bytes", "child_fd_peak",
                 "concatenated_sha256", "dispatch_records",
                 "emitted_source_bytes", "fd_after", "fd_before",
@@ -448,6 +486,31 @@ private void validateEvidence(string text, string binaryHash,
             need(run["tree_sha256"].str == tree &&
                 run["concatenated_sha256"].str == concatenated,
                 "evidence contains divergent exact outputs");
+            need(run["variant"].str == expectedRun.variant &&
+                run["ordinal"].integer == expectedRun.ordinal &&
+                run["wall_us"].integer == expectedRun.process.wallUs &&
+                run["user_cpu_us"].integer == expectedRun.process.userUs &&
+                run["system_cpu_us"].integer == expectedRun.process.systemUs &&
+                run["peak_rss_bytes"].integer ==
+                    expectedRun.process.peakRssBytes &&
+                run["fd_before"].integer == expectedRun.process.fdBefore &&
+                run["fd_after"].integer == expectedRun.process.fdAfter &&
+                run["child_fd_peak"].integer ==
+                    expectedRun.process.childFdPeak &&
+                run["dispatch_records"].integer ==
+                    expectedRun.accounting.records &&
+                run["available_bytes"].integer ==
+                    expectedRun.accounting.availableBytes &&
+                run["inspected_bytes"].integer ==
+                    expectedRun.accounting.inspectedBytes &&
+                run["emitted_source_bytes"].integer ==
+                    expectedRun.accounting.emittedSourceBytes &&
+                run["output_bytes"].integer == expectedRun.output.bytes &&
+                run["output_files"].integer == expectedRun.output.files &&
+                run["tree_sha256"].str == expectedRun.output.tree &&
+                run["concatenated_sha256"].str ==
+                    expectedRun.output.concatenated,
+                "run evidence does not match the observed execution");
             if (run["variant"].str == "v3") ++v3Runs;
             else if (run["variant"].str == "v4") ++v4Runs;
             else need(false, "unknown run variant");
@@ -587,32 +650,50 @@ void main(string[] args) {
     output.put(`]}`);
     auto evidence = output.data;
     need(!evidence.canFind(root), "evidence leaked temporary paths");
-    validateEvidence(evidence, binaryHash, v3Hash, v4Hash);
+    validateEvidence(evidence, binaryHash, v3Hash, v4Hash, fixtures, copies);
     write(evidencePath, evidence ~ "\n");
     auto reopened = readText(evidencePath);
     need(reopened == evidence ~ "\n", "evidence reopen changed bytes");
-    validateEvidence(reopened, binaryHash, v3Hash, v4Hash);
+    validateEvidence(reopened, binaryHash, v3Hash, v4Hash, fixtures, copies);
 
     expectedFailure(() => validateEvidence(reopened, "0".replicate(64),
-        v3Hash, v4Hash), "binary digest");
+        v3Hash, v4Hash, fixtures, copies), "binary digest");
     expectedFailure(() => validateEvidence(reopened, binaryHash,
-        "0".replicate(64), v4Hash), "config digest");
+        "0".replicate(64), v4Hash, fixtures, copies), "config digest");
     expectedFailure(() => validateEvidence(reopened.replace(schema,
-        "scrubbed.dispatch-shipping-evidence.v0"), binaryHash, v3Hash, v4Hash),
+        "scrubbed.dispatch-shipping-evidence.v0"), binaryHash, v3Hash, v4Hash,
+        fixtures, copies),
         "schema identity");
     expectedFailure(() => validateEvidence(replaceFirst(reopened,
-        `"version":1`, `"version":2`), binaryHash, v3Hash, v4Hash),
+        `"version":1`, `"version":2`), binaryHash, v3Hash, v4Hash,
+        fixtures, copies),
         "schema version");
     expectedFailure(() => validateEvidence(replaceFirst(reopened,
         `"version":1`, `"version":1,"foreign":true`), binaryHash, v3Hash,
-        v4Hash), "exact schema");
+        v4Hash, fixtures, copies), "exact schema");
     expectedFailure(() => validateEvidence(replaceFirst(reopened,
         "job:v4:" ~ v4Hash, "job:v4:" ~ "e".replicate(64)), binaryHash,
-        v3Hash, v4Hash), "job identity");
+        v3Hash, v4Hash, fixtures, copies), "job identity");
     auto stale = replaceFirst(reopened, fixtures[0].runs[0].output.tree,
         "f".replicate(64));
-    expectedFailure(() => validateEvidence(stale, binaryHash, v3Hash, v4Hash),
-        "stale output digest");
+    expectedFailure(() => validateEvidence(stale, binaryHash, v3Hash, v4Hash,
+        fixtures, copies), "stale output digest");
+    expectedFailure(() => validateEvidence(replaceFirst(reopened,
+        `"label":"many-small"`, `"label":"few-large"`), binaryHash,
+        v3Hash, v4Hash, fixtures, copies), "fixture label/order");
+    expectedFailure(() => validateEvidence(replaceFirst(reopened,
+        `"documents":4096`, `"documents":4095`), binaryHash, v3Hash,
+        v4Hash, fixtures, copies), "fixture dimensions");
+    expectedFailure(() => validateEvidence(replaceFirst(reopened,
+        `"ordinal":0`, `"ordinal":9`), binaryHash, v3Hash, v4Hash,
+        fixtures, copies), "run ordinal/order");
+    expectedFailure(() => validateEvidence(replaceFirst(reopened,
+        `"wall_us":` ~ fixtures[0].runs[0].process.wallUs.to!string,
+        `"wall_us":-1`), binaryHash, v3Hash, v4Hash, fixtures, copies),
+        "run measurement");
+    expectedFailure(() => validateEvidence(replaceFirst(reopened,
+        `"dispatch_records":0`, `"dispatch_records":1`), binaryHash,
+        v3Hash, v4Hash, fixtures, copies), "run accounting");
 
     writeln("dispatch shipping evidence: wrote ", evidencePath);
     writeln("dispatch shipping evidence: copy probe source_bytes=",

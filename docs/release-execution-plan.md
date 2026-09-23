@@ -11,9 +11,10 @@ own scoped contracts and review evidence.
 A user can describe one ordered document pipeline through either CLI flags or
 JSON, run it over local files, directory trees, JSONL, or supported WARC/WET
 inputs, and produce content plus independently routed metadata/annotations.
-For heterogeneous files, a bounded detector may dispatch one input to one
-type-specific extraction subpipeline; accepted routes converge on the same
-text-document contract before shared text filters run.
+For heterogeneous files, the explicit opt-in v4 root now dispatches one input
+to one bounded action; accepted routes converge on the same text-document
+contract before shared text filters run. Only `core-plain-text/v1` ships, so
+the broader type-specific extractors in R3 remain future work.
 The same document bytes should not need to bounce through several Python
 processes and intermediate files for Unicode repair, HTML extraction,
 normalization, metadata, language/quality/PII decisions, deduplication,
@@ -45,10 +46,12 @@ Parent: [#148](https://github.com/schancel/scrubbed/issues/148).
    stage during a documented compatibility window, then remove duplicate
    parsing/orchestration once equivalence and migration tests prove the new
    path. One config fact must have one owner.
-5. **Add bounded typed dispatch.** After #148, #155 extends the composition
-   root with media/container detection and finite route selection. This is a
-   one-of choice before a common text-document boundary, not document splitting,
-   a general branch/join graph, or a parser-specific switch in the CLI.
+5. **Add bounded typed dispatch — complete for the core text route.** #155
+   extends the composition root with strict v4 JSON/tokens, bounded
+   media/container detection, finite route selection, structured records, and
+   ordinary/JSONL/durable execution. This is a one-of choice before a common
+   text-document boundary, not document splitting, a general branch/join graph,
+   or a parser-specific switch in the CLI. Specialist routes remain in R3.
 
 Gate: actual-binary CLI/JSON equivalence, identity/output routing, invalid
 ordering/options, empty/no-op/same-file inputs, split/reject/quarantine,
@@ -56,6 +59,9 @@ concurrent reuse, restart/error reporting, and an exact-output before/after
 resource benchmark. The heterogeneous-file slice additionally proves bounded
 signature/container inspection, misleading extension/MIME cases, stable source
 identity, explicit unsupported-input policy, and no duplicate whole-input read.
+The committed D-only O3 evidence covers deterministic many-small and few-large
+text layouts, exact v3/v4 output equality, resource/accounting observations,
+and mapped-input copy accounting. It is descriptive and sets no speed threshold.
 
 ### R2 — complete the built-in transform path
 
@@ -140,9 +146,13 @@ evidence. Prove a safely provisioned 1-TiB local run under #60 before using
    macOS clean-machine packages first; Windows only when its POSIX-dependent
    paths have an explicit port contract. Bundle exact native/transitive
    licenses, checksums, completions, and clean-`PATH` execution tests.
-2. [#62](https://github.com/schancel/scrubbed/issues/62): executable examples
-   for repair, saved HTML, WARC/WET, metadata, dedup/PII/quality decisions,
-   chunking, and exports. CLI and JSON examples must describe the same plans.
+2. [#62](https://github.com/schancel/scrubbed/issues/62): stage the executable
+   pipeline gallery and small redistributable demonstration corpus from only
+   supported commands. Repair, saved HTML, and JSONL can land in the first
+   reviewed slice; add each later route only after its production owner lands.
+   In particular, the PII report/mask/redact example waits for #180. CLI and
+   JSON examples must describe equivalent plans, and unsupported modes stay
+   explicit rather than appearing as successful demos.
 3. Publish signed/checksummed GitHub release artifacts and the package-manager
    manifests justified by the proven platform matrix. Publish benchmark raw
    data and limitations with the release.

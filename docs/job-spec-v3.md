@@ -86,11 +86,11 @@ change the committed root prefix. A split sink failure reports the committed
 event prefix and partial-write uncertainty; repeated or trailing separators in
 derived output names are rejected rather than normalized away.
 
-This format is currently a linear document pipeline, not a general workflow
-language. #155 may add a bounded one-of dispatch declaration: detect the input
-media/container type, choose exactly one named extraction subpipeline, then
-converge on the common text-document contract. That is not
-`StageDecision.split`, fan-out, a join, or a general DAG. The current schema
-does not yet implement or accept it. Machine scheduling, transport,
-credentials, model downloads, and arbitrary plugin code do not belong in the
-local composition root.
+This format remains a linear document pipeline, not a general workflow
+language. Explicit opt-in dispatch is the separate additive v4 root; its
+`common` member is one complete v3 job. V3 parsing, canonical bytes,
+`job:v3:` identity, defaults, predecessor lowerings, and execution are
+unchanged by v4. Dispatch is one bounded choice before the common text-document
+boundary, not `StageDecision.split`, fan-out, a join, or a general DAG.
+Machine scheduling, transport, credentials, model downloads, and arbitrary
+plugin code do not belong in either local composition root.

@@ -9,11 +9,12 @@ scrubbed run --input - --output - --jsonl-fields text,title \
 ```
 
 All five JSONL options and both `-` endpoints are required. Field names are
-unique top-level JSON keys. The default, `--filters`, v1 `--config`, v3
-`--config`, and ordered composition tokens all lower to one canonical job that
-is compiled before stdin is read or stdout is written. File scheduling
-options, `--list-filters`,
-and `--explain` are unavailable in this mode. `--validate` checks options,
+unique top-level JSON keys. The default, `--filters`, v1/v3 `--config`, ordered
+v3 composition tokens, and explicit v4 JSON/tokens all compile before stdin is
+read or stdout is written. File scheduling options and `--list-filters` are
+unavailable in this mode. Linear v3 rejects `--explain`; explicit v4 accepts it
+and emits one bounded `scrubbed.dispatch.v1` record per present selected field
+to stderr, leaving stdout as whole-record JSONL. `--validate` checks options,
 identity, config, and filters without reading stdin or writing stdout.
 `--dry-run` processes records and reports the bounded count to stderr but
 writes no stdout. Normal stdout contains only JSONL records; status and
@@ -59,8 +60,11 @@ top-level field names, a text-transform delegate, and positive byte caps.
 `effects.stdio_stream` binds the same operation to caller-owned `File` handles
 or process stdin/stdout. The locator-aware variant supplies the same validated
 line `SourceLocator` to `effects.jsonl_job`, which executes one selected field
-through the existing compiled-job runner and copies its sole mapped result
-before the input owner closes. JSON framing and value preservation remain here;
+through the selected compiled v3 or v4 runtime plan and copies its sole mapped
+result before the input owner closes. V4 derives a fixed-size unit ID from the
+document identity and zero-based configured field ordinal; absent fields emit
+no dispatch record, and whole-record failures use a distinct record-domain ID.
+JSON framing and value preservation remain here;
 there is no second JSON parser or legacy execution path on the shipping route.
 
 Each physical line is one object. LF and CRLF are accepted, as is a final

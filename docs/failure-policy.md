@@ -11,6 +11,14 @@ outstanding state for the current canonical config and never renders private
 sink labels. The predecessor policy below remains relevant to retained v1/v2
 offline state but is no longer the canonical durable writer.
 
+Explicit v4 dispatch follows the same root-last durable policy. Reject and
+quarantine are acknowledged document outcomes with no output; route and pass
+publish exactly one root. Detection/refinement/extractor/common failures map to
+bounded inspect/decode/filter phases and stable codes. Explain/error records
+may carry bounded outcome/provenance/accounting, but never raw paths, hints,
+source bytes, extracted bytes, archive entry names, private sink keys, or
+free-form exception text. V3 behavior and exit meanings are unchanged.
+
 The opt-in local manifest is the durable failure ledger. An admitted file may
 fail its read, decode, filter, or sink step and allow later files to continue
 only after its exact `DocumentId`/sink row becomes `failed` or `uncertain` and

@@ -10,7 +10,7 @@ issue. This file remains the status record for implemented work.
 The ordered path to the first public package release is maintained in
 [`docs/release-execution-plan.md`](docs/release-execution-plan.md). Its critical
 path is canonical CLI/JSON composition (#148), complete built-in transform
-wiring, typed document detection/dispatch (#155), extraction/curation parity,
+wiring, the landed typed document dispatch boundary (#155), extraction/curation parity,
 full-pipeline profiling and tuning, then clean-machine packages and executable
 examples. Direct S3/distributed execution and wholesale specialist-parser
 reimplementation are deferred and do not gate that release; bounded adapters
@@ -150,14 +150,20 @@ for explicitly supported document formats are tracked separately (#67, #156).
       compile and execute that model. Default, `--filters`, and v1 JSON remain
       edge lowerings; predecessor execution/configuration factories and the v2
       stage facade are deleted and guarded by a D-only reachability check.
-- [ ] Detect each input's media/container type and dispatch it to exactly one
+- [x] Detect each input's media/container type and dispatch it to exactly one
       configured extraction subpipeline before common text transforms (#155).
-      Detection must combine bounded byte/container evidence with untrusted
-      MIME/extension hints, preserve the original `Document` identity and
-      output name, and converge accepted routes on one versioned text-document
-      contract. This is finite typed choice, not `StageDecision.split`, a
-      general workflow DAG, or a join. Unknown, ambiguous, encrypted, malformed,
-      and unsupported records must follow an explicit structured policy.
+      Explicit opt-in v4 JSON and ordered tokens compile to the same `job:v4:`
+      identity and run through ordinary local, selected-field JSONL,
+      manifest-v2, and failure-journal-v3 paths without changing v3 behavior.
+      Detection and ZIP refinement are bounded; every outcome has an explicit
+      route/pass/reject/quarantine action, source identity and output name are
+      preserved, and routed content crosses one extracted-text contract before
+      the common v3 job runs once. The shipping extractor registry contains
+      only `core-plain-text/v1`; Office/PDF/image/archive extraction remains
+      separate work under #67/#156. Canonical explain/error records are bounded
+      and omit paths, hints, source bytes, entry names, and exception text.
+      The O3/release many-small/few-large evidence is descriptive and establishes
+      exact v3/v4 output equivalence and accounting, not a speed win.
 - [x] Config file using JSON via Phobos `std.json` (no added dependency),
       specifying canonical v3 stages, filters, and typed options. Mojibake
       exposes `encodings` and `max-passes`; unknown keys are rejected by
@@ -463,6 +469,12 @@ is useful, but it is not sufficient on its own.
       compiler in one emulated container; Windows and HTML packaging remain
       untested. This is not a public release, fully static binary, or proof of
       bit-for-bit reproducible builds.
+- [ ] Publish the #62 executable pipeline gallery and redistributable
+      demonstration corpus only for shipping commands. Repair, HTML, and JSONL
+      may form the first reviewed slice; PII report/mask/redact waits for #180,
+      and later WARC, specialist-adapter, curated-shard, or model examples wait
+      for their production owners. Unsupported routes remain explicit rather
+      than being staged as successful examples.
 - [~] Stress interruption, disk-full, invalid UTF-8, permission failures,
       changing inputs, and process restart. F12's local-manifest release-active
       faults and earlier process-kill probes cover bounded subsets without a

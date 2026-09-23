@@ -30,6 +30,26 @@ struct ContentPiece {
         return piece;
     }
 
+    version (MaterializationWorkProbe) {
+        /// Caller-owned evidence for the retained replacement boundary. This
+        /// API and its accounting branch do not exist in ordinary builds.
+        static ContentPiece ownMeasured(const(ubyte)[] bytes,
+                ref ContentPieceOwnWorkV1 work) {
+            import core.memory : GC;
+
+            auto before = GC.allocatedInCurrentThread;
+            auto result = own(bytes);
+            auto after = GC.allocatedInCurrentThread;
+            enforce(after >= before, "content-piece GC counter moved backwards");
+            ++work.calls;
+            work.sourceBytes += bytes.length;
+            work.retainedBytes += result.size;
+            work.logicalCopiedBytes += bytes.length;
+            work.gcAllocatedBytes += after - before;
+            return result;
+        }
+    }
+
     bool isBorrowed() const { return kind == Kind.borrowed; }
     bool isOwned() const { return kind == Kind.owned; }
 
@@ -55,6 +75,17 @@ struct ContentPiece {
         part.offset += start;
         part.count = length;
         return part;
+    }
+}
+
+version (MaterializationWorkProbe) {
+    /// Fixed-size scalar accounting; callers choose its storage and lifetime.
+    struct ContentPieceOwnWorkV1 {
+        ulong calls;
+        ulong sourceBytes;
+        ulong retainedBytes;
+        ulong logicalCopiedBytes;
+        ulong gcAllocatedBytes;
     }
 }
 

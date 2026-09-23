@@ -304,8 +304,80 @@ struct Pipeline {
         return text;
     }
 
+    version (MaterializationWorkProbe) {
+        /// Run the unchanged filter decisions with caller-owned boundary
+        /// accounting. Ordinary builds contain neither this entry point nor
+        /// the GC/counter branches.
+        string runMeasured(string text, ref PipelineMaterializationWorkV1 work) const {
+            import core.memory : GC;
+
+            size_t index;
+            while (index < stages.length) {
+                if (stages[index].streaming.push !is null) {
+                    StreamingFilter[maxFusedStages] fused;
+                    size_t fusedLength;
+                    while (index < stages.length &&
+                           stages[index].streaming.push !is null &&
+                           fusedLength < maxFusedStages) {
+                        fused[fusedLength++] = stages[index].streaming;
+                        ++index;
+                    }
+                    auto inputBytes = text.length;
+                    auto before = GC.allocatedInCurrentThread;
+                    text = fusedStreamingRange(text,
+                        fused[0 .. fusedLength]).to!string;
+                    auto after = GC.allocatedInCurrentThread;
+                    enforce(after >= before,
+                        "pipeline GC counter moved backwards");
+                    auto boundary = &work.fusedScalar;
+                    ++boundary.calls;
+                    boundary.inputBytes += inputBytes;
+                    boundary.outputBytes += text.length;
+                    boundary.logicalMaterializedBytes += text.length;
+                    boundary.gcAllocatedBytes += after - before;
+                    continue;
+                }
+                auto stage = stages[index++];
+                auto input = text;
+                auto before = GC.allocatedInCurrentThread;
+                text = stage.configured.isValid
+                    ? stage.configured(text) : stage.plain(text);
+                auto after = GC.allocatedInCurrentThread;
+                enforce(after >= before,
+                    "pipeline GC counter moved backwards");
+                auto boundary = &work.wholeTextFilter;
+                ++boundary.calls;
+                boundary.inputBytes += input.length;
+                boundary.outputBytes += text.length;
+                boundary.gcAllocatedBytes += after - before;
+                if (text.ptr == input.ptr && text.length == input.length)
+                    boundary.aliasedOutputBytes += text.length;
+                else
+                    boundary.distinctOutputBytes += text.length;
+            }
+            return text;
+        }
+    }
+
     const(string)[] names() const {
         return stageNames;
+    }
+}
+
+version (MaterializationWorkProbe) {
+    struct PipelineBoundaryWorkV1 {
+        ulong calls;
+        ulong inputBytes;
+        ulong outputBytes;
+        ulong logicalMaterializedBytes;
+        ulong gcAllocatedBytes;
+        ulong aliasedOutputBytes;
+        ulong distinctOutputBytes;
+    }
+
+    struct PipelineMaterializationWorkV1 {
+        PipelineBoundaryWorkV1 fusedScalar;
+        PipelineBoundaryWorkV1 wholeTextFilter;
     }
 }
 

@@ -159,5 +159,9 @@ SIGKILL checkpoints only into the second, separate release-mode D executable;
 the shipping `dub build` binary has no kill-marker behavior. The actual
 shipping binary is exercised by the live post-plan SIGKILL test; the separate
 release harness deterministically covers after-plan, before-publish,
-after-publish/before-DB-commit, and after-commit windows. Neither proof is a
-power-loss guarantee.
+after-publish/before-DB-commit, and after-commit windows. It also drives a
+three-child compiled split through argparse and durable execution, proves the
+complete event set precedes publication, recovers committed/uncertain/planned
+siblings without rewriting the committed inode, and checks reject/quarantine
+as replay-stable no-output terminals in manifest v2 and journal v3. Neither
+proof is a power-loss guarantee.

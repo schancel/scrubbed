@@ -2,10 +2,11 @@
 module experiments.html_parser.cli_check;
 
 import domain.document : Document, OutputName, SourceLocator;
-import effects.html_tree_json_stage : htmlTreeJsonPlan;
+import composition.compiler : compileJob;
+import effects.html_tree_json_stage;
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
 import effects.html_tree_export : HtmlTreeOutputLimit, serializeTreeJson;
-import stages.config : buildConfigV2;
+import job.json : parseJobJson;
 import stages.registry : availableStages;
 import core.stdc.stdlib : free;
 import core.sys.posix.stdlib : realpath;
@@ -41,10 +42,14 @@ int main(string[] args) {
     need(args.length == 2, "usage: cli_check <release executable>");
     need(availableStages().find("html-tree-json") !is null,
         "concrete effects module failed self-registration");
-    need(htmlTreeJsonPlan().stages.length == 1,
-        "registered stage did not resolve through buildConfigV2");
+    auto fixtureSpec = parseJobJson(`{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-tree-json","options":{},"filters":[]}]}`);
+    need(compileJob(fixtureSpec).stages.length == 1,
+        "registered stage did not resolve through canonical compiler");
     bool unknownRejected;
-    try buildConfigV2(`{"version":2,"stages":[{"name":"unknown-html-stage"}]}`);
+    auto unknownSpec = parseJobJson(`{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"unknown-html-stage","options":{},"filters":[]}]}`);
+    try compileJob(unknownSpec);
     catch (Exception) unknownRejected = true;
     need(unknownRejected, "unknown stage resolved");
     auto syntheticDocument = Document(SourceLocator("local-html:v1", "/tmp", "synthetic"),
@@ -142,8 +147,9 @@ int main(string[] args) {
     need(parseJSON(raisedOutput)["nodes"].array[$ - 1]["text"].str == "Hi",
         "raised CLI limit did not preserve HTML text");
     auto htmlConfig = buildPath(root, "html-config.json");
-    write(htmlConfig, `{"version":2,"stages":[{"name":"html-tree-json",` ~
-        `"options":{"max-html-bytes":2097152}}]}`);
+    write(htmlConfig, `{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-tree-json","options":` ~
+        `{"max-html-bytes":2097152},"filters":[]}]}`);
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json", "--config", htmlConfig], 0, "1 published");
     need(readText(output) == raisedOutput, "JSON and CLI HTML limits differ");
@@ -159,12 +165,14 @@ int main(string[] args) {
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json", "--config=", "--max-html-bytes", "2097152"],
         2, "nonempty path");
-    write(htmlConfig, `{"version":2,"stages":[{"name":"html-tree-json",` ~
-        `"options":{"max-html-bytes":8388609}}]}`);
+    write(htmlConfig, `{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-tree-json","options":` ~
+        `{"max-html-bytes":8388609},"filters":[]}]}`);
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json", "--config", htmlConfig], 2, "limit");
-    write(htmlConfig, `{"version":2,"stages":[{"name":"html-markdown",` ~
-        `"options":{"max-html-bytes":2097152}}]}`);
+    write(htmlConfig, `{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-markdown","options":` ~
+        `{"max-html-bytes":2097152},"filters":[]}]}`);
     expect(executable, ["extract", "--input", input, "--output", output,
         "--format", "tree-json", "--config", htmlConfig], 2, "exactly one");
     need(readText(output) == raisedOutput, "invalid limit changed prior output");
@@ -215,8 +223,9 @@ int main(string[] args) {
     auto expandedResult = readText(expandedOutput);
     need(parseJSON(expandedResult)["nodes"].array[$ - 1]["text"].str == "Hi",
         "raised decoded cap did not publish the page");
-    write(htmlConfig, `{"version":2,"stages":[{"name":"html-tree-json",` ~
-        `"options":{"max-html-bytes":2097152,"charset":"utf-16le"}}]}`);
+    write(htmlConfig, `{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-tree-json","options":` ~
+        `{"max-html-bytes":2097152,"charset":"utf-16le"},"filters":[]}]}`);
     expect(executable, ["extract", "--input", input, "--output", expandedOutput,
         "--format", "tree-json", "--config", htmlConfig], 0, "1 published");
     need(readText(expandedOutput) == expandedResult,

@@ -54,17 +54,16 @@ for explicitly supported document formats are tracked separately (#67, #156).
       1-MiB payload and maximum 65,536 accepted chunks, including all JSONL
       rows, under an explicit 256-MiB RSS ceiling. Pipeline/CLI wiring is a
       separate integration concern; the accepted opt-in #42 outcome is complete.
-- [~] Standalone document stage contracts now cover ordered map, reject,
+- [x] Document stage contracts cover ordered map, reject,
       quarantine, split, cancellation and resource declarations, with tagged
-      derived-child IDs. Typed stage self-registration and strict nested v2
-      config validation are tested; v2 execution is not wired into the CLI.
-      These stages are not wired to the local bounded file scheduler, and a
-      stage result currently batches its events.
-- [~] Typed source/parser/sink ports and a per-document effects runner now
+      derived-child IDs. Typed stage self-registration and canonical v3
+      compilation are wired into the local bounded file scheduler. A stage
+      result still batches its events.
+- [x] Typed source/parser/sink ports and a per-document effects runner
       exercise the same ordered path with in-memory and faulting D adapters.
       The file-mapping opener lives in the effects layer, not domain. The
-      runner is tested but not wired into the CLI; corpus backpressure and
-      throughput remain unproven.
+      runner is wired into canonical CLI routes; corpus-scale throughput
+      remains a separate profiling obligation under #59.
 - [~] A strict byte-to-Unicode facade in `source/text/decoding.d` decodes
       UTF-8 and BOM/declared UTF-16 LE/BE, with typed quarantine for malformed,
       conflicting, unsupported, or binary-looking input. It is tested but not
@@ -135,18 +134,20 @@ for explicitly supported document formats are tracked separately (#67, #156).
       lazily with `stripControlChars`; registry adapters materialize strings.
 
 ## Phase 3 — configurability
-- [~] Canonical document/filter composition (#148): the pure v3 `JobSpec`,
+- [x] Canonical document/filter composition (#148): the v3 `JobSpec`,
       strict duplicate-aware JSON parser, canonical serializer/identity,
       ordered typed CLI-token lowering, and v1/default lowering are tested.
       Stable stage-instance IDs are distinct from registered implementation
       names. Filter/stage resolution is injectable; the pure composition
       compiler retains instance IDs and identity, validates option types/order
       and filter placement, and `fix-mojibake` has a registry-owned typed
-      option schema plus its exact v1 adapter. A pure one-stage executor now
+      option schema. A pure one-stage executor
       applies before/after filters with explicit UTF-8 materialization and
-      preserves borrowed content for empty chains. The
-      shipping CLI and execution engine are not switched yet; v3 flags/config
-      must not be advertised as available until that slice lands.
+      preserves borrowed content for empty chains. Ordinary and durable local
+      file/tree, selected-field JSONL, extract, and metadata routing now
+      compile and execute that model. Default, `--filters`, and v1 JSON remain
+      edge lowerings; predecessor execution/configuration factories and the v2
+      stage facade are deleted and guarded by a D-only reachability check.
 - [ ] Detect each input's media/container type and dispatch it to exactly one
       configured extraction subpipeline before common text transforms (#155).
       Detection must combine bounded byte/container evidence with untrusted
@@ -156,10 +157,10 @@ for explicitly supported document formats are tracked separately (#67, #156).
       general workflow DAG, or a join. Unknown, ambiguous, encrypted, malformed,
       and unsupported records must follow an explicit structured policy.
 - [x] Config file using JSON via Phobos `std.json` (no added dependency),
-      specifying the filter chain and per-filter options. Implemented with
-      ordered string/object entries; mojibake exposes `encodings` and
-      `max-passes`; unknown keys are rejected by registry-owned option
-      schemas. See `scrubbed.example.json`.
+      specifying canonical v3 stages, filters, and typed options. Mojibake
+      exposes `encodings` and `max-passes`; unknown keys are rejected by
+      registry-owned schemas. See `scrubbed.example.json`. Version-1 filter
+      JSON remains a compatibility edge lowering.
 - [x] Add CLI `--validate`, `--dry-run`, and per-file `--explain` inspection
       without output mutation in validate/dry-run modes. Explain reports
       changed/unchanged/failure with bounded pending-path tracking even when

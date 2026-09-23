@@ -2,8 +2,9 @@
 
 Issue #148 replaces two disconnected execution descriptions with one typed job
 specification. This document pins predecessor behavior during the compatibility
-window. Ordinary and durable local file/tree plus selected-field JSONL
-processing now lower these forms into v3 and use compiled effects bridges.
+window. Ordinary and durable local file/tree, selected-field JSONL, extract,
+and metadata routing now compile canonical v3 jobs. Supported predecessor
+selectors lower at the edge and have no independent execution model.
 
 ## Current compatibility boundary
 
@@ -24,9 +25,9 @@ configuration must not create or replace a destination.
 
 The compatibility window lowers all three forms into one implicit document
 transform stage on the switched route. It does not retain a second execution
-model there. Removal
-requires actual-binary migration diagnostics, exact-output equivalence, and
-proof that no shipping route reaches the predecessor parser/orchestrator.
+model there. Actual-binary migration diagnostics, exact-output equivalence,
+and source reachability checks now prove the removal boundary. The predecessor
+parser/orchestrator and v2 stage facade are deleted.
 
 ## Release-active predecessor check
 
@@ -44,6 +45,9 @@ ldc2 -O3 -release -i -Isource \
   experiments/pipeline_config/resource_check.d \
   -of=/tmp/scrubbed-pipeline-resource-check
 /tmp/scrubbed-pipeline-resource-check "$(pwd)/scrubbed"
+ldc2 -O3 -release experiments/pipeline_config/predecessor_reachability_check.d \
+  -of=/tmp/scrubbed-pipeline-reachability-check
+/tmp/scrubbed-pipeline-reachability-check source
 ```
 
 The checker runs the actual binary and pins:
@@ -65,3 +69,6 @@ checker and adds `jsonl_stream/job_resource_check.d` for exact predecessor /
 canonical bytes plus fresh-child wall, CPU, and peak-RSS observations.
 Stage 5c switches manifest/journal routes to the same compiled plan and derives
 durable identity from canonical v3 bytes rather than selector spelling.
+Stage 6 migrates extract and metadata routing, removes predecessor factories
+and v2 configuration, and gates source reachability so canonical compilation
+is the only internal composition root.

@@ -2,6 +2,7 @@
 module manifest_cli.check;
 
 import core.sys.posix.signal : SIGKILL;
+import core.sys.posix.sys.stat : lstat, stat_t;
 import effects.local_manifest : LocalManifest;
 import effects.sqlite_ffi;
 import std.algorithm.searching : canFind;
@@ -74,6 +75,124 @@ private string[] baseCommand(string executable, string input, string output,
         "--manifest", db, "--filters", "normalize-line-endings", "--explain",
         "--threads", "2", "--max-queued-docs", "2",
         "--max-open-inputs", "1", "--max-input-bytes", "1048576"];
+}
+
+private ulong inode(string path) {
+    stat_t state;
+    need(lstat(path.toStringz, &state) == 0, "stat output inode");
+    return state.st_ino;
+}
+
+private string[] fixtureCommand(string executable, string input, string output,
+        string database, string stage, bool journal = false) {
+    auto command = [executable, "run", "--input", input, "--output", output,
+        "--stage", "fixture=" ~ stage, "--threads", "1"];
+    command ~= journal ? ["--error-journal", database] : ["--manifest", database];
+    return command;
+}
+
+private void multiTerminalRecovery(string harness, string root) {
+    foreach (phase; ["after-event-plan", "after-second-publish"]) {
+        auto folder = buildPath(root, "three-" ~ phase);
+        auto outputRoot = buildPath(folder, "out");
+        mkdir(folder);
+        auto input = buildPath(folder, "input.txt");
+        auto output = buildPath(outputRoot, "root.txt");
+        auto database = buildPath(folder, "state.db");
+        write(input, "three\r\n");
+        auto command = fixtureCommand(harness, input, output, database,
+            "stage6-three");
+        auto marker = database ~ ".kill-" ~ phase;
+        write(marker, "");
+        auto killed = run(command);
+        remove(marker);
+        need(killed.status == -SIGKILL, phase ~ " fixture did not SIGKILL");
+        need(text(database, "PRAGMA integrity_check") == "ok" &&
+            scalar(database, "SELECT count(*) FROM pragma_foreign_key_check") == 0 &&
+            scalar(database, "SELECT count(*) FROM final_event") == 3 &&
+            text(database, "SELECT state FROM root_state") == "planned",
+            phase ~ " invalid planned event set");
+        if (phase == "after-event-plan") {
+            need(scalar(database,
+                "SELECT count(*) FROM final_event WHERE state='planned'") == 3 &&
+                !exists(buildPath(outputRoot, "part-0.txt")) &&
+                !exists(buildPath(outputRoot, "part-1.txt")) &&
+                !exists(buildPath(outputRoot, "part-2.txt")),
+                "event set was not complete before publication");
+            expect("three event-set restart", command, 0, "done.");
+        } else {
+            auto first = buildPath(outputRoot, "part-0.txt");
+            need(text(database,
+                "SELECT state FROM final_event WHERE ordinal=0") == "committed" &&
+                text(database,
+                "SELECT state FROM final_event WHERE ordinal=1") == "planned" &&
+                text(database,
+                "SELECT state FROM final_event WHERE ordinal=2") == "planned" &&
+                scalar(database,
+                "SELECT count(*) FROM publication_intent WHERE ordinal=1") == 1 &&
+                exists(first) && exists(buildPath(outputRoot, "part-1.txt")) &&
+                !exists(buildPath(outputRoot, "part-2.txt")),
+                "partial split state mismatch");
+            auto firstInode = inode(first);
+            auto firstBytes = readText(first);
+            expect("partial split default refusal", command, 1, "retry-required");
+            need(text(database,
+                "SELECT state FROM final_event WHERE ordinal=1") == "uncertain" &&
+                scalar(database, "SELECT count(*) FROM publication_intent") == 0,
+                "restart did not reconcile interrupted intent to uncertain");
+            expect("partial split explicit recovery",
+                command ~ ["--manifest-retry"], 0, "done.");
+            need(inode(first) == firstInode && readText(first) == firstBytes,
+                "committed sibling was rewritten");
+        }
+        need(text(database, "SELECT state FROM root_state") == "complete" &&
+            scalar(database,
+                "SELECT count(*) FROM final_event WHERE state='committed'") == 3 &&
+            readText(buildPath(outputRoot, "part-0.txt")) == "three\r\n" &&
+            readText(buildPath(outputRoot, "part-1.txt")) == "three\r\n" &&
+            readText(buildPath(outputRoot, "part-2.txt")) == "three\r\n",
+            phase ~ " recovery did not commit ordered children");
+        writeln("ok: three-terminal ", phase);
+    }
+}
+
+private void terminalNoOutput(string harness, string root) {
+    foreach (stage; ["stage6-reject", "stage6-quarantine"])
+        foreach (journal; [false, true]) {
+            auto label = stage ~ (journal ? "-journal" : "-manifest");
+            auto folder = buildPath(root, label);
+            mkdir(folder);
+            auto input = buildPath(folder, "input.txt");
+            auto output = buildPath(folder, "output.txt");
+            auto database = buildPath(folder, "state.db");
+            write(input, "terminal\n");
+            if (journal) {
+                auto initialized = run([harness, "errors-init", "--journal",
+                    database]);
+                need(initialized.status == 0 &&
+                    scalar(database, "PRAGMA user_version") == 3,
+                    label ~ " initialization failed");
+            }
+            auto command = fixtureCommand(harness, input, output, database,
+                stage, journal);
+            auto first = run(command);
+            need(first.status == 1 && (journal ? first.output.length == 0 :
+                first.output.canFind("done.")), label ~ " first status/output");
+            need(!exists(output), label ~ " first run created output");
+            auto replay = run(command);
+            need(replay.status == 1 && (journal ? replay.output.length == 0 :
+                replay.output.canFind("done.")), label ~ " replay status/output");
+            need(!exists(output), label ~ " replay created output");
+            auto recovery = command ~ [journal ? "--error-retry" :
+                "--manifest-retry"];
+            auto recovered = run(recovery);
+            need(recovered.status == 1 && (journal ? recovered.output.length == 0 :
+                recovered.output.canFind("done.")), label ~ " recovery status/output");
+            need(!exists(output) && text(database,
+                "SELECT state FROM root_state") == "complete" &&
+                scalar(database, "SELECT count(*) FROM final_event") == 1,
+                label ~ " terminal state/output mismatch");
+        }
 }
 
 private void deterministicCrashWindows(string harness, string root) {
@@ -208,7 +327,11 @@ int main(string[] args) {
         readText(buildPath(treeOut, "a", "z.txt")) == "second\n",
         "tree output bytes");
 
-    if (args.length == 3) deterministicCrashWindows(args[2], root);
+    if (args.length == 3) {
+        deterministicCrashWindows(args[2], root);
+        multiTerminalRecovery(args[2], root);
+        terminalNoOutput(args[2], root);
+    }
     writeln("canonical manifest-v2 CLI checks passed");
     return 0;
 }

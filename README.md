@@ -80,8 +80,9 @@ names. New filters register themselves via `static this()` in their own
 module (see `filters/normalize.d`) — nothing in `app.d` or `pipeline.d`
 needs to change to add one.
 
-`--config` accepts JSON containing an ordered `filters` array. Entries may be
-plain names or objects with `name` and `options`; see `scrubbed.example.json`.
+`--config` accepts the canonical version-3 job JSON shown in
+`scrubbed.example.json`. The predecessor version-1 object containing only an
+ordered `filters` array remains accepted as an edge compatibility syntax.
 `fix-mojibake` supports `encodings` (`latin1`, `cp1252`, or both) and
 `max-passes`. Unknown option names are errors, and `--config` cannot be
 combined with `--filters`. Put `uncurl-quotes` before it when typographic quotes surround
@@ -91,19 +92,16 @@ round-trip candidates rather than isolated spans.
 A pure [canonical v3 job specification](docs/job-spec-v3.md) now models
 stable stage instances, registered implementations, ordered filters, and
 typed options identically for JSON and ordered CLI tokens. It is the migration
-target, not a shipping input yet; the commands above continue to use the
-documented predecessor forms until #148's execution switch is reviewed. The
-filter registry now has an injectable typed-schema path for that compiler;
-`fix-mojibake` is migrated while retaining its exact predecessor adapter. The
-pure compiler now resolves injected stage/filter registries and canonical job
-identity. Its pure one-stage executor proves declared before/after filter
-placement over checked content, but the shipping commands do not use the v3
-job or expose its flags yet.
+shipping composition root. Default selection, `--filters`, and version-1 JSON
+lower at the edge into the same typed model; they do not retain an independent
+parser-to-executor path. The compiler resolves self-registered stage/filter
+factories and canonical job identity before reading documents.
 
 For `extract`, `--max-html-bytes` sets one raw-input and decoded-UTF-8 cap
 (default 1,048,576; maximum 8,388,608). Alternatively, `extract --config` reads a
-v2 JSON config containing exactly one `html-tree-json` or `html-markdown` stage
-matching `--format`; its `options` may include `max-html-bytes` and `charset`.
+version-3 JSON job containing exactly one `html-tree-json` or `html-markdown`
+stage matching `--format`, no filters, and options that may include
+`max-html-bytes` and `charset`.
 The extract config is distinct from `run`'s filter-chain config, and cannot be
 combined with extract's `--max-html-bytes` or `--charset` flags. Raising the cap
 does not raise the separate tree/Markdown output limits or guarantee a native
@@ -231,13 +229,13 @@ claim of Tika, Docling, Pandoc, or general OCR parity.
 The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
 describe the current module boundaries. A typed document-identity and borrowed
 view module, ordered borrowed/owned content-piece module with a lazy range,
-standalone document stage contracts, a typed self-registering stage registry
-and strict nested v2 config API, and typed source/parser/sink ports with a
-per-document runner exist, but they are not yet wired into the CLI's v1
-filter pipeline or its bounded local file scheduler. V2 is not a CLI mode.
-The file-mapping opener now lives in the effects
-layer; the CLI's own mmap path is unchanged. High-edit list scaling is not
-ready for a throughput path. A D module-boundary check is under `scripts/`.
+standalone document stage contracts, a typed self-registering stage registry,
+and typed source/parser/sink ports with a per-document runner are wired through
+canonical v3 compilation into the bounded local scheduler. The predecessor v2
+configuration facade and direct pipeline orchestration are deleted. The
+file-mapping opener lives in the effects layer. High-edit list scaling is not
+ready for a throughput path. D module-boundary and predecessor-reachability
+checks guard these boundaries.
 The document model distinguishes original source IDs from derived-child IDs;
 split stages now use the latter, without changing original source IDs.
 A standalone [binary-v1 document shard and annotation-overlay API](docs/document-shards.md)

@@ -1,6 +1,11 @@
 # Deterministic HTML metadata slice
 
-Import `effects.html_metadata_stage` to register the opt-in `html-metadata` stage, or call `htmlMetadataPlan(charset)` to build its one-stage plan. It accepts HTML `Content` and maps the same typed `DocumentId` to UTF-8 `metadata-json:v1` `Content`; it does not need a paired file, output sink, CLI selector, network fetch, or model. The input follows the existing restricted `HtmlTree` boundary and its 64 KiB raw/decoded, node, depth, attribute, and observation limits.
+Import `effects.html_metadata_stage` to register the opt-in `html-metadata`
+stage, then select it in a canonical version-3 job. It accepts HTML `Content`
+and maps the same typed `DocumentId` to UTF-8 `metadata-json:v1` `Content`; it
+does not need a paired file, output sink, network fetch, or model. The input
+follows the existing restricted `HtmlTree` boundary and its 64 KiB raw/decoded,
+node, depth, attribute, and observation limits.
 
 Only `<head>` evidence is considered. The four fields are `title`, `author`, `date`, and `url`, in that wire order. Rules and priority (lower number wins):
 

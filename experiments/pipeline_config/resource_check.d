@@ -4,7 +4,7 @@ module experiments.pipeline_config.resource_check;
 import core.memory : GC;
 import core.sys.posix.sys.resource : RUSAGE_CHILDREN, getrusage, rusage;
 import filters.normalize;
-import pipeline : Pipeline;
+import pipeline : Pipeline, TypedFilterSpec;
 import std.array : replicate;
 import std.conv : to;
 import std.datetime.stopwatch : AutoStart, StopWatch;
@@ -44,7 +44,8 @@ private void observe(string executable, string root, string label,
     auto allocatedBefore = GC.allocatedInCurrentThread;
     auto usedBefore = GC.stats.usedSize;
     auto predecessorWall = StopWatch(AutoStart.yes);
-    auto expected = Pipeline.build(["normalize-line-endings"]).run(fixture);
+    auto expected = Pipeline.buildTyped([
+        TypedFilterSpec("normalize-line-endings")]).run(fixture);
     predecessorWall.stop();
     auto predecessorAllocated = GC.allocatedInCurrentThread - allocatedBefore;
     GC.collect();

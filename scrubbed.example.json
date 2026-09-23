@@ -1,15 +1,23 @@
 {
-  "filters": [
-    "uncurl-quotes",
+  "version": 3,
+  "stages": [
     {
-      "name": "fix-mojibake",
-      "options": {
-        "encodings": "latin1,cp1252",
-        "max-passes": 4
-      }
-    },
-    "decode-html-entities",
-    "normalize-line-endings",
-    "strip-control"
+      "id": "clean",
+      "implementation": "text-transform",
+      "options": {},
+      "filters": [
+        { "name": "uncurl-quotes", "options": {} },
+        {
+          "name": "fix-mojibake",
+          "options": {
+            "encodings": "latin1,cp1252",
+            "max-passes": 4
+          }
+        },
+        { "name": "decode-html-entities", "options": {} },
+        { "name": "normalize-line-endings", "options": {} },
+        { "name": "strip-control", "options": {} }
+      ]
+    }
   ]
 }

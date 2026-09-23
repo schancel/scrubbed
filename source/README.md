@@ -24,10 +24,9 @@ registrations run. It does not contain the filter algorithms.
 
 [`pipeline.d`](pipeline.d) owns the injectable name-to-filter registry and
 ordered `Pipeline`. Filters register with `registerFilter` for a plain
-`string -> string` function, the predecessor `registerFilterFactory`, or a
-typed option-schema factory. `Pipeline.build`/`buildConfigured` preserve the
-shipping predecessor edge; `buildTyped` resolves v3 scalar types without
-coercion. The global registry is read-only to consumers, while explicit
+`string -> string` function or a typed option-schema factory. The canonical
+compiler alone calls `Pipeline.buildTyped`, which resolves v3 scalar types
+without coercion. The global registry is read-only to consumers, while explicit
 `FilterRegistry` instances support isolated composition tests. Unknown names,
 options, missing required values, and type mismatches fail while building the
 chain. Configured whole-buffer factories retain only a pure context-free function
@@ -89,23 +88,22 @@ It preserves empty descriptors and borrowing checks without flattening bytes.
 map/reject/quarantine/split decisions, child provenance, cancellation safe
 points, and validated descriptive resources. Its pass-mode metadata describes
 single-pass or resumable stage behavior; it does not implement checkpoints or
-scheduling. These stages are not wired to the current string pipeline or CLI.
+scheduling. Canonical compiled jobs execute these contracts for shipping
+file/tree and JSONL routes.
 
 [`stages/registry.d`](stages/registry.d) adds typed stage declarations, option
 schemas, factory registration, and relative ordering metadata. A concrete
 stage registers itself in its own module constructor; consumers import that
-module to make it available. [`stages/config.d`](stages/config.d) strictly
-parses the nested `{"version":2,"stages":[{"name":"...","options":{...}}]}`
-API format and resolves typed transforms before document execution. Its
-registry factories likewise return a pure context-free function pointer paired
+module to make it available. The deleted v2 `stages.config` facade has no
+shipping or test consumer; canonical v3 parsing and compilation own stage
+resolution. Registry factories return a pure context-free function pointer paired
 with transitive-immutable parsed configuration, so resolved execution can be
 reused concurrently without rebuilding factories. Its
 [`stages/fixture.d`](stages/fixture.d) registration exists only in unittest
 builds. [`effects/html_tree_json_stage.d`](effects/html_tree_json_stage.d) is a concrete
-effects-owned, self-registering v2 stage used only by `extract`; that route resolves its typed
-plan without exposing a general v2-config CLI option. Its 32 MiB resource
-declaration is descriptive, not an enforced RSS limit. The existing v1
-`--config` path remains unchanged. Registration and parsing do not reserve resources or establish
+effects-owned, self-registering stage used by `extract`; that route compiles a
+canonical v3 job. Its 32 MiB resource
+declaration is descriptive, not an enforced RSS limit. Registration and parsing do not reserve resources or establish
 production document-stage backpressure; F04's high-edit content path still
 needs measurement. The CLI's bounded local file queue is a separate seam.
 [`stages/text_transform.d`](stages/text_transform.d) is the self-registering

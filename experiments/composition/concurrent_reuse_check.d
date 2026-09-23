@@ -79,7 +79,7 @@ import domain.document : Document, OutputName, SourceLocator;
 import job.json : parseJobJson;
 import pipeline : ConfiguredFilter, Filter, FilterConfiguration, FilterRegistry,
     Pipeline, StreamingFilter, StreamingFinish, StreamingPush, StreamingState,
-    TypedFilterOptions, maxStreamingExpansion;
+    TypedFilterOptions, TypedFilterSpec, maxStreamingExpansion;
 import stages.contract : EventKind, PassMode, ResourceDeclaration,
     StageDecision, StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
@@ -257,7 +257,8 @@ void main() {
     FilterRegistry streamingFilters;
     streamingFilters.addStreamingFilter("delayed", StreamingFilter(
         StreamingState.init, &delayedPush, &delayedFinish));
-    auto streaming = Pipeline.build(["delayed"], &streamingFilters);
+    auto streaming = Pipeline.buildTyped([TypedFilterSpec("delayed")],
+        &streamingFilters);
 
     enforce(oneRun(job, 0, streaming) && oneRun(job, 1, streaming) &&
         oneRun(copied, 2, streaming),

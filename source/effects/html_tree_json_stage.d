@@ -5,14 +5,12 @@ import content.pieces : Content, ContentPiece;
 import effects.html_tree : HtmlFailureReason, checkedHtmlByteLimit,
     defaultExtractHtmlBytes, parseHtml;
 import effects.html_tree_export : HtmlTreeOutputLimit, serializeTreeJson;
-import stages.config : StagePlan, buildConfigV2;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, OptionDeclaration, OptionType,
     StageConfiguration, StageOptions, StageRegistration, registerStage;
 import std.conv : to;
 import std.exception : enforce;
-import std.json : JSONValue;
 
 private string failureReason(HtmlFailureReason reason) pure {
     return reason.to!string;
@@ -75,34 +73,23 @@ static this() {
          OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory));
 }
 
-/// The concrete module owns its name; CLI consumes only this typed plan.
-StagePlan htmlTreeJsonPlan(string charset = null,
-    size_t byteLimit = defaultExtractHtmlBytes) {
-    checkedHtmlByteLimit(byteLimit);
-    auto options = `,"options":{"max-html-bytes":` ~
-        JSONValue(cast(long)byteLimit).toString;
-    if (charset !is null) options ~= `,"charset":` ~ JSONValue(charset).toString;
-    options ~= `}`;
-    return buildConfigV2(`{"version":2,"stages":[{"name":"html-tree-json"` ~
-        options ~ `}]}`);
-}
-
 unittest {
+    import composition.compiler : compileJob;
+    import composition.executor : runCompiledStage;
     import domain.document : Document, OutputName, SourceLocator;
-    import stages.contract : EventKind, StageDocument, runStage;
+    import job.json : parseJobJson;
+    import stages.contract : EventKind, StageDocument;
     import std.exception : enforce;
 
-    auto plan = htmlTreeJsonPlan();
+    auto spec = parseJobJson(`{"version":3,"stages":[{"id":` ~
+        `"extract","implementation":"html-tree-json","options":{},"filters":[]}]}`);
+    auto plan = compileJob(spec);
     enforce(plan.stages.length == 1);
     auto document = Document(SourceLocator("local-html:v1", "/tmp", "a.html"),
         OutputName("a.html.tree.json"));
     auto input = StageDocument(document,
         new Content([ContentPiece.own(cast(const(ubyte)[])"<p>hi</p>")]));
-    auto spec = plan.stages[0].declaration;
-    auto declaration = StageDeclaration(spec.key.idup, spec.passMode,
-        ResourceDeclaration(spec.resources.cpuSlots, spec.resources.memoryBytes));
-    auto result = runStage([input], declaration,
-        plan.stages[0].transform);
+    auto result = runCompiledStage([input], plan.stages[0]);
     enforce(result.events.length == 1 && result.events[0].kind == EventKind.emitted);
     enforce(result.events[0].payload.document.id == document.id);
 }

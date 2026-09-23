@@ -141,22 +141,22 @@ void main(string[] args) {
         JsonlDecisionKind.unsupportedFanout: JsonlFailureKind.unsupportedFanout,
     ]) {
         auto decided = Fixture("{\"text\":\"value\"}\n");
-        bool failed;
-        try processJsonlDocuments(&decided.read, &decided.write, "batch",
-            "stable-source", ["text"],
-            (string field, string text, SourceLocator source) {
-                require(DocumentId.from(source).text == DocumentId.from(
-                    SourceLocator("batch", "stable-source", "1")).text,
-                    "typed transform locator changed");
-                throw new JsonlDecisionFailure(decision, "typed decision");
-                return string.init;
-            }, JsonlLimits(1024, 2048));
+        try {
+            processJsonlDocuments(&decided.read, &decided.write, "batch",
+                "stable-source", ["text"],
+                (string field, string text, SourceLocator source) {
+                    require(DocumentId.from(source).text == DocumentId.from(
+                        SourceLocator("batch", "stable-source", "1")).text,
+                        "typed transform locator changed");
+                    throw new JsonlDecisionFailure(decision, "typed decision");
+                    return string.init;
+                }, JsonlLimits(1024, 2048));
+            throw new Exception("typed decision did not throw");
+        }
         catch (JsonlFailure error) {
-            failed = true;
             require(error.kind == expected && decided.output.length == 0,
                 "typed decision classification/output");
         }
-        require(failed, "typed decision unexpectedly succeeded");
     }
 
     auto tooLong = Fixture("{\"text\":\"123456789\"}\n");

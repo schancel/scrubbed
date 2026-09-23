@@ -1,6 +1,8 @@
 /// Opt-in local HTML route. This is CLI orchestration, not a two-file commit.
 module effects.metadata_route_cli;
 
+import composition.compiler : compileJob;
+import composition.executor : runCompiledStage;
 import content.pieces : Content, ContentPiece;
 import core.stdc.errno : errno, EINTR, ENOENT;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
@@ -8,20 +10,16 @@ import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t, S_ISDIR, S_ISREG, S
 import core.sys.posix.unistd : close, posixRead = read;
 import domain.document : Document, OutputName, SourceLocator;
 import effects.atomic_piece_sink : OutputPolicyViolation;
-import effects.html_metadata_stage : htmlMetadataPlan;
+import effects.html_metadata_stage;
 import effects.html_tree : maxRawBytes;
 import effects.independent_sinks : IndependentLocalSinks, IndependentPayloads,
     IndependentSinkFailure, contentSinkKey, metadataSinkKey;
 import effects.local_manifest : LocalManifest, SinkKey, SinkState, configDigest,
     inputDigest;
-import filters.entities;
-import filters.mojibake;
-import filters.normalize;
-import filters.punctuation;
-import pipeline : Pipeline;
+import job.legacy : lowerLegacyNames;
+import job.spec : JobSpec, JobStageSpec;
 import std.digest.sha : SHA256;
-import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
-    StageDocument, runStage;
+import stages.contract : EventKind, StageDocument;
 import std.algorithm.sorting : sort;
 import std.file : SpanMode, dirEntries, mkdir, read, thisExePath;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
@@ -292,8 +290,11 @@ int runMetadataRoute(const string[] args) {
     }
     try {
         auto files = preflight(o);
-        auto chain = Pipeline.build(o.filters.split(","));
-        auto plan = htmlMetadataPlan();
+        auto contentSpec = lowerLegacyNames(o.filters.split(","));
+        auto contentJob = compileJob(contentSpec);
+        JobSpec metadataSpec;
+        metadataSpec.stages = [JobStageSpec("metadata", "html-metadata")];
+        auto metadataJob = compileJob(metadataSpec);
         auto executable = runningExecutableDigest();
         auto contentHash = routeConfigDigest("route-content:v2:", o.filters, executable);
         auto metadataHash = routeConfigDigest("route-metadata:v2:",
@@ -312,13 +313,8 @@ int runMetadataRoute(const string[] args) {
             auto document = Document(SourceLocator("local-html:v1", o.input, file.name),
                 OutputName(file.name));
             auto source = new Content([ContentPiece.own(raw)]);
-            auto stage = plan.stages[0].declaration;
-            auto staged = runStage([StageDocument(document, source)],
-                StageDeclaration(stage.key.idup, stage.passMode,
-                    ResourceDeclaration(stage.resources.cpuSlots,
-                        stage.resources.memoryBytes,
-                        stage.resources.exclusiveNames.dup)),
-                plan.stages[0].transform);
+            auto staged = runCompiledStage([StageDocument(document, source)],
+                metadataJob.stages[0]);
             if (staged.events.length != 1) throw new Exception("unexpected stage event count");
             auto event = staged.events[0];
             if (event.kind == EventKind.quarantined || event.kind == EventKind.rejected) {
@@ -327,8 +323,13 @@ int runMetadataRoute(const string[] args) {
             }
             if (event.kind != EventKind.emitted || event.payload.document.id != document.id)
                 throw new Exception("metadata stage identity changed");
-            auto filtered = chain.run(cast(string) raw);
-            auto content = new Content([ContentPiece.own(cast(const(ubyte)[]) filtered)]);
+            auto contentResult = runCompiledStage([StageDocument(document,
+                new Content([ContentPiece.own(raw.dup)]))], contentJob.stages[0]);
+            if (contentResult.events.length != 1 ||
+                    contentResult.events[0].kind != EventKind.emitted ||
+                    contentResult.events[0].payload.document.id != document.id)
+                throw new Exception("content stage identity changed");
+            auto content = contentResult.events[0].payload.content;
             auto metadata = event.payload.content;
             checkedTarget(o.contentRoot, file.name, true);
             checkedTarget(o.metadataRoot, file.name, true);

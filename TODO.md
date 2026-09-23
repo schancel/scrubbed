@@ -2,8 +2,8 @@
 
 Status key: [x] done and verified, [~] partially done, [ ] not started.
 
-Planning status (2026-09-22): [70 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
-cover the broader corpus-curation roadmap with 139 native dependency edges.
+Planning status (2026-09-22): [73 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
+cover the broader corpus-curation roadmap with 142 native dependency edges.
 Acceptance is not an implementation claim; worker readiness is tracked per
 issue. This file remains the status record for implemented work.
 
@@ -384,6 +384,21 @@ is useful, but it is not sufficient on its own.
       Both must implement one metadata port/schema with model/version,
       provenance, timeout and failure fields; deterministic heuristic metadata
       remains model-free.
+- [ ] Add provenance-bearing topical tags (#167) after the common extracted
+      text-document boundary. Source-declared tags/categories and inferred
+      tags must remain distinct candidates; inferred values carry a named
+      algorithm/model, vocabulary identity, confidence and abstention rather
+      than masquerading as author metadata.
+- [ ] Add an optional per-document compressibility annotation (#168) with raw
+      input/compressed sizes and a precisely named, versioned estimator. This
+      is an algorithm-specific proxy related to complexity, not exact
+      Kolmogorov complexity, and it must not silently become a quality policy.
+- [x] Evaluate embedding-space intrinsic dimension separately (#169) after
+      #66. The repository-only TwoNN evidence attaches results to an evaluated
+      population with estimator/model/metric/sample/stability provenance and
+      explicit abstention; it is not a production stage, a scalar inferred
+      from one document embedding, or interchangeable with Hausdorff or
+      compression complexity.
 - [~] Store immutable source documents and keyed analyzer overlays. A
       standalone binary-v1 artifact API now has bounded integrity-checked
       frames, version/revision-checked streaming joins, create-only source

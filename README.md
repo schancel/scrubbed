@@ -230,6 +230,13 @@ before mojibake and other Unicode filters run. Production Office/PDF/image
 support remains unimplemented; #67 evaluates specialist adapters and #156 owns
 bounded adoption for only the formats that pass those gates. This is not a
 claim of Tika, Docling, Pandoc, or general OCR parity.
+Optional metadata enrichments keep unlike evidence separate: #167 owns
+source-declared versus inferred topical tags, #168 owns a named
+compressor-specific per-document measurement rather than an “exact Kolmogorov
+complexity” claim, and the repository-only #169 evaluation measures intrinsic
+dimension over embedding point clouds rather than assigning a Hausdorff-like
+number to a single document. That evaluation is evidence, not a production
+pipeline stage or CLI feature.
 The [architecture map](docs/architecture.md) and [filter guide](source/filters/README.md)
 describe the current module boundaries. A typed document-identity and borrowed
 view module, ordered borrowed/owned content-piece module with a lazy range,

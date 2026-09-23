@@ -4,6 +4,10 @@ This directory is an evidence-only, non-production comparison between a sparse
 lexical baseline and one local dense embedding candidate. It does not add a
 runtime dependency or propose adoption.
 
+The separate [embedding-dimension experiment](../embedding_dimension/README.md)
+consumes these committed immutable shards without changing their format or
+recomputing embeddings. Its population statistic is not document metadata.
+
 ## Frozen inputs
 
 `generate_fixtures.d` deterministically authors 36 CC0 test documents and 18

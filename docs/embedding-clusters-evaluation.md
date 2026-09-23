@@ -3,6 +3,10 @@
 Status: feasibility evidence only; no production adoption is recommended by
 this experiment.
 
+The follow-up [intrinsic-dimension evaluation](embedding-dimension-evaluation.md)
+streams these frozen shards as a named corpus population. It neither changes
+the #66 evidence nor attaches a corpus statistic to individual documents.
+
 ## Question and design
 
 The experiment asks whether a bounded local semantic embedding pass can improve

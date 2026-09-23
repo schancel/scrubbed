@@ -1,0 +1,13 @@
+key	value
+estimator	twonn-mle:v1
+finite_sample_formula	(m-1)/sum(log(r2/r1))
+zero_distance_policy	skip and warn; abstain if fewer than 12 usable ratios
+minimum_points	12
+resampling	nine deterministic 80-percent hash-ranked subsamples
+default_seed	169
+default_metric	euclidean
+default_normalization	none
+maximum_relative_stability_width	1.25
+maximum_live_decoded_vectors	2
+publication	adjacent pending file then atomic rename
+attachment	one result per identified population; never per member document

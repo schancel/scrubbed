@@ -1,0 +1,3 @@
+population	points	distance_evaluations	wall_seconds	cpu_seconds	process_peak_rss_bytes	current_thread_gc_allocated_bytes	input_disk_bytes	distance_evaluations_per_second	peak_live_decoded_vectors
+small	104	10712	0.398252	0.304561	3670016	16387712	16286	26897.542	2
+material	384	147072	6.825386	4.436601	3817472	291061296	81864	21547.792	2

@@ -1,0 +1,9 @@
+population	identity	points	duplicates	estimate	low	high	status	reason	peak_vectors	distances
+synthetic:heldout-line	7f11ce3842c6c53a6525c48ff1aaf3d1299a6620cbe30467b90afbcd16614250	104	0	0.816455406	0.757464068	0.899618530	estimate	-	2	10712
+synthetic:heldout-plane	4516c5f32676fcee1d6343d32c76d59018206938fc1ace09c25ecfbd590ecac1	136	0	1.958889403	1.814168564	2.072988171	estimate	-	2	18360
+synthetic:heldout-high	9c1d3b0898cda2ad7e9ab3a1f62615dc1d1df5b0cd31da053ec3690dd8515814	200	0	4.448779221	4.196891262	4.856021156	estimate	-	2	39800
+synthetic:duplicates	dd164edba491da7e00b055f28ddaaf819378faf47d595bd6c4ec4bb42a767e0c	64	21	1.333303470	1.333303470	1.333303470	estimate	-	2	4032
+synthetic:degenerate	c4cc409ebf762589b16c0a60ccca2c0ab456a5d1959c9d9144f9660c3d65b147	32	496	-	-	-	abstain	duplicate-or-degenerate	2	992
+synthetic:too-small	93da1fae6512147bd706bafec2c278b38f56ad0510a44ac964a6c9cd04a5add2	8	0	-	-	-	abstain	insufficient-sample	0	0
+synthetic:material	c5569eafaa6379e12bacd98cfa51c7213b1edc8ebf4a605c0356fa1013ccc642	384	0	5.700456531	5.660848205	5.840097209	estimate	-	2	147072
+corpus:embedding-clusters-v1	3fa7dd04e8e57e5ef4da8a9160355ff47329c4cb31fd9563639d573c1b4a1220	36	2	1.529929239	1.378998244	1.912360068	estimate	-	2	1260

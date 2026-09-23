@@ -525,6 +525,391 @@ string fixMojibake(string text) {
     return repairMojibake(text, MojibakeOptions());
 }
 
+version (MojibakeWorkProbe) {
+    /// Fixed-size, caller-owned work evidence. The shipping build does not
+    /// contain this API or any counter branch. Eight buckets cover the public
+    /// default and the authored option cases without allocating from an
+    /// arbitrary max-passes value; larger probe requests are refused.
+    enum mojibakeWorkProbePasses = 8;
+
+    struct MojibakeEncodingWork {
+        ulong legacyByteCalls;
+        ulong legacyByteScalars;
+        ulong cp1252TableEntries;
+        ulong legacyByteMapped;
+        ulong legacyByteUnmapped;
+        ulong sequenceCalls;
+        ulong sequenceScalars;
+        ulong sequenceValid;
+        ulong sequenceInvalid;
+        ulong canEncodeCalls;
+        ulong canEncodeScalars;
+        ulong canEncodeSuccess;
+        ulong canEncodeFailure;
+        ulong candidateScoreCalls;
+        ulong candidateDecodedScalars;
+        ulong candidateSuccess;
+        ulong candidateUnencodable;
+        ulong candidateUtfFailure;
+        ulong plausibilityCalls;
+        ulong plausibilityScalars;
+        ulong groupingAttempts;
+        ulong groupingSpans;
+        ulong materializations;
+        ulong materializedSourceBytes;
+        ulong materializedOutputBytes;
+    }
+
+    struct MojibakePassWork {
+        ulong entered;
+        ulong currentPlausibilityCalls;
+        ulong currentPlausibilityScalars;
+        ulong scoreZeroExits;
+        ulong wholeWinnerExits;
+        ulong localRepairExits;
+        ulong unchangedExits;
+        MojibakeEncodingWork latin1;
+        MojibakeEncodingWork cp1252;
+    }
+
+    struct MojibakeWorkEvidence {
+        string output;
+        MojibakePassWork[mojibakeWorkProbePasses] passes;
+    }
+
+    private ref MojibakeEncodingWork probeEncoding(ref MojibakePassWork pass,
+            LegacyEncoding encoding) pure {
+        return encoding == LegacyEncoding.latin1 ? pass.latin1 : pass.cp1252;
+    }
+
+    private bool probeLegacyByte(dchar c, LegacyEncoding encoding,
+            out ubyte result, ref MojibakeEncodingWork work) pure {
+        ++work.legacyByteCalls;
+        ++work.legacyByteScalars;
+        const mapped = legacyByte(c, encoding, result);
+        if (encoding == LegacyEncoding.cp1252 &&
+                !(c <= 0xFF && (c <= 0x7F || c >= 0xA0))) {
+            foreach (candidate; cp1252HighRange) {
+                ++work.cp1252TableEntries;
+                if (candidate == c) break;
+            }
+        }
+        if (mapped) ++work.legacyByteMapped;
+        else ++work.legacyByteUnmapped;
+        return mapped;
+    }
+
+    private bool probeCanEncode(string text, LegacyEncoding encoding,
+            ref MojibakeEncodingWork work) pure {
+        ++work.canEncodeCalls;
+        foreach (dchar c; text) {
+            ++work.canEncodeScalars;
+            ubyte ignored;
+            if (!probeLegacyByte(c, encoding, ignored, work)) {
+                ++work.canEncodeFailure;
+                return false;
+            }
+        }
+        ++work.canEncodeSuccess;
+        return true;
+    }
+
+    private auto probeLegacyBytes(string text, LegacyEncoding encoding,
+            MojibakeEncodingWork* work) {
+        struct ProbeLegacyBytes {
+            private string source;
+            private LegacyEncoding encoding;
+            private MojibakeEncodingWork* work;
+
+            @property bool empty() const pure { return source.length == 0; }
+
+            @property char front() pure {
+                assert(!empty);
+                ubyte result;
+                const mapped = probeLegacyByte(source.front, encoding,
+                    result, *work);
+                assert(mapped);
+                return cast(char) result;
+            }
+
+            void popFront() pure {
+                assert(!empty);
+                source.popFront();
+            }
+
+            @property ProbeLegacyBytes save() { return this; }
+        }
+        return ProbeLegacyBytes(text, encoding, work);
+    }
+
+    private auto countedScalars(Range)(Range source, ulong* consumed) {
+        struct CountedScalars {
+            private Range source;
+            private ulong* consumed;
+
+            @property bool empty() { return source.empty; }
+            @property auto front() { return source.front; }
+            void popFront() {
+                source.popFront();
+                ++*consumed;
+            }
+            @property CountedScalars save() { return this; }
+        }
+        return CountedScalars(source, consumed);
+    }
+
+    private long probeCurrentPlausibility(string text,
+            ref MojibakePassWork pass) pure {
+        ++pass.currentPlausibilityCalls;
+        const result = plausibilityScore(text);
+        foreach (dchar scalar; text) {
+            cast(void) scalar;
+            ++pass.currentPlausibilityScalars;
+        }
+        return result;
+    }
+
+    private long probePlausibility(string text,
+            ref MojibakeEncodingWork work) pure {
+        ++work.plausibilityCalls;
+        const result = plausibilityScore(text);
+        foreach (dchar scalar; text) {
+            cast(void) scalar;
+            ++work.plausibilityScalars;
+        }
+        return result;
+    }
+
+    private bool probeScoreCandidate(string text, LegacyEncoding encoding,
+            out long score, ref MojibakeEncodingWork work) pure {
+        ++work.candidateScoreCalls;
+        if (!probeCanEncode(text, encoding, work)) {
+            ++work.candidateUnencodable;
+            return false;
+        }
+        try {
+            auto decoded = probeLegacyBytes(text, encoding, &work)
+                .byUTF!(dchar, No.useReplacementDchar);
+            ++work.plausibilityCalls;
+            auto counted = countedScalars(decoded,
+                &work.candidateDecodedScalars);
+            auto plausibilityCounted = countedScalars(counted,
+                &work.plausibilityScalars);
+            score = plausibilityScore(plausibilityCounted);
+            ++work.candidateSuccess;
+            return true;
+        } catch (UTFException) {
+            ++work.candidateUtfFailure;
+            return false;
+        }
+    }
+
+    private size_t probeSequenceEnd(string text, size_t start,
+            LegacyEncoding encoding, ref MojibakeEncodingWork work) pure {
+        ++work.sequenceCalls;
+        auto rest = text[start .. $];
+        ubyte lead;
+        ++work.sequenceScalars;
+        if (!probeLegacyByte(rest.front, encoding, lead, work)) {
+            ++work.sequenceInvalid;
+            return start;
+        }
+        const width = lead >= 0xC2 && lead <= 0xDF ? 2 :
+            lead >= 0xE0 && lead <= 0xEF ? 3 :
+            lead >= 0xF0 && lead <= 0xF4 ? 4 : 0;
+        if (width == 0) {
+            ++work.sequenceInvalid;
+            return start;
+        }
+        rest.popFront();
+        foreach (_; 1 .. width) {
+            if (rest.empty) {
+                ++work.sequenceInvalid;
+                return start;
+            }
+            ubyte next;
+            ++work.sequenceScalars;
+            if (!probeLegacyByte(rest.front, encoding, next, work) ||
+                    next < 0x80 || next > 0xBF) {
+                ++work.sequenceInvalid;
+                return start;
+            }
+            rest.popFront();
+        }
+        const end = text.length - rest.length;
+        long ignored;
+        if (probeScoreCandidate(text[start .. end], encoding, ignored, work)) {
+            ++work.sequenceValid;
+            return end;
+        }
+        ++work.sequenceInvalid;
+        return start;
+    }
+
+    private string probeMaterialize(string text, LegacyEncoding encoding,
+            ref MojibakeEncodingWork work) pure {
+        ++work.materializations;
+        work.materializedSourceBytes += text.length;
+        auto output = appender!string();
+        output.reserve(text.length);
+        foreach (char byteValue; probeLegacyBytes(text, encoding, &work))
+            output.put(byteValue);
+        work.materializedOutputBytes += output.data.length;
+        return output.data;
+    }
+
+    private string probeRepairLocal(string text, MojibakeOptions options,
+            size_t remainingPasses, ref MojibakePassWork pass) pure {
+        auto output = appender!string();
+        size_t copiedUntil;
+        size_t at;
+        while (at < text.length) {
+            size_t bestEnd;
+            LegacyEncoding bestEncoding;
+            long bestGain;
+            foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
+                if ((encoding == LegacyEncoding.latin1 && !options.useLatin1) ||
+                    (encoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                auto work = &probeEncoding(pass, encoding);
+                auto end = probeSequenceEnd(text, at, encoding, *work);
+                if (end == at) continue;
+                ubyte lead;
+                probeLegacyByte(text[at .. $].front, encoding, lead, *work);
+                if (lead == 0xC2) continue;
+                const atom = text[at .. end];
+                long decodedScore;
+                if (!probeScoreCandidate(atom, encoding, decodedScore, *work)) continue;
+                const atomicGain = decodedScore - probePlausibility(atom, *work);
+                if (atomicGain > bestGain) {
+                    bestGain = atomicGain;
+                    bestEnd = end;
+                    bestEncoding = encoding;
+                }
+                if (remainingPasses < 2) continue;
+                foreach (_; 1 .. 4) {
+                    ++work.groupingAttempts;
+                    const next = end < text.length ?
+                        probeSequenceEnd(text, end, encoding, *work) : end;
+                    if (next == end) break;
+                    end = next;
+                    ++work.groupingSpans;
+                    const span = text[at .. end];
+                    if (!probeScoreCandidate(span, encoding, decodedScore, *work)) continue;
+                    const intermediate = probeMaterialize(span, encoding, *work);
+                    foreach (nextEncoding; [LegacyEncoding.latin1,
+                            LegacyEncoding.cp1252]) {
+                        if ((nextEncoding == LegacyEncoding.latin1 &&
+                                !options.useLatin1) ||
+                            (nextEncoding == LegacyEncoding.cp1252 &&
+                                !options.useCp1252)) continue;
+                        auto nextWork = &probeEncoding(pass, nextEncoding);
+                        long nextScore;
+                        if (probeScoreCandidate(intermediate, nextEncoding,
+                                nextScore, *nextWork)) {
+                            const improvement = nextScore -
+                                probePlausibility(span, *work);
+                            if (improvement > 0 && nextScore > decodedScore &&
+                                    improvement >= bestGain) {
+                                bestGain = improvement;
+                                bestEnd = end;
+                                bestEncoding = encoding;
+                            }
+                        }
+                    }
+                }
+            }
+            if (bestGain > 0) {
+                if (copiedUntil == 0) output.reserve(text.length);
+                output.put(text[copiedUntil .. at]);
+                auto work = &probeEncoding(pass, bestEncoding);
+                output.put(probeMaterialize(text[at .. bestEnd],
+                    bestEncoding, *work));
+                copiedUntil = bestEnd;
+                at = bestEnd;
+            } else {
+                auto rest = text[at .. $];
+                rest.popFront();
+                at = text.length - rest.length;
+            }
+        }
+        if (copiedUntil == 0) return text;
+        output.put(text[copiedUntil .. $]);
+        return output.data;
+    }
+
+    /// Execute the exact decision flow with bounded caller-owned counters.
+    /// The probe refuses a pass count it cannot represent rather than silently
+    /// merging or allocating buckets.
+    MojibakeWorkEvidence measureMojibakeWork(string text,
+            size_t maxPasses = 4, bool useLatin1 = true,
+            bool useCp1252 = true) pure {
+        enforce(maxPasses <= mojibakeWorkProbePasses,
+            "mojibake work probe pass count exceeds fixed capacity");
+        MojibakeWorkEvidence evidence;
+        auto options = MojibakeOptions(maxPasses, useLatin1, useCp1252);
+        const original = text;
+        if (allASCII(text)) {
+            evidence.output = text;
+            enforce(evidence.output == repairMojibake(original, options),
+                "mojibake work probe differs from ordinary execution");
+            return evidence;
+        }
+        foreach (passIndex; 0 .. options.maxPasses) {
+            auto pass = &evidence.passes[passIndex];
+            ++pass.entered;
+            LegacyEncoding winner;
+            bool haveWinner;
+            long bestScore = probeCurrentPlausibility(text, *pass);
+            if (bestScore == 0) {
+                ++pass.scoreZeroExits;
+                break;
+            }
+            foreach (encoding; [LegacyEncoding.latin1,
+                    LegacyEncoding.cp1252]) {
+                if ((encoding == LegacyEncoding.latin1 && !options.useLatin1) ||
+                    (encoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                auto work = &probeEncoding(*pass, encoding);
+                long candidateScore;
+                if (probeScoreCandidate(text, encoding, candidateScore,
+                        *work) && candidateScore > bestScore) {
+                    winner = encoding;
+                    haveWinner = true;
+                    bestScore = candidateScore;
+                }
+            }
+            if (!haveWinner) {
+                bool encodable;
+                if (options.useLatin1)
+                    encodable = probeCanEncode(text, LegacyEncoding.latin1,
+                        pass.latin1);
+                if (!encodable && options.useCp1252)
+                    encodable = probeCanEncode(text, LegacyEncoding.cp1252,
+                        pass.cp1252);
+                if (encodable) {
+                    ++pass.unchangedExits;
+                    break;
+                }
+                const local = probeRepairLocal(text, options,
+                    options.maxPasses - passIndex, *pass);
+                if (local == text) {
+                    ++pass.unchangedExits;
+                    break;
+                }
+                ++pass.localRepairExits;
+                text = local;
+                continue;
+            }
+            ++pass.wholeWinnerExits;
+            auto work = &probeEncoding(*pass, winner);
+            text = probeMaterialize(text, winner, *work);
+        }
+        evidence.output = text;
+        enforce(evidence.output == repairMojibake(original, options),
+            "mojibake work probe differs from ordinary execution");
+        return evidence;
+    }
+}
+
 private string applyConfiguredMojibake(string text,
         immutable(FilterConfiguration) raw) pure {
     auto configured = cast(immutable(MojibakeConfiguration)) raw;

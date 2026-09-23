@@ -697,6 +697,20 @@ final class DurableJobLedger {
                 safeRegularOrAbsent(plan.destination, true);
                 if (!exists(plan.destination) || !isFile(plan.destination))
                     return false;
+                // Exact destination ownership is always checked through the
+                // destination index.  The inode-wide scan below is only
+                // needed for multiply-linked files.
+                auto owner = db.prepare(`SELECT 1 FROM final_event WHERE
+                    destination=?1 AND NOT(final_document_id=?2 AND sink_key=?3)
+                    LIMIT 1`);
+                scope(exit) sqlite3_finalize(owner);
+                bindText(owner, 1, plan.destination);
+                bindText(owner, 2, plan.document.text);
+                bindText(owner, 3, plan.sink);
+                auto ownerRc = sqlite3_step(owner);
+                need(ownerRc == SQLITE_ROW || ownerRc == SQLITE_DONE,
+                    "destination-owner-read-failed");
+                if (ownerRc == SQLITE_ROW) return false;
                 if (needsInodeAliasScan(plan.destination)) {
                     auto aliases = db.prepare(`SELECT destination,final_document_id,sink_key
                         FROM final_event WHERE destination IS NOT NULL AND
@@ -1332,6 +1346,88 @@ version (unittest) {
         ledger = new DurableJobLedger(malformed, DurableKind.manifest, identity);
         assertThrown(ledger.completeRoot(key));
         assertThrown(ledger.planEvents(key, events[0 .. 1]));
+        ledger.close();
+    }
+
+    unittest { // Exact destination ownership is checked for single-link files.
+        auto root = buildPath(tempDir, "durable-owner-" ~ randomUUID.toString);
+        mkdir(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+        DurableIdentity identity;
+        identity.jobIdentity = "job:v3:" ~ replicate("9", 64);
+        identity.digest = reasonDigest("owner-identity");
+        auto path = buildPath(root, "manifest.db");
+        auto first = buildPath(root, "first.txt");
+        auto second = buildPath(root, "second.txt");
+        auto documentA = DocumentId.fromCanonicalText(
+            "doc:v1:" ~ replicate("a", 64));
+        auto documentB = DocumentId.fromCanonicalText(
+            "doc:v1:" ~ replicate("b", 64));
+        DurableRootKey keyA = DurableRootKey(documentA,
+            reasonDigest("owner-input-a"), identity.digest);
+        DurableRootKey keyB = DurableRootKey(documentB,
+            reasonDigest("owner-input-b"), identity.digest);
+        DurableEventPlan eventA;
+        eventA.ordinal = 0; eventA.kind = "emitted";
+        eventA.document = documentA; eventA.outputName = "first.txt";
+        eventA.sink = derivedSink("emitted", documentA, 0);
+        eventA.destination = first; eventA.hasOutput = true;
+        eventA.outputSha256 = sha256Of(cast(const(ubyte)[])"same");
+        auto eventB = eventA;
+        eventB.document = documentB; eventB.outputName = "second.txt";
+        eventB.sink = derivedSink("emitted", documentB, 0);
+        eventB.destination = second;
+        auto ledger = new DurableJobLedger(path, DurableKind.manifest, identity);
+        auto keys = [keyA, keyB];
+        auto events = [eventA, eventB];
+        foreach (index, event; events) {
+            auto key = keys[index];
+            ledger.planRoot(key); ledger.planEvents(key, [event]);
+            assert(ledger.prepare(key, 0, false) == DurableAction.publish);
+            ledger.beginPublication(key, 0);
+            write(event.destination, "same");
+            ledger.commitPublished(key, 0); ledger.completeRoot(key);
+        }
+        ledger.close();
+        stat_t firstInfo;
+        assert(stat(first.toStringz, &firstInfo) == 0 && firstInfo.st_nlink == 1);
+
+        void rewriteSecond(ref const(DurableEventPlan) event) {
+            auto raw = new Database(path, SQLITE_OPEN_READWRITE);
+            auto row = raw.prepare(`UPDATE final_event SET final_document_id=?5,
+                sink_key=?6,destination=?7 WHERE document_id=?1 AND
+                input_sha256=?2 AND config_sha256=?3 AND ordinal=?4`);
+            bindRoot(row, keyB); bindLong(row, 4, 0);
+            bindText(row, 5, event.document.text); bindText(row, 6, event.sink);
+            bindText(row, 7, event.destination); done(row);
+            sqlite3_finalize(row);
+            auto set = raw.prepare(`UPDATE root_state SET event_set_sha256=?4
+                WHERE document_id=?1 AND input_sha256=?2 AND config_sha256=?3`);
+            bindRoot(set, keyB);
+            auto digest = eventSetDigest([event]);
+            bindDigest(set, 4, digest); done(set); sqlite3_finalize(set);
+            raw.close();
+        }
+
+        // A duplicate row for the same durable owner remains valid.
+        auto sameOwner = eventB;
+        sameOwner.document = eventA.document;
+        sameOwner.sink = eventA.sink;
+        sameOwner.destination = eventA.destination;
+        rewriteSecond(sameOwner);
+        ledger = new DurableJobLedger(path, DurableKind.manifest, identity);
+        assert(ledger.verifiedEmittedSkip(keyA));
+        assert(ledger.verifiedEmittedSkip(keyB));
+        ledger.close();
+
+        // A distinct durable owner claiming that exact path must force the
+        // ordinary execution path even though the file has only one link.
+        auto distinctOwner = sameOwner;
+        distinctOwner.document = eventB.document;
+        distinctOwner.sink = eventB.sink;
+        rewriteSecond(distinctOwner);
+        ledger = new DurableJobLedger(path, DurableKind.manifest, identity);
+        assert(!ledger.verifiedEmittedSkip(keyA));
+        assert(!ledger.verifiedEmittedSkip(keyB));
         ledger.close();
     }
 

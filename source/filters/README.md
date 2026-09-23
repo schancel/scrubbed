@@ -48,7 +48,9 @@ For options, use [`mojibake.d`](mojibake.d) as the existing example. Its
 scalar types before calling the factory once per chain construction. During
 the v1 compatibility window, the same registration retains the predecessor
 string factory so current JSON coercion and diagnostics do not change. New
-configurable filters should expose a typed factory. A plain filter rejects
+configurable filters should expose a typed factory whose result is a plain
+function pointer plus transitive-immutable parsed configuration; configured
+delegates and mutable retained state are rejected at this boundary. A plain filter rejects
 nonempty options. [`entities.d`](entities.d)
 decodes a limited set of HTML entities and uses `mojibake`'s CP1252 helper;
 [`punctuation.d`](punctuation.d) owns quote normalization.

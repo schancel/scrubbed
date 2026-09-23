@@ -29,7 +29,10 @@ shipping predecessor edge; `buildTyped` resolves v3 scalar types without
 coercion. The global registry is read-only to consumers, while explicit
 `FilterRegistry` instances support isolated composition tests. Unknown names,
 options, missing required values, and type mismatches fail while building the
-chain. `Pipeline.run` passes whole-buffer results between materialization
+chain. Configured whole-buffer factories retain only a pure context-free function
+pointer plus transitive-immutable parsed configuration; mutable streaming
+state is created anew by each run. `Pipeline.run` passes whole-buffer results
+between materialization
 barriers; consecutive bounded scalar registrations share one lazy traversal.
 
 [`job/`](job/README.md) owns the pure v3 linear-job model. Strict JSON,
@@ -87,6 +90,9 @@ stage registers itself in its own module constructor; consumers import that
 module to make it available. [`stages/config.d`](stages/config.d) strictly
 parses the nested `{"version":2,"stages":[{"name":"...","options":{...}}]}`
 API format and resolves typed transforms before document execution. Its
+registry factories likewise return a pure context-free function pointer paired
+with transitive-immutable parsed configuration, so resolved execution can be
+reused concurrently without rebuilding factories. Its
 [`stages/fixture.d`](stages/fixture.d) registration exists only in unittest
 builds. [`effects/html_tree_json_stage.d`](effects/html_tree_json_stage.d) is a concrete
 effects-owned, self-registering v2 stage used only by `extract`; that route resolves its typed

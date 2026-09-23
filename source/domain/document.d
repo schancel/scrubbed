@@ -15,31 +15,31 @@ struct SourceLocator {
     private string sourceValue;
     private string recordValue;
 
-    this(string datasetNamespace, string sourceKey, string recordKey) {
+    this(string datasetNamespace, string sourceKey, string recordKey) pure {
         namespaceValue = canonicalField(datasetNamespace);
         sourceValue = canonicalField(sourceKey);
         recordValue = canonicalField(recordKey);
     }
 
-    string datasetNamespace() const { return namespaceValue; }
-    string sourceKey() const { return sourceValue; }
-    string recordKey() const { return recordValue; }
+    string datasetNamespace() const pure { return namespaceValue; }
+    string sourceKey() const pure { return sourceValue; }
+    string recordKey() const pure { return recordValue; }
 }
 
 /// A presentation name. It never participates in DocumentId derivation.
 struct OutputName {
     private string value;
 
-    this(string name) { value = canonicalField(name); }
-    string text() const { return value; }
+    this(string name) pure { value = canonicalField(name); }
+    string text() const pure { return value; }
 }
 
 /// Versioned SHA-256 key for a logical source record or a derived child.
 struct DocumentId {
     private string value;
 
-    private this(string digest) { value = digest; }
-    string text() const { return value; }
+    private this(string digest) pure { value = digest; }
+    string text() const pure { return value; }
 
     /// Parse an already-stored typed ID without deriving new provenance.
     static DocumentId fromCanonicalText(string text) {
@@ -59,7 +59,7 @@ struct DocumentId {
         return DocumentId(text.idup);
     }
 
-    static DocumentId from(SourceLocator source) {
+    static DocumentId from(SourceLocator source) pure {
         enforce(source.datasetNamespace.length != 0 && source.sourceKey.length != 0 &&
             source.recordKey.length != 0, "source locator is not initialized");
         auto bytes = appender!(ubyte[]);
@@ -91,14 +91,14 @@ struct Document {
     OutputName outputName;
     private DocumentId childId;
 
-    this(SourceLocator source, OutputName outputName) {
+    this(SourceLocator source, OutputName outputName) pure {
         DocumentId.from(source); // Reject invalid provenance at construction.
         this.sourceValue = source;
         this.outputName = outputName;
     }
 
     /// Return a value, never a writable alias to identity provenance.
-    @property SourceLocator source() const {
+    @property SourceLocator source() const pure {
         return SourceLocator(sourceValue.datasetNamespace, sourceValue.sourceKey,
             sourceValue.recordKey);
     }
@@ -114,20 +114,20 @@ struct Document {
         return child;
     }
 
-    DocumentId id() const {
+    DocumentId id() const pure {
         auto sourceId = DocumentId.from(sourceValue);
         return childId.text.length != 0 ? childId : sourceId;
     }
 }
 
-private string canonicalField(string input) {
+private string canonicalField(string input) pure {
     enforce(input.length != 0, "identity/name field must not be empty");
     validate(input);
     enforce(input.indexOf('\0') < 0, "identity/name field must not contain NUL");
     return normalize(input).idup;
 }
 
-private void appendField(ref Appender!(ubyte[]) bytes, string field) {
+private void appendField(ref Appender!(ubyte[]) bytes, string field) pure {
     enforce(field.length <= uint.max, "identity field too long");
     auto length = cast(uint) field.length;
     foreach_reverse (shift; [0, 8, 16, 24])
@@ -186,12 +186,12 @@ struct DocumentView {
         this.length = length;
     }
 
-    size_t size() const {
+    size_t size() const pure {
         enforce(owner !is null && !owner.closed, "document view owner is closed");
         return length;
     }
 
-    ubyte at(size_t index) const {
+    ubyte at(size_t index) const pure {
         enforce(index < size, "document view index out of range");
         return owner.bytes[start + index];
     }

@@ -6,7 +6,7 @@ import pipeline : StreamingFilter, StreamingState, maxStreamingExpansion,
 import std.algorithm : map;
 import std.conv : to;
 
-private dchar straightenQuote(dchar c) {
+private dchar straightenQuote(dchar c) pure {
     switch (c) {
         case '‘', '’', '‚', '‛', 'ʼ': return '\'';
         case '“', '”', '„', '‟': return '"';
@@ -24,7 +24,7 @@ string uncurlQuotesFilter(string text) {
 }
 
 private size_t uncurlQuotesPush(ref StreamingState, dchar input,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     (*output)[0] = straightenQuote(input);
     return 1;
 }

@@ -10,24 +10,24 @@ import std.utf : encode;
 
 enum EntityContext { text, attribute }
 
-private bool asciiAlphaNumeric(char c) {
+private bool asciiAlphaNumeric(char c) pure {
     return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
            (c >= 'a' && c <= 'z');
 }
 
-private int digitValue(char c, bool hex) {
+private int digitValue(char c, bool hex) pure {
     if (c >= '0' && c <= '9') return c - '0';
     if (hex && c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (hex && c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
 }
 
-private string codePointString(dchar c) {
+private string codePointString(dchar c) pure {
     char[4] encoded;
     return encoded[0 .. encode(encoded, c)].idup;
 }
 
-private string numericReference(string text, ref size_t end) {
+private string numericReference(string text, ref size_t end) pure {
     size_t cursor = end + 1; // end initially points at '#'
     bool hex;
     if (cursor < text.length && (text[cursor] == 'x' || text[cursor] == 'X')) {
@@ -58,7 +58,7 @@ private string numericReference(string text, ref size_t end) {
 /// Decode exactly once. The registered filter uses text context. For an HTML
 /// attribute value, call this overload after tokenization with attribute context.
 /// RAWTEXT, script, comments and other tokenizer states are not supported.
-string decodeHtmlEntities(string text, EntityContext context = EntityContext.text) {
+string decodeHtmlEntities(string text, EntityContext context = EntityContext.text) pure {
     auto output = appender!string;
     output.reserve(text.length);
     size_t position;
@@ -113,7 +113,7 @@ string decodeHtmlEntities(string text, EntityContext context = EntityContext.tex
     return output.data;
 }
 
-private string decodeHtmlEntitiesFilter(string text) {
+private string decodeHtmlEntitiesFilter(string text) pure {
     return decodeHtmlEntities(text);
 }
 

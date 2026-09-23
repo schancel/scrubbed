@@ -5,9 +5,9 @@ import job.json : jobIdentity;
 import job.spec : JobOption, JobOptionType, JobOptions, JobSpec, validateJobSpec;
 import pipeline : FilterOption, FilterRegistry, Pipeline, TypedFilterOptions,
     TypedFilterSpec, availableFilterRegistry;
-import stages.contract : ResourceDeclaration, StageDeclaration, StageTransform;
-import stages.registry : FilterPlacement, StageOption, StageOptions, StageRegistry,
-    availableStages;
+import stages.contract : ResourceDeclaration, StageDeclaration;
+import stages.registry : ConfiguredStageTransform, FilterPlacement, StageOption,
+    StageOptions, StageRegistry, availableStages;
 import std.exception : enforce;
 
 struct CompiledStage {
@@ -15,16 +15,17 @@ private:
     bool initialized;
     string stageId;
     StageDeclaration stageDeclaration;
-    StageTransform stageTransform;
+    ConfiguredStageTransform stageTransform;
     FilterPlacement placement;
     Pipeline filterPipeline;
 
     @disable this();
 
-    this(string id, StageDeclaration declaration, StageTransform transform,
+    this(string id, StageDeclaration declaration,
+            ConfiguredStageTransform transform,
             FilterPlacement filterPlacement, Pipeline filters) {
         enforce(id.length != 0, "compiled stage ID is required");
-        enforce(transform !is null, "compiled stage transform is required");
+        enforce(transform.isValid, "compiled stage transform is required");
         enforce(filterPlacement == FilterPlacement.none ||
             filterPlacement == FilterPlacement.before ||
             filterPlacement == FilterPlacement.after,
@@ -47,7 +48,10 @@ public:
         requireCompiled;
         return stageDeclaration;
     }
-    StageTransform transform() const { requireCompiled; return stageTransform; }
+    ConfiguredStageTransform transform() const {
+        requireCompiled;
+        return stageTransform;
+    }
     FilterPlacement filterPlacement() const { requireCompiled; return placement; }
     string runFilters(string input) const {
         requireCompiled;
@@ -151,6 +155,72 @@ CompiledJob compileJob(const ref JobSpec spec,
     return CompiledJob(identity, compiledStages);
 }
 
+version (unittest) {
+    import std.conv : to;
+    import stages.contract : StageDecision, StageDocument;
+    import stages.registry : StageConfiguration;
+    import pipeline : ConfiguredFilter, FilterConfiguration;
+
+    private class CompilerStageTestConfiguration : StageConfiguration {
+        bool enabled;
+        this(bool enabled) immutable { this.enabled = enabled; }
+    }
+
+    private StageDecision applyCompilerStageTest(StageDocument input,
+            immutable(StageConfiguration) raw) pure {
+        auto configured = cast(immutable(CompilerStageTestConfiguration)) raw;
+        return configured.enabled ? StageDecision.map(input) :
+            StageDecision.reject("disabled");
+    }
+
+    private ConfiguredStageTransform compilerStageTestFactory(
+            const ref StageOptions options) {
+        const label = options["label"].asText;
+        const count = options["count"].asInteger;
+        const enabled = options["enabled"].asBoolean;
+        enforce(label == "ready" && count == 3,
+            "stage scalar conversion failed");
+        return ConfiguredStageTransform(&applyCompilerStageTest,
+            new immutable CompilerStageTestConfiguration(enabled));
+    }
+
+    private StageDecision applyCompilerNoop(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.map(input);
+    }
+
+    private ConfiguredStageTransform compilerNoopFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applyCompilerNoop);
+    }
+
+    private class CompilerFilterTestConfiguration : FilterConfiguration {
+        string label;
+        long count;
+        bool enabled;
+        this(string label, long count, bool enabled) immutable {
+            this.label = label;
+            this.count = count;
+            this.enabled = enabled;
+        }
+    }
+
+    private string applyCompilerFilterTest(string text,
+            immutable(FilterConfiguration) raw) pure {
+        auto configured = cast(immutable(CompilerFilterTestConfiguration)) raw;
+        return text ~ configured.label ~ configured.count.to!string ~
+            (configured.enabled ? "T" : "F");
+    }
+
+    private ConfiguredFilter compilerFilterTestFactory(
+            const ref TypedFilterOptions options) {
+        return ConfiguredFilter(&applyCompilerFilterTest,
+            new immutable CompilerFilterTestConfiguration(
+                options["label"].asText, options["count"].asInteger,
+                options["enabled"].asBoolean));
+    }
+}
+
 unittest {
     import job.cli_tokens : parseJobTokens;
     import job.json : parseJobJson;
@@ -165,40 +235,22 @@ unittest {
 
     FilterRegistry filters;
     filters.addFilter("plain", cast(Filter) ((string text) => text ~ "!"));
-    auto typedFactory = (const ref TypedFilterOptions options) {
-        const label = options["label"].asText;
-        const count = options["count"].asInteger;
-        const enabled = options["enabled"].asBoolean;
-        return cast(ConfiguredFilter) ((string text) => text ~ label ~
-            count.to!string ~ (enabled ? "T" : "F"));
-    };
     filters.addTypedFilterFactory("typed", [
         FilterOptionDeclaration("label", FilterOptionType.text, true),
         FilterOptionDeclaration("count", FilterOptionType.integer, true),
         FilterOptionDeclaration("enabled", FilterOptionType.boolean, true)
-    ], typedFactory);
+    ], &compilerFilterTestFactory);
 
     StageRegistry stages;
-    auto stageFactory = (const ref StageOptions options) {
-        const label = options["label"].asText;
-        const count = options["count"].asInteger;
-        const enabled = options["enabled"].asBoolean;
-        enforce(label == "ready" && count == 3, "stage scalar conversion failed");
-        return cast(StageTransform) ((StageDocument input) =>
-            enabled ? StageDecision.map(input) : StageDecision.reject("disabled"));
-    };
     stages.add(StageRegistration(StageDeclaration("text-transform",
         PassMode.singlePass, ResourceDeclaration(1, 0)), [
             OptionDeclaration("label", OptionType.text, true),
             OptionDeclaration("count", OptionType.integer, true),
             OptionDeclaration("enabled", OptionType.boolean, true)
-        ], null, null, stageFactory, FilterPlacement.before));
-    auto noFilters = (const ref StageOptions options) {
-        return cast(StageTransform) ((StageDocument input) => StageDecision.map(input));
-    };
+        ], null, null, &compilerStageTestFactory, FilterPlacement.before));
     stages.add(StageRegistration(StageDeclaration("sink",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null,
-        ["text-transform"], noFilters, FilterPlacement.none));
+        ["text-transform"], &compilerNoopFactory, FilterPlacement.none));
 
     auto json = parseJobJson(`{"version":3,"stages":[` ~
         `{"id":"first","implementation":"text-transform",` ~
@@ -251,7 +303,7 @@ unittest {
     StageRegistry legacyRegistry;
     legacyRegistry.add(StageRegistration(StageDeclaration("text-transform",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
-        noFilters, FilterPlacement.before));
+        &compilerNoopFactory, FilterPlacement.before));
     assert(compileJob(legacy, &legacyRegistry, &filters)
         .stages[0].runFilters("x") == "x!");
 

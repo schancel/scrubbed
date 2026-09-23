@@ -36,14 +36,17 @@ extern(C) {
         NativeString data;
     }
 
-    void* lxb_html_document_create();
-    int lxb_html_document_parse(void* document, const(ubyte)* utf8, size_t length);
-    void* lxb_html_document_destroy(void* document);
-    const(ubyte)* lxb_dom_element_qualified_name(NativeNode* element, size_t* length);
-    void* lxb_dom_element_first_attribute_noi(NativeNode* element);
-    void* lxb_dom_element_next_attribute_noi(void* attribute);
-    const(ubyte)* lxb_dom_attr_qualified_name(void* attribute, size_t* length);
-    const(ubyte)* lxb_dom_attr_value_noi(void* attribute, size_t* length);
+    void* lxb_html_document_create() pure;
+    int lxb_html_document_parse(void* document, const(ubyte)* utf8,
+        size_t length) pure;
+    void* lxb_html_document_destroy(void* document) pure;
+    const(ubyte)* lxb_dom_element_qualified_name(NativeNode* element,
+        size_t* length) pure;
+    void* lxb_dom_element_first_attribute_noi(NativeNode* element) pure;
+    void* lxb_dom_element_next_attribute_noi(void* attribute) pure;
+    const(ubyte)* lxb_dom_attr_qualified_name(void* attribute,
+        size_t* length) pure;
+    const(ubyte)* lxb_dom_attr_value_noi(void* attribute, size_t* length) pure;
 }
 
 enum int elementNode = 1;

@@ -9,19 +9,19 @@ import std.exception : enforce;
 enum size_t maxTreeJsonBytes = 4 * 1024 * 1024;
 
 class HtmlTreeOutputLimit : Exception {
-    this() { super("tree-json output exceeds 4 MiB"); }
+    this() pure { super("tree-json output exceeds 4 MiB"); }
 }
 
 private struct Writer {
     char[] bytes;
 
-    void put(string value) {
+    void put(string value) pure {
         if (value.length > maxTreeJsonBytes - bytes.length)
             throw new HtmlTreeOutputLimit;
         bytes ~= value;
     }
 
-    void quoted(string value) {
+    void quoted(string value) pure {
         put("\"");
         foreach (char c; value) {
             switch (c) {
@@ -46,7 +46,7 @@ private struct Writer {
 }
 
 /// Key order, node order, and one trailing LF are part of tree-json:v1.
-string serializeTreeJson(Document document, const ref HtmlTree tree) {
+string serializeTreeJson(Document document, const ref HtmlTree tree) pure {
     Writer writer;
     auto source = document.source;
     writer.put(`{"version":"tree-json:v1","documentId":`);

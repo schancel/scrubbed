@@ -99,7 +99,11 @@ does not accept v3 until #148's switch slice. See the
 `composition.compiler` is the only conversion point from `JobOption` to the
 registry-owned stage/filter scalar types. It resolves injected registries,
 invokes factories once, validates relative implementation order, and retains
-the stage-instance ID and canonical job identity behind read-only compiled
+only pure context-free executable function pointers plus transitive-immutable
+parsed configuration. Shallow compiled-plan copies are therefore safe for
+deterministic sequential or concurrent reuse; streaming state remains local
+to each pipeline run. The stage-instance ID and canonical job identity remain
+behind read-only compiled
 views. Stage registrations declare filter placement as none, before, or after;
 compilation rejects unsupported filters. `stages.text_transform` is a self-registering no-op map with before
 placement. `composition.executor` now proves one compiled stage's declared
@@ -143,7 +147,9 @@ global dedup or persistence implementation.
 
 `stages.registry` records each concrete stage's declaration, typed option
 schema, factory and relative `before`/`after` constraints. Stage modules
-self-register when imported; the registry does not import their names.
+self-register when imported; the registry does not import their names. A
+factory returns a pure context-free stage function and transitive-immutable typed
+configuration rather than a configured delegate.
 `stages.config.buildConfigV2` accepts only a nested version-2 object with an
 ordered `stages` array. It rejects unknown keys/names, duplicate stage names,
 missing required options, incorrect JSON option types and relative-order

@@ -67,18 +67,18 @@ struct StageDecision {
     private StageDocument[] output;
     private string explanation;
 
-    static StageDecision map(StageDocument output) {
+    static StageDecision map(StageDocument output) pure {
         return StageDecision(DecisionKind.map, [output], null);
     }
-    static StageDecision reject(string reason) {
+    static StageDecision reject(string reason) pure {
         enforce(reason.length != 0, "rejection needs a reason");
         return StageDecision(DecisionKind.reject, null, reason);
     }
-    static StageDecision quarantine(string reason) {
+    static StageDecision quarantine(string reason) pure {
         enforce(reason.length != 0, "quarantine needs a reason");
         return StageDecision(DecisionKind.quarantine, null, reason);
     }
-    static StageDecision split(StageDocument[] children) {
+    static StageDecision split(StageDocument[] children) pure {
         enforce(children.length > 0, "split needs children");
         return StageDecision(DecisionKind.split, children.dup, null);
     }

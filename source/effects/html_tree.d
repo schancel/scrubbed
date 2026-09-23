@@ -56,12 +56,12 @@ struct HtmlOutcome {
     private HtmlTree treeValue;
     private HtmlFailure failureValue;
 
-    bool isParsed() const { return succeeded; }
-    ref const(HtmlTree) tree() const {
+    bool isParsed() const pure { return succeeded; }
+    ref const(HtmlTree) tree() const pure {
         enforce(succeeded, "HTML outcome is quarantined");
         return treeValue;
     }
-    ref const(HtmlFailure) failure() const {
+    ref const(HtmlFailure) failure() const pure {
         enforce(!succeeded, "HTML outcome is parsed");
         return failureValue;
     }
@@ -74,7 +74,7 @@ private struct Accounting { size_t created, destroyed; }
 
 private class BoundaryFault : Exception {
     HtmlFailureReason reason;
-    this(HtmlFailureReason reason) {
+    this(HtmlFailureReason reason) pure {
         super("restricted HTML boundary failed");
         this.reason = reason;
     }
@@ -83,20 +83,21 @@ private class BoundaryFault : Exception {
 private HtmlOutcome failed(HtmlFailureReason reason,
     QuarantineReason decodeReason = QuarantineReason.none,
     bool hasOffendingOffset = false, size_t offendingOffset = 0,
-    int nativeStatus = 0) {
+    int nativeStatus = 0) pure {
     HtmlOutcome outcome;
     outcome.failureValue = HtmlFailure(reason, decodeReason,
         hasOffendingOffset, offendingOffset, nativeStatus);
     return outcome;
 }
 
-private void charge(ref HtmlTree tree, size_t bytes) {
+private void charge(ref HtmlTree tree, size_t bytes) pure {
     if (bytes > maxObservationBytes - tree.observedBytes)
         throw new BoundaryFault(HtmlFailureReason.observationLimit);
     tree.observedBytes += bytes;
 }
 
-private string copyNative(const(ubyte)* value, size_t length, ref HtmlTree tree) {
+private string copyNative(const(ubyte)* value, size_t length,
+        ref HtmlTree tree) pure {
     if (length != 0 && value is null)
         throw new BoundaryFault(HtmlFailureReason.nativeData);
     charge(tree, length);
@@ -109,7 +110,7 @@ private string copyNative(const(ubyte)* value, size_t length, ref HtmlTree tree)
 }
 
 private void observe(NativeNode* first, size_t parent, size_t depth,
-    ref size_t visited, ref HtmlTree tree, Fault fault) {
+    ref size_t visited, ref HtmlTree tree, Fault fault) pure {
     for (auto node = first; node !is null; node = node.next) {
         if (depth > maxDepth) throw new BoundaryFault(HtmlFailureReason.depthLimit);
         if (++visited > maxNodes) throw new BoundaryFault(HtmlFailureReason.nodeLimit);
@@ -151,14 +152,14 @@ private void observe(NativeNode* first, size_t parent, size_t depth,
     }
 }
 
-size_t checkedHtmlByteLimit(ulong limit) {
+size_t checkedHtmlByteLimit(ulong limit) pure {
     enforce(limit > 0 && limit <= maxConfigurableHtmlBytes,
         "HTML byte limit must be between 1 and 8388608");
     return cast(size_t)limit;
 }
 
 private HtmlOutcome parseImpl(const(ubyte)[] raw, string charset, string source,
-    Fault fault, Accounting* accounting, size_t byteLimit = maxRawBytes) {
+    Fault fault, Accounting* accounting, size_t byteLimit = maxRawBytes) pure {
     checkedHtmlByteLimit(byteLimit);
     // This check runs before decodeBytes or any native allocation.
     if (raw.length > byteLimit) return failed(HtmlFailureReason.rawLimit);
@@ -211,7 +212,7 @@ private HtmlOutcome parseImpl(const(ubyte)[] raw, string charset, string source,
 /// Parse only the selected HTML element names, ordered decoded attributes,
 /// and text nodes. No HTML encoding sniffing or unrestricted DOM semantics.
 HtmlOutcome parseHtml(const(ubyte)[] raw, string declaredCharset = null,
-    string source = "", size_t byteLimit = maxRawBytes) {
+    string source = "", size_t byteLimit = maxRawBytes) pure {
     return parseImpl(raw, declaredCharset, source, Fault.none, null, byteLimit);
 }
 

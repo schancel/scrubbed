@@ -1,7 +1,7 @@
 /// Strict v2 document-stage configuration boundary; not connected to the CLI.
 module stages.config;
 
-import stages.contract : StageDeclaration, StageTransform;
+import stages.contract : StageDeclaration, StageDocument, StageTransform;
 import stages.registry : OptionType, StageOption, StageOptions, StageRegistry,
     availableStages;
 import std.exception : enforce;
@@ -76,13 +76,53 @@ StagePlan buildConfigV2(string json, const(StageRegistry)* registry = null) {
                 enforce(found, "unknown option for " ~ name ~ ": " ~ key);
             }
         }
-        auto transform = registry.build(name, options);
+        auto configured = registry.build(name, options);
+        StageTransform transform = (StageDocument input) => configured(input);
         plan.stages ~= ConfiguredStage(registration.declaration, transform, options);
     }
     string[] keys;
     foreach (stage; plan.stages) keys ~= stage.declaration.key;
     registry.validateOrder(keys);
     return plan;
+}
+
+version (unittest) {
+    import stages.contract : StageDecision;
+    import stages.registry : ConfiguredStageTransform, StageConfiguration;
+
+    private class ConfigTestConfiguration : StageConfiguration {
+        long count;
+        bool active;
+        this(long count, bool active) immutable {
+            this.count = count;
+            this.active = active;
+        }
+    }
+
+    private StageDecision applyConfigIdentity(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.map(input);
+    }
+
+    private StageDecision applyConfigTyped(StageDocument input,
+            immutable(StageConfiguration) raw) pure {
+        auto configured = cast(immutable(ConfigTestConfiguration)) raw;
+        if (configured.count == 4 && configured.active)
+            return StageDecision.reject("typed values arrived");
+        return StageDecision.map(input);
+    }
+
+    private ConfiguredStageTransform configIdentityFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applyConfigIdentity);
+    }
+
+    private ConfiguredStageTransform configTypedFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applyConfigTyped,
+            new immutable ConfigTestConfiguration(
+                options["count"].asInteger(), options["active"].asBoolean()));
+    }
 }
 
 unittest {
@@ -128,25 +168,13 @@ unittest {
         mustReject(bad);
 
     StageRegistry isolated;
-    auto simple = (const ref StageOptions options) {
-        return cast(typeof(global.stages[0].transform)) ((StageDocument input) {
-            return StageDecision.map(input);
-        });
-    };
     isolated.add(StageRegistration(StageDeclaration("early", PassMode.singlePass,
-        ResourceDeclaration(1, 0)), null, ["late"], null, simple));
-    auto typed = (const ref StageOptions options) {
-        auto count = options["count"].asInteger();
-        auto active = options["active"].asBoolean();
-        return cast(typeof(global.stages[0].transform)) ((StageDocument input) {
-            if (count == 4 && active) return StageDecision.reject("typed values arrived");
-            return StageDecision.map(input);
-        });
-    };
+        ResourceDeclaration(1, 0)), null, ["late"], null,
+        &configIdentityFactory));
     isolated.add(StageRegistration(StageDeclaration("late", PassMode.singlePass,
         ResourceDeclaration(1, 0)), [OptionDeclaration("count", OptionType.integer, true),
         OptionDeclaration("active", OptionType.boolean, true)],
-        null, ["early"], typed));
+        null, ["early"], &configTypedFactory));
     auto valid = buildConfigV2(`{"version":2,"stages":[{"name":"early"},` ~
         `{"name":"late","options":{"count":4,"active":true}}]}`, &isolated);
     enforce(valid.stages.length == 2);
@@ -166,6 +194,7 @@ unittest {
         `"options":{"count":true,"active":true}}]}`, &isolated);
     mustReject(`{"version":2,"stages":[{"name":"late"}]}`, &isolated);
     isolated.add(StageRegistration(StageDeclaration("orphan", PassMode.singlePass,
-        ResourceDeclaration(1, 0)), null, ["not-registered"], null, simple));
+        ResourceDeclaration(1, 0)), null, ["not-registered"], null,
+        &configIdentityFactory));
     mustReject(`{"version":2,"stages":[{"name":"orphan"}]}`, &isolated);
 }

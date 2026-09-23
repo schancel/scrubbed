@@ -7,7 +7,11 @@ registries. It performs no I/O and imports no concrete filter or stage module.
 typed scalar options into registry-owned values, invokes injected stage and
 filter factories once, validates relative implementation order, and retains
 each stable stage-instance ID plus the canonical `job:v3:` identity. Compiled
-identity, stage order, IDs, and declarations are exposed through read-only
+stage and configured-filter execution retain only pure context-free function
+pointers with transitive-immutable parsed configuration; factories never run
+during document execution and mutable streaming state is local to each run.
+Compiled identity, stage order, IDs, and declarations are exposed through
+read-only
 views, and explicit module-private constructors suppress D's generated
 aggregate initializer, so callers cannot detach executable behavior from that
 identity. [`access_contract.d`](access_contract.d) pins that external-module

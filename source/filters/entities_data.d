@@ -2,10 +2,7 @@
 // Copyright © WHATWG (Apple, Google, Mozilla, Microsoft); BSD-3-Clause terms in THIRD_PARTY_NOTICES.md.
 module filters.entities_data;
 
-private string[string] namedEntities;
-
-static this() {
-    namedEntities = [
+private immutable string[string] namedEntities = [
         "&AElig": "Æ",
         "&AElig;": "Æ",
         "&AMP": "&",
@@ -2237,10 +2234,9 @@ static this() {
         "&zscr;": "𝓏",
         "&zwj;": "‍",
         "&zwnj;": "‌",
-    ];
-}
+];
 
-string findNamedEntity(string name) {
+string findNamedEntity(string name) pure {
     auto value = name in namedEntities;
     return value is null ? null : *value;
 }

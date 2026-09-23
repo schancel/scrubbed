@@ -2,12 +2,18 @@
 module stages.text_transform;
 
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
-    StageDeclaration, StageDocument, StageTransform;
-import stages.registry : FilterPlacement, StageOptions, StageRegistration,
-    registerStage;
+    StageDeclaration, StageDocument;
+import stages.registry : ConfiguredStageTransform, FilterPlacement,
+    StageConfiguration, StageOptions, StageRegistration, registerStage;
 
-private StageTransform buildTextTransform(const ref StageOptions options) {
-    return (StageDocument input) => StageDecision.map(input);
+private StageDecision applyTextTransform(StageDocument input,
+        immutable(StageConfiguration)) pure {
+    return StageDecision.map(input);
+}
+
+private ConfiguredStageTransform buildTextTransform(
+        const ref StageOptions options) {
+    return ConfiguredStageTransform(&applyTextTransform);
 }
 
 static this() {

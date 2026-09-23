@@ -1,7 +1,8 @@
 /// Typed document-stage registrations; concrete stage modules own their registrations.
 module stages.registry;
 
-import stages.contract : ResourceDeclaration, StageDeclaration, StageTransform;
+import stages.contract : ResourceDeclaration, StageDecision, StageDeclaration,
+    StageDocument;
 import std.exception : enforce;
 import std.string : indexOf;
 import std.utf : validate;
@@ -50,7 +51,37 @@ struct StageOption {
 }
 
 alias StageOptions = StageOption[string];
-alias StageFactory = StageTransform function(const ref StageOptions);
+
+/// Type-erased, transitively immutable configuration parsed by a stage factory.
+class StageConfiguration {}
+
+alias StageApply = StageDecision function(StageDocument,
+    immutable(StageConfiguration)) pure;
+
+/// Reentrant configured execution: code has no delegate context and all
+/// retained configuration is transitively immutable.
+struct ConfiguredStageTransform {
+private:
+    StageApply stageApply;
+    immutable(StageConfiguration) stageConfiguration;
+
+public:
+    this(StageApply apply,
+            immutable(StageConfiguration) configuration = null) {
+        enforce(apply !is null, "configured stage implementation is required");
+        stageApply = apply;
+        stageConfiguration = configuration;
+    }
+
+    bool isValid() const { return stageApply !is null; }
+
+    StageDecision opCall(StageDocument input) const {
+        enforce(isValid, "configured stage transform is not initialized");
+        return stageApply(input, stageConfiguration);
+    }
+}
+
+alias StageFactory = ConfiguredStageTransform function(const ref StageOptions);
 
 struct OptionDeclaration {
     string key;
@@ -120,7 +151,7 @@ struct StageRegistry {
     }
 
     /// Validate declared option names/types once, then invoke the factory.
-    StageTransform build(string key, const StageOptions options) const {
+    ConfiguredStageTransform build(string key, const StageOptions options) const {
         auto registration = find(key);
         enforce(registration !is null, "unknown stage: " ~ key);
         foreach (name, value; options) {
@@ -136,7 +167,7 @@ struct StageRegistry {
                 enforce((declaration.key in options) !is null,
                     "missing option for " ~ key ~ ": " ~ declaration.key);
         auto transform = registration.factory(options);
-        enforce(transform !is null, "stage factory returned no transform: " ~ key);
+        enforce(transform.isValid, "stage factory returned no transform: " ~ key);
         return transform;
     }
 
@@ -173,19 +204,34 @@ const(StageRegistry)* availableStages() {
     return &registeredStages;
 }
 
+version (unittest) {
+    private StageDecision registryTestApply(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.map(input);
+    }
+
+    private ConfiguredStageTransform registryTestFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&registryTestApply);
+    }
+}
+
 unittest {
     import stages.contract : PassMode, ResourceDeclaration, StageDecision, StageDocument;
     import std.exception : assertThrown;
 
-    StageRegistry registry;
-    auto factory = (const ref StageOptions options) {
-        return cast(StageTransform) ((StageDocument input) {
-            return StageDecision.map(input);
-        });
+    size_t mutableState;
+    auto captured = (StageDocument input, immutable(StageConfiguration)) {
+        ++mutableState;
+        return StageDecision.map(input);
     };
+    static assert(!__traits(compiles, ConfiguredStageTransform(captured)));
+    assertThrown(ConfiguredStageTransform.init(StageDocument.init));
+
+    StageRegistry registry;
     auto item = StageRegistration(StageDeclaration("sample", PassMode.singlePass,
         ResourceDeclaration(1, 0)), [OptionDeclaration("label", OptionType.text, true)],
-        null, null, factory);
+        null, null, &registryTestFactory);
     registry.add(item);
     auto found = registry.find("sample");
     assert(found !is null);
@@ -207,7 +253,7 @@ unittest {
     assert(StageOption.integer(4).asInteger() == 4);
     assert(StageOption.boolean(true).asBoolean());
     assertThrown(StageOption.text("x").asInteger());
-    assert(registry.build("sample", ["label": StageOption.text("x")]) !is null);
+    assert(registry.build("sample", ["label": StageOption.text("x")]).isValid);
     assertThrown(registry.build("sample", ["label": StageOption.integer(1)]));
     assertThrown(registry.build("sample", null));
     registry.validateOrder(["sample", "sample"]);

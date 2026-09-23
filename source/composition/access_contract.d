@@ -3,15 +3,15 @@ module composition.access_contract;
 
 import composition.compiler : CompiledJob, CompiledStage;
 import pipeline : Pipeline;
-import stages.contract : StageDeclaration, StageTransform;
-import stages.registry : FilterPlacement;
+import stages.contract : StageDeclaration;
+import stages.registry : ConfiguredStageTransform, FilterPlacement;
 
 // D's generated aggregate initializer can otherwise bypass private fields.
 // Only composition.compiler may pair canonical identity with resolved behavior.
 static assert(!__traits(compiles,
     CompiledJob("job:v3:forged", cast(CompiledStage[]) null)));
 static assert(!__traits(compiles,
-    CompiledStage("forged", StageDeclaration.init, StageTransform.init,
+    CompiledStage("forged", StageDeclaration.init, ConfiguredStageTransform.init,
         FilterPlacement.none, Pipeline.init)));
 static assert(!__traits(compiles, { CompiledJob forged; }));
 static assert(!__traits(compiles, { CompiledStage forged; }));

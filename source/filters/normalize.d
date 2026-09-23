@@ -64,7 +64,7 @@ string normalizeLineEndingsFilter(string text) {
 }
 
 private size_t stripControlPush(ref StreamingState, dchar input,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     if (isControl(input) && input != '\n' && input != '\t' && input != '\r')
         return 0;
     (*output)[0] = input;
@@ -72,7 +72,7 @@ private size_t stripControlPush(ref StreamingState, dchar input,
 }
 
 private size_t normalizeLineEndingsPush(ref StreamingState state, dchar input,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     const hadCR = state.words[0] != 0;
     state.words[0] = 0;
     if (hadCR) {
@@ -94,7 +94,7 @@ private size_t normalizeLineEndingsPush(ref StreamingState state, dchar input,
 }
 
 private size_t normalizeLineEndingsFinish(ref StreamingState state,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     if (state.words[0] == 0) return 0;
     state.words[0] = 0;
     (*output)[0] = '\n';

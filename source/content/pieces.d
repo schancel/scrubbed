@@ -22,7 +22,7 @@ struct ContentPiece {
     }
 
     /// Retain a replacement independently of the caller's mutable array.
-    static ContentPiece own(const(ubyte)[] bytes) {
+    static ContentPiece own(const(ubyte)[] bytes) pure {
         ContentPiece piece;
         piece.kind = Kind.owned;
         piece.replacement = bytes.dup;
@@ -33,7 +33,7 @@ struct ContentPiece {
     bool isBorrowed() const { return kind == Kind.borrowed; }
     bool isOwned() const { return kind == Kind.owned; }
 
-    size_t size() const {
+    size_t size() const pure {
         enforce(kind != Kind.invalid, "uninitialized content piece");
         if (kind == Kind.borrowed) {
             // Check the owner even when this piece has zero bytes.
@@ -44,7 +44,7 @@ struct ContentPiece {
         return count;
     }
 
-    ubyte at(size_t index) const {
+    ubyte at(size_t index) const pure {
         enforce(index < size, "content piece index out of range");
         return kind == Kind.borrowed ? source.at(offset + index) : replacement[offset + index];
     }
@@ -63,7 +63,7 @@ struct ContentPiece {
 final class Content {
     private ContentPiece[] sequence;
 
-    this(ContentPiece[] pieces = null) {
+    this(ContentPiece[] pieces = null) pure {
         foreach (piece; pieces) piece.size;
         sequence = pieces.dup;
     }
@@ -74,23 +74,23 @@ final class Content {
         private ContentPiece[] descriptors;
         private size_t cursor;
 
-        @property bool empty() { return cursor == descriptors.length; }
-        @property ContentPiece front() {
+        @property bool empty() pure { return cursor == descriptors.length; }
+        @property ContentPiece front() pure {
             enforce(!empty, "content piece range is empty");
             auto piece = descriptors[cursor];
             piece.size;
             return piece;
         }
-        void popFront() {
+        void popFront() pure {
             front; // Check a borrowed descriptor even if it is empty.
             ++cursor;
         }
         PieceRange save() { return this; }
     }
 
-    PieceRange pieces() { return PieceRange(sequence); }
+    PieceRange pieces() pure { return PieceRange(sequence); }
 
-    size_t size() const {
+    size_t size() const pure {
         size_t total;
         foreach (piece; sequence) {
             auto n = piece.size;
@@ -172,7 +172,8 @@ final class Content {
 
     /// The chunk is temporary: a sink must consume it before returning.
     /// At most chunkSize bytes are buffered, including for mapped input.
-    void stream(scope void delegate(const(ubyte)[]) sink, size_t chunkSize = 8192) const {
+    void stream(scope void delegate(const(ubyte)[]) pure sink,
+            size_t chunkSize = 8192) const pure {
         enforce(chunkSize != 0, "stream chunk size must be positive");
         auto buffer = new ubyte[chunkSize];
         size_t filled;

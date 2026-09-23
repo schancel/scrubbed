@@ -3,10 +3,12 @@
 /// one is safer than leaving the input alone. See THIRD_PARTY_NOTICES.md.
 module filters.mojibake;
 
-import pipeline : ConfiguredFilter, FilterOptionDeclaration, FilterOptionType,
-    FilterOptions, TypedFilterOptions, registerTypedFilterFactory;
+import pipeline : ConfiguredFilter, FilterConfiguration, FilterOptionDeclaration,
+    FilterOptionType, FilterOptions, TypedFilterOptions,
+    registerTypedFilterFactory;
 import std.array : appender;
 import std.conv : ConvException, to;
+import std.exception : enforce;
 import std.range.primitives : empty, front, isForwardRange, isInputRange, popFront, save;
 import std.string : split;
 import std.typecons : No;
@@ -21,7 +23,7 @@ immutable dchar[32] cp1252HighRange = [
     0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0,      0x017E, 0x0178,
 ];
 
-dchar cp1252ToUnicode(ubyte b) {
+dchar cp1252ToUnicode(ubyte b) pure {
     if (b >= 0x80 && b <= 0x9F) {
         const c = cp1252HighRange[b - 0x80];
         return c == 0 ? dchar.init : c;
@@ -31,7 +33,7 @@ dchar cp1252ToUnicode(ubyte b) {
 
 private enum LegacyEncoding { latin1, cp1252 }
 
-private bool legacyByte(dchar c, LegacyEncoding encoding, out ubyte result) {
+private bool legacyByte(dchar c, LegacyEncoding encoding, out ubyte result) pure {
     if (c <= 0xFF && (encoding == LegacyEncoding.latin1 || c <= 0x7F || c >= 0xA0)) {
         result = cast(ubyte) c;
         return true;
@@ -47,7 +49,7 @@ private bool legacyByte(dchar c, LegacyEncoding encoding, out ubyte result) {
     return false;
 }
 
-private bool canEncodeLegacy(string text, LegacyEncoding encoding) {
+private bool canEncodeLegacy(string text, LegacyEncoding encoding) pure {
     foreach (dchar c; text) {
         ubyte ignored;
         if (!legacyByte(c, encoding, ignored)) return false;
@@ -64,9 +66,9 @@ private auto legacyBytes(string text, LegacyEncoding encoding) {
         private string source;
         private LegacyEncoding encoding;
 
-        @property bool empty() const { return source.length == 0; }
+        @property bool empty() const pure { return source.length == 0; }
 
-        @property char front() const {
+        @property char front() const pure {
             assert(!empty);
             ubyte result;
             const mapped = legacyByte(source.front, encoding, result);
@@ -74,7 +76,7 @@ private auto legacyBytes(string text, LegacyEncoding encoding) {
             return cast(char) result;
         }
 
-        void popFront() {
+        void popFront() pure {
             assert(!empty);
             source.popFront();
         }
@@ -93,7 +95,7 @@ private auto decodedCandidate(string text, LegacyEncoding encoding) {
 /// The decoded text's UTF-8 bytes are exactly the legacy-byte range, so do not
 /// decode those bytes to dchar and encode them a second time. The public
 /// string boundary still needs owned storage; reserve its known upper bound.
-private string materializeValidatedCandidate(string text, LegacyEncoding encoding) {
+private string materializeValidatedCandidate(string text, LegacyEncoding encoding) pure {
     auto output = appender!string();
     output.reserve(text.length);
     foreach (char byteValue; legacyBytes(text, encoding)) output.put(byteValue);
@@ -112,7 +114,7 @@ private string roundTrip(string text, LegacyEncoding encoding) {
 string latin1RoundTrip(string text) { return roundTrip(text, LegacyEncoding.latin1); }
 string cp1252RoundTrip(string text) { return roundTrip(text, LegacyEncoding.cp1252); }
 
-private bool oneOf(string members)(dchar c) {
+private bool oneOf(string members)(dchar c) pure {
     // The scorer's sets are compile-time non-ASCII literals. Keep the hot
     // ASCII rejection sound, and compare Unicode scalars without repeatedly
     // decoding the UTF-8 membership string at runtime.
@@ -126,39 +128,39 @@ private bool oneOf(string members)(dchar c) {
 static assert(oneOf!"ÂÃÎÐ"('Ã'));
 static assert(!oneOf!"ÂÃÎÐ"('A'));
 
-private bool isBad(dchar c) { return oneOf!"¦¤¨¬¯¸ƒˆˇ˘˛˜†‡‰⌐◊�ªº"(c); }
-private bool isLaw(dchar c) { return c == '¶' || c == '§'; }
-private bool isCurrency(dchar c) { return oneOf!"¢£¥₧€"(c); }
-private bool isStartPunctuation(dchar c) { return oneOf!"¡«¿΄΅‘‚“„•‹©"(c); }
-private bool isEndPunctuation(dchar c) { return oneOf!"®»˝”›™"(c); }
-private bool isNumericSymbol(dchar c) { return oneOf!"²³¹±¼½¾×µ÷⁄∂∆∏∑√∞∩∫≈≠≡≤≥№"(c); }
-private bool isBox(dchar c) {
+private bool isBad(dchar c) pure { return oneOf!"¦¤¨¬¯¸ƒˆˇ˘˛˜†‡‰⌐◊�ªº"(c); }
+private bool isLaw(dchar c) pure { return c == '¶' || c == '§'; }
+private bool isCurrency(dchar c) pure { return oneOf!"¢£¥₧€"(c); }
+private bool isStartPunctuation(dchar c) pure { return oneOf!"¡«¿΄΅‘‚“„•‹©"(c); }
+private bool isEndPunctuation(dchar c) pure { return oneOf!"®»˝”›™"(c); }
+private bool isNumericSymbol(dchar c) pure { return oneOf!"²³¹±¼½¾×µ÷⁄∂∆∏∑√∞∩∫≈≠≡≤≥№"(c); }
+private bool isBox(dchar c) pure {
     return oneOf!"│┌┐┘├┤┬┼═║╒╓╔╕╖╗╘╙╚╛╜╝╞╟╠╡╢╣╤╥╦╧╨╩╪╫╬▀▄█▌▐░▒▓"(c);
 }
-private bool isUpperAccented(dchar c) {
+private bool isUpperAccented(dchar c) pure {
     return (c >= 0xC0 && c <= 0xD1) ||
         oneOf!"ØÜÝĂĀĄĆČĎĐĘĚĒĖĞĢİĪĶĹĽŁĻŃŇŅŒŘŚŞŠŢŤŮŰŸŹŻŽҔ"(c);
 }
-private bool isLowerAccented(dchar c) {
+private bool isLowerAccented(dchar c) pure {
     return c == 'ß' || (c >= 0xE0 && c <= 0xF1) ||
         oneOf!"ăąāćčďđęěēėğģįīķĺľłļœŕśşšťüźżžҕﬁﬂ"(c);
 }
-private bool isUpperCommon(dchar c) {
+private bool isUpperCommon(dchar c) pure {
     return c == 'Þ' || (c >= 0x391 && c <= 0x3A9) ||
         (c >= 0x410 && c <= 0x42F) || oneOf!"ΆΈΉΊΌΎΏΪΫЁ"(c);
 }
-private bool isLowerCommon(dchar c) {
+private bool isLowerCommon(dchar c) pure {
     return (c >= 0x3B1 && c <= 0x3C9) || (c >= 0x430 && c <= 0x45F) ||
         oneOf!"άέήίΰόύώϊϋ"(c);
 }
-private bool isKaomoji(dchar c) {
+private bool isKaomoji(dchar c) pure {
     return (c >= 0xD2 && c <= 0xD6) || (c >= 0xD9 && c <= 0xDC) ||
         (c >= 0xF2 && c <= 0xF6) || (c >= 0xF8 && c <= 0xFC) || oneOf!"ŐŌŪŲ°"(c);
 }
-private bool asciiLetter(dchar c) {
+private bool asciiLetter(dchar c) pure {
     return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 }
-private bool whitespace(dchar c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+private bool whitespace(dchar c) pure { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
 
 private enum : uint {
     catBad = 1 << 0,
@@ -175,7 +177,7 @@ private enum : uint {
     catKaomoji = 1 << 11,
 }
 
-private uint categories(dchar c) {
+private uint categories(dchar c) pure {
     if (c < 0x80) return 0;
     uint result;
     if (isBad(c)) result |= catBad;
@@ -193,12 +195,12 @@ private uint categories(dchar c) {
     return result;
 }
 
-private bool has(uint value, uint category) { return (value & category) != 0; }
-private bool broad(uint value) {
+private bool has(uint value, uint category) pure { return (value & category) != 0; }
+private bool broad(uint value) pure {
     return has(value, catBad | catLowerAccented | catUpperAccented | catBox |
         catStart | catEnd | catCurrency | catNumeric | catLaw);
 }
-private bool lowerish(uint value) {
+private bool lowerish(uint value) pure {
     return has(value, catLowerAccented | catLowerCommon | catBox | catEnd |
         catCurrency | catNumeric);
 }
@@ -211,7 +213,7 @@ private struct PlausibilityAnalysis {
 /// Traverse the decoded scalars once. `includePenalties` lets the public
 /// badness-only entry point compile out the unrelated plausibility checks,
 /// while full candidate scoring no longer decodes every scalar twice.
-private PlausibilityAnalysis analyzePlausibility(bool includePenalties, Range)(Range text)
+private PlausibilityAnalysis analyzePlausibility(bool includePenalties, Range)(Range text) pure
 if (isInputRange!Range) {
     dchar previous = dchar.init;
     dchar current = dchar.init;
@@ -308,7 +310,7 @@ if (isInputRange!Range) {
 
 /// Higher means more plausible. Mojibake evidence dominates; unsafe controls,
 /// replacement characters, and private-use codepoints receive extra penalties.
-long plausibilityScore(Range)(Range text)
+long plausibilityScore(Range)(Range text) pure
 if (isInputRange!Range) {
     const analysis = analyzePlausibility!true(text);
     return -100L * cast(long) analysis.badness + analysis.penalties;
@@ -318,6 +320,18 @@ private struct MojibakeOptions {
     size_t maxPasses = 4;
     bool useLatin1 = true;
     bool useCp1252 = true;
+}
+
+private class MojibakeConfiguration : FilterConfiguration {
+    size_t maxPasses;
+    bool useLatin1;
+    bool useCp1252;
+
+    this(MojibakeOptions options) immutable {
+        maxPasses = options.maxPasses;
+        useLatin1 = options.useLatin1;
+        useCp1252 = options.useCp1252;
+    }
 }
 
 private void selectEncodings(ref MojibakeOptions result, string encoded) {
@@ -358,7 +372,7 @@ private MojibakeOptions parseTypedOptions(const ref TypedFilterOptions options) 
     return result;
 }
 
-private bool scoreCandidate(string text, LegacyEncoding encoding, out long score) {
+private bool scoreCandidate(string text, LegacyEncoding encoding, out long score) pure {
     if (!canEncodeLegacy(text, encoding)) return false;
     try {
         score = plausibilityScore(decodedCandidate(text, encoding));
@@ -370,7 +384,8 @@ private bool scoreCandidate(string text, LegacyEncoding encoding, out long score
 
 /// Return the end byte offset of one exact UTF-8 sequence represented by
 /// legacy codepoints. An invalid or incomplete sequence is not a candidate.
-private size_t legacySequenceEnd(string text, size_t start, LegacyEncoding encoding) {
+private size_t legacySequenceEnd(string text, size_t start,
+        LegacyEncoding encoding) pure {
     auto rest = text[start .. $];
     ubyte lead;
     if (!legacyByte(rest.front, encoding, lead)) return start;
@@ -393,7 +408,7 @@ private size_t legacySequenceEnd(string text, size_t start, LegacyEncoding encod
 
 /// Scan only exact legacy-encoded UTF-8 sequences. Unmatched slices are
 /// appended directly from the original buffer, never decoded or re-encoded.
-private string repairLocal(string text, MojibakeOptions options, size_t remainingPasses) {
+private string repairLocal(string text, MojibakeOptions options, size_t remainingPasses) pure {
     auto output = appender!string();
     size_t copiedUntil;
     size_t at;
@@ -469,7 +484,7 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
     return output.data;
 }
 
-private bool allASCII(string text) {
+private bool allASCII(string text) pure {
     // Byte iteration is sufficient: every non-ASCII UTF-8 sequence has at
     // least one high bit. Keep this admission scan out of the variable-width
     // Unicode decoder; compiler/codegen choices are measured separately.
@@ -478,7 +493,7 @@ private bool allASCII(string text) {
     return true;
 }
 
-private string repairMojibake(string text, MojibakeOptions options) {
+private string repairMojibake(string text, MojibakeOptions options) pure {
     // An ASCII buffer is already an exact fixed point for both supported
     // round trips. This also keeps ordinary mmap-backed documents borrowed.
     if (allASCII(text)) return text;
@@ -525,15 +540,27 @@ string fixMojibake(string text) {
     return repairMojibake(text, MojibakeOptions());
 }
 
+private string applyConfiguredMojibake(string text,
+        immutable(FilterConfiguration) raw) pure {
+    auto configured = cast(immutable(MojibakeConfiguration)) raw;
+    enforce(configured !is null, "invalid fix-mojibake configuration");
+    auto options = MojibakeOptions(configured.maxPasses,
+        configured.useLatin1, configured.useCp1252);
+    return repairMojibake(text, options);
+}
+
+private ConfiguredFilter configuredMojibake(MojibakeOptions options) {
+    return ConfiguredFilter(&applyConfiguredMojibake,
+        new immutable MojibakeConfiguration(options));
+}
+
 private ConfiguredFilter configureMojibake(const ref FilterOptions options) {
-    const parsed = parseOptions(options);
-    return (string text) => repairMojibake(text, parsed);
+    return configuredMojibake(parseOptions(options));
 }
 
 private ConfiguredFilter configureTypedMojibake(
         const ref TypedFilterOptions options) {
-    const parsed = parseTypedOptions(options);
-    return (string text) => repairMojibake(text, parsed);
+    return configuredMojibake(parseTypedOptions(options));
 }
 
 static this() {

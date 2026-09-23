@@ -18,10 +18,38 @@ import std.typecons : No;
 import std.utf : byUTF, validate;
 
 alias FilterOptions = string[string];
-/// Original public filter contract, retained for source compatibility.
-alias Filter = string function(string);
-/// A configured stage may capture typed options parsed once at build time.
-alias ConfiguredFilter = string delegate(string);
+/// Plain filter contract; purity prevents retained callbacks from sharing state.
+alias Filter = string function(string) pure;
+
+/// Type-erased, transitively immutable configuration parsed by a filter factory.
+class FilterConfiguration {}
+
+alias ConfiguredFilterApply = string function(string,
+    immutable(FilterConfiguration)) pure;
+
+/// Reentrant configured execution: code has no delegate context and all
+/// retained configuration is transitively immutable.
+struct ConfiguredFilter {
+private:
+    ConfiguredFilterApply filterApply;
+    immutable(FilterConfiguration) filterConfiguration;
+
+public:
+    this(ConfiguredFilterApply apply,
+            immutable(FilterConfiguration) configuration = null) {
+        enforce(apply !is null, "configured filter implementation is required");
+        filterApply = apply;
+        filterConfiguration = configuration;
+    }
+
+    bool isValid() const { return filterApply !is null; }
+
+    string opCall(string input) const {
+        enforce(isValid, "configured filter is not initialized");
+        return filterApply(input, filterConfiguration);
+    }
+}
+
 alias FilterFactory = ConfiguredFilter function(const ref FilterOptions);
 
 enum FilterOptionType { text, integer, boolean }
@@ -89,9 +117,9 @@ struct StreamingState {
 enum maxStreamingExpansion = 2;
 private enum maxFusedStages = 16;
 alias StreamingPush = size_t function(ref StreamingState, dchar,
-    dchar[maxStreamingExpansion]*);
+    dchar[maxStreamingExpansion]*) pure;
 alias StreamingFinish = size_t function(ref StreamingState,
-    dchar[maxStreamingExpansion]*);
+    dchar[maxStreamingExpansion]*) pure;
 
 /// One bounded UTF-8-scalar transducer. `push` and `finish` may emit at most
 /// `maxStreamingExpansion` scalars. Empty output drops an input scalar.
@@ -202,8 +230,8 @@ void registerFilter(string name, Filter f) {
     registeredFilters.addFilter(name, f);
 }
 
-/// Register an option-aware factory. It must validate and parse every option;
-/// Pipeline.build calls it once and stores the returned typed closure.
+/// Register an option-aware factory. It validates and parses every option;
+/// Pipeline.build calls it once and stores reentrant immutable configuration.
 void registerFilterFactory(string name, FilterFactory factory) {
     registeredFilters.addFilterFactory(name, factory);
 }
@@ -271,9 +299,12 @@ struct Pipeline {
                 auto streaming = registration.streamingFactory(spec.options);
                 enforce(streaming.push !is null,
                     "streaming filter factory returned no push implementation");
-                p.stages ~= Stage(null, null, streaming);
+                p.stages ~= Stage(Filter.init, ConfiguredFilter.init, streaming);
             } else if (registration.factory !is null) {
-                p.stages ~= Stage(null, registration.factory(spec.options));
+                auto configured = registration.factory(spec.options);
+                enforce(configured.isValid,
+                    "filter factory returned no implementation");
+                p.stages ~= Stage(Filter.init, configured);
             } else if (registration.typedFactory !is null) {
                 throw new Exception("filter '" ~ spec.name ~
                     "' has no predecessor configuration adapter");
@@ -281,9 +312,11 @@ struct Pipeline {
                 if (spec.options.length)
                     throw new Exception("filter '" ~ spec.name ~ "' accepts no options");
                 if (registration.streaming.push !is null)
-                    p.stages ~= Stage(null, null, registration.streaming);
+                    p.stages ~= Stage(Filter.init, ConfiguredFilter.init,
+                        registration.streaming);
                 else
-                    p.stages ~= Stage(registration.plain, null);
+                    p.stages ~= Stage(registration.plain,
+                        ConfiguredFilter.init);
             }
             p.stageNames ~= spec.name;
         }
@@ -317,9 +350,9 @@ struct Pipeline {
                             "missing option '" ~ declaration.key ~
                             "' for filter '" ~ spec.name ~ "'");
                 auto configured = registration.typedFactory(spec.options);
-                enforce(configured !is null,
+                enforce(configured.isValid,
                     "typed filter factory returned no implementation");
-                p.stages ~= Stage(null, configured);
+                p.stages ~= Stage(Filter.init, configured);
             } else {
                 enforce(spec.options.length == 0,
                     "filter '" ~ spec.name ~ "' accepts no typed options");
@@ -327,9 +360,11 @@ struct Pipeline {
                     registration.streamingFactory is null,
                     "filter '" ~ spec.name ~ "' has no typed v3 factory");
                 if (registration.streaming.push !is null)
-                    p.stages ~= Stage(null, null, registration.streaming);
+                    p.stages ~= Stage(Filter.init, ConfiguredFilter.init,
+                        registration.streaming);
                 else
-                    p.stages ~= Stage(registration.plain, null);
+                    p.stages ~= Stage(registration.plain,
+                        ConfiguredFilter.init);
             }
             p.stageNames ~= spec.name;
         }
@@ -354,7 +389,7 @@ struct Pipeline {
                 continue;
             }
             auto stage = stages[index++];
-            if (stage.configured !is null)
+            if (stage.configured.isValid)
                 text = stage.configured(text);
             else
                 text = stage.plain(text);
@@ -475,23 +510,23 @@ static assert(isInputRange!(typeof(fusedStreamingRange("x", [StreamingFilter(
         return cast(size_t) 1;
     }, null)]))));
 
-private string legacyFilterTest(string text) { return text ~ "!"; }
+private string legacyFilterTest(string text) pure { return text ~ "!"; }
 
 private size_t duplicateStreamingTest(ref StreamingState, dchar input,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     (*output)[0] = input;
     (*output)[1] = input;
     return 2;
 }
 
 private size_t identityStreamingTest(ref StreamingState, dchar input,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     (*output)[0] = input;
     return 1;
 }
 
 private size_t delayedStreamingTest(ref StreamingState state, dchar input,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     if (state.words[0] == 0) {
         state.words[0] = input;
         return 0;
@@ -502,7 +537,7 @@ private size_t delayedStreamingTest(ref StreamingState state, dchar input,
 }
 
 private size_t delayedStreamingFinishTest(ref StreamingState state,
-    dchar[maxStreamingExpansion]* output) {
+        dchar[maxStreamingExpansion]* output) pure {
     if (state.words[0] == 0) return 0;
     (*output)[0] = cast(dchar) state.words[0];
     state.words[0] = 0;
@@ -515,15 +550,42 @@ private StreamingFilter streamingFactoryTest(const ref FilterOptions options) {
     return StreamingFilter(StreamingState.init, &identityStreamingTest, null);
 }
 
+private class TypedFilterTestConfiguration : FilterConfiguration {
+    long count;
+    bool enabled;
+    string label;
+
+    this(long count, bool enabled, string label) immutable {
+        this.count = count;
+        this.enabled = enabled;
+        this.label = label;
+    }
+}
+
+private string applyTypedFilterTest(string text,
+        immutable(FilterConfiguration) raw) pure {
+    auto configured = cast(immutable(TypedFilterTestConfiguration)) raw;
+    return configured.enabled
+        ? text ~ configured.label ~ configured.count.to!string : text;
+}
+
 private ConfiguredFilter typedFactoryTest(const ref TypedFilterOptions options) {
-    const count = options["count"].asInteger;
-    const enabled = options["enabled"].asBoolean;
-    const label = options["label"].asText.idup;
-    return (string text) => enabled ? text ~ label ~ count.to!string : text;
+    auto configured = new immutable TypedFilterTestConfiguration(
+        options["count"].asInteger, options["enabled"].asBoolean,
+        options["label"].asText);
+    return ConfiguredFilter(&applyTypedFilterTest, configured);
 }
 
 unittest {
     import std.exception : assertThrown;
+
+    size_t mutableState;
+    auto captured = (string input, immutable(FilterConfiguration)) {
+        ++mutableState;
+        return input;
+    };
+    static assert(!__traits(compiles, ConfiguredFilter(captured)));
+    assertThrown(ConfiguredFilter.init("x"));
 
     Filter typedLegacy = &legacyFilterTest;
     auto registrar = &registerFilter;

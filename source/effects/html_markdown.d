@@ -10,42 +10,42 @@ import std.utf : UTFException, encode;
 enum size_t maxMarkdownBytes = 4 * 1024 * 1024;
 
 class HtmlMarkdownOutputLimit : Exception {
-    this() { super("Markdown output exceeds 4 MiB"); }
+    this() pure { super("Markdown output exceeds 4 MiB"); }
 }
 
 private struct Writer {
     char[] bytes;
 
-    void put(string value) {
+    void put(string value) pure {
         if (value.length > maxMarkdownBytes - bytes.length)
             throw new HtmlMarkdownOutputLimit;
         bytes ~= value;
     }
 
-    void putText(string value) {
+    void putText(string value) pure {
         if (value.length && bytes.length && bytes[$ - 1] == ' ' &&
             value[0] == ' ') put(value[1 .. $]);
         else put(value);
     }
 
-    void trim() {
+    void trim() pure {
         while (bytes.length && (bytes[$ - 1] == ' ' || bytes[$ - 1] == '\n'))
             bytes.length--;
     }
 
-    void block() {
+    void block() pure {
         trim();
         if (bytes.length) put("\n\n");
     }
 
-    string result() { return bytes.idup; }
+    string result() pure { return bytes.idup; }
 }
 
-private bool white(char c) {
+private bool white(char c) pure {
     return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f';
 }
 
-private string clean(string input, bool code = false) {
+private string clean(string input, bool code = false) pure {
     Writer writer;
     bool pending;
     foreach (dchar c; input) {
@@ -84,7 +84,7 @@ private string clean(string input, bool code = false) {
     return writer.result();
 }
 
-private string singleLine(string input) {
+private string singleLine(string input) pure {
     Writer writer;
     bool pending;
     foreach (char c; input) {
@@ -96,13 +96,13 @@ private string singleLine(string input) {
     return writer.result();
 }
 
-private string attribute(const ref HtmlNode node, string name) {
+private string attribute(const ref HtmlNode node, string name) pure {
     foreach (ref const attr; node.attributes)
         if (attr.name == name) return attr.value;
     return null;
 }
 
-private bool safeTarget(string target) {
+private bool safeTarget(string target) pure {
     if (!target.length || target.length > 4096 || target.length >= 2 &&
         (target[0 .. 2] == "//" || target[0 .. 2] == "\\\\")) return false;
     if (target[0] == '\\') return false;
@@ -125,7 +125,7 @@ private bool safeTarget(string target) {
     return true;
 }
 
-private string markdownTarget(string target) {
+private string markdownTarget(string target) pure {
     Writer writer;
     foreach (char c; target) {
         if (c == '&') writer.put("&amp;");
@@ -134,7 +134,7 @@ private string markdownTarget(string target) {
     return writer.result();
 }
 
-private size_t endOf(const ref HtmlTree tree, size_t index) {
+private size_t endOf(const ref HtmlTree tree, size_t index) pure {
     size_t end = index + 1;
     while (end < tree.nodes.length) {
         size_t parent = tree.nodes[end].parentIndex;
@@ -149,7 +149,7 @@ private size_t endOf(const ref HtmlTree tree, size_t index) {
     return end;
 }
 
-private string nodeText(const ref HtmlTree tree, size_t index) {
+private string nodeText(const ref HtmlTree tree, size_t index) pure {
     Writer writer;
     foreach (i; index + 1 .. endOf(tree, index)) {
         bool breakNode = tree.nodes[i].kind == HtmlNodeKind.element &&
@@ -168,7 +168,7 @@ private string nodeText(const ref HtmlTree tree, size_t index) {
     return writer.result();
 }
 
-private size_t longestRun(string value, char marker) {
+private size_t longestRun(string value, char marker) pure {
     size_t current, longest;
     foreach (char c; value) {
         current = c == marker ? current + 1 : 0;
@@ -178,10 +178,10 @@ private size_t longestRun(string value, char marker) {
 }
 
 private void renderChildren(const ref HtmlTree tree, size_t parent,
-    ref Writer writer, size_t depth);
+    ref Writer writer, size_t depth) pure;
 
 private void renderNode(const ref HtmlTree tree, size_t index,
-    ref Writer writer, size_t depth) {
+    ref Writer writer, size_t depth) pure {
     if (depth > 128) throw new HtmlMarkdownOutputLimit;
     ref const node = tree.nodes[index];
     if (node.kind == HtmlNodeKind.text) {
@@ -323,7 +323,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
 }
 
 private void renderChildren(const ref HtmlTree tree, size_t parent,
-    ref Writer writer, size_t depth) {
+    ref Writer writer, size_t depth) pure {
     for (size_t child = parent + 1; child < endOf(tree, parent);
          child = endOf(tree, child))
         if (tree.nodes[child].parentIndex == parent)
@@ -332,7 +332,7 @@ private void renderChildren(const ref HtmlTree tree, size_t parent,
 
 /// Convert a bounded selected tree without reading HTML or publishing output.
 /// An output-cap exception exposes no partial string to the caller.
-string renderMarkdown(const ref HtmlTree tree) {
+string renderMarkdown(const ref HtmlTree tree) pure {
     Writer writer;
     for (size_t i; i < tree.nodes.length; i = endOf(tree, i)) {
         if (tree.nodes[i].parentIndex == size_t.max)

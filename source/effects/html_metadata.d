@@ -35,7 +35,7 @@ struct HtmlMetadata {
     MetadataField title, author, date, url;
 }
 
-private string normalized(string input) {
+private string normalized(string input) pure {
     string result;
     bool pending;
     foreach (ch; input.byDchar) {
@@ -50,12 +50,12 @@ private string normalized(string input) {
     return result;
 }
 
-private string attribute(const ref HtmlNode node, string name) {
+private string attribute(const ref HtmlNode node, string name) pure {
     foreach (a; node.attributes) if (a.name == name) return a.value;
     return null;
 }
 
-private bool validDate(string value) {
+private bool validDate(string value) pure {
     if (value.length < 10 || (value.length != 10 &&
         (value.length < 20 || value[10] != 'T')) ||
         value[4] != '-' || value[7] != '-') return false;
@@ -85,7 +85,7 @@ private bool validDate(string value) {
     return true;
 }
 
-private bool validUrl(string value) {
+private bool validUrl(string value) pure {
     size_t start;
     if (value.length > 8 && value[0 .. 8] == "https://") start = 8;
     else if (value.length > 7 && value[0 .. 7] == "http://") start = 7;
@@ -116,7 +116,7 @@ private bool validUrl(string value) {
 }
 
 private void offer(ref MetadataField field, string raw, string rule,
-    size_t node, int priority, bool isDate = false, bool isUrl = false) {
+    size_t node, int priority, bool isDate = false, bool isUrl = false) pure {
     auto value = normalized(raw);
     if (value.length == 0 || (isDate && !validDate(value)) ||
         (isUrl && !validUrl(value))) {
@@ -129,7 +129,7 @@ private void offer(ref MetadataField field, string raw, string rule,
     else field.overflow = true;
 }
 
-private void decide(ref MetadataField field) {
+private void decide(ref MetadataField field) pure {
     if (!field.candidates.length) {
         field.status = field.invalidEvidence ? "invalid" : "absent";
         return;
@@ -156,7 +156,7 @@ private void decide(ref MetadataField field) {
 }
 
 /// Only head evidence is eligible. Node ordinals refer to HtmlTree pre-order.
-HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) {
+HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
     HtmlMetadata result;
     size_t head = size_t.max;
     foreach (i, node; tree.nodes) if (node.kind == HtmlNodeKind.element && node.name == "head") {
@@ -194,9 +194,29 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) {
     return result;
 }
 
-private string quote(string value) { return JSONValue(value).toString; }
+private string quote(string value) pure {
+    enum hex = "0123456789abcdef";
+    string result = "\"";
+    foreach (char c; value) {
+        switch (c) {
+            case '"': result ~= `\"`; break;
+            case '\\': result ~= `\\`; break;
+            case '\b': result ~= `\b`; break;
+            case '\f': result ~= `\f`; break;
+            case '\n': result ~= `\n`; break;
+            case '\r': result ~= `\r`; break;
+            case '\t': result ~= `\t`; break;
+            default:
+                auto byteValue = cast(ubyte)c;
+                if (byteValue < 0x20)
+                    result ~= `\u00` ~ hex[byteValue >> 4] ~ hex[byteValue & 0xf];
+                else result ~= c;
+        }
+    }
+    return result ~ "\"";
+}
 
-private string fieldJson(const ref MetadataField field) {
+private string fieldJson(const ref MetadataField field) pure {
     string encoded = `{"status":` ~ quote(field.status) ~ `,"value":`;
     encoded ~= field.status == "selected" ? quote(field.value) : "null";
     encoded ~= `,"rule":` ~ (field.status == "selected" ? quote(field.rule) : "null");
@@ -213,11 +233,11 @@ private string fieldJson(const ref MetadataField field) {
 }
 
 class HtmlMetadataOutputLimit : Exception {
-    this() { super("metadata output limit"); }
+    this() pure { super("metadata output limit"); }
 }
 
 /// Fixed key order and one LF are metadata-json:v1's canonical wire.
-string serializeHtmlMetadata(DocumentId id, const HtmlMetadata metadata) {
+string serializeHtmlMetadata(DocumentId id, const HtmlMetadata metadata) pure {
     auto encoded = `{"version":"metadata-json:v1","documentId":` ~ quote(id.text) ~
         `,"fields":{"title":` ~ fieldJson(metadata.title) ~
         `,"author":` ~ fieldJson(metadata.author) ~

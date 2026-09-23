@@ -44,12 +44,12 @@ struct DecodeOutcome {
     private DecodedText decodedValue;
     private QuarantinedText quarantinedValue;
 
-    bool isDecoded() const { return succeeded; }
-    ref const(DecodedText) decoded() const {
+    bool isDecoded() const pure { return succeeded; }
+    ref const(DecodedText) decoded() const pure {
         enforce(succeeded, "decode outcome is quarantined");
         return decodedValue;
     }
-    ref const(QuarantinedText) quarantined() const {
+    ref const(QuarantinedText) quarantined() const pure {
         enforce(!succeeded, "decode outcome is decoded");
         return quarantinedValue;
     }
@@ -57,11 +57,11 @@ struct DecodeOutcome {
 
 private enum Charset { absent, utf8, utf16le, utf16be, ambiguous, unsupported }
 
-private bool asciiSpace(char c) {
+private bool asciiSpace(char c) pure {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
-private Charset parseCharset(string label) {
+private Charset parseCharset(string label) pure {
     if (label is null) return Charset.absent;
     size_t start;
     size_t end = label.length;
@@ -81,13 +81,13 @@ private Charset parseCharset(string label) {
     }
 }
 
-private bool matches(Charset label, TextEncoding encoding) {
+private bool matches(Charset label, TextEncoding encoding) pure {
     return (label == Charset.utf8 && encoding == TextEncoding.utf8) ||
         (label == Charset.utf16le && encoding == TextEncoding.utf16le) ||
         (label == Charset.utf16be && encoding == TextEncoding.utf16be);
 }
 
-private ByteOrderMark findBom(const(ubyte)[] raw) {
+private ByteOrderMark findBom(const(ubyte)[] raw) pure {
     if (raw.length >= 3 && raw[0] == 0xef && raw[1] == 0xbb && raw[2] == 0xbf)
         return ByteOrderMark.utf8;
     if (raw.length >= 2 && raw[0] == 0xff && raw[1] == 0xfe)
@@ -97,12 +97,12 @@ private ByteOrderMark findBom(const(ubyte)[] raw) {
     return ByteOrderMark.none;
 }
 
-private bool forbiddenControl(uint cp) {
+private bool forbiddenControl(uint cp) pure {
     return (cp < 0x20 && cp != 0x09 && cp != 0x0a && cp != 0x0d) ||
         cp == 0x7f;
 }
 
-private void appendUtf8(ref char[] output, uint cp) {
+private void appendUtf8(ref char[] output, uint cp) pure {
     if (cp < 0x80) output ~= cast(char) cp;
     else if (cp < 0x800) {
         output ~= cast(char) (0xc0 | (cp >> 6));
@@ -120,7 +120,7 @@ private void appendUtf8(ref char[] output, uint cp) {
 }
 
 private bool validUtf8(const(ubyte)[] raw, size_t start,
-    out QuarantineReason reason, out size_t offset) {
+    out QuarantineReason reason, out size_t offset) pure {
     for (size_t i = start; i < raw.length;) {
         const lead = raw[i];
         const width = lead < 0x80 ? 1 : lead >= 0xc2 && lead <= 0xdf ? 2 :
@@ -148,14 +148,14 @@ private bool validUtf8(const(ubyte)[] raw, size_t start,
     return true;
 }
 
-private uint read16(const(ubyte)[] raw, size_t i, TextEncoding encoding) {
+private uint read16(const(ubyte)[] raw, size_t i, TextEncoding encoding) pure {
     return encoding == TextEncoding.utf16le ?
         cast(uint) raw[i] | (cast(uint) raw[i + 1] << 8) :
         (cast(uint) raw[i] << 8) | raw[i + 1];
 }
 
 private bool decodeUtf16(const(ubyte)[] raw, size_t start, TextEncoding encoding,
-    ref char[] output, out QuarantineReason reason, out size_t offset) {
+    ref char[] output, out QuarantineReason reason, out size_t offset) pure {
     for (size_t i = start; i < raw.length;) {
         if (raw.length - i < 2) {
             reason = QuarantineReason.malformedUnicode; offset = i; return false;
@@ -187,7 +187,7 @@ private bool decodeUtf16(const(ubyte)[] raw, size_t start, TextEncoding encoding
 /// Decode a borrowed byte slice. The returned text is owned; quarantine
 /// retains only metadata so large failed inputs are not copied or pinned.
 DecodeOutcome decodeBytes(const(ubyte)[] raw, string declaredCharset = null,
-    string source = "") {
+    string source = "") pure {
     DecodeOutcome result;
     auto evidence = DecodeEvidence(source, declaredCharset, raw.length, findBom(raw));
     auto label = parseCharset(declaredCharset);

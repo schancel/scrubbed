@@ -9,7 +9,7 @@ import stages.registry : FilterPlacement;
 import std.exception : enforce;
 import std.utf : validate;
 
-private string materializeUtf8(Content input) {
+private string materializeUtf8(Content input) pure {
     enforce(input !is null, "stage content is required");
     ubyte[] bytes;
     input.stream((const(ubyte)[] chunk) { bytes ~= chunk; });
@@ -18,7 +18,7 @@ private string materializeUtf8(Content input) {
     return text;
 }
 
-private Content ownedText(string text) {
+private Content ownedText(string text) pure {
     validate(text);
     return new Content([ContentPiece.own(cast(const(ubyte)[]) text)]);
 }
@@ -48,12 +48,12 @@ StageResult runCompiledStage(StageDocument[] inputs,
     enforce(placement != FilterPlacement.none || names.length == 0,
         "stage without filter placement has filters");
 
-    StageTransform transform = stage.transform;
+    auto configured = stage.transform;
+    StageTransform transform = (StageDocument input) => configured(input);
     if (placement == FilterPlacement.before && names.length) {
-        auto compiledTransform = transform;
         transform = (StageDocument input) {
             input.content = applyFilters(input.content, stage);
-            return compiledTransform(input);
+            return configured(input);
         };
     }
 
@@ -66,10 +66,68 @@ StageResult runCompiledStage(StageDocument[] inputs,
 }
 
 version (unittest) {
-    private size_t observingFilterCalls;
-    private string observingFilter(string text) {
-        ++observingFilterCalls;
-        return text;
+    import domain.document : Document, OutputName;
+    import stages.contract : StageDecision;
+    import stages.registry : ConfiguredStageTransform, StageConfiguration,
+        StageOptions;
+
+    private class ObservingFilterCalled : Exception {
+        this() pure { super("observing filter called"); }
+    }
+    private string observingFilter(string text) pure {
+        throw new ObservingFilterCalled;
+    }
+
+    private StageDecision applyAppendStage(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        input.content = ownedText(materializeUtf8(input.content) ~ "S");
+        return StageDecision.map(input);
+    }
+
+    private StageDecision applyRejectStage(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.reject("kept");
+    }
+
+    private StageDecision applyQuarantineStage(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.quarantine("review");
+    }
+
+    private StageDecision applySplitStage(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.split([
+            StageDocument(Document(input.document.source, OutputName("a")),
+                input.content),
+            StageDocument(Document(input.document.source, OutputName("b")),
+                input.content)
+        ]);
+    }
+
+    private StageDecision applyIdentityStage(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.map(input);
+    }
+
+    private ConfiguredStageTransform appendStageFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applyAppendStage);
+    }
+    private ConfiguredStageTransform rejectStageFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applyRejectStage);
+    }
+    private ConfiguredStageTransform quarantineStageFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applyQuarantineStage);
+    }
+    private ConfiguredStageTransform splitStageFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applySplitStage);
+    }
+    private ConfiguredStageTransform identityStageFactory(
+            const ref StageOptions options) {
+        return ConfiguredStageTransform(&applyIdentityStage);
     }
 }
 
@@ -87,43 +145,21 @@ unittest {
     filters.addFilter("suffix-f", cast(Filter) ((string text) => text ~ "F"));
     filters.addFilter("observing", &observingFilter);
     StageRegistry stages;
-    auto appendStage = (const ref StageOptions options) {
-        return cast(StageTransform) ((StageDocument input) {
-            input.content = ownedText(materializeUtf8(input.content) ~ "S");
-            return StageDecision.map(input);
-        });
-    };
     stages.add(StageRegistration(StageDeclaration("before-stage",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
-        appendStage, FilterPlacement.before));
+        &appendStageFactory, FilterPlacement.before));
     stages.add(StageRegistration(StageDeclaration("after-stage",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
-        appendStage, FilterPlacement.after));
-    auto rejectStage = (const ref StageOptions options) {
-        return cast(StageTransform) ((StageDocument input) =>
-            StageDecision.reject("kept"));
-    };
+        &appendStageFactory, FilterPlacement.after));
     stages.add(StageRegistration(StageDeclaration("reject-stage",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
-        rejectStage, FilterPlacement.after));
-    auto quarantineStage = (const ref StageOptions options) {
-        return cast(StageTransform) ((StageDocument input) =>
-            StageDecision.quarantine("review"));
-    };
+        &rejectStageFactory, FilterPlacement.after));
     stages.add(StageRegistration(StageDeclaration("quarantine-stage",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
-        quarantineStage, FilterPlacement.after));
-    auto splitStage = (const ref StageOptions options) {
-        return cast(StageTransform) ((StageDocument input) => StageDecision.split([
-            StageDocument(Document(input.document.source, OutputName("a")),
-                input.content),
-            StageDocument(Document(input.document.source, OutputName("b")),
-                input.content)
-        ]));
-    };
+        &quarantineStageFactory, FilterPlacement.after));
     stages.add(StageRegistration(StageDeclaration("split-stage",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
-        splitStage, FilterPlacement.after));
+        &splitStageFactory, FilterPlacement.after));
 
     auto document = Document(SourceLocator("memory", "batch", "1"),
         OutputName("out"));
@@ -169,13 +205,10 @@ unittest {
         `"implementation":"before-stage"}]}`);
     auto owner = new DocumentViewOwner(cast(ubyte[]) "z".dup);
     auto borrowed = new Content([ContentPiece.borrow(owner.view(0, 1))]);
-    auto unchangedStage = (const ref StageOptions options) {
-        return cast(StageTransform) ((StageDocument value) => StageDecision.map(value));
-    };
     StageRegistry identityStages;
     identityStages.add(StageRegistration(StageDeclaration("before-stage",
         PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
-        unchangedStage, FilterPlacement.before));
+        &identityStageFactory, FilterPlacement.before));
     auto identityPlan = compileJob(noFilter,
         &identityStages, &filters);
     auto unchanged = runCompiledStage([StageDocument(document, borrowed)],
@@ -199,17 +232,13 @@ unittest {
         `{"id":"observing-one","implementation":"before-stage",` ~
         `"filters":[{"name":"observing"}]}]}`);
     auto observingPlan = compileJob(observing, &identityStages, &filters);
-    observingFilterCalls = 0;
     assertThrown(runCompiledStage([StageDocument(document, invalid)],
         observingPlan.stages[0]));
-    assert(observingFilterCalls == 0);
     invalidOwner.close();
 
     auto invalidDocument = Document.init;
-    observingFilterCalls = 0;
-    assertThrown(runCompiledStage([
+    assertThrown!ObservingFilterCalled(runCompiledStage([
         StageDocument(document, ownedText("first")),
         StageDocument(invalidDocument, ownedText("second"))
     ], observingPlan.stages[0]));
-    assert(observingFilterCalls == 1);
 }

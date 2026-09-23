@@ -469,7 +469,7 @@ is useful, but it is not sufficient on its own.
       compiler in one emulated container; Windows and HTML packaging remain
       untested. This is not a public release, fully static binary, or proof of
       bit-for-bit reproducible builds.
-- [~] Publish the #62 executable pipeline gallery and redistributable
+- [ ] Publish the #62 executable pipeline gallery and redistributable
       demonstration corpus only for shipping commands. Repair, HTML, and JSONL
       may form the first reviewed slice; PII report/mask/redact waits for #180,
       and later WARC, specialist-adapter, curated-shard, or model examples wait

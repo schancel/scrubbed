@@ -8,8 +8,12 @@ import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : sha256Of;
 import std.exception : enforce;
+import std.format : format;
 import std.stdio : writeln;
 import std.string : indexOf;
+
+version (SourceRightsScaleCheck) {} else static assert(0,
+    "compile the release checker with -d-version=SourceRightsScaleCheck");
 
 private size_t checks;
 
@@ -59,6 +63,37 @@ private void needFailure(RightsDecision decision, RightsReason reason,
     need(decision.action == RightsAction.denyUse, label ~ " denies use");
     need(!decision.closureComplete, label ~ " marks closure incomplete");
     need(decision.reason == reason, label ~ " reports its fail-closed reason");
+}
+
+private void checkSubstantialChain(DocumentId root) {
+    enum edgeCount = 20_000;
+    DerivedArtifactRelation[] chain;
+    chain.reserve(edgeCount);
+    auto parent = RightsArtifactId.document(root);
+    foreach (index; 0 .. edgeCount) {
+        const digest = format("%064x", index + 1);
+        auto child = RightsArtifactId.annotation("annotation:v1:" ~ digest);
+        auto provenance = ProvenanceId.fromCanonicalText(
+            "provenance:v1:" ~ digest);
+        chain ~= DerivedArtifactRelation(parent, child, provenance);
+        parent = child;
+    }
+
+    SourceRightsGraphWork work;
+    auto decision = evaluateSourceRightsWithGraphWork(root, [], chain, work);
+    need(decision.closureComplete &&
+        decision.affectedIds.length == edgeCount + 1,
+        "substantial chain has complete affected-ID closure");
+    need(work.relationInspections == edgeCount * 2,
+        "relation validation inspects each edge exactly twice");
+    need(work.cycleNodeVisits == edgeCount + 1,
+        "cycle validation visits each artifact exactly once");
+    need(work.cycleParentSteps == edgeCount,
+        "cycle validation follows each parent edge exactly once");
+    need(work.reachabilityNodeVisits == edgeCount + 1,
+        "closure visits each reachable artifact exactly once");
+    need(work.reachabilityEdgeSteps == edgeCount,
+        "closure follows each child edge exactly once");
 }
 
 void main() {
@@ -165,13 +200,33 @@ void main() {
         DerivedArtifactRelation(cycleA, cycleB, provenanceId('2')),
         DerivedArtifactRelation(cycleB, cycleA, provenanceId('3')),
     ];
-    needFailure(evaluateSourceRights(root, [], cyclic),
-        RightsReason.relationCycle, "cycle");
+    auto cyclicDecision = evaluateSourceRights(root, [], cyclic);
+    needFailure(cyclicDecision, RightsReason.relationCycle, "cycle");
+    DerivedArtifactRelation[] reversedCyclic;
+    foreach_reverse (relation; cyclic)
+        reversedCyclic ~= relation;
+    auto reversedCyclicDecision = evaluateSourceRights(root, [],
+        reversedCyclic);
+    needFailure(reversedCyclicDecision, RightsReason.relationCycle,
+        "reordered cycle");
+    need(reversedCyclicDecision.canonicalBytes.equal(
+        cyclicDecision.canonicalBytes),
+        "cycle-before-orphan reason and bytes are input-order independent");
 
     auto orphan = relations ~ [DerivedArtifactRelation(cycleA, cycleB,
         provenanceId('2'))];
-    needFailure(evaluateSourceRights(root, [], orphan),
-        RightsReason.orphanRelation, "orphan relation");
+    auto orphanDecision = evaluateSourceRights(root, [], orphan);
+    needFailure(orphanDecision, RightsReason.orphanRelation, "orphan relation");
+    DerivedArtifactRelation[] reversedOrphan;
+    foreach_reverse (relation; orphan)
+        reversedOrphan ~= relation;
+    auto reversedOrphanDecision = evaluateSourceRights(root, [],
+        reversedOrphan);
+    needFailure(reversedOrphanDecision, RightsReason.orphanRelation,
+        "reordered orphan relation");
+    need(reversedOrphanDecision.canonicalBytes.equal(
+        orphanDecision.canonicalBytes),
+        "orphan reason and bytes are input-order independent");
 
     auto inconsistentParent = relations ~ [DerivedArtifactRelation(
         annotationB, exportReference, provenanceId('2'))];
@@ -198,6 +253,8 @@ void main() {
         "malformed provenance identifier is rejected");
     rejects({ RightsArtifactId.annotation("annotation:v1:" ~ hex64('g')); },
         "non-hex artifact identifier is rejected");
+
+    checkSubstantialChain(root);
 
     writeln("source-rights release checks passed: ", checks);
     writeln("frozen canonical SHA-256: ", canonicalHash);

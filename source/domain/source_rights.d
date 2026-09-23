@@ -197,10 +197,50 @@ struct RightsDecision {
     }
 }
 
+private struct GraphValidationWork {
+    size_t relationInspections;
+    size_t cycleNodeVisits;
+    size_t cycleParentSteps;
+    size_t reachabilityNodeVisits;
+    size_t reachabilityEdgeSteps;
+}
+
+version (SourceRightsScaleCheck) {
+    /// Deterministic graph-work evidence exposed only to the release checker.
+    struct SourceRightsGraphWork {
+        size_t relationInspections;
+        size_t cycleNodeVisits;
+        size_t cycleParentSteps;
+        size_t reachabilityNodeVisits;
+        size_t reachabilityEdgeSteps;
+    }
+
+    RightsDecision evaluateSourceRightsWithGraphWork(DocumentId root,
+            const(RightsEvidence)[] evidence,
+            const(DerivedArtifactRelation)[] relations,
+            out SourceRightsGraphWork work) {
+        GraphValidationWork measured;
+        auto decision = evaluateSourceRightsImpl(root, evidence, relations,
+            &measured);
+        work = SourceRightsGraphWork(measured.relationInspections,
+            measured.cycleNodeVisits, measured.cycleParentSteps,
+            measured.reachabilityNodeVisits,
+            measured.reachabilityEdgeSteps);
+        return decision;
+    }
+}
+
 /// Resolve policy and graph closure without reading content or performing I/O.
 RightsDecision evaluateSourceRights(DocumentId root,
+        const(RightsEvidence)[] evidence,
+        const(DerivedArtifactRelation)[] relations) {
+    return evaluateSourceRightsImpl(root, evidence, relations, null);
+}
+
+private RightsDecision evaluateSourceRightsImpl(DocumentId root,
     const(RightsEvidence)[] evidence,
-    const(DerivedArtifactRelation)[] relations) {
+    const(DerivedArtifactRelation)[] relations,
+    GraphValidationWork* work) {
     RightsArtifactId[] known;
     if (root.text.length != 0)
         known ~= RightsArtifactId.document(root);
@@ -246,7 +286,7 @@ RightsDecision evaluateSourceRights(DocumentId root,
                 evidenceIds, allProvenance);
 
     auto graph = validateGraph(root, relations, known, evidenceIds,
-        evidenceProvenance, allProvenance);
+        evidenceProvenance, allProvenance, work);
     if (!graph.closureComplete)
         return graph;
 
@@ -282,26 +322,38 @@ RightsDecision evaluateSourceRights(DocumentId root,
 private RightsDecision validateGraph(DocumentId root,
     const(DerivedArtifactRelation)[] relations, RightsArtifactId[] known,
     EvidenceId[] evidenceIds, ProvenanceId[] evidenceProvenance,
-    ProvenanceId[] allProvenance) {
+    ProvenanceId[] allProvenance, GraphValidationWork* work) {
     auto rootId = RightsArtifactId.document(root);
-    DerivedArtifactRelation[] ordered;
-    foreach (relation; relations)
-        ordered ~= relation;
-    ordered.sort!((left, right) => relationKey(left) < relationKey(right));
+    bool[string] evidenceProvenanceIds;
+    foreach (provenance; evidenceProvenance)
+        evidenceProvenanceIds[provenance.text] = true;
+
+    bool[string] edges;
+    bool duplicateRelation;
+    foreach (relation; relations) {
+        if (work !is null)
+            ++work.relationInspections;
+        const edge = relation.parent.text ~ "\0" ~ relation.child.text;
+        if (edge in edges)
+            duplicateRelation = true;
+        else
+            edges[edge] = true;
+    }
+    if (duplicateRelation)
+        return failedDecision(RightsReason.duplicateRelation, known,
+            evidenceIds, allProvenance);
 
     string[string] parentByChild;
     string[string] relationByProvenance;
     string[][string] children;
 
-    foreach (index, relation; ordered) {
+    foreach (relation; relations) {
+        if (work !is null)
+            ++work.relationInspections;
         const edge = relation.parent.text ~ "\0" ~ relation.child.text;
-        if (index > 0 && relationKey(ordered[index - 1]) == relationKey(relation))
-            return failedDecision(RightsReason.duplicateRelation, known,
-                evidenceIds, allProvenance);
-        foreach (provenance; evidenceProvenance)
-            if (provenance.text == relation.provenanceId.text)
-                return failedDecision(RightsReason.inconsistentProvenance,
-                    known, evidenceIds, allProvenance);
+        if (relation.provenanceId.text in evidenceProvenanceIds)
+            return failedDecision(RightsReason.inconsistentProvenance,
+                known, evidenceIds, allProvenance);
         if (auto priorParent = relation.child.text in parentByChild) {
             if (*priorParent != relation.parent.text)
                 return failedDecision(RightsReason.inconsistentProvenance,
@@ -322,16 +374,42 @@ private RightsDecision validateGraph(DocumentId root,
         return failedDecision(RightsReason.inconsistentProvenance, known,
             evidenceIds, allProvenance);
 
+    // A single-parent graph is a set of parent chains. Global three-state
+    // visitation finishes each node once, including disconnected components,
+    // so cycles are diagnosed before the separate orphan check.
+    ubyte[string] visitState;
     foreach (artifact; known) {
-        bool[string] path;
+        ubyte state;
+        if (auto recorded = artifact.text in visitState)
+            state = *recorded;
+        if (state == 2)
+            continue;
+
+        string[] path;
         auto cursor = artifact.text;
-        while (auto parent = cursor in parentByChild) {
-            if (cursor in path)
+        while (true) {
+            state = 0;
+            if (auto recorded = cursor in visitState)
+                state = *recorded;
+            if (state == 2)
+                break;
+            if (state == 1)
                 return failedDecision(RightsReason.relationCycle, known,
                     evidenceIds, allProvenance);
-            path[cursor] = true;
-            cursor = *parent;
+            visitState[cursor] = 1;
+            path ~= cursor;
+            if (work !is null)
+                ++work.cycleNodeVisits;
+            if (auto parent = cursor in parentByChild) {
+                if (work !is null)
+                    ++work.cycleParentSteps;
+                cursor = *parent;
+            }
+            else
+                break;
         }
+        foreach (node; path)
+            visitState[node] = 2;
     }
 
     bool[string] reached;
@@ -342,8 +420,13 @@ private RightsDecision validateGraph(DocumentId root,
         if (current in reached)
             continue;
         reached[current] = true;
-        if (auto next = current in children)
+        if (work !is null)
+            ++work.reachabilityNodeVisits;
+        if (auto next = current in children) {
+            if (work !is null)
+                work.reachabilityEdgeSteps += next.length;
             pending ~= *next;
+        }
     }
     foreach (artifact; known)
         if (!(artifact.text in reached))
@@ -381,11 +464,6 @@ private RightsArtifactId[] sortedUniqueArtifacts(RightsArtifactId[] values) {
 
 private int stateRank(RightsState state) {
     return cast(int) state;
-}
-
-private string relationKey(const(DerivedArtifactRelation) relation) {
-    return relation.parent.text ~ "\0" ~ relation.child.text ~ "\0" ~
-        relation.provenanceId.text;
 }
 
 private void enforceCanonicalId(string text, string prefix, string label) {

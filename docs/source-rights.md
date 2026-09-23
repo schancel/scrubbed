@@ -46,6 +46,11 @@ child document, annotation, and export reference in canonical lexical order.
 Relations are a complete snapshot for the decision, so unreachable supplied
 relations are rejected as orphans rather than ignored.
 
+Graph validation first enforces one parent per child, then uses global
+three-state visitation and one root-reachability pass. Cycle and closure work
+is linear in supplied artifacts plus relations; cycles are diagnosed before
+otherwise-unreachable components are reported as orphans.
+
 The evaluator fails closed with `denyUse` and an incomplete-closure marker for:
 
 - an uninitialized root or evidence attached to another root;
@@ -73,12 +78,17 @@ content bytes.
 Run the focused evidence gate with:
 
 ```sh
-ldc2 -O -release -Isource \
+ldc2 -O3 -release -d-version=SourceRightsScaleCheck -Isource \
   -of=/tmp/scrubbed-source-rights-check \
   experiments/source_rights/check.d \
   source/domain/source_rights.d source/domain/document.d
 /tmp/scrubbed-source-rights-check
 ```
+
+The optimized checker includes a 20,000-edge chain and asserts exact bounded
+work counts: two relation inspections, one cycle-node visit, at most one parent
+step, one reachability visit, and at most one child step per corresponding
+input item. Wall time is not used as the complexity oracle.
 
 ## Deferred integration
 

@@ -53,7 +53,10 @@ controls use separate seeds and point counts, and are reported separately:
 | plane | 136 | 2 | 1.959 | 1.814–2.073 |
 | linear 5-D control in 8-D | 200 | 5 | 4.449 | 4.197–4.856 |
 
-The 64-point duplicate control reports 21 zero-distance pairs and a warning.
+The 64-point duplicate control reports 21 zero-distance pairs, a warning, and
+a nonzero 1.217–1.704 interval derived from 28-point subsamples of its 35 usable
+ratios. A 14-point duplicate subsample has only 12 usable ratios; its 80%
+resample would fall below the minimum, so it abstains with an explicit warning.
 The all-duplicate 32-point control abstains as `duplicate-or-degenerate`; the
 8-point control abstains as `insufficient-sample`; a deliberately strict
 stability policy abstains as `unstable-resampling`. The checker independently
@@ -82,7 +85,10 @@ vector plus O(point-count) scalar/ID metadata. The 384-point negative control
 observes a peak of two; forcing the ceiling to one rejects admission before the
 candidate vector allocation. Reversing index/shard traversal yields identical
 result bytes. Changing shard bytes, model, metric/normalization, seed, sample
-size, or stability options changes identity or rejects verification.
+size, or stability options changes identity or rejects verification. Stability
+widths use a canonical 17-significant-digit representation: thresholds only
+`2e-12` apart around the observed boundary have distinct identities and the
+expected opposite statuses.
 
 Publication writes a complete adjacent `.pending` result and atomically
 renames it. The crash harness sends SIGKILL after pending bytes exist, verifies

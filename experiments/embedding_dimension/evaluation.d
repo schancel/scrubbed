@@ -114,6 +114,12 @@ private string finite(double value) {
     return value.isFinite ? format("%.9f", value) : "-";
 }
 
+private string canonicalFinite(double value) {
+    enforce(value.isFinite, "nonfinite estimator option");
+    // Seventeen significant decimal digits round-trip every IEEE-754 double.
+    return format("%.17g", value);
+}
+
 string digestBytes(const(ubyte)[] bytes) {
     return sha256Of(bytes).toHexString!(LetterCase.lower).idup;
 }
@@ -219,13 +225,14 @@ private Member[] selectMembers(const Member[] all, size_t requested,
 
 string populationIdentity(const Population population, const Options options,
         const Member[] selected) {
+    enforce(options.maximumRelativeInterval >= 0, "negative stability width");
     string[] ids;
     foreach (member; selected) ids ~= member.id;
     return digestText(resultVersion ~ "\n" ~ estimatorVersion ~ "\n" ~
         options.population ~ "\n" ~ options.modelDigest ~ "\n" ~
         metricName(options.metric) ~ "\n" ~ normalizationName(options.normalization) ~ "\n" ~
         options.seed.to!string ~ "\n" ~ options.sampleSize.to!string ~ "\n" ~
-        format("%.9f", options.maximumRelativeInterval) ~ "\n" ~
+        canonicalFinite(options.maximumRelativeInterval) ~ "\n" ~
         population.dimension.to!string ~ "\n" ~ population.shardDigests.join("\n") ~ "\n" ~
         population.sourceDigest ~ "\n" ~ population.indexOptions ~ "\n" ~
         ids.join("\n") ~ "\n");
@@ -363,14 +370,21 @@ Result evaluate(const Population population, Options options,
     result.distanceEvaluations = primary.comparisons;
     result.estimate = primary.value;
     result.peakLiveVectors = budget.peak;
+    if (result.duplicatePairs) result.warnings = "zero-distance-duplicates-skipped";
     if (!primary.value.isFinite) {
         result.status = "abstain";
         result.reason = primary.duplicates ? "duplicate-or-degenerate" : "degenerate-ratios";
         return result;
     }
     double[] resamples;
-    auto subsample = selected.length * 4 / 5;
-    if (subsample < minimumPoints) subsample = selected.length;
+    auto subsample = primary.ratios.length * 4 / 5;
+    if (subsample < minimumPoints) {
+        result.status = "abstain";
+        result.reason = "unstable-resampling";
+        if (result.warnings.length) result.warnings ~= ";";
+        result.warnings ~= "too-few-usable-ratios-for-resampling";
+        return result;
+    }
     foreach (replicate; 1 .. bootstrapReplicates + 1) {
         struct RankedRatio { ulong rank; RatioRow ratio; }
         RankedRatio[] ranked;
@@ -398,7 +412,6 @@ Result evaluate(const Population population, Options options,
         return result;
     }
     result.status = "estimate";
-    if (result.duplicatePairs) result.warnings = "zero-distance-duplicates-skipped";
     result.peakLiveVectors = budget.peak;
     return result;
 }

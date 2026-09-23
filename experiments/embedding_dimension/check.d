@@ -136,6 +136,14 @@ void main(string[] args) {
         "independent finite-sample formula check");
     need(duplicate.status == "estimate" && duplicate.duplicatePairs > 0 &&
         duplicate.warnings.canFind("duplicates"), "duplicate warning");
+    need(duplicate.intervalLow < duplicate.estimate &&
+        duplicate.intervalHigh > duplicate.estimate,
+        "duplicate control resamples usable ratios rather than selected points");
+    auto sparseDuplicate = synthetic(root, "duplicates", 169, 14);
+    need(sparseDuplicate.status == "abstain" &&
+        sparseDuplicate.reason == "unstable-resampling" &&
+        sparseDuplicate.warnings.canFind("too-few-usable-ratios"),
+        "too few usable ratios for resampling");
     need(degenerate.status == "abstain" && degenerate.reason == "duplicate-or-degenerate",
         "degenerate abstention");
     need(small.status == "abstain" && small.reason == "insufficient-sample",
@@ -157,6 +165,7 @@ void main(string[] args) {
     sensitivity ~= synthetic(root, "heldout-plane", 170);
     sensitivity ~= synthetic(root, "heldout-plane", 171);
     sensitivity ~= synthetic(root, "heldout-plane", 169, 0, Metric.cosine, Normalization.l2);
+    sensitivity ~= sparseDuplicate;
     auto unstableOptions = options("synthetic:heldout-plane:strict-stability",
         "model:synthetic:v1");
     unstableOptions.maximumRelativeInterval = 0.000001;
@@ -165,6 +174,19 @@ void main(string[] args) {
     need(unstable.status == "abstain" && unstable.reason == "unstable-resampling",
         "unstable resampling abstention");
     sensitivity ~= unstable;
+
+    auto boundary = (plane.intervalHigh - plane.intervalLow) / plane.estimate;
+    auto belowBoundary = options("synthetic:heldout-plane", "model:synthetic:v1");
+    belowBoundary.maximumRelativeInterval = boundary - 1e-12;
+    auto aboveBoundary = options("synthetic:heldout-plane", "model:synthetic:v1");
+    aboveBoundary.maximumRelativeInterval = boundary + 1e-12;
+    auto below = evaluate(loadPopulation(buildPath(root, "fixtures", "heldout-plane", "index.tsv")),
+        belowBoundary);
+    auto above = evaluate(loadPopulation(buildPath(root, "fixtures", "heldout-plane", "index.tsv")),
+        aboveBoundary);
+    need(below.identity != above.identity, "lossless stability-width identity");
+    need(below.status == "abstain" && above.status == "estimate",
+        "stability-width boundary status");
 
     auto scratch = buildPath(tempDir(), "embedding-dimension-check-" ~ randomUUID().toString);
     scope(exit) if (exists(scratch)) rmdirRecurse(scratch);

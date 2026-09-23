@@ -1,10 +1,12 @@
 module mix_export.check;
 
 import core.memory : GC;
+import core.atomic : atomicLoad, atomicStore;
 import core.sys.posix.fcntl : fcntl, F_GETFD;
 import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;
 import core.sys.posix.sys.stat : chmod, lstat, stat_t, S_IRUSR, S_IWUSR;
 import core.sys.posix.unistd : _exit, link;
+import core.thread : Thread;
 import domain.document : OutputName, SourceLocator;
 import domain.mix_policy : MissingAnnotation, MixDecision, MixPolicy, MixReason;
 import domain.quality_features : QualityPolicy, decide, measure;
@@ -203,8 +205,33 @@ private ChildStats childStats(string mode, string manifest) {
     return result;
 }
 
+private struct PublishStats {
+    ulong rss;
+    size_t fdStart;
+    size_t fdPeak;
+    size_t fdEnd;
+    ulong retainedChecksum;
+}
+
+private PublishStats childPublish(string mode, string output,
+        const ref Fixture source) {
+    auto process = execute([thisExePath(), mode, output, source.shard,
+        source.quality, source.dedup]);
+    check(process.status == 0, "publisher child failed: " ~ process.output);
+    auto values = process.output.split;
+    check(values.length == 5, "publisher child output shape");
+    PublishStats result;
+    result.rss = values[0].to!ulong;
+    result.fdStart = values[1].to!size_t;
+    result.fdPeak = values[2].to!size_t;
+    result.fdEnd = values[3].to!size_t;
+    result.retainedChecksum = values[4].to!ulong;
+    return result;
+}
+
 private void faultChecks(string root, Fixture source, QualityPolicy quality,
         MixPolicy mix) {
+    auto baselineFds = fds();
     foreach (raw; 0 .. 8) {
         auto target = cast(MixExportStep)raw;
         auto output = buildPath(root, "fault-" ~ raw.to!string);
@@ -225,6 +252,8 @@ private void faultChecks(string root, Fixture source, QualityPolicy quality,
                 "post-publication fault exposed incomplete generation");
         } else check(manifest.length == 0,
             "pre-publication fault exposed a commit manifest");
+        check(fds() == baselineFds,
+            "failed publication retained a file descriptor");
     }
 }
 
@@ -316,8 +345,26 @@ private void resourceProof(string root, QualityPolicy quality, MixPolicy mix) {
     auto source = fixture(root, records, quality, "resource");
     auto output = buildPath(root, "resource-output");
     mkdir(output);
-    auto generation = publishMixGeneration(output, source.shard,
-        source.quality, source.dedup, quality, mix);
+    auto publish = childPublish("--publish", output, source);
+    auto generationManifest = onlyFile(output, "*.commit.json");
+    auto bufferedOutput = buildPath(root, "resource-buffered-output");
+    mkdir(bufferedOutput);
+    auto bufferedPublish = childPublish("--publish-buffered-control",
+        bufferedOutput, source);
+    check(publish.retainedChecksum == 0 &&
+        bufferedPublish.retainedChecksum != 0,
+        "publisher buffering control was not retained");
+    check(publish.fdEnd == publish.fdStart &&
+        bufferedPublish.fdEnd == bufferedPublish.fdStart &&
+        publish.fdPeak >= publish.fdStart + 4 &&
+        bufferedPublish.fdPeak >= bufferedPublish.fdStart + 4 &&
+        publish.fdPeak <= publish.fdStart + 5 &&
+        bufferedPublish.fdPeak <= bufferedPublish.fdStart + 5,
+        "publisher FD bound or leak");
+    check(publish.rss < 64UL * 1024 * 1024 &&
+        bufferedPublish.rss > publish.rss + 16UL * 1024 * 1024,
+        "publisher RSS proof lacks buffering sensitivity");
+    auto generation = readMixGeneration(generationManifest);
     auto first = childStats("--stream", generation.manifestPath);
     auto second = childStats("--stream", generation.manifestPath);
     auto buffered = childStats("--buffer", generation.manifestPath);
@@ -338,10 +385,52 @@ private void resourceProof(string root, QualityPolicy quality, MixPolicy mix) {
         "reader RSS proof lacks buffering sensitivity");
     writeln("mix export resources: stream=", first.rss, "/", second.rss,
         " buffered=", buffered.rss, " fd=", first.fdStart, "/",
-        first.fdPeak, "/", first.fdEnd);
+        first.fdPeak, "/", first.fdEnd, " publish=", publish.rss,
+        " publish-buffered=", bufferedPublish.rss, " publish-fd=",
+        publish.fdStart, "/", publish.fdPeak, "/", publish.fdEnd);
 }
 
 void main(string[] args) {
+    if (args.length == 6 &&
+            (args[1] == "--publish" ||
+             args[1] == "--publish-buffered-control")) {
+        GC.collect();
+        auto fdStart = fds();
+        auto fdPeak = fdStart;
+        ulong checksum;
+        ubyte[] retained;
+        if (args[1] == "--publish-buffered-control") {
+            retained = cast(ubyte[])read(args[3]);
+            foreach (value; retained) checksum = checksum * 33 + value;
+        }
+        auto quality = QualityPolicy(0, 1_000_000, 1_000_000, 1_000_000);
+        auto all = MixPolicy("0123456789abcdef", 1, 1);
+        shared bool stopSampling;
+        shared size_t sampledPeak = fdPeak;
+        auto sampler = new Thread({
+            while (!stopSampling.atomicLoad) {
+                auto current = fds();
+                if (current > sampledPeak) sampledPeak = current;
+                Thread.yield();
+            }
+        });
+        sampler.start();
+        bool samplerJoined;
+        scope(exit) {
+            if (!samplerJoined) {
+                stopSampling.atomicStore(true);
+                sampler.join();
+            }
+        }
+        publishMixGeneration(args[2], args[3], args[4], args[5], quality, all);
+        stopSampling.atomicStore(true);
+        sampler.join();
+        samplerJoined = true;
+        fdPeak = cast(size_t)sampledPeak;
+        writeln(rssBytes(), " ", fdStart, " ", fdPeak, " ", fds(), " ",
+            checksum);
+        return;
+    }
     if (args.length == 6 && args[1] == "--crash-after-link") {
         auto quality = QualityPolicy(0, 1_000_000, 1_000_000, 1_000_000);
         auto all = MixPolicy("0123456789abcdef", 1, 1);

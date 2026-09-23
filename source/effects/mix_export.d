@@ -247,7 +247,17 @@ private final class PrivateWriter {
         sha256 = hexDigest(digest.finish());
     }
 
-    ~this() { if (fd >= 0) close(fd); }
+    // Failure can precede finish (for example while joining a malformed
+    // overlay). Class destruction is GC-timed, so callers use this idempotent
+    // cleanup at scope exit to return the descriptor deterministically.
+    void abandon() nothrow {
+        if (fd < 0) return;
+        auto old = fd;
+        fd = -1;
+        close(old);
+    }
+
+    ~this() { abandon(); }
 }
 
 private void trustedDirectory(string path) {
@@ -668,6 +678,7 @@ MixGeneration publishMixGeneration(string outputDirectory, string shardPath,
     auto manifestPath = buildPath(outputDirectory, manifestFile);
 
     auto decisions = new PrivateWriter(decisionPath);
+    scope(exit) decisions.abandon();
     string previous;
     auto report = visitMixDecisions(shardPath, qualityPath, dedupPath,
         qualityPolicy, mixPolicy,
@@ -698,6 +709,7 @@ MixGeneration publishMixGeneration(string outputDirectory, string shardPath,
         hexDigest(qualityDigest), hexDigest(dedupDigest), qualityVersion,
         policyBytes, policySha, report, decisions.size, decisions.sha256);
     auto provenanceWriter = new PrivateWriter(provenancePath);
+    scope(exit) provenanceWriter.abandon();
     provenanceWriter.put(cast(const(ubyte)[])provenance);
     provenanceWriter.finish(fault, MixExportStep.provenanceAfterWrite,
         MixExportStep.provenanceAfterFsync);
@@ -719,6 +731,7 @@ MixGeneration publishMixGeneration(string outputDirectory, string shardPath,
     auto temporaryManifest = buildPath(outputDirectory,
         "." ~ manifestFile ~ "." ~ randomUUID.toString ~ ".tmp");
     auto manifestWriter = new PrivateWriter(temporaryManifest);
+    scope(exit) manifestWriter.abandon();
     scope(exit) unlink(temporaryManifest.toStringz);
     manifestWriter.put(cast(const(ubyte)[])manifest);
     manifestWriter.finish(fault, MixExportStep.manifestAfterWrite,

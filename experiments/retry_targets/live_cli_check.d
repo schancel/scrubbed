@@ -523,6 +523,32 @@ void main(string[] args) {
     checkResources(binary, root);
     if (args.length == 3) {
         auto hook = args[2];
+        auto rootFailureInput = buildPath(root, "root-failure-input.txt");
+        auto rootFailureOutput = buildPath(root, "root-failure-output.txt");
+        auto rootFailureDb = buildPath(root, "root-failure.db");
+        auto rootFailureBase = ["run", "--input", rootFailureInput, "--output",
+            rootFailureOutput, "--error-journal", rootFailureDb];
+        write(rootFailureInput, "root failure replay");
+        call(hook, ["errors-init", "--journal", rootFailureDb], 0);
+        call(hook, rootFailureBase, 0);
+        write(rootFailureDb ~ ".fault-filter", "");
+        call(hook, rootFailureBase, 1);
+        remove(rootFailureDb ~ ".fault-filter");
+        journal = new FailureJournal(rootFailureDb);
+        need(journal.eventCount() == 1, "completed-root failure event");
+        journal.close();
+        call(hook, rootFailureBase ~ ["--error-retry", "--error-targeted"], 0);
+        journal = new FailureJournal(rootFailureDb);
+        remaining.length = 0;
+        journal.visitOutstandingTargets((SinkKey key) { remaining ~= key; });
+        need(remaining.length == 0 && journal.eventCount() == 2,
+            "completed-root retry recovery");
+        journal.close();
+        call(hook, rootFailureBase ~ ["--error-retry", "--error-targeted"], 0);
+        journal = new FailureJournal(rootFailureDb);
+        need(journal.eventCount() == 2, "completed-root repeat idempotence");
+        journal.close();
+
         auto crashInput = buildPath(root, "crash-input.txt");
         auto crashOutput = buildPath(root, "crash-output.txt");
         auto crashDb = buildPath(root, "crash.db");

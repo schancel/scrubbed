@@ -72,6 +72,12 @@ private bool pathIsSymlink(string path) {
     return lstat(path.toStringz, &info) == 0 && S_ISLNK(info.st_mode);
 }
 
+private bool needsInodeAliasScan(string path) {
+    stat_t info;
+    need(lstat(path.toStringz, &info) == 0, "destination-stat-failed");
+    return info.st_nlink > 1;
+}
+
 // Refuse recognized predecessor formats before SQLite can perform recovery or
 // checkpoint work. This deliberately reads only documented fixed header fields.
 private void preflightDatabaseHeader(string path, DurableKind kind) {
@@ -615,7 +621,7 @@ final class DurableJobLedger {
                     need(sqlite3_step(owner) == SQLITE_ROW &&
                         sqlite3_column_int64(owner, 0) == 0,
                         "destination-owned-by-another-event");
-                    if (exists(event.destination)) {
+                    if (exists(event.destination) && needsInodeAliasScan(event.destination)) {
                         auto aliases = db.prepare(`SELECT destination,final_document_id,sink_key
                             FROM final_event WHERE destination IS NOT NULL`);
                         scope(exit) sqlite3_finalize(aliases);
@@ -698,7 +704,7 @@ final class DurableJobLedger {
         if (row.plan.hasOutput) {
             need(!pathIsSymlink(row.plan.destination), "symlink-destination");
             safeRegularOrAbsent(row.plan.destination, true);
-            if (exists(row.plan.destination)) {
+            if (exists(row.plan.destination) && needsInodeAliasScan(row.plan.destination)) {
                 auto aliases = db.prepare(`SELECT destination,final_document_id,sink_key
                     FROM final_event WHERE
                     destination IS NOT NULL AND NOT(document_id=?1 AND
@@ -709,6 +715,7 @@ final class DurableJobLedger {
                     auto rc = sqlite3_step(aliases);
                     if (rc == SQLITE_DONE) break;
                     need(rc == SQLITE_ROW, "destination-owner-read-failed");
+                    version (unittest) ++aliasRowsInspected;
                     auto sameOwner = columnText(aliases, 1) == row.plan.document.text &&
                         columnText(aliases, 2) == row.plan.sink;
                     need(sameOwner || !sameInode(row.plan.destination, columnText(aliases, 0)),
@@ -923,6 +930,11 @@ final class DurableJobLedger {
         need(kind == DurableKind.journal && rootExists(key),
             "root-failure-unavailable");
         transaction({
+            auto reopen = db.prepare(`UPDATE root_state SET state='planned',updated_utc_ms=?4
+                WHERE document_id=?1 AND input_sha256=?2 AND config_sha256=?3`);
+            scope(exit) sqlite3_finalize(reopen);
+            bindRoot(reopen, key); bindLong(reopen, 4, nowUtcMs()); done(reopen);
+            need(sqlite3_changes(db.handle) == 1, "missing-root");
             auto sink = derivedSink("root", key.document, 0);
             appendFailure(key, sink, DurableEventState.failed, phase, code);
         });
@@ -983,6 +995,7 @@ version (unittest) {
     import std.path : buildPath;
     import std.uuid : randomUUID;
     import core.sys.posix.sys.stat : stat, stat_t;
+    import core.sys.posix.unistd : link;
 
     unittest {
         auto root = buildPath(tempDir, "durable-job-" ~ randomUUID.toString);
@@ -1091,16 +1104,32 @@ version (unittest) {
         assertThrown(ledger.completeRoot(key));
         ledger.close(); // refusal leaves the planned root usable
         ledger = new DurableJobLedger(path, DurableKind.manifest, identity);
-        DurableEventPlan[300] events;
+        DurableEventPlan[1200] events;
         foreach (ordinal, ref event; events) {
             event.ordinal = ordinal; event.kind = "emitted"; event.document = document;
             event.outputName = ordinal.to!string; event.sink = "sink:" ~ ordinal.to!string;
             event.destination = buildPath(root, "fresh-" ~ ordinal.to!string);
-            event.hasOutput = true; event.outputSha256 = reasonDigest(event.outputName);
+            event.hasOutput = true;
+            event.outputSha256 = sha256Of(cast(const(ubyte)[])[]);
         }
         aliasRowsInspected = 0;
         ledger.planEvents(key, events[]);
         assert(aliasRowsInspected == 0); // absent paths do not produce N(N-1)/2 inode probes
+        ledger.close();
+        foreach (ref event; events) write(event.destination, cast(ubyte[])[]);
+        auto committed = new Database(path, SQLITE_OPEN_READWRITE);
+        committed.exec("UPDATE final_event SET state='committed'"); committed.close();
+        ledger = new DurableJobLedger(path, DurableKind.manifest, identity);
+        aliasRowsInspected = 0;
+        foreach (ordinal; 0 .. events.length)
+            assert(ledger.prepare(key, ordinal, false) == DurableAction.skip);
+        assert(aliasRowsInspected == 0); // 1200 single-link replay uses no global inode scan
+        remove(events[1].destination);
+        assert(link(events[0].destination.toStringz,
+            events[1].destination.toStringz) == 0);
+        aliasRowsInspected = 0;
+        assertThrown(ledger.prepare(key, 1, false));
+        assert(aliasRowsInspected > 0); // hardlinks retain the bounded slow path
         ledger.close();
 
         auto malformed = buildPath(root, "malformed.db");

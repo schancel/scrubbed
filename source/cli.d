@@ -14,7 +14,7 @@ import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
 import effects.failure_journal : FailureJournal;
 import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
     DurableIdentity, DurableJobLedger, DurableKind, DurableRootKey, deriveDurableIdentity,
-    derivedSink, reasonDigest;
+    createJournalV3, derivedSink, reasonDigest;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.failure_policy : recordDocumentFailure;
@@ -794,10 +794,12 @@ private struct ManifestOutcome {
     string detail;
     SinkKey key;
     bool hasKey;
+    bool terminal;
 }
 
-private ManifestOutcome manifestOutcome(string status, string detail, SinkKey key) {
-    return ManifestOutcome(status, detail, key, true);
+private ManifestOutcome manifestOutcome(string status, string detail, SinkKey key,
+        bool terminal = false) {
+    return ManifestOutcome(status, detail, key, true, terminal);
 }
 
 private class ManifestDecisionFailure : Exception {
@@ -1335,11 +1337,13 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
         }
         throw failure;
     }
-    auto status = allEventsPreviouslyTerminal ? "skipped" :
-        (retry ? "retry" : outcome.status);
+    auto terminal = outcome.rejected != 0 || outcome.quarantined != 0;
+    auto status = terminal ? outcome.status :
+        (allEventsPreviouslyTerminal ? "skipped" :
+            (retry ? "retry" : outcome.status));
     return manifestOutcome(status, outcome.firstReason,
         SinkKey(rootKey.document, rootKey.inputSha256, rootKey.configSha256,
-            "local-primary:v1"));
+            "local-primary:v1"), terminal);
 }
 
 int runApp(string[] args) {
@@ -1596,11 +1600,12 @@ int runApp(string[] args) {
                     inputIsDir, compiledJob.get, bytes, dryRun, publication);
                 decision.status = local.status;
                 decision.detail = local.firstReason;
-                if (local.rejected || local.quarantined) {
-                    decisionMutex.lock();
-                    ++terminalDecisions;
-                    decisionMutex.unlock();
-                }
+                decision.terminal = local.rejected != 0 || local.quarantined != 0;
+            }
+            if (decision.terminal) {
+                decisionMutex.lock();
+                ++terminalDecisions;
+                decisionMutex.unlock();
             }
             if (explain && errorJournalPath.length)
                 v2Explain(decision.status, decision.key,
@@ -2016,6 +2021,27 @@ unittest {
         "suffix=text:policy-stop", "--stage-option", "enabled=boolean:true",
         "--threads", "1"]) == 1, "compiled rejection exit");
     requireCli(!exists(rejectedOutput), "compiled rejection published output");
+    auto terminalArgs = ["--input", input, "--output", rejectedOutput,
+        "--stage", "stop=fixture", "--stage-option", "suffix=text:policy-stop",
+        "--stage-option", "enabled=boolean:true", "--threads", "1", "--explain"];
+    auto durableManifest = buildPath(root, "terminal-manifest.db");
+    requireCli(runApp(["scrubbed", "run"] ~ terminalArgs ~
+        ["--manifest", durableManifest]) == 1, "manifest terminal first exit");
+    requireCli(runApp(["scrubbed", "run"] ~ terminalArgs ~
+        ["--manifest", durableManifest]) == 1, "manifest terminal replay exit");
+    requireCli(runApp(["scrubbed", "run"] ~ terminalArgs ~
+        ["--manifest", durableManifest, "--manifest-retry"]) == 1,
+        "manifest terminal retry exit");
+    auto durableJournal = buildPath(root, "terminal-journal.db");
+    createJournalV3(durableJournal);
+    requireCli(runApp(["scrubbed", "run"] ~ terminalArgs ~
+        ["--error-journal", durableJournal]) == 1, "journal terminal first exit");
+    requireCli(runApp(["scrubbed", "run"] ~ terminalArgs ~
+        ["--error-journal", durableJournal]) == 1, "journal terminal replay exit");
+    requireCli(runApp(["scrubbed", "run"] ~ terminalArgs ~
+        ["--error-journal", durableJournal, "--error-retry"]) == 1,
+        "journal terminal retry exit");
+    requireCli(!exists(rejectedOutput), "durable rejection published output");
 }
 
 // Model the late-traversal-fault boundary deterministically: one worker has

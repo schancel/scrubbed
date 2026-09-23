@@ -161,6 +161,7 @@ final class BoundedInput {
     private Condition changed;
     private TaskPool pool;
     private InputLimits limits;
+    private size_t processingLimit;
     private InputCounts counts;
     private size_t nextDescriptorSequence;
     private bool cancelled;
@@ -179,6 +180,8 @@ final class BoundedInput {
             !limits.workerDescriptors || !threads)
             throw new Exception("input limits and threads must be positive");
         this.limits = limits;
+        processingLimit = threads < limits.workerDescriptors ?
+            threads : limits.workerDescriptors;
         this.process = process;
         this.reportFailure = reportFailure;
         this.isFatal = isFatal;
@@ -186,11 +189,11 @@ final class BoundedInput {
         if (metrics !is null) metrics.setLimits(limits);
         mutex = new Mutex;
         changed = new Condition(mutex);
-        // finish(true) enlists its caller as a worker. Keep the total
-        // processing callbacks within --threads even when the descriptor
-        // ceiling is configured higher than the thread count.
+        // Keep every requested worker available while the producer is still
+        // admitting paths. finish(true) may enlist its caller later, so the
+        // processing gate below remains the authoritative --threads cap.
         if (threads > 1)
-            pool = new TaskPool(threads - 1);
+            pool = new TaskPool(threads);
     }
 
     /// false means a prior fault or explicit cancellation stopped admission.
@@ -266,7 +269,7 @@ final class BoundedInput {
         // canonical file cannot consume a scarce descriptor while waiting for
         // an earlier file's ordered publication turn.
         while (!cancelled && (sequence != nextDescriptorSequence ||
-                counts.workerDescriptors == limits.workerDescriptors))
+                counts.workerDescriptors == processingLimit))
             changed.wait();
         if (cancelled) {
             counts.reservedBytes -= bytes;
@@ -432,6 +435,26 @@ unittest {
     joiner.join();
     assert(joined.succeeded == 3 && joined.workerDescriptors == 0 &&
         joined.reservedBytes == 0);
+
+    auto producerEntered = new Semaphore(0);
+    auto producerRelease = new Semaphore(0);
+    auto producerPhase = new BoundedInput(InputLimits(2, 2, 2), 2,
+        (string path, ulong bytes) {
+            producerEntered.notify();
+            producerRelease.wait();
+        },
+        (string path, Throwable error) { assert(0, error.msg); });
+    assert(producerPhase.submit("first", 1));
+    assert(producerPhase.submit("second", 1));
+    assert(producerEntered.wait(500.msecs));
+    auto fullConcurrencyBeforeFinish = producerEntered.wait(100.msecs);
+    producerRelease.notify();
+    producerRelease.notify();
+    auto producerCounts = producerPhase.finish();
+    assert(fullConcurrencyBeforeFinish,
+        "configured workers were unavailable during producer admission");
+    assert(producerCounts.succeeded == 2 &&
+        producerCounts.peakWorkerDescriptors == 2);
 
     shared size_t faults;
     auto failing = new BoundedInput(InputLimits(2, 2, 1), 4,

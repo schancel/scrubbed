@@ -64,13 +64,51 @@ instrumentation overhead on few-large is why performance and attribution are
 separate series rather than interchangeable timings. These are Darwin-local
 diagnostic observations, not Linux or Windows claims.
 
-No scheduler candidate was implemented, so the report records
+The initial attribution slice included no scheduler candidate, so its report records
 `ATTRIBUTION_ONLY_NO_CANDIDATE` and `production_candidate_authorized: false`.
 The contract's four-of-five, 10% before/after gate therefore cannot authorize
 a scheduling change. Shipping order, admission, descriptor ownership,
 cancellation, error selection, publication, and resource-cap behavior are
 unchanged; when the environment variable is absent, the metrics object is not
 allocated and no instrumentation clock or mutex is touched.
+
+### Bounded worker-availability candidate
+
+The follow-up comparison fixes the diagnosed producer-phase worker deficit:
+`BoundedInput` now creates the requested number of background workers instead
+of reserving one for a producer that only enters the pool during final join.
+An explicit `min(threads, worker-descriptor-cap)` processing gate continues to
+bound callbacks when `finish(true)` temporarily enlists its caller. A
+fail-before unit test requires both configured workers to enter admitted work
+before `finish()` begins.
+
+```sh
+ldc2 -O3 -release benchmarks/coordination_profile.d \
+  -of=/tmp/scrubbed-coordination-profile
+/tmp/scrubbed-coordination-profile /path/to/base/scrubbed \
+  /path/to/candidate/scrubbed \
+  benchmarks/coordination-scheduler-evidence.json
+```
+
+The harness alternates base/candidate order for five pairs at threads 1/2/4
+on both frozen layouts, exact-gates every output, and separately interleaves
+five instrumented many-small four-thread pairs. It authorizes production only
+when at least four pairs improve, the target median wall improvement is at
+least 10%, attributed queue residence falls, and single-thread plus all
+few-large wall/CPU/RSS/FD medians avoid regressions above 5%.
+
+The recorded run passed all gates: five of five target pairs improved;
+many-small four-thread median wall fell from 3.119 to 2.689 seconds (13.8%),
+and accepted-to-worker queue residence fell 15.9%. Many-small two-thread wall
+fell from 7.981 to 4.234 seconds. Few-large medians were 6.758/3.631/2.386
+seconds versus 6.842/3.607/2.475 for base at threads 1/2/4, with all control
+resources inside the 5% ceiling. The report therefore records
+`AUTHORIZED_BOUNDED_WORKER_AVAILABILITY`.
+
+Size-aware randomized execution remains a separate potential optimization for
+heterogeneous inputs. It is intentionally absent here: all files in the
+many-small fixture have equal size, and combining scheduling policies would
+make this candidate's causal result uninterpretable.
 
 ## Attested full-process target
 

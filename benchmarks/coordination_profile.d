@@ -219,8 +219,170 @@ private JSONValue invoke(string binary, string input, string output,
     return result;
 }
 
-void main(string[] args) {
-    need(args.length == 3, "usage: coordination_profile <release-binary> <report>");
+private long[] values(JSONValue[] samples, size_t threads, string field) {
+    long[] result;
+    foreach (sample; samples)
+        if (sample["threads"].integer == threads)
+            result ~= field == "cpu_us" ?
+                sample["user_us"].integer + sample["system_us"].integer :
+                sample[field].integer;
+    result.sort();
+    return result;
+}
+
+private long median(JSONValue[] samples, size_t threads, string field) {
+    auto ordered = values(samples, threads, field);
+    need(ordered.length == runs, "comparison sample cardinality differs");
+    return ordered[ordered.length / 2];
+}
+
+private long sampleValue(JSONValue[] samples, size_t threads,
+        size_t ordinal, string field) {
+    foreach (sample; samples)
+        if (sample["threads"].integer == threads &&
+                sample["ordinal"].integer == ordinal)
+            return field == "cpu_us" ?
+                sample["user_us"].integer + sample["system_us"].integer :
+                sample[field].integer;
+    throw new Exception("comparison sample missing");
+}
+
+private bool withinFivePercent(long candidate, long baseline) {
+    return candidate * 100 <= baseline * 105;
+}
+
+private void runComparison(string[] args) {
+    auto baseline = absolutePath(args[1]);
+    auto candidate = absolutePath(args[2]);
+    auto reportPath = absolutePath(args[3]);
+    need(exists(baseline) && exists(candidate) && !exists(reportPath),
+        "comparison binary missing or report exists");
+    need(tableIdentity() == fixtureTablePin, "fixture table pin differs");
+    auto root = buildPath(tempDir, "scrubbed-coordination-compare-" ~
+        randomUUID.toString);
+    mkdirRecurse(root); scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto config = buildPath(root, "mixed-v3.json");
+    write(config, configText());
+    need(fileDigest(config) == configPin, "config pin differs");
+    JSONValue[] layoutReports;
+    bool controlsPass = true;
+    size_t targetWins;
+    long targetBaselineWall, targetCandidateWall;
+    JSONValue[] baselineAttribution, candidateAttribution;
+    foreach (ref layout; layouts) {
+        auto input = buildPath(root, layout.name ~ "-input");
+        makeFixture(input, layout);
+        auto inputId = identify(input);
+        need(inputId.tree == inputTreePins[layout.name], "input tree pin differs");
+        JSONValue[] baselineSamples, candidateSamples;
+        foreach (round; 0 .. runs) foreach (threads; [1, 2, 4]) {
+            foreach (candidateFirst; [round % 2 == 1, round % 2 == 0]) {
+                auto isCandidate = candidateFirst;
+                auto binary = isCandidate ? candidate : baseline;
+                auto output = buildPath(root, layout.name ~
+                    (isCandidate ? "-candidate-" : "-baseline-") ~
+                    threads.to!string ~ "-" ~ round.to!string);
+                auto sample = invoke(binary, input, output, config, threads,
+                    round, root, false);
+                auto outputId = identify(output);
+                need(outputId.tree == outputTreePins[layout.name],
+                    "comparison exact output tree pin differs");
+                sample["output_bytes"] = cast(long)outputId.bytes;
+                sample["output_tree_sha256"] = outputId.tree;
+                sample["output_concatenated_sha256"] = outputId.concatenated;
+                if (isCandidate) candidateSamples ~= sample;
+                else baselineSamples ~= sample;
+                rmdirRecurse(output);
+            }
+        }
+        foreach (threads; [1, 2, 4]) {
+            auto baselineWall = median(baselineSamples, threads, "wall_us");
+            auto candidateWall = median(candidateSamples, threads, "wall_us");
+            if (layout.name == "many-small" && threads == 4) {
+                targetBaselineWall = baselineWall;
+                targetCandidateWall = candidateWall;
+                foreach (round; 0 .. runs)
+                    if (sampleValue(candidateSamples, threads, round, "wall_us") <
+                            sampleValue(baselineSamples, threads, round, "wall_us"))
+                        ++targetWins;
+            }
+            if (threads == 1 || layout.name == "few-large") {
+                foreach (field; ["wall_us", "cpu_us", "peak_rss_bytes",
+                        "sampled_fd_peak"])
+                    controlsPass = controlsPass && withinFivePercent(
+                        median(candidateSamples, threads, field),
+                        median(baselineSamples, threads, field));
+            }
+        }
+        if (layout.name == "many-small")
+        foreach (round; 0 .. runs) foreach (candidateFirst;
+                [round % 2 == 1, round % 2 == 0]) {
+            auto isCandidate = candidateFirst;
+            auto binary = isCandidate ? candidate : baseline;
+            auto output = buildPath(root, "many-small-attribution-" ~
+                (isCandidate ? "candidate-" : "baseline-") ~ round.to!string);
+            auto sample = invoke(binary, input, output, config, 4, round,
+                root, true);
+            auto outputId = identify(output);
+            need(outputId.tree == outputTreePins[layout.name],
+                "comparison attribution output tree pin differs");
+            if (isCandidate) candidateAttribution ~= sample;
+            else baselineAttribution ~= sample;
+            rmdirRecurse(output);
+        }
+        layoutReports ~= JSONValue([
+            "layout": JSONValue(layout.name),
+            "files": JSONValue(cast(long)layout.files),
+            "input_bytes": JSONValue(cast(long)inputId.bytes),
+            "input_tree_sha256": JSONValue(inputId.tree),
+            "baseline_samples": JSONValue(baselineSamples),
+            "candidate_samples": JSONValue(candidateSamples)]);
+    }
+    auto waitField = "accepted_worker_queue";
+    long[] baselineWait, candidateWait;
+    foreach (sample; baselineAttribution)
+        baselineWait ~= sample["metrics"]["phases"][waitField]["nanoseconds"].integer;
+    foreach (sample; candidateAttribution)
+        candidateWait ~= sample["metrics"]["phases"][waitField]["nanoseconds"].integer;
+    baselineWait.sort(); candidateWait.sort();
+    auto waitFalls = candidateWait[runs / 2] < baselineWait[runs / 2];
+    auto authorized = targetWins >= 4 &&
+        targetCandidateWall * 100 <= targetBaselineWall * 90 &&
+        waitFalls && controlsPass;
+    auto report = JSONValue([
+        "schema": JSONValue("scrubbed.coordination-scheduler-comparison.v1"),
+        "host_os": JSONValue(commandOutput(["uname", "-s"])),
+        "host_architecture": JSONValue(commandOutput(["uname", "-m"])),
+        "host_cpu": JSONValue(commandOutput(
+            ["sysctl", "-n", "machdep.cpu.brand_string"])),
+        "baseline_binary_sha256": JSONValue(fileDigest(baseline)),
+        "candidate_binary_sha256": JSONValue(fileDigest(candidate)),
+        "harness_sha256": JSONValue(fileDigest(args[0])),
+        "fixture_table_sha256": JSONValue(fixtureTablePin),
+        "config_sha256": JSONValue(configPin),
+        "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
+        "target_wins": JSONValue(cast(long)targetWins),
+        "target_baseline_median_wall_us": JSONValue(targetBaselineWall),
+        "target_candidate_median_wall_us": JSONValue(targetCandidateWall),
+        "target_baseline_median_queue_ns": JSONValue(baselineWait[runs / 2]),
+        "target_candidate_median_queue_ns": JSONValue(candidateWait[runs / 2]),
+        "controls_within_five_percent": JSONValue(controlsPass),
+        "production_candidate_authorized": JSONValue(authorized),
+        "decision": JSONValue(authorized ?
+            "AUTHORIZED_BOUNDED_WORKER_AVAILABILITY" :
+            "REJECTED_THRESHOLD_NOT_MET"),
+        "baseline_attribution": JSONValue(baselineAttribution),
+        "candidate_attribution": JSONValue(candidateAttribution),
+        "layouts": JSONValue(layoutReports)]);
+    auto text = report.toString;
+    need(!text.canFind(root), "comparison report leaked temporary path");
+    parseJSON(text);
+    write(reportPath, text ~ "\n");
+    need(readText(reportPath) == text ~ "\n", "comparison report reopen differs");
+    writeln("coordination comparison: wrote ", reportPath);
+}
+
+private void runAttribution(string[] args) {
     auto binary = absolutePath(args[1]);
     auto reportPath = absolutePath(args[2]);
     need(exists(binary) && !exists(reportPath), "binary missing or report exists");
@@ -306,4 +468,12 @@ void main(string[] args) {
     write(reportPath, text ~ "\n");
     need(readText(reportPath) == text ~ "\n", "report reopen differs");
     writeln("coordination profile: wrote ", reportPath);
+}
+
+void main(string[] args) {
+    need(args.length == 3 || args.length == 4,
+        "usage: coordination_profile <release-binary> <report> | " ~
+        "<baseline-binary> <candidate-binary> <report>");
+    if (args.length == 4) runComparison(args);
+    else runAttribution(args);
 }

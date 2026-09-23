@@ -1940,6 +1940,24 @@ private void selfTestNativePath(string sourceRoot, string poisonPath,
 
 int main(string[] args) {
     try {
+        if (args.length == 7 && args[1] == "--attested-attribution") {
+            auto root = privateScratch("scrubbed-canonical-attribution-build-");
+            scope(exit) rmdirRecurse(root);
+            auto built = buildAttestedExecutable(args[2], root);
+            validateAttestation(built.attestation, built.snapshot.sha256);
+            auto harness = snapshotExecutable(args[3], root,
+                "scrubbed-pipeline-attribution-check");
+            auto attestationPath = buildPath(root, "build-attestation.json");
+            write(attestationPath, built.attestation.toString ~ "\n");
+            auto result = execute([harness.path, "--run", built.snapshot.path,
+                attestationPath, args[4], args[5], args[6], harness.path]);
+            verifySnapshot(built.snapshot);
+            verifySnapshot(harness);
+            require(result.status == 0,
+                "canonical attribution harness failed: " ~ result.output);
+            writeln(result.output.strip);
+            return 0;
+        }
         if (args.length == 6 && args[1] == "--attested-profile") {
             auto root = privateScratch("scrubbed-canonical-profile-build-");
             scope(exit) rmdirRecurse(root);
@@ -2005,7 +2023,8 @@ int main(string[] args) {
         require(validSupplied || validAttested,
             "usage: pipeline SCRUBBED_BINARY [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
             "or pipeline --attested-build CLEAN_SOURCE [REPORT_JSON [--large TIME_BUDGET_SECONDS]]; " ~
-            "or pipeline --attested-profile CLEAN_SOURCE PROFILE_HARNESS REPORT_JSON TIME_BUDGET_SECONDS");
+            "or pipeline --attested-profile CLEAN_SOURCE PROFILE_HARNESS REPORT_JSON TIME_BUDGET_SECONDS; " ~
+            "or pipeline --attested-attribution CLEAN_SOURCE ATTRIBUTION_HARNESS CANONICAL_PROFILE REPORT_JSON TIME_BUDGET_SECONDS");
         auto inputTarget = attestedMode ? args[2] : args[1];
         auto reportPath = attestedMode ?
             (args.length >= 4 ? args[3] : "") :

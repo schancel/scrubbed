@@ -72,6 +72,42 @@ The strict checker also rejects nonfinite or negative timing/CPU values,
 signals, byte-count drift, invalid RSS/FD/rusage domains, and fabricated disk
 support for every ordinary and durable measurement.
 
+## Canonical CLI attribution
+
+`pipeline_attribution_check.d` publishes the evidence-only companion
+`scrubbed-cli-attribution-v1`. It reuses the canonical profile's frozen
+128 MiB fixtures, configs, expected outputs, durable semantics, target hash,
+and full build attestation without changing them. For each layout it records
+three exact-PID `/usr/bin/sample` traces for scalar threads1, mixed threads1,
+mixed threads4, manifest-v2 verified skip, and journal-v3 verified skip. A
+trace is accepted only after exact output and status gates and at least 100
+bound stacks. Three separate druntime profiles cover scalar and mixed
+threads1; their fields are explicitly D-GC-only.
+
+```sh
+ldc2 -O3 -release benchmarks/pipeline.d -of=/tmp/scrubbed-pipeline
+ldc2 -O3 -release benchmarks/pipeline_attribution_check.d \
+  -of=/tmp/scrubbed-pipeline-attribution-check
+/tmp/scrubbed-pipeline-attribution-check --self-test
+/tmp/scrubbed-pipeline-attribution-check --self-test-live-sample
+# The full run requires a clean Darwin checkout and passes capacity first.
+/tmp/scrubbed-pipeline --attested-attribution "$(pwd)" \
+  /tmp/scrubbed-pipeline-attribution-check \
+  benchmarks/pipeline-canonical-profile.json \
+  benchmarks/pipeline-canonical-attribution.json 1800
+/tmp/scrubbed-pipeline-attribution-check --check \
+  benchmarks/pipeline-canonical-attribution.json
+```
+
+The exact checker recipe and output basename above bind the report to the
+rebuilt Mach-O. Original sample/GC logs remain in private scratch only; the
+report retains their hashes plus sanitized top symbols, partitions,
+repetition order, median/range, tool settings, direct-child diagnostic
+wall/CPU/RSS, and structured unsupported fields. Sampling is not an exact-call
+counter, and D-GC evidence is not native or total-process allocation evidence.
+The derived conclusion can be a stable named hotspot, distributed cost, or
+unavailable attribution; none authorizes a production edit in this slice.
+
 ## Fused scalar-filter microbenchmark
 
 `fused_filters.d` compares the former separately materialized

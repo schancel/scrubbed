@@ -149,17 +149,21 @@ struct ExtractorRegistrationV1 {
             seen[cast(size_t) outcome] = true;
         }
         bool[string] optionKeys;
+        ExtractorOptionDeclarationV1[] checkedSchema;
         foreach (declaration; optionSchema) {
-            enforce((declaration.key in optionKeys) is null,
+            auto checked = ExtractorOptionDeclarationV1(declaration.key,
+                declaration.type, declaration.required);
+            enforce((checked.key in optionKeys) is null,
                 "duplicate extractor option declaration");
-            optionKeys[declaration.key] = true;
+            optionKeys[checked.key] = true;
+            checkedSchema ~= checked;
         }
         enforce(factory !is null, "extractor factory is required");
         this.implementation = implementation.idup;
         this.version_ = version_.idup;
         this.acceptedOutcomes = acceptedOutcomes.dup;
         this.resources = ExtractorResourcesV1(resources.cpuSlots, resources.memoryBytes);
-        this.optionSchema = optionSchema.dup;
+        this.optionSchema = checkedSchema;
         this.factory = factory;
     }
 
@@ -174,8 +178,11 @@ struct ExtractorRegistrationV1 {
     }
 
     void validateOptions(const ref ExtractorOptionsV1 options) {
-        // Revalidate public registration fields before trusting its schema.
-        validatedCopy;
+        auto checked = validatedCopy;
+        checked.validateCheckedOptions(options);
+    }
+
+    private void validateCheckedOptions(const ref ExtractorOptionsV1 options) {
         enforce(options.length <= optionSchema.length,
             "extractor has undeclared options");
         foreach (key, value; options) {
@@ -191,8 +198,9 @@ struct ExtractorRegistrationV1 {
     }
 
     ConfiguredExtractorV1 build(const ref ExtractorOptionsV1 options) {
-        validateOptions(options);
-        auto configured = factory(options);
+        auto checked = validatedCopy;
+        checked.validateCheckedOptions(options);
+        auto configured = checked.factory(options);
         enforce(configured.isValid, "extractor factory returned invalid configuration");
         return configured;
     }
@@ -213,6 +221,14 @@ public:
     }
     ExtractorRegistrationV1* find(string implementation) {
         return implementation in registrations;
+    }
+    ExtractorRegistrationV1 validated(string implementation) {
+        auto registration = implementation in registrations;
+        enforce(registration !is null, "unknown extractor: " ~ implementation);
+        auto checked = registration.validatedCopy;
+        enforce(checked.implementation == implementation,
+            "extractor registry key/implementation mismatch: " ~ implementation);
+        return checked;
     }
 }
 

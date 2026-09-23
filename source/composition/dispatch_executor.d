@@ -398,6 +398,73 @@ unittest {
         &stages, &filters));
     assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
 
+    auto implementationRegistry = testExtractors;
+    addSecond(implementationRegistry, DetectionOutcomeV1.html);
+    implementationRegistry.find("second").implementation = "other";
+    auto badImplementationLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(badImplementationLater,
+        &implementationRegistry, &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto versionRegistry = testExtractors;
+    addSecond(versionRegistry, DetectionOutcomeV1.html);
+    versionRegistry.find("second").version_ = "";
+    auto badVersionLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(badVersionLater, &versionRegistry,
+        &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto outcomeRegistry = testExtractors;
+    addSecond(outcomeRegistry, DetectionOutcomeV1.html);
+    outcomeRegistry.find("second").acceptedOutcomes[0] =
+        DetectionOutcomeV1.unknown;
+    auto badOutcomeMetadataLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(badOutcomeMetadataLater,
+        &outcomeRegistry, &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto emptyKeyRegistry = testExtractors;
+    addSecond(emptyKeyRegistry, DetectionOutcomeV1.html,
+        [ExtractorOptionDeclarationV1("enabled",
+            ExtractorOptionTypeV1.boolean, false)]);
+    emptyKeyRegistry.find("second").optionSchema[0].key = "";
+    auto emptyKeyLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(emptyKeyLater, &emptyKeyRegistry,
+        &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto optionTypeRegistry = testExtractors;
+    addSecond(optionTypeRegistry, DetectionOutcomeV1.html,
+        [ExtractorOptionDeclarationV1("enabled",
+            ExtractorOptionTypeV1.boolean, false)]);
+    optionTypeRegistry.find("second").optionSchema[0].type =
+        cast(ExtractorOptionTypeV1) 99;
+    auto invalidOptionTypeLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(invalidOptionTypeLater,
+        &optionTypeRegistry, &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto duplicateSchemaRegistry = testExtractors;
+    addSecond(duplicateSchemaRegistry, DetectionOutcomeV1.html, [
+        ExtractorOptionDeclarationV1("first",
+            ExtractorOptionTypeV1.boolean, false),
+        ExtractorOptionDeclarationV1("second",
+            ExtractorOptionTypeV1.boolean, false)
+    ]);
+    duplicateSchemaRegistry.find("second").optionSchema[1].key = "first";
+    auto duplicateSchemaLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(duplicateSchemaLater,
+        &duplicateSchemaRegistry, &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
+    auto missingFactoryRegistry = testExtractors;
+    addSecond(missingFactoryRegistry, DetectionOutcomeV1.html);
+    missingFactoryRegistry.find("second").factory = null;
+    auto missingFactoryLater = twoRouteSpec("second");
+    assertThrown(compileDispatchJobV1(missingFactoryLater,
+        &missingFactoryRegistry, &stages, &filters));
+    assert(dispatchFactoryCalls == 0 && commonFactoryCalls == 0);
+
     auto plan = compileDispatchJobV1(spec, &extractors, &stages, &filters);
     assert(dispatchFactoryCalls == 1);
     assert(commonFactoryCalls == 1);

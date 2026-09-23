@@ -139,9 +139,7 @@ CompiledDispatchJobV1 compileDispatchJobV1(ref DispatchJobSpecV1 spec,
     // extractor factory. Later invalid routes cannot leave earlier effects.
     ValidatedDispatchRouteV1[] validatedRoutes;
     foreach (route; spec.dispatch.routes) {
-        auto registration = extractors.find(route.extractor);
-        enforce(registration !is null, "unknown extractor: " ~ route.extractor);
-        auto checkedRegistration = registration.validatedCopy;
+        auto checkedRegistration = extractors.validated(route.extractor);
         foreach (action; spec.dispatch.actions)
             if (action.kind == DispatchActionKindV1.route && action.target == route.name)
                 enforce(checkedRegistration.accepts(extractionOutcome(action.outcome)),

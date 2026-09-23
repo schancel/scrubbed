@@ -317,9 +317,29 @@ private string partition(SymbolCount item) {
     return "system";
 }
 
+private string derivedDominantLeafComponent(JSONValue sample) {
+    auto leaf = sample["leaf_top"].array;
+    need(leaf.length != 0, "cannot derive dominant component from empty leaf evidence");
+    return leaf[0]["symbol"].str ~ " (" ~ leaf[0]["image"].str ~ ")";
+}
+
+private string derivedDominantPartition(JSONValue sample) {
+    string result;
+    long maximum = -1;
+    foreach (name; ["kernel", "system", "runtime", "project", "unresolved"]) {
+        auto count = sample["partitions"][name]["count"].integer;
+        if (count > maximum) {
+            result = name;
+            maximum = count;
+        }
+    }
+    return result;
+}
+
 private string sanitizedSampleDigest(JSONValue value) {
     SHA256 result;
     digestPart(result, value["accepted_stacks"].integer.to!string);
+    digestPart(result, value["sampled_pid"].integer.to!string);
     digestPart(result, value["dominant_leaf_component"].str);
     digestPart(result, value["sample_path_redacted"].boolean ? "true" : "false");
     digestPart(result, value["path_binding_semantics"].str);
@@ -340,20 +360,37 @@ private string sanitizedSampleDigest(JSONValue value) {
     return toHexString(result.finish()).to!string;
 }
 
+private string captureBindingDigest(long pid, string binaryHash, string rawHash) {
+    SHA256 result;
+    digestPart(result, pid.to!string);
+    digestPart(result, binaryHash);
+    digestPart(result, rawHash);
+    return toHexString(result.finish()).to!string;
+}
+
 private JSONValue parseSample(string raw, long expectedPid, string binary) {
     auto lines = raw.splitLines;
     auto canonicalBinary = canonicalExisting(binary);
     bool analysisBound, processBound, pathBound, pathRedacted, inCallGraph, inLeaf;
-    long accepted;
+    long accepted, analysisPid = -1, processPid = -1;
     SymbolCount[] inclusive, leaf;
     foreach (line; lines) {
         auto clean = line.strip;
         if (clean.startsWith("Analysis of sampling ") &&
-            clean.canFind("(pid " ~ expectedPid.to!string ~ ")") &&
-            clean.endsWith("every " ~ sampleInterval.to!string ~ " milliseconds"))
+            clean.endsWith("every " ~ sampleInterval.to!string ~ " milliseconds")) {
+            auto begin = clean.indexOf("(pid ");
+            auto end = begin < 0 ? -1 : clean.indexOf(")", begin);
+            if (begin >= 0 && end > begin)
+                analysisPid = clean[begin + 5 .. end].to!long;
             analysisBound = true;
-        if (clean.startsWith("Process:") && clean.canFind("[" ~ expectedPid.to!string ~ "]"))
+        }
+        if (clean.startsWith("Process:")) {
+            auto begin = clean.lastIndexOf("[");
+            auto end = clean.endsWith("]") ? clean.length - 1 : -1;
+            if (begin >= 0 && end > begin)
+                processPid = clean[begin + 1 .. end].to!long;
             processBound = true;
+        }
         if (clean.startsWith("Path:")) {
             auto sampledPath = clean[5 .. $].strip;
             if (sampledPath.canFind('*')) {
@@ -373,7 +410,8 @@ private JSONValue parseSample(string raw, long expectedPid, string binary) {
         } else if (inLeaf && parseTrailingCount(line, count, rest))
             leaf ~= parseSymbol(count, rest, baseName(canonicalBinary));
     }
-    need(analysisBound && processBound && pathBound,
+    need(analysisBound && processBound && pathBound &&
+            analysisPid == expectedPid && processPid == expectedPid,
         "sample PID/binary/settings binding failed");
     need(accepted >= minimumStacks, "sample contained fewer than 100 accepted stacks");
     long accounted;
@@ -395,6 +433,7 @@ private JSONValue parseSample(string raw, long expectedPid, string binary) {
     auto component = leafTop.array.length ?
         leafTop[0]["symbol"].str ~ " (" ~ leafTop[0]["image"].str ~ ")" : "unresolved";
     auto sanitized = JSONValue(["accepted_stacks": JSONValue(accepted),
+        "sampled_pid": JSONValue(analysisPid),
         "inclusive_top": inclusiveTop, "leaf_top": leafTop,
         "dominant_leaf_component": JSONValue(component), "partitions": partitionJson]);
     sanitized["sample_path_redacted"] = pathRedacted;
@@ -509,6 +548,8 @@ private JSONValue traceRun(string[] command, string binary, string binaryHash,
         result["status"] = "SUPPORTED";
         result["sample"] = parsed;
         result["raw_private_sha256"] = hashFile(rawPath);
+        result["capture_binding_sha256"] = captureBindingDigest(
+            cast(long)pid, binaryHash, result["raw_private_sha256"].str);
     }
     return result;
 }
@@ -524,17 +565,14 @@ private JSONValue parseGc(string raw) {
     long collections = -1, allocatedMiB = -1, collectionMs = -1;
     long summaryCollections = -1, summaryMs = -1;
     size_t collectionFields, summaryFields, timeFields;
-    string[] sanitized;
     foreach (line; raw.splitLines) {
         auto clean = line.strip;
         if (clean.startsWith("Number of collections:")) {
             ++collectionFields;
             collections = singleLong(clean, "Number of collections:", "");
-            sanitized ~= "Number of collections:" ~ collections.to!string;
         } else if (clean.startsWith("Grand total GC time:")) {
             ++timeFields;
             collectionMs = singleLong(clean, "Grand total GC time:", " milliseconds");
-            sanitized ~= "Grand total GC time:" ~ collectionMs.to!string ~ "ms";
         } else if (clean.startsWith("GC summary:")) {
             ++summaryFields;
             auto fields = clean.split;
@@ -546,15 +584,13 @@ private JSONValue parseGc(string raw) {
             summaryMs = fields[6].to!long;
             need(allocatedMiB >= 0 && allocatedMiB <= long.max / (1024 * 1024),
                 "negative or overflowed GC allocation summary");
-            sanitized ~= "GC summary:" ~ allocatedMiB.to!string ~ "MiB";
         }
     }
     need(collectionFields == 1 && summaryFields == 1 && timeFields == 1,
         "truncated or duplicate GC summary");
     need(collections == summaryCollections && collectionMs == summaryMs,
         "inconsistent GC summary totals");
-    auto sanitizedText = sanitized.join("\n");
-    return JSONValue(["status": JSONValue("SUPPORTED"),
+    auto result = JSONValue(["status": JSONValue("SUPPORTED"),
         "semantics": JSONValue("D runtime GC-only; excludes native and total-process allocations"),
         "collection_count": JSONValue(collections),
         "allocated_bytes": JSONValue(allocatedMiB * 1024 * 1024),
@@ -564,8 +600,22 @@ private JSONValue parseGc(string raw) {
         "pool_size": JSONValue(["status": JSONValue("UNSUPPORTED"),
             "reason": JSONValue("druntime profile summary exposes no pool size")]),
         "heap_size": JSONValue(["status": JSONValue("UNSUPPORTED"),
-            "reason": JSONValue("druntime profile summary exposes no heap size")]),
-        "sanitized_sha256": JSONValue(hashBytes(cast(const(ubyte)[])sanitizedText))]);
+            "reason": JSONValue("druntime profile summary exposes no heap size")])]);
+    result["sanitized_sha256"] = gcStructuredDigest(result);
+    return result;
+}
+
+private string gcStructuredDigest(JSONValue item) {
+    SHA256 result;
+    foreach (value; [item["status"].str, item["semantics"].str,
+            item["collection_count"].integer.to!string,
+            item["allocated_bytes"].integer.to!string,
+            item["allocated_bytes_semantics"].str,
+            item["collection_time_milliseconds"].integer.to!string,
+            item["pool_size"]["status"].str, item["pool_size"]["reason"].str,
+            item["heap_size"]["status"].str, item["heap_size"]["reason"].str])
+        digestPart(result, value);
+    return toHexString(result.finish()).to!string;
 }
 
 private JSONValue gcRun(string[] command, string binaryHash, string sourceSha,
@@ -1058,6 +1108,8 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
         auto sample = trace["sample"];
         need(sample["pid_binary_bound"].boolean,
             "supported stack sample lacks PID/binary binding");
+        need(trace["sampled_pid"].integer == sample["sampled_pid"].integer,
+            "published sampled PID differs from sanitized sample evidence");
         need(sample["accepted_stacks"].integer >= minimumStacks,
             "supported stack sample has fewer than 100 stacks");
         need(sample["sanitized_sha256"].str == sanitizedSampleDigest(sample),
@@ -1077,8 +1129,9 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
         need(sample["leaf_top"].array.length > 0 &&
             sample["leaf_top"].array.length <= 20,
             "supported stack leaf top cardinality differs");
-        need(sample["dominant_leaf_component"].str.length != 0,
-            "supported stack dominant component is empty");
+        need(sample["dominant_leaf_component"].str ==
+                derivedDominantLeafComponent(sample),
+            "supported stack dominant component is not derived from leaf evidence");
         foreach (collection; [sample["inclusive_top"], sample["leaf_top"]])
             foreach (symbol; collection.array)
                 need(symbol["symbol"].str.length && symbol["image"].str.length &&
@@ -1106,6 +1159,12 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
             "stack partition accounting differs: " ~ total.to!string ~ "/" ~
                 sample["accepted_stacks"].integer.to!string ~ " fraction=" ~
                 fraction.to!string);
+        need(sample["dominant_partition"].str == derivedDominantPartition(sample),
+            "supported stack dominant partition is not derived from partition evidence");
+        need(trace["capture_binding_sha256"].str == captureBindingDigest(
+                trace["sampled_pid"].integer, trace["target_binary_sha256"].str,
+                trace["raw_private_sha256"].str),
+            "sampled PID is not bound to the captured raw evidence");
     } else need(trace["status"].str == "UNSUPPORTED" && trace["reason"].str.length &&
         trace["time_profiler_fallback"]["status"].str == "UNSUPPORTED",
         "unsupported trace lacks exact fallback evidence");
@@ -1134,7 +1193,8 @@ private void validateGc(JSONValue item, string binaryHash, string layout,
             "D runtime GC-only; excludes native and total-process allocations" &&
         item["pool_size"]["status"].str == "UNSUPPORTED" &&
         item["heap_size"]["status"].str == "UNSUPPORTED" &&
-        digest(item["raw_private_sha256"].str) && digest(item["sanitized_sha256"].str),
+        digest(item["raw_private_sha256"].str) &&
+        item["sanitized_sha256"].str == gcStructuredDigest(item),
         "invalid structured D-GC evidence");
 }
 private bool sameRange(JSONValue left, JSONValue right) {
@@ -1374,11 +1434,15 @@ private void selfTest() {
         "child_log_sha256": JSONValue("B".replicate(64)),
         "status": JSONValue("SUPPORTED"), "sample": parsed,
         "raw_private_sha256": JSONValue("C".replicate(64))]);
+    trace["capture_binding_sha256"] = captureBindingDigest(123,
+        "A".replicate(64), "C".replicate(64));
     validateTrace(trace, "A".replicate(64), "many-small", "scalar-threads1", 0);
     validateTrace(parseJSON(trace.toString), "A".replicate(64), "many-small",
         "scalar-threads1", 0);
     mustRejectTrace(trace, (ref JSONValue t) { t["sampled_pid"] = 0L; },
         "missing PID binding accepted");
+    mustRejectTrace(trace, (ref JSONValue t) { t["sampled_pid"] = 124L; },
+        "changed sampled PID accepted without matching capture evidence");
     mustRejectTrace(trace, (ref JSONValue t) { t["config_sha256"] = "D".replicate(64); },
         "stale config binding accepted");
     mustRejectTrace(trace, (ref JSONValue t) { t["sample"]["accepted_stacks"] = 99L; },
@@ -1393,8 +1457,12 @@ private void selfTest() {
     mustRejectTrace(trace, (ref JSONValue t) { t["process_exit_code"] = 1L; },
         "failed process accepted");
     mustRejectTrace(trace, (ref JSONValue t) {
-        t["sample"]["dominant_leaf_component"] = "";
-    }, "empty dominant component accepted");
+        t["sample"]["dominant_leaf_component"] = "fabricated (<target>)";
+        t["sample"]["sanitized_sha256"] = sanitizedSampleDigest(t["sample"]);
+    }, "fabricated dominant component accepted");
+    mustRejectTrace(trace, (ref JSONValue t) {
+        t["sample"]["dominant_partition"] = "kernel";
+    }, "fabricated dominant partition accepted");
     mustRejectTrace(trace, (ref JSONValue t) {
         t["sample"]["leaf_top"][0]["symbol"] = "replacement";
     }, "changed sanitized symbol accepted");
@@ -1412,7 +1480,13 @@ private void selfTest() {
         "mixed trace repetition indexes accepted");
     mustThrow(() { noLeak(`{"symbol":"/Users/private/name"}`); },
         "published private path accepted");
-    writeln("canonical attribution self-test passed (24 release-active negatives)");
+    auto gcEvidence = parseGc(gc);
+    gcEvidence["sanitized_sha256"] = gcStructuredDigest(gcEvidence);
+    gcEvidence["collection_time_milliseconds"] = 4L;
+    mustThrow(() { need(gcEvidence["sanitized_sha256"].str ==
+            gcStructuredDigest(gcEvidence), "GC evidence digest differs"); },
+        "changed D-GC collection time accepted without raw-derived digest change");
+    writeln("canonical attribution self-test passed (27 release-active negatives)");
 }
 
 private void selfTestLiveSample(string self) {

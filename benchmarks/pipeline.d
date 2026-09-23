@@ -1757,6 +1757,12 @@ private void selfTest() {
     failed = false;
     try { validateRestart(bad); } catch (Exception) { failed = true; }
     require(failed, "unproven restart negative did not fail");
+    auto sourceAttestation = JSONValue(["source_sha": JSONValue("a".replicate(40))]);
+    validateAttributionBuildSource(sourceAttestation, "a".replicate(40));
+    failed = false;
+    try { validateAttributionBuildSource(sourceAttestation, "f".replicate(40)); }
+    catch (Exception) { failed = true; }
+    require(failed, "self-consistent wrong attribution source negative did not fail");
     writeln("pipeline release self-test passed");
 }
 
@@ -1938,21 +1944,29 @@ private void selfTestNativePath(string sourceRoot, string poisonPath,
     writeln("native PATH swap remained pinned: ", built.snapshot.sha256);
 }
 
+private void validateAttributionBuildSource(JSONValue attestation,
+                                            string expectedSource) {
+    require(attestation["source_sha"].str == expectedSource,
+        "attested attribution build source differs from ancestry-checked source");
+}
+
 int main(string[] args) {
     try {
         if (args.length == 7 && args[1] == "--attested-attribution") {
+            auto expectedSource = checked(["git", "-C", args[2], "rev-parse", "HEAD"]);
             auto historicalMergeBase = execute(["git", "-C", args[2], "merge-base",
-                "61e8ff9c70ff51842c1dd0063dc253fccc29f1dd", "HEAD"]);
+                "61e8ff9c70ff51842c1dd0063dc253fccc29f1dd", expectedSource]);
             require(historicalMergeBase.status == 0 &&
                 historicalMergeBase.output.strip ==
                     "65789b90b294b9d0edfe4270d8654e120e7c4928" &&
                 execute(["git", "-C", args[2], "merge-base", "--is-ancestor",
-                    "0fe58a0955e1afe16894c91acfdb7bf59077eee5", "HEAD"]).status == 0,
+                    "0fe58a0955e1afe16894c91acfdb7bf59077eee5", expectedSource]).status == 0,
                 "canonical profile/current attribution source ancestry differs");
             auto root = privateScratch("scrubbed-canonical-attribution-build-");
             scope(exit) rmdirRecurse(root);
             auto built = buildAttestedExecutable(args[2], root);
             validateAttestation(built.attestation, built.snapshot.sha256);
+            validateAttributionBuildSource(built.attestation, expectedSource);
             auto harness = snapshotExecutable(args[3], root,
                 "scrubbed-pipeline-attribution-check");
             auto attestationPath = buildPath(root, "build-attestation.json");

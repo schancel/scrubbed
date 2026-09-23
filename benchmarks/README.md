@@ -270,6 +270,51 @@ GC, syscall-byte, OS-cold, and >RAM claims.
 
 ## Lazy mojibake candidates
 
+### Bounded mojibake work attribution
+
+`mojibake_work.d` is the evidence-only follow-up to the canonical attribution
+report. It is available only in a `MojibakeWorkProbe` build; ordinary product
+builds contain neither its API nor counter branches. The probe also runs the
+ordinary implementation and refuses any valid-input result that differs.
+Its fixed eight pass buckets are caller-owned, so concurrent probes do not
+share counters and a requested ninth pass is rejected instead of allocating an
+unbounded profile from an option value.
+
+```sh
+ldc2 -O3 -release -d-version=MojibakeWorkProbe \
+  -d-version=MojibakeWorkO3Release -Isource \
+  benchmarks/mojibake_work.d source/filters/mojibake.d source/pipeline.d \
+  -of=/tmp/scrubbed-mojibake-work
+/tmp/scrubbed-mojibake-work --self-test
+/tmp/scrubbed-mojibake-work
+```
+
+The self-test release-actively reconciles call/outcome totals and checks ten
+clean, damaged, multilayer, local-island, ambiguous and incomplete cases. It
+also checks the exact invalid-UTF-8 exception, fixed pass capacity, and two
+concurrent caller-owned runs. The JSON output retains every entered pass and
+separate Latin-1/CP1252 counts for legacy-byte mapping, sequence scans,
+encodability, candidate decoding, plausibility, grouping and materialization.
+It hashes and validates the exact probe and harness sources, hashes every case
+input and its option-bearing identity, and records the compiler vendor/frontend
+version, exact `ldc2` 1.43.0 version line, and the required O3/release flags and
+build mode. A changed probe source, case set, input hash, build identity, or
+published count is rejected by the D harness before JSON is emitted.
+
+On the authored focused cases, whole-string one-layer and multilayer repairs
+did not call `legacySequenceEnd`; that helper was exercised by the fallback
+for unmappable surrounding Unicode. On pass 0, the local-island case made 19
+Latin-1 and 20 CP1252 sequence calls, with 38 and 58 corresponding
+`legacyByte` calls, and selected local repair; pass 1 stopped at score zero.
+On pass 0, the ambiguous-C2 preservation case made 11 sequence calls and 22
+legacy-byte calls for each encoding, selected unchanged, and did not alter the
+output. These exact counts and outcomes are release-active goldens. They
+identify bounded repeated work but do not supply a candidate or an end-to-end
+A/B win.
+The production threshold is therefore **not met**, optimization remains
+unauthorized, and the ordinary mojibake algorithm is unchanged. This is not a
+claim about every corpus, SIMD, the pipeline scheduler, or materialization.
+
 `mojibake_ranges.d` compares three implementations using identical scorer
 logic and inputs:
 

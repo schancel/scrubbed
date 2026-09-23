@@ -597,12 +597,11 @@ any cross-tool comparison. No HTML extractor or trafilatura parity is claimed.
 ## SHA-256 backend-only evidence
 
 `sha256_backend_check.d` exercises the private incremental facade introduced
-for #185 without migrating any production caller. The current evidence base is
-`cd15948466509055ae0431439f651ecba8a301f6`: 76 `SHA256`/`sha256Of`
-occurrences in 21 production modules. The committed evidence records each
-module's source hash and preserves representative document, child, and v3 job
-identity fixtures. No file outside `source/crypto`, this harness, this README,
-and the evidence JSON changes in this landing.
+for #185. The migration inventory is fixed at 77 `Sha256`/`sha256Of`
+occurrences in the same 21 production modules recorded at base
+`cd15948466509055ae0431439f651ecba8a301f6`. The committed evidence records
+each module's source hash and preserves representative document, child, and
+v3 job identity fixtures.
 
 Build and run the release-active checks from the repository root:
 
@@ -640,8 +639,7 @@ cross-compiles to x86-64 Mach-O and Linux objects whose disassembly contains
 is `BLOCKED_EXTERNAL_ARCHITECTURE_MISMATCH_CPUID_UNKNOWN`: no x86 CPUID query
 was made, and no x86 result was substituted. On native x86-64, the report
 instead distinguishes CPUID without SHA-NI from executed-and-passed SHA-NI. A
-capable native x86-64 host must run the same KAT/chunk/alignment suite before
-production migration.
+capable native x86-64 host must run the same KAT/chunk/alignment suite.
 
 The `SHA-256 native backends` GitHub Actions workflow runs the same
 release-active harness on GitHub-hosted `ubuntu-24.04` x86-64 and
@@ -654,15 +652,27 @@ Run `35914157081` passed both native jobs. The committed sanitized artifacts
 record `SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on
 x86-64 and `armv8-sha2` on arm64, and identical source hashes across both
 architectures. Native x86 execution is therefore no longer an external
-blocker; production migration remains deferred only for the combined
-full-CLI/durable equivalence and performance gates.
+blocker.
 
 `sha256-backend-evidence.json` contains five interleaved scalar/selected
 samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,
 and instruction counts. The validator re-derives the host identity and
 architecture-conditioned execution statuses. These timings are descriptive:
-cache and frequency
-state are uncontrolled, and this backend-only landing makes no production or
-full-CLI speed claim. Production SHA call-site migration remains deferred
-until native x86 proof and combined full-CLI/durable gates pass; #184 landing
-alone does not authorize migration.
+cache and frequency state are uncontrolled. Production callers now use the
+facade after native x86/ARM proof, exact digest and identity checks, the full
+50-module suite, and combined full-CLI/durable gates passed. On the recorded
+ARM host, all source and output hash-phase medians improved; seven of eight
+end-to-end medians improved. The one exception was a +3.9% wall result for
+full reexecution of the few-large manifest case even though its source/output
+hash phases improved 42%/66%; this non-hash/noise exception is retained rather
+than averaged away.
+
+The combined-gate artifacts are
+`sha256-migration-base-durable-evidence.json`,
+`sha256-migration-candidate-durable-evidence.json`, and the derived
+`sha256-migration-summary.json`. Each raw report is produced by
+`durable_skip_check.d`; its `before` variant means forced reexecution and its
+`candidate` variant means verified skip. The summary renames those modes to
+avoid confusing them with the base and migrated executable roles, binds both
+raw-report and executable hashes, and records every median rather than only
+the favorable cases.

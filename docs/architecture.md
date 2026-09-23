@@ -20,7 +20,7 @@ composition.compiler/executor/job_executor -> job, pipeline, stages
 domain.document (typed identity/view facade)
 content.pieces -> domain.document (checked borrowed content)
 stages.contract -> content.pieces, domain.document (standalone stage contract)
-stages.config -> stages.registry -> stages.contract (unwired v2 config API)
+stages.registry -> stages.contract (self-registered typed stage factories)
 effects.local_job -> effects.runner, mapped_file, atomic_piece_sink
 effects.durable_job -> domain.document, sqlite_ffi, local_manifest path/hash primitives
 effects.jsonl_job -> effects.runner, effects.jsonl_stream
@@ -47,10 +47,10 @@ bound recursive pull depth. This filter fusion is not yet the unwired
 Filter lookup is injectable through `FilterRegistry`; the process-global
 instance is exposed read-only after module-constructor registration. The v3
 factory path declares exact text/integer/boolean option schemas and rejects a
-type mismatch before processing input. `fix-mojibake` uses that path while
-retaining its separate predecessor string adapter until #148 deletes v1.
-Neither registry path imports the `job` model; the future composition layer
-owns the explicit conversion.
+type mismatch before processing input. `fix-mojibake` uses that path.
+Version-1 configuration is converted by the edge lowerer before registry
+lookup; no separate string-option factory remains. The registry does not
+import the `job` model; composition owns conversion.
 
 `cli.processOne` maps a nonempty input with `MmFile`, runs the chain while the
 mapping is open, and closes it before writing. A filter may return an unchanged
@@ -85,9 +85,8 @@ lifetime lease to `DocumentViewOwner` until `close`; checked `at`/iteration
 borrows bytes without an eager whole-file copy or an escaping slice.
 The in-memory constructor borrows a GC-owned array instead, which the caller
 must not manually free or reallocate while open. `copy` explicitly retains
-only the selected range; all view access is rejected after owner close. The
-current CLI retains its own mapping-lifetime logic and is not wired to this
-facade.
+only the selected range; all view access is rejected after owner close.
+Canonical local execution uses this facade through `effects.local_job`.
 
 The pure `job` subtree defines one linear v3 `JobSpec`: stable stage-instance
 ID, registered implementation name, typed stage options, and ordered filters
@@ -166,12 +165,11 @@ schema, factory and relative `before`/`after` constraints. Stage modules
 self-register when imported; the registry does not import their names. A
 factory returns a pure context-free stage function and transitive-immutable typed
 configuration rather than a configured delegate.
-`stages.config.buildConfigV2` accepts only a nested version-2 object with an
-ordered `stages` array. It rejects unknown keys/names, duplicate stage names,
-missing required options, incorrect JSON option types and relative-order
-violations before any document is run. A test-only fixture self-registers from
-its own module. This builds typed transforms but is not an executable v2 CLI
-path; the existing v1 `--config` format and `max-passes` semantics are unchanged.
+Canonical version-3 JSON and CLI tokens compile through this registry. The
+compiler rejects unknown names, missing or mistyped options, duplicate stage
+IDs, invalid filter placement, and relative-order violations before any
+document is read. The predecessor v2 config facade is deleted. A test-only
+fixture self-registers from its own module.
 There is no plugin loading or resource scheduler here. F04's ordered-list
 high-edit scaling and event materialization still require production
 backpressure/representation measurement.

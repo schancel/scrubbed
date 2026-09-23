@@ -8,7 +8,7 @@ import effects.jsonl_stream : JsonlLimits;
 import effects.stdio_stream : processFileJsonl;
 import domain.document : DocumentId;
 import filters.normalize;
-import pipeline : Pipeline;
+import pipeline : Pipeline, TypedFilterSpec;
 import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.conv : to;
 import std.file : exists, mkdir, read, rmdirRecurse, tempDir, write;
@@ -68,7 +68,8 @@ private Observation runChild(string[] command, string inputPath,
 private void predecessor(string inputPath, string outputPath) {
     auto input = File(inputPath, "rb");
     auto output = File(outputPath, "wb");
-    auto chain = Pipeline.build(["normalize-line-endings"]);
+    auto chain = Pipeline.buildTyped([
+        TypedFilterSpec("normalize-line-endings")]);
     auto completed = processFileJsonl(input, output, "resource", "fixture",
         ["text"], (string field, string text, DocumentId id) => chain.run(text),
         JsonlLimits(1024, 2048));

@@ -17,7 +17,6 @@ import std.string : indexOf;
 import std.typecons : No;
 import std.utf : byUTF, validate;
 
-alias FilterOptions = string[string];
 /// Plain filter contract; purity prevents retained callbacks from sharing state.
 alias Filter = string function(string) pure;
 
@@ -50,12 +49,9 @@ public:
     }
 }
 
-alias FilterFactory = ConfiguredFilter function(const ref FilterOptions);
-
 enum FilterOptionType { text, integer, boolean }
 
-/// Typed v3 option value. The predecessor factory API remains separate so its
-/// string-coercion behavior can be retired only after the CLI switch is proven.
+/// Typed v3 option value received only after edge compatibility lowering.
 struct FilterOption {
     private FilterOptionType optionType;
     private string textValue;
@@ -129,13 +125,6 @@ struct StreamingFilter {
     StreamingFinish finish;
 }
 
-alias StreamingFilterFactory = StreamingFilter function(const ref FilterOptions);
-
-struct FilterSpec {
-    string name;
-    FilterOptions options;
-}
-
 struct TypedFilterSpec {
     string name;
     TypedFilterOptions options;
@@ -143,11 +132,9 @@ struct TypedFilterSpec {
 
 private struct FilterRegistration {
     Filter plain;
-    FilterFactory factory;
     TypedFilterFactory typedFactory;
     FilterOptionDeclaration[] optionDeclarations;
     StreamingFilter streaming;
-    StreamingFilterFactory streamingFactory;
 }
 
 /// Injectable registry: concrete filters still own registration, while tests
@@ -182,20 +169,11 @@ struct FilterRegistry {
         add(name, FilterRegistration(filter));
     }
 
-    void addFilterFactory(string name, FilterFactory factory) {
-        enforce(factory !is null, "filter factory is required");
-        FilterRegistration registration;
-        registration.factory = factory;
-        add(name, registration);
-    }
-
     void addTypedFilterFactory(string name,
             FilterOptionDeclaration[] declarations,
-            TypedFilterFactory typedFactory,
-            FilterFactory legacyFactory = null) {
+            TypedFilterFactory typedFactory) {
         enforce(typedFactory !is null, "typed filter factory is required");
         FilterRegistration registration;
-        registration.factory = legacyFactory;
         registration.typedFactory = typedFactory;
         registration.optionDeclarations = declarations;
         add(name, registration);
@@ -206,14 +184,6 @@ struct FilterRegistry {
             "streaming filter requires a push implementation");
         FilterRegistration registration;
         registration.streaming = streaming;
-        add(name, registration);
-    }
-
-    void addStreamingFilterFactory(string name,
-            StreamingFilterFactory streamingFactory) {
-        enforce(streamingFactory !is null, "streaming filter requires a factory");
-        FilterRegistration registration;
-        registration.streamingFactory = streamingFactory;
         add(name, registration);
     }
 
@@ -230,32 +200,16 @@ void registerFilter(string name, Filter f) {
     registeredFilters.addFilter(name, f);
 }
 
-/// Register an option-aware factory. It validates and parses every option;
-/// Pipeline.build calls it once and stores reentrant immutable configuration.
-void registerFilterFactory(string name, FilterFactory factory) {
-    registeredFilters.addFilterFactory(name, factory);
-}
-
-/// Register a typed v3 factory and, while v1 remains accepted, its exact
-/// predecessor adapter. New configuration code should use the typed factory.
+/// Register a typed v3 factory with its exact option declarations.
 void registerTypedFilterFactory(string name,
         FilterOptionDeclaration[] declarations,
-        TypedFilterFactory typedFactory,
-        FilterFactory legacyFactory = null) {
-    registeredFilters.addTypedFilterFactory(name, declarations, typedFactory,
-        legacyFactory);
+        TypedFilterFactory typedFactory) {
+    registeredFilters.addTypedFilterFactory(name, declarations, typedFactory);
 }
 
 /// Register a no-option bounded streaming implementation.
 void registerStreamingFilter(string name, StreamingFilter streaming) {
     registeredFilters.addStreamingFilter(name, streaming);
-}
-
-/// Option-aware equivalent. The factory validates and parses immutable
-/// options once while Pipeline is built.
-void registerStreamingFilterFactory(string name,
-    StreamingFilterFactory streamingFactory) {
-    registeredFilters.addStreamingFilterFactory(name, streamingFactory);
 }
 
 const(FilterRegistry)* availableFilterRegistry() {
@@ -278,50 +232,6 @@ struct Pipeline {
     }
     private Stage[] stages;
     private string[] stageNames;
-
-    static Pipeline build(const(string)[] filterNames,
-            const(FilterRegistry)* selected = null) {
-        FilterSpec[] specs;
-        foreach (name; filterNames) specs ~= FilterSpec(name);
-        return buildConfigured(specs, selected);
-    }
-
-    static Pipeline buildConfigured(FilterSpec[] specs,
-            const(FilterRegistry)* selected = null) {
-        if (selected is null) selected = availableFilterRegistry();
-        Pipeline p;
-        foreach (spec; specs) {
-            auto registration = spec.name in selected.registrations;
-            if (registration is null)
-                throw new Exception("unknown filter: " ~ spec.name ~
-                    " (available: " ~ availableFilters(selected).idup.to!string ~ ")");
-            if (registration.streamingFactory !is null) {
-                auto streaming = registration.streamingFactory(spec.options);
-                enforce(streaming.push !is null,
-                    "streaming filter factory returned no push implementation");
-                p.stages ~= Stage(Filter.init, ConfiguredFilter.init, streaming);
-            } else if (registration.factory !is null) {
-                auto configured = registration.factory(spec.options);
-                enforce(configured.isValid,
-                    "filter factory returned no implementation");
-                p.stages ~= Stage(Filter.init, configured);
-            } else if (registration.typedFactory !is null) {
-                throw new Exception("filter '" ~ spec.name ~
-                    "' has no predecessor configuration adapter");
-            } else {
-                if (spec.options.length)
-                    throw new Exception("filter '" ~ spec.name ~ "' accepts no options");
-                if (registration.streaming.push !is null)
-                    p.stages ~= Stage(Filter.init, ConfiguredFilter.init,
-                        registration.streaming);
-                else
-                    p.stages ~= Stage(registration.plain,
-                        ConfiguredFilter.init);
-            }
-            p.stageNames ~= spec.name;
-        }
-        return p;
-    }
 
     /// Resolve typed v3 values without string inference or coercion.
     static Pipeline buildTyped(TypedFilterSpec[] specs,
@@ -356,9 +266,6 @@ struct Pipeline {
             } else {
                 enforce(spec.options.length == 0,
                     "filter '" ~ spec.name ~ "' accepts no typed options");
-                enforce(registration.factory is null &&
-                    registration.streamingFactory is null,
-                    "filter '" ~ spec.name ~ "' has no typed v3 factory");
                 if (registration.streaming.push !is null)
                     p.stages ~= Stage(Filter.init, ConfiguredFilter.init,
                         registration.streaming);
@@ -544,12 +451,6 @@ private size_t delayedStreamingFinishTest(ref StreamingState state,
     return 1;
 }
 
-private StreamingFilter streamingFactoryTest(const ref FilterOptions options) {
-    enforce(options.length == 1 && options.get("mode", "") == "identity",
-        "expected mode=identity");
-    return StreamingFilter(StreamingState.init, &identityStreamingTest, null);
-}
-
 private class TypedFilterTestConfiguration : FilterConfiguration {
     long count;
     bool enabled;
@@ -590,9 +491,10 @@ unittest {
     Filter typedLegacy = &legacyFilterTest;
     auto registrar = &registerFilter;
     registrar("__legacy-filter-test", typedLegacy);
-    assert(Pipeline.build(["__legacy-filter-test"]).run("ok") == "ok!");
-    assert(Pipeline.build([]).names.length == 0);
-    assert(Pipeline.build(null).names.length == 0);
+    assert(Pipeline.buildTyped([TypedFilterSpec("__legacy-filter-test")])
+        .run("ok") == "ok!");
+    assert(Pipeline.buildTyped([]).names.length == 0);
+    assert(Pipeline.buildTyped(null).names.length == 0);
 
     registerStreamingFilter("__stream-duplicate-test",
         StreamingFilter(StreamingState.init, &duplicateStreamingTest, null));
@@ -601,22 +503,17 @@ unittest {
     registerStreamingFilter("__stream-delayed-test",
         StreamingFilter(StreamingState.init, &delayedStreamingTest,
             &delayedStreamingFinishTest));
-    registerStreamingFilterFactory("__stream-factory-test", &streamingFactoryTest);
-    assert(Pipeline.build(["__stream-duplicate-test", "__stream-delayed-test"])
+    assert(Pipeline.buildTyped([TypedFilterSpec("__stream-duplicate-test"),
+        TypedFilterSpec("__stream-delayed-test")])
         .run("ab") == "aabb");
     // A whole-buffer stage is a materialization barrier, and execution order
     // remains exactly the user's registration order.
-    assert(Pipeline.build(["__stream-duplicate-test", "__legacy-filter-test",
-        "__stream-delayed-test"]).run("a") == "aa!");
-    string[] longRun;
-    foreach (_; 0 .. 17) longRun ~= "__stream-identity-test";
-    assert(Pipeline.build(longRun).run("bounded") == "bounded");
-    FilterOptions factoryOptions = ["mode": "identity"];
-    assert(Pipeline.buildConfigured([FilterSpec("__stream-factory-test",
-        factoryOptions)]).run("configured") == "configured");
-    factoryOptions["unknown"] = "rejected";
-    assertThrown(Pipeline.buildConfigured([FilterSpec("__stream-factory-test",
-        factoryOptions)]));
+    assert(Pipeline.buildTyped([TypedFilterSpec("__stream-duplicate-test"),
+        TypedFilterSpec("__legacy-filter-test"),
+        TypedFilterSpec("__stream-delayed-test")]).run("a") == "aa!");
+    TypedFilterSpec[] longRun;
+    foreach (_; 0 .. 17) longRun ~= TypedFilterSpec("__stream-identity-test");
+    assert(Pipeline.buildTyped(longRun).run("bounded") == "bounded");
 
     // Explicit registries make resolution testable without global mutation.
     FilterRegistry isolated;
@@ -626,7 +523,8 @@ unittest {
         FilterOptionDeclaration("count", FilterOptionType.integer, true),
         FilterOptionDeclaration("enabled", FilterOptionType.boolean, true)
     ], &typedFactoryTest);
-    assert(Pipeline.build(["plain"], &isolated).run("ok") == "ok!");
+    assert(Pipeline.buildTyped([TypedFilterSpec("plain")], &isolated)
+        .run("ok") == "ok!");
     TypedFilterOptions typedOptions = [
         "label": FilterOption.text("x"),
         "count": FilterOption.integer(2),
@@ -634,8 +532,9 @@ unittest {
     ];
     assert(Pipeline.buildTyped([TypedFilterSpec("typed", typedOptions)],
         &isolated).run("a") == "ax2");
-    assertThrown(Pipeline.build(["typed"], &isolated));
-    assertThrown(Pipeline.build(["__legacy-filter-test"], &isolated));
+    assertThrown(Pipeline.buildTyped([TypedFilterSpec("typed")], &isolated));
+    assertThrown(Pipeline.buildTyped([TypedFilterSpec("__legacy-filter-test")],
+        &isolated));
     assertThrown(Pipeline.buildTyped([TypedFilterSpec("typed", [
         "label": FilterOption.text("x"),
         "count": FilterOption.text("2"),
@@ -651,6 +550,6 @@ unittest {
     assertThrown(isolated.addFilter("plain", &legacyFilterTest));
     static assert(!__traits(compiles, availableFilterRegistry().addFilter(
         "forbidden", &legacyFilterTest)));
-    assertThrown(Pipeline.build(["__stream-identity-test"])
+    assertThrown(Pipeline.buildTyped([TypedFilterSpec("__stream-identity-test")])
         .run(cast(string)[cast(char) 0xC3]));
 }

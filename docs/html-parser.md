@@ -71,10 +71,10 @@ was 196,984,832 bytes.
 The check executable resolves Lexbor symbols from the vendored static archive
 and has no Lexbor dynamic dependency. The shipping CLI calls the restricted
 wrapper only on the `extract` route. The concrete `effects.html_tree_json_stage`
-module self-registers its typed v2 stage; its own `htmlTreeJsonPlan` resolves
-it through `buildConfigV2`. There is no general v2-config CLI option. The
-stage maps one source `DocumentId` to the same ID or quarantines it with its
-parser/decode reason.
+module self-registers its typed stage. `extract` constructs or parses a
+canonical version-3 job, compiles it through the shared registry, and executes
+the compiled stage. The stage maps one source `DocumentId` to the same ID or
+quarantines it with its parser/decode reason.
 
 `tree-json:v1` is deterministic UTF-8 JSON with one LF: top-level keys in
 order `version`, `documentId`, `source`, `outputName`, `nodes`. Source keys are
@@ -94,17 +94,17 @@ that option. An unsupported/conflicting declaration quarantines the document,
 preserving decode reason and byte offset when available. Raw input is at most
 1 MiB by default before allocation/native parse; decoded UTF-8 has the same
 default. `extract --max-html-bytes N` raises or lowers both, within 1..8,388,608.
-Equivalently, `extract --config html-extract.json` accepts a strict v2 config:
+Equivalently, `extract --config html-extract.json` accepts a canonical v3 job:
 
 ```json
-{"version":2,"stages":[{"name":"html-tree-json","options":{"max-html-bytes":1048576,"charset":"utf-8"}}]}
+{"version":3,"stages":[{"id":"extract","implementation":"html-tree-json","options":{"max-html-bytes":1048576,"charset":"utf-8"},"filters":[]}]}
 ```
 
-Use `html-markdown` as the stage name for `--format markdown`. The stage name
+Use `html-markdown` as the implementation for `--format markdown`. The implementation
 must match `--format`, and JSON config cannot be combined with the CLI's HTML
 limit or charset flags. Both routes validate the same stage option and apply
-the same admission and parser cap. The `run --config` filter-chain schema is
-separate; generic multi-stage v2 CLI composition is not yet wired.
+the same admission and parser cap. The extract route requires exactly one stage
+and no filters; `run --config` accepts the general canonical job form.
 Raising the input cap does not raise the independent depth, node, attribute,
 observation, or serialized-output limits, nor does it bound Lexbor's native
 heap. With a larger cap the route still runs one bounded worker and holds one
@@ -132,7 +132,8 @@ Release-active actual-binary check:
 
 ```sh
 dub build --build=release
-ldc2 -O3 -release -Isource -of=.dub/html-cli-check experiments/html_parser/cli_check.d source/domain/document.d source/content/pieces.d source/stages/contract.d source/stages/config.d source/stages/registry.d source/effects/html_tree_json_stage.d source/effects/html_tree_export.d source/effects/html_tree.d source/effects/lexbor_ffi.d source/text/decoding.d .dub/lexbor/liblexbor_static.a
+ldc2 -i -O3 -release -Isource -of=.dub/html-cli-check \
+  experiments/html_parser/cli_check.d .dub/lexbor/liblexbor_static.a
 .dub/html-cli-check ./scrubbed
 ```
 

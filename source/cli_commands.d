@@ -83,7 +83,7 @@ struct Extract {
     string charset;
     @(NamedArgument("max-html-bytes").Description("Raw and decoded HTML byte limit (1..8388608; default 1048576)"))
     ulong maxHtmlBytes;
-    @(NamedArgument("config").Description("JSON v2 config for the selected HTML stage"))
+    @(NamedArgument("config").Description("Canonical JSON v3 job for the selected HTML stage"))
     string config;
 }
 

@@ -45,10 +45,10 @@ remain plain filters and therefore explicit materialization barriers.
 For options, use [`mojibake.d`](mojibake.d) as the existing example. Its
 `registerTypedFilterFactory` declaration owns the `encodings:text` and
 `max-passes:integer` schema; `Pipeline.buildTyped` validates names and exact
-scalar types before calling the factory once per chain construction. During
-the v1 compatibility window, the same registration retains the predecessor
-string factory so current JSON coercion and diagnostics do not change. New
-configurable filters should expose a typed factory whose result is a plain
+scalar types before calling the factory once per chain construction. Version-1
+JSON scalar values are converted by the edge lowerer before this typed
+boundary; there is no predecessor string-option factory. New configurable
+filters should expose a typed factory whose result is a plain
 function pointer plus transitive-immutable parsed configuration; configured
 delegates and mutable retained state are rejected at this boundary. A plain filter rejects
 nonempty options. [`entities.d`](entities.d)

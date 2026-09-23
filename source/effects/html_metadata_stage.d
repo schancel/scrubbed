@@ -5,14 +5,12 @@ import content.pieces : Content, ContentPiece;
 import effects.html_metadata : HtmlMetadataOutputLimit, extractHtmlMetadata,
     serializeHtmlMetadata;
 import effects.html_tree : HtmlFailureReason, maxRawBytes, parseHtml;
-import stages.config : StagePlan, buildConfigV2;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, OptionDeclaration, OptionType,
     StageConfiguration, StageOptions, StageRegistration, registerStage;
 import std.conv : to;
 import std.exception : enforce;
-import std.json : JSONValue;
 
 private class HtmlMetadataConfiguration : StageConfiguration {
     string charset;
@@ -60,11 +58,4 @@ static this() {
     registerStage(StageRegistration(StageDeclaration("html-metadata",
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text)], null, null, &factory));
-}
-
-StagePlan htmlMetadataPlan(string charset = null) {
-    auto options = charset is null ? "" : `,"options":{"charset":` ~
-        JSONValue(charset).toString ~ `}`;
-    return buildConfigV2(`{"version":2,"stages":[{"name":"html-metadata"` ~
-        options ~ `}]}`);
 }

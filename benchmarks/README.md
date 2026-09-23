@@ -34,8 +34,7 @@ range. It generates 131,072 identical mixed CRLF/control/curly-quote rows
 two implementations, and reports five rounds per sample.
 
 ```sh
-ldc2 -O3 -release -Isource benchmarks/fused_filters.d \
-  source/pipeline.d source/filters/normalize.d source/filters/punctuation.d \
+ldc2 -i -O3 -release -Isource benchmarks/fused_filters.d \
   -of=/tmp/scrubbed-fused-filters
 /tmp/scrubbed-fused-filters
 ```

@@ -74,8 +74,9 @@ same model; neither surface owns a second grammar.
 
 The no-selector default, predecessor `--filters`, and v1 `filters` JSON lower
 to one stage with ID `legacy-text` and implementation `text-transform`.
-Legacy scalar JSON types are retained in the v3 model. The predecessor parser
-remains live only until actual-binary equivalence and removal proofs pass. An
+Legacy scalar JSON types are retained in the v3 model. The compatibility
+parser is an edge lowerer only; predecessor execution/configuration factories
+have been deleted and a D-only reachability gate prevents their return. An
 explicit `--config` always selects config parsing, including an empty file,
 which is rejected before output mutation rather than falling back to defaults.
 

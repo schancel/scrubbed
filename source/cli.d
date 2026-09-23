@@ -2,6 +2,7 @@
 module cli;
 
 import composition.compiler : CompiledJob, compileJob;
+import composition.executor : runCompiledStage;
 import composition.job_executor : CompiledJobFailure;
 import core.sync.mutex : Mutex;
 import core.sync.condition : Condition;
@@ -9,54 +10,48 @@ import effects.bounded_input : BoundedInput, InputLimits;
 import effects.jsonl_stream : JsonlFailure, JsonlLimits;
 import effects.jsonl_job : runJsonlField;
 import effects.stdio_stream : processStandardJsonlDocuments;
-import effects.local_manifest : LocalManifest, SinkKey, Inspection, SinkState,
-    configDigest, inputDigest, outputDigest;
-import effects.failure_journal : FailureJournal;
+import effects.local_manifest : SinkKey, inputDigest;
 import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
     DurableIdentity, DurableJobLedger, DurableKind, DurableRootKey, deriveDurableIdentity,
     createJournalV3, derivedSink, reasonDigest;
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
-import effects.failure_policy : recordDocumentFailure;
 import effects.local_job : LocalJobOutcome, runLocalJob, runLocalJobBatch;
 import effects.runner : EffectFailure, EffectPhase;
-import domain.failure : FailureClass, FailurePhase, FailureRecord;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
 import effects.html_tree : checkedHtmlByteLimit, defaultExtractHtmlBytes;
-import effects.html_tree_json_stage : htmlTreeJsonPlan;
-import effects.html_markdown_stage : htmlMarkdownPlan;
+import effects.html_tree_json_stage;
+import effects.html_markdown_stage;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
-    StageDocument, StageEvent, runStage;
-import stages.config : buildConfigV2;
+    StageDocument, StageEvent;
 import stages.text_transform;
 import job.cli_tokens : parseJobTokens;
 import job.json : canonicalJobJson, jobIdentity, parseJobJson;
 import job.legacy : lowerLegacyDefault, lowerLegacyJson, lowerLegacyNames;
-import job.spec : JobSpec;
+import job.spec : JobOption, JobSpec, JobStageSpec;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
 import filters.punctuation;
-import pipeline;
+import pipeline : availableFilters;
 import std.algorithm.searching : canFind, startsWith;
 import std.algorithm.iteration : map;
 import std.algorithm.sorting : sort;
 import std.array : array, split;
 import std.conv : to;
-import std.file : FileException, SpanMode, dirEntries, exists, getAttributes,
+import std.file : FileException, SpanMode, dirEntries, exists,
     getSize, isDir, isFile, isSymlink, mkdir, mkdirRecurse, remove, rename, readText,
-    setAttributes, write, thisExePath;
+    write, thisExePath;
 import std.getopt : config, defaultGetoptPrinter, getopt;
 import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
-import std.mmfile : MmFile;
 import std.parallelism : totalCPUs;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
 import std.string : indexOf, join;
 import std.typecons : Nullable;
-import std.utf : UTFException, validate;
+import std.utf : validate;
 import std.uuid : randomUUID;
 import std.digest.sha : SHA256;
 import core.stdc.errno : errno, EINTR;
@@ -64,6 +59,65 @@ import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
 import core.sys.posix.sys.stat : fstat, stat, stat_t, S_ISREG;
 import core.sys.posix.unistd : close, posixRead = read;
 import std.string : toStringz;
+
+version (ManifestCliHarness) {
+    import stages.contract : PassMode, StageDecision;
+    import stages.registry : ConfiguredStageTransform, FilterPlacement,
+        StageApply, StageConfiguration, StageOptions, StageRegistration,
+        registerStage;
+
+    private StageDecision harnessSplit(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        StageDocument[] children;
+        foreach (ordinal; 0 .. 3) {
+            auto name = "part-" ~ ordinal.to!string ~ ".txt";
+            auto source = input.document.source;
+            auto document = Document(SourceLocator(source.datasetNamespace,
+                source.sourceKey, source.recordKey ~ ":stage6:" ~
+                ordinal.to!string), OutputName(name));
+            children ~= StageDocument(document, input.content);
+        }
+        return StageDecision.split(children);
+    }
+
+    private StageDecision harnessReject(StageDocument,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.reject("stage6-reject");
+    }
+
+    private StageDecision harnessQuarantine(StageDocument,
+            immutable(StageConfiguration)) pure {
+        return StageDecision.quarantine("stage6-quarantine");
+    }
+
+    private ConfiguredStageTransform harnessTransform(StageApply apply) {
+        return ConfiguredStageTransform(apply);
+    }
+
+    private ConfiguredStageTransform harnessSplitFactory(const ref StageOptions) {
+        return harnessTransform(&harnessSplit);
+    }
+    private ConfiguredStageTransform harnessRejectFactory(const ref StageOptions) {
+        return harnessTransform(&harnessReject);
+    }
+    private ConfiguredStageTransform harnessQuarantineFactory(const ref StageOptions) {
+        return harnessTransform(&harnessQuarantine);
+    }
+
+    static this() {
+        foreach (registration; [
+            StageRegistration(StageDeclaration("stage6-three", PassMode.singlePass,
+                ResourceDeclaration(1, 0)), null, null, null,
+                &harnessSplitFactory, FilterPlacement.none),
+            StageRegistration(StageDeclaration("stage6-reject", PassMode.singlePass,
+                ResourceDeclaration(1, 0)), null, null, null,
+                &harnessRejectFactory, FilterPlacement.none),
+            StageRegistration(StageDeclaration("stage6-quarantine", PassMode.singlePass,
+                ResourceDeclaration(1, 0)), null, null, null,
+                &harnessQuarantineFactory, FilterPlacement.none)
+        ]) registerStage(registration);
+    }
+}
 
 private string normalizedAbsolute(string path) {
     return buildNormalizedPath(absolutePath(path));
@@ -184,77 +238,6 @@ private void preflightDestination(string destination, string outputRoot) {
         throw new Exception("output destination is not a plain file: " ~ destination);
 }
 
-/// Write beside the destination and rename into place. This makes same-file
-/// input/output safe even when `content` is still a view into an MmFile, and
-/// prevents readers from observing a partially-written destination.
-private void atomicWrite(string destination, string outputRoot, const void[] content) {
-    auto parent = dirName(normalizedAbsolute(destination));
-    ensurePlainDirectory(outputRoot, parent);
-    uint destinationAttributes;
-    const destinationExists = exists(destination);
-    if (destinationExists) {
-        if (isSymlink(destination))
-            throw new Exception("refusing to replace output symlink: " ~ destination);
-        destinationAttributes = getAttributes(destination);
-    }
-
-    auto temporary = buildPath(parent, "." ~ baseName(destination) ~
-        ".scrubbed-" ~ randomUUID.toString ~ ".tmp");
-    scope(failure) if (exists(temporary)) remove(temporary);
-    write(temporary, content);
-    if (destinationExists)
-        setAttributes(temporary, destinationAttributes);
-    rename(temporary, destination);
-}
-
-private FilterSpec[] parseFilterConfig(string contents) {
-    const root = parseJSON(contents);
-    if (root.type != JSONType.object || "filters" !in root.object ||
-        root.object["filters"].type != JSONType.array)
-        throw new Exception("config must contain a 'filters' array");
-    foreach (key, ignored; root.object)
-        if (key != "filters")
-            throw new Exception("unknown config key: " ~ key);
-
-    FilterSpec[] specs;
-    foreach (entry; root.object["filters"].array) {
-        FilterSpec spec;
-        if (entry.type == JSONType.string) {
-            spec.name = entry.str;
-        } else if (entry.type == JSONType.object && "name" in entry.object &&
-                   entry.object["name"].type == JSONType.string) {
-            foreach (key, ignored; entry.object)
-                if (key != "name" && key != "options")
-                    throw new Exception("unknown key '" ~ key ~ "' for filter entry");
-            spec.name = entry.object["name"].str;
-            if (auto options = "options" in entry.object) {
-                if (options.type != JSONType.object)
-                    throw new Exception("options for " ~ spec.name ~ " must be an object");
-                foreach (key, value; options.object) {
-                    final switch (value.type) {
-                        case JSONType.string: spec.options[key] = value.str; break;
-                        case JSONType.integer: spec.options[key] = value.integer.to!string; break;
-                        case JSONType.uinteger: spec.options[key] = value.uinteger.to!string; break;
-                        case JSONType.true_: spec.options[key] = "true"; break;
-                        case JSONType.false_: spec.options[key] = "false"; break;
-                        case JSONType.null_, JSONType.float_, JSONType.array, JSONType.object:
-                            throw new Exception("option " ~ key ~ " for " ~ spec.name ~
-                                " must be a string, integer, or boolean");
-                    }
-                }
-            }
-        } else {
-            throw new Exception("each config filter must be a name or an object with 'name'");
-        }
-        specs ~= spec;
-    }
-    return specs;
-}
-
-private FilterSpec[] loadFilterConfig(string path) {
-    return parseFilterConfig(readText(path));
-}
-
 private string destinationFor(string file, string inputRoot, string outputRoot,
                               bool inputIsDir) {
     return inputIsDir ? buildPath(outputRoot, relativePath(file, inputRoot)) : outputRoot;
@@ -284,19 +267,26 @@ int runExtract(string requestedInput, string requestedOutput,
     preflightOutput(output, isTree);
     auto sourceRoot = isTree ? input : dirName(input);
     auto outputRoot = isTree ? output : dirName(output);
-    auto plan = configPath.length ? buildConfigV2(readText(configPath)) :
-        (format == "markdown" ? htmlMarkdownPlan(declaredCharset, byteLimit) :
-        htmlTreeJsonPlan(declaredCharset, byteLimit));
     auto expectedStage = format == "markdown" ? "html-markdown" : "html-tree-json";
-    if (plan.stages.length != 1 || plan.stages[0].declaration.key != expectedStage)
+    JobSpec spec;
+    if (configPath.length) {
+        spec = parseJobJson(readText(configPath));
+    } else {
+        JobStageSpec stage;
+        stage.id = "extract";
+        stage.implementation = expectedStage;
+        stage.options["max-html-bytes"] = JobOption.integer(byteLimit);
+        if (declaredCharset !is null)
+            stage.options["charset"] = JobOption.text(declaredCharset);
+        spec.stages = [stage];
+    }
+    if (spec.stages.length != 1 || spec.stages[0].implementation != expectedStage ||
+            spec.stages[0].filters.length != 0)
         throw new Exception("extract config must contain exactly one " ~ expectedStage ~ " stage");
-    auto configuredLimit = "max-html-bytes" in plan.stages[0].options;
+    auto configuredLimit = "max-html-bytes" in spec.stages[0].options;
     byteLimit = configuredLimit is null ? defaultExtractHtmlBytes :
         checkedHtmlByteLimit(configuredLimit.asInteger());
-    auto specification = plan.stages[0].declaration;
-    auto stage = StageDeclaration(specification.key.idup, specification.passMode,
-        ResourceDeclaration(specification.resources.cpuSlots,
-            specification.resources.memoryBytes));
+    auto plan = compileJob(spec);
     size_t quarantined, published;
     auto scheduler = new BoundedInput(InputLimits(1, byteLimit + 1, 1), 1,
         (string file, ulong reservedBytes) {
@@ -328,8 +318,8 @@ int runExtract(string requestedInput, string requestedOutput,
                     throw new Exception("extract input changed while reading: " ~ file);
             }
             auto content = new Content([ContentPiece.own(raw)]);
-            auto result = runStage([StageDocument(document, content)], stage,
-                plan.stages[0].transform);
+            auto result = runCompiledStage([StageDocument(document, content)],
+                plan.stages[0]);
             if (result.events.length != 1)
                 throw new Exception("extract stage produced unexpected decision count");
             auto event = result.events[0];
@@ -373,60 +363,6 @@ int runExtract(string requestedInput, string requestedOutput,
     stderr.writefln("extract done: %s published, %s quarantined", published,
         quarantined);
     return quarantined ? 1 : 0;
-}
-
-/// Returns whether the filter chain changed the document. In dry-run mode the
-/// same mapping and filter path executes, but no output path is created.
-bool processOne(string file, string inputRoot, string outputRoot,
-                bool inputIsDir, const ref Pipeline chain, ulong reservedBytes,
-                bool dryRun = false) {
-    if (isSymlink(file))
-        throw new Exception("refusing symlink input: " ~ file);
-
-    string outPath = destinationFor(file, inputRoot, outputRoot, inputIsDir);
-    preflightDestination(outPath, inputIsDir ? outputRoot : dirName(outputRoot));
-
-    if (reservedBytes == 0) {
-        // MmFile cannot map an empty file. Check size on an opened handle so
-        // growth between traversal and open cannot bypass the byte budget.
-        {
-            scope input = File(file, "rb");
-            if (input.size != 0)
-                throw new Exception("input changed size after admission: " ~ file);
-        }
-        auto cleanedEmpty = chain.run("");
-        if (!dryRun)
-            atomicWrite(outPath, inputIsDir ? outputRoot : dirName(outputRoot), cleanedEmpty);
-        return cleanedEmpty.length != 0;
-    }
-
-    string cleaned;
-    bool changed;
-    {
-        if (getSize(file) != reservedBytes)
-            throw new Exception("input changed size after admission: " ~ file);
-        // Close the mapping before rename: Windows does not grant delete/
-        // rename sharing to MmFile's read handle. Only copy when a no-op (or
-        // custom slicing) filter returns storage that aliases the mapping.
-        // A fixed-size map cannot transiently map beyond the byte token if
-        // the file grows after traversal but before this open.
-        scope mm = new MmFile(file, MmFile.Mode.read, reservedBytes, null);
-        if (getSize(file) != reservedBytes)
-            throw new Exception("input changed size after admission: " ~ file);
-        auto text = cast(string)(cast(ubyte[]) mm[]);
-        cleaned = chain.run(text);
-        changed = cleaned != text;
-        if (cleaned.length) {
-            const textStart = cast(size_t) text.ptr;
-            const textEnd = textStart + text.length;
-            const cleanedStart = cast(size_t) cleaned.ptr;
-            if (cleanedStart >= textStart && cleanedStart < textEnd)
-                cleaned = cleaned.idup;
-        }
-    }
-    if (!dryRun)
-        atomicWrite(outPath, inputIsDir ? outputRoot : dirName(outputRoot), cleaned);
-    return changed;
 }
 
 private LocalJobOutcome processCompiledOne(string file, string inputRoot,
@@ -761,23 +697,6 @@ private ubyte[32] runningExecutableDigest() {
     return digest.finish();
 }
 
-private void appendField(ref string bytes, string field) {
-    bytes ~= field.length.to!string ~ ":" ~ field;
-}
-
-private ubyte[32] manifestConfig(string filterList, string configContents,
-                                  bool configured,
-                                  string outputPath, bool inputIsDir) {
-    string bytes = "scrubbed:cli-output:v1;";
-    appendField(bytes, configured ? "config" : "filters");
-    appendField(bytes, configured ? configContents : filterList);
-    appendField(bytes, inputIsDir ? "tree" : "file");
-    appendField(bytes, outputPath);
-    appendField(bytes, "utf8-text:atomic-piece:v1");
-    appendField(bytes, cast(string)runningExecutableDigest()[]);
-    return configDigest(cast(const(ubyte)[])bytes);
-}
-
 version (ManifestCliHarness) {
     // A separate release-mode D harness binary injects deterministic process
     // crashes. This branch is absent from the shipping executable.
@@ -802,72 +721,11 @@ private ManifestOutcome manifestOutcome(string status, string detail, SinkKey ke
     return ManifestOutcome(status, detail, key, true, terminal);
 }
 
-private class ManifestDecisionFailure : Exception {
-    string status;
-    DocumentId documentId;
-    string sinkKey;
-    this(string status, string message, DocumentId documentId, string sinkKey) {
-        super(message);
-        this.status = status;
-        this.documentId = documentId;
-        this.sinkKey = sinkKey;
-    }
-}
 
-private class FatalManifestPreFilter : Exception {
-    SinkKey key;
-    this(SinkKey key, Exception cause) {
-        super("fatal manifest pre-filter operation: " ~ cause.msg);
-        this.key = key;
-    }
-}
 
-private class FatalPlannedFailure : Exception {
-    SinkKey key;
-    this(SinkKey key, Exception cause) {
-        super("fatal pre-sink failure: " ~ cause.msg);
-        this.key = key;
-    }
-}
 
-private class DocumentFailure : Exception {
-    FailureRecord record;
-    this(FailureRecord record) {
-        super(record.reason);
-        this.record = record;
-    }
-}
 
-private class FatalDocumentFailure : Exception {
-    FailureRecord record;
-    bool acknowledged;
-    this(FailureRecord record, Exception cause, bool acknowledged) {
-        super("fatal document failure: " ~ cause.msg);
-        this.record = record;
-        this.acknowledged = acknowledged;
-    }
-}
 
-private class V2DocumentFailure : Exception {
-    SinkKey key;
-    string status;
-    string phase;
-    string code;
-    bool hasPublicSink;
-    this(SinkKey key, string status, string phase, string code,
-            bool hasPublicSink) {
-        super(code);
-        this.key = key;
-        this.status = status;
-        this.phase = phase;
-        this.code = code;
-        this.hasPublicSink = hasPublicSink;
-    }
-}
-
-private class V2FatalFailure : Exception {
-    this() { super("error-journal-fatal"); }
-}
 
 private void v2Explain(string status, SinkKey key, string sinkId,
         string phase = "", string code = "") {
@@ -877,259 +735,12 @@ private void v2Explain(string status, SinkKey key, string sinkId,
     writeln(line);
 }
 
-private ManifestOutcome processV2One(FailureJournal journal, string databasePath,
-        string file, string inputRoot, string outputRoot, bool inputIsDir,
-        const ref Pipeline chain, ulong reservedBytes, ubyte[32] configHash,
-        bool retry, bool targeted) {
-    // Until the input digest is trustworthy there is no key to journal.
-    if (isSymlink(file) || getSize(file) != reservedBytes)
-        throw new V2FatalFailure;
-    scope mm = reservedBytes ? new MmFile(file, MmFile.Mode.read, reservedBytes, null) : null;
-    string text;
-    if (mm !is null) text = cast(string)(cast(ubyte[])mm[]);
-    else {
-        scope source = File(file, "rb");
-        if (source.size != 0) throw new V2FatalFailure;
-    }
-    if (getSize(file) != reservedBytes) throw new V2FatalFailure;
-    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
-    auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
-    SinkKey key = SinkKey(id, inputDigest(cast(const(ubyte)[])text),
-        configHash, "local-primary:v1");
-    if (targeted && !journal.hasOutstanding(key))
-        throw new V2DocumentFailure(key, "target-mismatch", "inspect",
-            "target-mismatch", true);
-    auto destination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
-    bool replacing;
-    try {
-        preflightDestination(destination, inputIsDir ? outputRoot : dirName(outputRoot));
-        ensurePlainDirectory(inputIsDir ? outputRoot : dirName(outputRoot),
-            dirName(destination));
-        journal.requireDestinationOwner(key, destination);
-        auto inspected = journal.inspect(key);
-        if (inspected == Inspection.verifiedCommitted)
-            return manifestOutcome("skipped", "", key);
-        auto previous = journal.lookup(key);
-        bool destinationExists = exists(destination);
-        bool unresolved = !previous.isNull &&
-            (previous.get.state != SinkState.planned || journal.hasOutstanding(key));
-        if (!retry && (destinationExists || unresolved))
-            throw new V2DocumentFailure(key,
-                !previous.isNull && previous.get.state == SinkState.uncertain ?
-                    "uncertain" : "retry-required", "inspect", "retry-required",
-                    !previous.isNull);
-        journal.plan(key, destination);
-        replacing = retry && (destinationExists || unresolved);
-        if (replacing && !previous.isNull) journal.retry(key);
-        version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
-    } catch (V2DocumentFailure decision) { throw decision; }
-      catch (Throwable ignored) { throw new V2FatalFailure; }
-    string phase = "filter";
-    bool touched;
-    try {
-        version (FailurePolicyHarness) {
-            phase = "read";
-            failureAt(databasePath, "read", file);
-            phase = "decode";
-            failureAt(databasePath, "decode", file);
-            phase = "filter";
-            failureAt(databasePath, "filter", file);
-        }
-        auto cleaned = chain.run(text);
-        phase = "scheduler";
-        if (getSize(file) != reservedBytes ||
-            inputDigest(mm is null ? cast(const(ubyte)[])"" :
-                cast(const(ubyte)[])mm[]) != key.inputSha256)
-            throw new Exception("input changed before publication");
-        const changed = cleaned != text;
-        phase = "policy";
-        version (FailurePolicyHarness) failureAt(databasePath, "policy", file);
-        auto content = new Content([ContentPiece.own(cast(const(ubyte)[])cleaned)]);
-        phase = "sink";
-        try {
-            journal.beginPublication(key);
-        } catch (Throwable ignored) { throw new V2FatalFailure; }
-        version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
-        touched = true;
-        version (FailurePolicyHarness) failureAt(databasePath, "sink", file);
-        writeAtomicPieces(destination, content.pieces());
-        version (ManifestCliHarness) manifestKillAt(databasePath, "after-publish");
-        try {
-            journal.commitPublished(key, destination,
-                outputDigest(cast(const(ubyte)[])cleaned));
-        } catch (Throwable ignored) { throw new V2FatalFailure; }
-        version (ManifestCliHarness) manifestKillAt(databasePath, "after-commit");
-        return manifestOutcome(replacing ? "retry" :
-            (changed ? "changed" : "unchanged"), "", key);
-    } catch (V2FatalFailure fatal) { throw fatal; }
-      catch (Exception failure) {
-        if (cast(OutputPolicyViolation)failure !is null) phase = "policy";
-        if (cast(ResourceExhaustion)failure !is null) phase = "resource";
-        if (phase == "filter" && cast(UTFException)failure !is null)
-            phase = "decode";
-        const code = phase == "sink" ? "sink-write-failed" : phase ~ "-failed";
-        try {
-            version (FailurePolicyHarness) {
-                if (exists(databasePath ~ ".fault-v2-arm-ack-on-failure"))
-                    write(databasePath ~ ".fault-v2-ack", "1");
-            }
-            journal.recordFailure(key, phase, code, touched);
-        }
-        catch (Throwable ignored) { throw new V2FatalFailure; }
-        if (phase == "policy" || phase == "resource" || phase == "scheduler")
-            throw new V2FatalFailure;
-        throw new V2DocumentFailure(key, touched ? "uncertain" : "failed",
-            phase, code, true);
-    }
-}
-
-private bool isLocalPrimaryTarget(FailureJournal journal, string file,
-        string inputRoot, bool inputIsDir) {
-    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
-    auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
-    return journal.hasOutstandingForDocumentSink(id, "local-primary:v1");
-}
-
 version (FailurePolicyHarness) {
     private void failureAt(string databasePath, string phase, string file) {
         auto marker = databasePath ~ ".fault-" ~ phase;
         if (exists(marker) && (readText(marker).length == 0 ||
             readText(marker) == baseName(file)))
             throw new Exception("injected " ~ phase ~ " fault");
-    }
-}
-
-private ManifestOutcome processManifestOne(LocalManifest manifest, string databasePath,
-        string file, string inputRoot,
-        string outputRoot, bool inputIsDir, const ref Pipeline chain,
-        ulong reservedBytes, ubyte[32] configHash, bool retry, bool dryRun,
-        size_t completedPrefix) {
-    if (isSymlink(file)) throw new Exception("refusing symlink input: " ~ file);
-    auto destination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
-    if (getSize(file) != reservedBytes)
-        throw new Exception("input changed size after admission: " ~ file);
-    scope mm = reservedBytes ? new MmFile(file, MmFile.Mode.read, reservedBytes, null) : null;
-    string text;
-    if (mm !is null) text = cast(string)(cast(ubyte[])mm[]);
-    else {
-        scope input = File(file, "rb");
-        if (input.size != 0) throw new Exception("empty input grew after admission");
-    }
-    auto firstHash = inputDigest(cast(const(ubyte)[])text);
-    auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
-    auto id = DocumentId.from(SourceLocator("local-files:v1", inputRoot, relative));
-    SinkKey key = SinkKey(id, firstHash, configHash, "local-primary:v1");
-    try {
-        preflightDestination(destination, inputIsDir ? outputRoot : dirName(outputRoot));
-    } catch (Exception failure) {
-        throw new FatalManifestPreFilter(key, failure);
-    }
-    bool replacing;
-    if (!dryRun) {
-        try {
-            auto inspected = manifest.inspect(key, destination);
-            if (inspected == Inspection.verifiedCommitted)
-                return manifestOutcome("skipped", "", key);
-            auto previous = manifest.lookup(key);
-            bool destinationExists = exists(destination);
-            bool unresolved = !previous.isNull && previous.get.state != SinkState.planned;
-            if (!retry && (destinationExists || unresolved))
-                throw new ManifestDecisionFailure(
-                    !previous.isNull && previous.get.state == SinkState.uncertain
-                        ? "uncertain" : "retry-required",
-                    "manifest output requires explicit --manifest-retry after inspection: " ~ destination,
-                    id, key.sink);
-            auto row = manifest.plan(key, destination);
-            replacing = retry && (destinationExists || row.state != SinkState.planned);
-            if (replacing)
-                manifest.retry(key);
-            version (ManifestCliHarness) manifestKillAt(databasePath, "after-plan");
-        } catch (ManifestDecisionFailure decision) {
-            throw decision;
-        } catch (Exception failure) {
-            throw new FatalManifestPreFilter(key, failure);
-        }
-    }
-    bool sinkTouched;
-    FailurePhase phase = FailurePhase.filter;
-    try {
-        version (FailurePolicyHarness) {
-            phase = FailurePhase.read;
-            failureAt(databasePath, "read", file);
-            phase = FailurePhase.decode;
-            failureAt(databasePath, "decode", file);
-            phase = FailurePhase.filter;
-            failureAt(databasePath, "filter", file);
-        }
-        auto cleaned = chain.run(text);
-        phase = FailurePhase.scheduler;
-        if (getSize(file) != reservedBytes ||
-            inputDigest(mm is null ? cast(const(ubyte)[])"" :
-                cast(const(ubyte)[])mm[]) != firstHash)
-            throw new Exception("mapped input changed before publish: " ~ file);
-        const changed = cleaned != text;
-        if (dryRun) return manifestOutcome(changed ? "dry-run-changed" :
-            "dry-run-unchanged", "", key);
-        version (ManifestCliHarness) manifestKillAt(databasePath, "before-publish");
-        // The F08 sink owns its buffer and fsync-before-rename publication.
-        phase = FailurePhase.policy;
-        version (FailurePolicyHarness) failureAt(databasePath, "policy", file);
-        ensurePlainDirectory(inputIsDir ? outputRoot : dirName(outputRoot),
-            dirName(destination));
-        version (FailurePolicyHarness) failureAt(databasePath, "content-own", file);
-        auto content = new Content([ContentPiece.own(cast(const(ubyte)[])cleaned)]);
-        // A no-op filter may return the mapped input. Keep its owner live
-        // until ContentPiece.own has copied those bytes.
-        if (mm !is null && mm[].length != reservedBytes)
-            throw new Exception("mapped input length changed");
-        phase = FailurePhase.sink;
-        sinkTouched = true;
-        version (FailurePolicyHarness) {
-            if (exists(databasePath ~ ".fault-policy-swap")) {
-                import std.file : symlink;
-                symlink(file, destination);
-            }
-        }
-        version (FailurePolicyHarness) failureAt(databasePath, "sink", file);
-        writeAtomicPieces(destination, content.pieces());
-        version (ManifestCliHarness) manifestKillAt(databasePath, "after-publish");
-        phase = FailurePhase.manifest;
-        manifest.commitPublished(key, destination,
-            outputDigest(cast(const(ubyte)[])cleaned));
-        version (ManifestCliHarness) manifestKillAt(databasePath, "after-commit");
-        return manifestOutcome(replacing ? "retry" :
-            (changed ? "changed" : "unchanged"),
-            replacing ? (changed ? "changed" : "unchanged") : "", key);
-    } catch (Exception failure) {
-        if (dryRun) throw failure;
-        if (phase == FailurePhase.policy || phase == FailurePhase.scheduler)
-            throw new FatalPlannedFailure(key, failure);
-        if (cast(OutputPolicyViolation)failure !is null)
-            phase = FailurePhase.policy;
-        if (cast(ResourceExhaustion)failure !is null)
-            phase = FailurePhase.resource;
-        if (phase == FailurePhase.filter && cast(UTFException)failure !is null)
-            phase = FailurePhase.decode;
-        const fatal = phase == FailurePhase.policy ||
-            phase == FailurePhase.resource || phase == FailurePhase.manifest;
-        auto record = FailureRecord(id, key.sink, phase,
-            fatal ? FailureClass.fatal : FailureClass.document,
-            sinkTouched, completedPrefix, failure.msg, failure);
-        // A manifest write or acknowledgment failure is fatal; it must never
-        // be mistaken for a quarantined document.
-        try {
-            version (FailurePolicyHarness) {
-                failureAt(databasePath, "pre-mark", file);
-                recordDocumentFailure(manifest, key, record,
-                    (in FailureRecord logged) { failureAt(databasePath, "log-ack", file); });
-            } else recordDocumentFailure(manifest, key, record);
-        } catch (Exception acknowledgmentFailure) {
-            record.classification = FailureClass.fatal;
-            throw new FatalDocumentFailure(record, acknowledgmentFailure, false);
-        }
-        if (fatal)
-            throw new FatalDocumentFailure(record, failure, true);
-        throw new DocumentFailure(record);
     }
 }
 
@@ -1292,6 +903,8 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         event.payload.content.pieces());
                     version (ManifestCliHarness) manifestKillAt(databasePath,
                         ordinal == 0 ? "after-first-publish" : "after-last-output");
+                    version (ManifestCliHarness) if (ordinal == 1)
+                        manifestKillAt(databasePath, "after-second-publish");
                     version (ManifestCliHarness) manifestKillAt(databasePath,
                         "after-publish");
                     ledger.commitPublished(rootKey, ordinal);
@@ -1319,6 +932,8 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         plans[ordinal].sink, failure);
                 }
             }
+            version (ManifestCliHarness) manifestKillAt(databasePath,
+                "before-root-commit");
             ledger.completeRoot(rootKey);
             version (ManifestCliHarness) manifestKillAt(databasePath, "after-root-commit");
         });
@@ -1581,7 +1196,6 @@ int runApp(string[] args) {
     auto publication = durableRoute ? null : new PublicationOrder;
     auto decisionMutex = new Mutex;
     size_t terminalDecisions;
-    size_t manifestCompletedPrefix;
     auto scheduler = new BoundedInput(
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs),
         manifestPath.length || errorJournalPath.length ? 1 : nThreads,
@@ -1617,15 +1231,8 @@ int runApp(string[] args) {
                     decision.hasKey ? decision.key.document.text : "",
                     decision.hasKey ? decision.key.sink : "");
             if (explain) pending.remove(file);
-            if (manifestPath.length) ++manifestCompletedPrefix;
         },
         (string file, Throwable error) {
-            auto documentFailure = cast(DocumentFailure)error;
-            auto fatalDocumentFailure = cast(FatalDocumentFailure)error;
-            auto manifestDecision = cast(ManifestDecisionFailure)error;
-            auto fatalPreFilter = cast(FatalManifestPreFilter)error;
-            auto fatalPlanned = cast(FatalPlannedFailure)error;
-            auto v2Decision = cast(V2DocumentFailure)error;
             auto durableDecision = cast(DurableDocumentFailure)error;
             auto effectFailure = cast(EffectFailure)error;
             auto orderedCanceled = cast(OrderedPublicationCanceled)error;
@@ -1654,41 +1261,15 @@ int runApp(string[] args) {
             auto renderedError = effectFailure is null ? error.msg :
                 error.msg ~ " (" ~ effectFailureDetail(effectFailure) ~ ")";
             stderr.writefln("%s %s: %s",
-                documentFailure !is null || manifestDecision !is null ||
-                    (durableDecision !is null && !durableDecision.fatal) ?
+                durableDecision !is null && !durableDecision.fatal ?
                     "SKIP" : "FATAL",
                 file, renderedError);
             if (explain) {
                 string status = "failure", detail, documentId, sinkKey;
-                if (documentFailure !is null) {
-                    status = documentFailure.record.sinkTouched ? "uncertain" : "failed";
-                    detail = "completed-prefix=" ~
-                        documentFailure.record.completedPrefix.to!string;
-                    documentId = documentFailure.record.documentId.text;
-                    sinkKey = documentFailure.record.sinkKey;
-                } else if (fatalDocumentFailure !is null) {
-                    status = !fatalDocumentFailure.acknowledged ? "unacknowledged" :
-                        (fatalDocumentFailure.record.sinkTouched ? "uncertain" : "failed");
-                    detail = "completed-prefix=" ~
-                        fatalDocumentFailure.record.completedPrefix.to!string;
-                    documentId = fatalDocumentFailure.record.documentId.text;
-                    sinkKey = fatalDocumentFailure.record.sinkKey;
-                } else if (manifestDecision !is null) {
-                    status = manifestDecision.status;
-                    documentId = manifestDecision.documentId.text;
-                    sinkKey = manifestDecision.sinkKey;
-                } else if (durableDecision !is null) {
+                if (durableDecision !is null) {
                     status = durableDecision.status;
                     documentId = durableDecision.key.document.text;
                     sinkKey = durableDecision.sink;
-                } else if (fatalPreFilter !is null) {
-                    documentId = fatalPreFilter.key.document.text;
-                    sinkKey = fatalPreFilter.key.sink;
-                } else if (fatalPlanned !is null) {
-                    status = "unacknowledged";
-                    detail = "manifest-state=planned";
-                    documentId = fatalPlanned.key.document.text;
-                    sinkKey = fatalPlanned.key.sink;
                 } else if (effectFailure !is null) {
                     status = effectFailure.partialWritePossible ? "uncertain" : "failure";
                     detail = effectFailureDetail(effectFailure);
@@ -1698,14 +1279,10 @@ int runApp(string[] args) {
                     chainLabel, status, error.msg, detail, documentId, sinkKey);
             }
             if (explain) pending.remove(file);
-            if (documentFailure !is null) ++manifestCompletedPrefix;
         }, (Throwable error) {
             return cast(OrderedPublicationCanceled)error is null &&
-                cast(V2DocumentFailure)error is null &&
                 (cast(DurableDocumentFailure)error is null ||
-                    (cast(DurableDocumentFailure)error).fatal) &&
-                cast(DocumentFailure)error is null &&
-                cast(ManifestDecisionFailure)error is null;
+                    (cast(DurableDocumentFailure)error).fatal);
         });
     bool workerFatalAdmission;
     void submitPath(string file) {
@@ -1893,18 +1470,6 @@ unittest {
         "--output", oversizedOutput, "--threads", "1",
         "--max-input-bytes", "2"]));
     assert(!exists(oversizedOutput));
-
-    auto changed = buildPath(root, "changed.txt");
-    auto changedOutput = buildPath(root, "changed-output.txt");
-    write(changed, "old");
-    write(changed, "larger");
-    auto changedChain = Pipeline.build(["fix-mojibake"]);
-    assertThrown(processOne(changed, changed, changedOutput, false,
-        changedChain, 3));
-    assert(!exists(changedOutput));
-    assertThrown(processOne(changed, changed, changedOutput, false,
-        changedChain, 0));
-    assert(!exists(changedOutput));
 
     version (Posix) {
         import std.file : symlink;

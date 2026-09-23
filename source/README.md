@@ -24,10 +24,9 @@ registrations run. It does not contain the filter algorithms.
 
 [`pipeline.d`](pipeline.d) owns the injectable name-to-filter registry and
 ordered `Pipeline`. Filters register with `registerFilter` for a plain
-`string -> string` function, the predecessor `registerFilterFactory`, or a
-typed option-schema factory. `Pipeline.build`/`buildConfigured` preserve the
-shipping predecessor edge; `buildTyped` resolves v3 scalar types without
-coercion. The global registry is read-only to consumers, while explicit
+`string -> string` function or a typed option-schema factory. The canonical
+compiler alone calls `Pipeline.buildTyped`, which resolves v3 scalar types
+without coercion. The global registry is read-only to consumers, while explicit
 `FilterRegistry` instances support isolated composition tests. Unknown names,
 options, missing required values, and type mismatches fail while building the
 chain. Configured whole-buffer factories retain only a pure context-free function
@@ -47,8 +46,8 @@ shipping consume v3 through compiled effects bridges.
 [`composition/`](composition/README.md) compiles that model through injected
 stage and filter registries without importing concrete implementations. It
 retains stage-instance identity and validates exact option types, relative
-stage order, and declared before/after/no-filter placement. Compilation is
-tested; the pure one-stage executor applies before/after filters over checked
+stage order, and declared before/after/no-filter placement. The pure one-stage
+executor applies before/after filters over checked
 `Content`. A pure one-record job executor now carries emitted documents through
 every compiled stage, retaining terminal decisions, split order and immediate
 parent provenance, and returns only final/terminal events. The effects runner
@@ -75,13 +74,13 @@ canonical key format and lifetime rule are in the
 and content/job stages are not implemented here.
 
 [`content/pieces.d`](content/pieces.d) provides ordered borrowed/owned byte
-pieces. The opt-in manifest CLI wraps the existing string pipeline's output
-as an owned piece for F08 publication; future text and output stages are not
-wired. It depends on `domain.document`'s
+pieces. Canonical compiled local, durable, extract, metadata, and selected-field
+JSONL routes carry stage content through this representation. It depends on
+`domain.document`'s
 checked view, not CLI mapping internals. Edits use byte offsets; `replace`
 can insert, delete, or replace without copying untouched source bytes. `stream`
-emits bounded, temporary chunks to a sink. The filters and no-manifest CLI
-do not use this facade.
+emits bounded, temporary chunks to a sink. Text filters remain explicit
+materialization barriers inside compiled stages.
 
 `Content.pieces()` is a lazy Phobos InputRange of checked piece descriptors.
 It preserves empty descriptors and borrowing checks without flattening bytes.
@@ -89,29 +88,28 @@ It preserves empty descriptors and borrowing checks without flattening bytes.
 map/reject/quarantine/split decisions, child provenance, cancellation safe
 points, and validated descriptive resources. Its pass-mode metadata describes
 single-pass or resumable stage behavior; it does not implement checkpoints or
-scheduling. These stages are not wired to the current string pipeline or CLI.
+scheduling. Canonical compiled jobs execute these contracts for shipping
+file/tree and JSONL routes.
 
 [`stages/registry.d`](stages/registry.d) adds typed stage declarations, option
 schemas, factory registration, and relative ordering metadata. A concrete
 stage registers itself in its own module constructor; consumers import that
-module to make it available. [`stages/config.d`](stages/config.d) strictly
-parses the nested `{"version":2,"stages":[{"name":"...","options":{...}}]}`
-API format and resolves typed transforms before document execution. Its
-registry factories likewise return a pure context-free function pointer paired
+module to make it available. The deleted v2 `stages.config` facade has no
+shipping or test consumer; canonical v3 parsing and compilation own stage
+resolution. Registry factories return a pure context-free function pointer paired
 with transitive-immutable parsed configuration, so resolved execution can be
 reused concurrently without rebuilding factories. Its
 [`stages/fixture.d`](stages/fixture.d) registration exists only in unittest
 builds. [`effects/html_tree_json_stage.d`](effects/html_tree_json_stage.d) is a concrete
-effects-owned, self-registering v2 stage used only by `extract`; that route resolves its typed
-plan without exposing a general v2-config CLI option. Its 32 MiB resource
-declaration is descriptive, not an enforced RSS limit. The existing v1
-`--config` path remains unchanged. Registration and parsing do not reserve resources or establish
+effects-owned, self-registering stage used by `extract`; that route compiles a
+canonical v3 job. Its 32 MiB resource
+declaration is descriptive, not an enforced RSS limit. Registration and parsing do not reserve resources or establish
 production document-stage backpressure; F04's high-edit content path still
 needs measurement. The CLI's bounded local file queue is a separate seam.
 [`stages/text_transform.d`](stages/text_transform.d) is the self-registering
 no-op document map used by compiled jobs whose content work is an ordered
-filter chain. Its declared `before` placement is metadata until execution is
-wired.
+filter chain. Compiled execution applies its declared `before` placement before
+the document map.
 
 [`effects/runner.d`](effects/runner.d) defines typed `Source`, `Parser`, and
 `Sink` ports and the one-document-at-a-time `runEffects` composition root.
@@ -128,9 +126,8 @@ events. It does not establish corpus-throughput readiness.
 single-active-lease mmap reader with checked borrows, bounded owning carry,
 and mapped-byte counters. [`effects/atomic_piece_sink.d`](effects/atomic_piece_sink.d)
 streams `Content.pieces()` through a bounded buffer to one atomic local
-destination. The opt-in manifest file/tree CLI uses the atomic piece sink;
-the mapped windowed input remains standalone. Neither is wired to the future
-document-stage runner; their resource bounds do not make
+destination. Canonical local and durable file/tree execution uses the atomic
+piece sink; the mapped windowed input remains standalone. Their resource bounds do not make
 context-heavy filters streaming.
 
 [`effects/html_tree_export.d`](effects/html_tree_export.d) serializes the

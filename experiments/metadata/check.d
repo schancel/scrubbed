@@ -1,14 +1,17 @@
 // Release-active, D-only field and stage goldens for metadata-json:v1.
 module experiments.metadata.check;
 
+import composition.compiler : compileJob;
+import composition.executor : runCompiledStage;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, OutputName, SourceLocator;
 import effects.html_metadata : extractHtmlMetadata, serializeHtmlMetadata;
-import effects.html_metadata_stage : htmlMetadataPlan;
+import effects.html_metadata_stage;
 import effects.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree,
     maxRawBytes, parseHtml;
 import stages.contract : DecisionKind, ResourceDeclaration, StageDeclaration,
     StageDocument;
+import job.json : parseJobJson;
 import std.conv : to;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.stdio : writeln;
@@ -101,7 +104,9 @@ void main() {
         `"url":{"status":"absent","value":null,"rule":null,"node":null,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]}}}` ~ "\n";
     check(serializeHtmlMetadata(document.id, extractHtmlMetadata(wireTree)) == exact,
         "exact canonical wire mismatch");
-    auto plan = htmlMetadataPlan();
+    auto metadataSpec = parseJobJson(`{"version":3,"stages":[{"id":"metadata",` ~
+        `"implementation":"html-metadata","options":{},"filters":[]}]}`);
+    auto plan = compileJob(metadataSpec);
     check(plan.stages.length == 1 && plan.stages[0].declaration.key == "html-metadata",
         "stage not registered");
     size_t[4] selected, correct, abstained;
@@ -114,15 +119,10 @@ void main() {
             "non-deterministic output");
         auto input = StageDocument(document,
             new Content([ContentPiece.own(cast(const(ubyte)[]) fixture.html)]));
-        auto decision = plan.stages[0].transform(input);
+        auto transform = plan.stages[0].transform;
+        auto decision = transform(input);
         check(decision.kind == DecisionKind.map, "stage did not map");
-        // StageDecision payload is observed through the public runStage boundary.
-        import stages.contract : runStage;
-        auto spec = plan.stages[0].declaration;
-        auto declaration = StageDeclaration(spec.key.idup, spec.passMode,
-            ResourceDeclaration(spec.resources.cpuSlots, spec.resources.memoryBytes));
-        auto output = runStage([input], declaration,
-            plan.stages[0].transform);
+        auto output = runCompiledStage([input], plan.stages[0]);
         check(output.events.length == 1 && output.events[0].payload.document.id == document.id,
             "DocumentId changed");
         check(bytes(output.events[0].payload.content) == direct, "stage wire differs");
@@ -205,11 +205,7 @@ void main() {
         html ~= "</head>";
         auto capped = StageDocument(document,
             new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
-        import stages.contract : runStage;
-        auto spec = plan.stages[0].declaration;
-        auto declaration = StageDeclaration(spec.key.idup, spec.passMode,
-            ResourceDeclaration(spec.resources.cpuSlots, spec.resources.memoryBytes));
-        auto result = runStage([capped], declaration, plan.stages[0].transform);
+        auto result = runCompiledStage([capped], plan.stages[0]);
         check(result.events.length == 1 && result.events[0].payload.document.id == document.id,
             "capped stage identity mismatch");
         auto field = parseJSON(bytes(result.events[0].payload.content))["fields"]["author"];
@@ -227,25 +223,30 @@ void main() {
     largeMetadata ~= "</head>";
     auto largeInput = StageDocument(document,
         new Content([ContentPiece.own(cast(const(ubyte)[]) largeMetadata)]));
-    auto largeDecision = plan.stages[0].transform(largeInput);
+    auto transform = plan.stages[0].transform;
+    auto largeDecision = transform(largeInput);
     check(largeDecision.kind == DecisionKind.quarantine &&
         largeDecision.reason == "outputLimit", "metadata output cap failed");
     auto malformed = parseHtml([cast(ubyte) 0xff]);
     check(!malformed.isParsed, "invalid UTF-8 accepted");
     auto badInput = StageDocument(document,
         new Content([ContentPiece.own([cast(ubyte) 0xff])]));
-    auto badDecision = plan.stages[0].transform(badInput);
+    auto badDecision = transform(badInput);
     check(badDecision.kind == DecisionKind.quarantine &&
         badDecision.reason.indexOf("/PRIVATE/secret") < 0 &&
         badDecision.reason.indexOf("record") < 0, "diagnostic leaked source");
     auto oversized = StageDocument(document,
         new Content([ContentPiece.own(new ubyte[maxRawBytes + 1])]));
-    check(plan.stages[0].transform(oversized).kind == DecisionKind.quarantine,
+    check(transform(oversized).kind == DecisionKind.quarantine,
         "oversized input accepted");
-    auto unsupported = htmlMetadataPlan("latin1");
+    auto unsupportedSpec = parseJobJson(`{"version":3,"stages":[{"id":"metadata",` ~
+        `"implementation":"html-metadata","options":{"charset":"latin1"},` ~
+        `"filters":[]}]}`);
+    auto unsupported = compileJob(unsupportedSpec);
     auto small = StageDocument(document,
         new Content([ContentPiece.own(cast(const(ubyte)[]) "<title>X</title>")]));
-    check(unsupported.stages[0].transform(small).kind == DecisionKind.quarantine,
+    auto unsupportedTransform = unsupported.stages[0].transform;
+    check(unsupportedTransform(small).kind == DecisionKind.quarantine,
         "unsupported charset accepted");
     foreach (i, key; ["title", "author", "date", "url"])
         writeln(key, " precision=", correct[i], "/", selected[i],

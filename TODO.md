@@ -39,14 +39,16 @@ for explicitly supported document formats are tracked separately (#67, #156).
       mmap/byte views exist in `source/domain/document.d`, with golden ID and
       close/alias tests. Derived children now use a distinct, deterministic
       `child:v1:` identity namespace, so an ordinary source locator cannot
-      collide with them. The CLI and future content/job pipelines do not yet
-      use this module; callers must explicitly close view owners.
+      collide with them. Canonical local, durable, extract, metadata, and
+      selected-field JSONL execution use this identity model; callers at the
+      lower-level view boundary must explicitly close view owners.
 - [~] Ordered borrowed/owned content pieces and bounded streaming exist in
       `source/content/pieces.d`; a D experiment compares list and rope edits.
-      `Content.pieces()` now exposes a lazy Phobos InputRange. Neither content
-      nor document stages are integrated into CLI filters/output; optimized
-      wired-list evidence shows high-edit scaling unsuitable for a throughput
-      path until representation/backpressure is revisited.
+      `Content.pieces()` now exposes a lazy Phobos InputRange. Canonical compiled
+      document stages and their before/after filter placement run through this
+      representation and the atomic piece sink; optimized wired-list evidence
+      shows high-edit scaling unsuitable for a throughput path until
+      representation/backpressure is revisited.
 - [~] Pure structured chunking and canonical JSONL export now provide stable
       document/revision-bound chunk identities, UTF-8 byte spans, bounded
       hierarchy depth, and output caps (`docs/structured-chunks.md`; #42
@@ -54,17 +56,16 @@ for explicitly supported document formats are tracked separately (#67, #156).
       1-MiB payload and maximum 65,536 accepted chunks, including all JSONL
       rows, under an explicit 256-MiB RSS ceiling. Pipeline/CLI wiring is a
       separate integration concern; the accepted opt-in #42 outcome is complete.
-- [~] Standalone document stage contracts now cover ordered map, reject,
+- [x] Document stage contracts cover ordered map, reject,
       quarantine, split, cancellation and resource declarations, with tagged
-      derived-child IDs. Typed stage self-registration and strict nested v2
-      config validation are tested; v2 execution is not wired into the CLI.
-      These stages are not wired to the local bounded file scheduler, and a
-      stage result currently batches its events.
-- [~] Typed source/parser/sink ports and a per-document effects runner now
+      derived-child IDs. Typed stage self-registration and canonical v3
+      compilation are wired into the local bounded file scheduler. A stage
+      result still batches its events.
+- [x] Typed source/parser/sink ports and a per-document effects runner
       exercise the same ordered path with in-memory and faulting D adapters.
       The file-mapping opener lives in the effects layer, not domain. The
-      runner is tested but not wired into the CLI; corpus backpressure and
-      throughput remain unproven.
+      runner is wired into canonical CLI routes; corpus-scale throughput
+      remains a separate profiling obligation under #59.
 - [~] A strict byte-to-Unicode facade in `source/text/decoding.d` decodes
       UTF-8 and BOM/declared UTF-16 LE/BE, with typed quarantine for malformed,
       conflicting, unsupported, or binary-looking input. It is tested but not
@@ -135,18 +136,20 @@ for explicitly supported document formats are tracked separately (#67, #156).
       lazily with `stripControlChars`; registry adapters materialize strings.
 
 ## Phase 3 — configurability
-- [~] Canonical document/filter composition (#148): the pure v3 `JobSpec`,
+- [x] Canonical document/filter composition (#148): the v3 `JobSpec`,
       strict duplicate-aware JSON parser, canonical serializer/identity,
       ordered typed CLI-token lowering, and v1/default lowering are tested.
       Stable stage-instance IDs are distinct from registered implementation
       names. Filter/stage resolution is injectable; the pure composition
       compiler retains instance IDs and identity, validates option types/order
       and filter placement, and `fix-mojibake` has a registry-owned typed
-      option schema plus its exact v1 adapter. A pure one-stage executor now
+      option schema. A pure one-stage executor
       applies before/after filters with explicit UTF-8 materialization and
-      preserves borrowed content for empty chains. The
-      shipping CLI and execution engine are not switched yet; v3 flags/config
-      must not be advertised as available until that slice lands.
+      preserves borrowed content for empty chains. Ordinary and durable local
+      file/tree, selected-field JSONL, extract, and metadata routing now
+      compile and execute that model. Default, `--filters`, and v1 JSON remain
+      edge lowerings; predecessor execution/configuration factories and the v2
+      stage facade are deleted and guarded by a D-only reachability check.
 - [ ] Detect each input's media/container type and dispatch it to exactly one
       configured extraction subpipeline before common text transforms (#155).
       Detection must combine bounded byte/container evidence with untrusted
@@ -156,10 +159,10 @@ for explicitly supported document formats are tracked separately (#67, #156).
       general workflow DAG, or a join. Unknown, ambiguous, encrypted, malformed,
       and unsupported records must follow an explicit structured policy.
 - [x] Config file using JSON via Phobos `std.json` (no added dependency),
-      specifying the filter chain and per-filter options. Implemented with
-      ordered string/object entries; mojibake exposes `encodings` and
-      `max-passes`; unknown keys are rejected by registry-owned option
-      schemas. See `scrubbed.example.json`.
+      specifying canonical v3 stages, filters, and typed options. Mojibake
+      exposes `encodings` and `max-passes`; unknown keys are rejected by
+      registry-owned schemas. See `scrubbed.example.json`. Version-1 filter
+      JSON remains a compatibility edge lowering.
 - [x] Add CLI `--validate`, `--dry-run`, and per-file `--explain` inspection
       without output mutation in validate/dry-run modes. Explain reports
       changed/unchanged/failure with bounded pending-path tracking even when
@@ -198,7 +201,7 @@ for explicitly supported document formats are tracked separately (#67, #156).
       checks and unchanged tree-json behavior; the old `filters/html2md.d`
       stub is not the shipping route.
 - [x] `extract` raw and decoded HTML byte caps are configurable together via
-      `--max-html-bytes` or an equivalent single-stage v2 JSON config, with
+      `--max-html-bytes` or an equivalent single-stage canonical v3 JSON job, with
       the same 1..8 MiB validation and a 1 MiB default. The lower-level
       parser and existing metadata route retain their prior 64 KiB default.
       A release-active
@@ -301,17 +304,20 @@ is useful, but it is not sufficient on its own.
       UTF-8 traversal with inline caller-owned state and one final
       materialization. An exact-output 4.06 MiB synthetic `-O3 -release`
       microbenchmark is about 1.9x faster than the former three-materialization
-      chain. Entity decoding, mojibake, HTML, CLI `Document`/`Content` wiring,
+      chain. Canonical local, selected-field JSONL, and durable routes already
+      use typed `Document`/`Content` execution. Entity decoding, mojibake, HTML,
       huge-input proof, and contextual spill policy remain.
 - [ ] Add backpressure-aware output and configurable concurrency for storage
       topology (local SSD, network filesystem, object-store staging). Verify
       actual OS descriptor and mapping counts stay bounded under low OS limits;
       the current local callback and input-byte tokens are narrower evidence.
-- [~] Stream ordered content pieces to atomic local output. A standalone
-      POSIX one-destination sink uses a bounded buffer and same-directory
-      rename, with injected-fault rollback and 1.075/2.149 GB D evidence
-      (`docs/atomic-piece-output.md`). It is not CLI-wired; parent-directory
-      crash durability, concurrent writers, and S3 commits remain open.
+- [~] Stream ordered content pieces to atomic local output. The POSIX
+      one-destination `writeAtomicPieces` sink ships in canonical local,
+      durable, and extract publication, using a bounded buffer and
+      same-directory rename with injected-fault rollback and 1.075/2.149 GB D
+      evidence (`docs/atomic-piece-output.md`). Parent-directory crash
+      durability, concurrent writers, and S3 commits remain open; the separate
+      mapped-window input is not integrated into CLI admission.
 - [~] Evaluate a direct S3 client/auth/capability boundary. A D-only local
       probe now tests fake credential precedence, fail-closed options, loopback
       endpoint/TLS behavior, and publication-safe error labels
@@ -323,40 +329,40 @@ is useful, but it is not sufficient on its own.
       unframed, so only framed formats (for example WARC) may safely use that
       route without an explicit manifest/framing adapter.
 - [~] Add a durable run manifest with input identity/checksum, selected filter
-      config, per-sink state and safe resume/retry. A statically linked local
-      SQLite v1 API is implemented and tested with destination rehash before
-      skip, two independent sinks, bounded 10,100-row replay, foreign-DB
-      refusal and process-kill windows (`docs/local-manifest.md`). Its pinned
-      prerequisite experiment remains in `docs/sqlite-manifest-evaluation.md`.
-      Opt-in file/tree `--manifest PATH` now uses the ledger for verified skips
-      and explicit `--manifest-retry` on unresolved output, with real-binary
-      crash/restart tests. JSONL and unflagged runs have no resume. This is a
-      serial local path, not power-loss durability, a concurrent input snapshot,
-      or bounded output materialization.
+      config, per-sink state and safe resume/retry. The retained statically
+      linked SQLite v1 API is archival/predecessor-only; live file/tree
+      `--manifest PATH` creates and runs the canonical manifest-v2 ledger and
+      refuses v1 without mutation (`docs/local-manifest.md`). V1 retains its
+      destination-rehash, two-sink, bounded 10,100-row replay, foreign-DB, and
+      process-kill tests. The v2 route has verified skips, explicit
+      `--manifest-retry`, ordered final-event recovery, and real-binary crash
+      tests. Its pinned prerequisite experiment remains in
+      `docs/sqlite-manifest-evaluation.md`. JSONL and unflagged runs have no
+      resume. This is a serial local path, not power-loss durability, a
+      concurrent input snapshot, or end-to-end bounded materialization.
 - [x] Classify opt-in local-manifest file failures (F12/#17). Typed per-document
       failures continue only after durable failed/uncertain ledger state and
       injected acknowledgment; run-fatal policy, observation, resource, and
       lost-ledger failures stop with exit 2. Keyed `--explain` and release-active
       actual-binary fault tests cover verified skips, unsafe routes, canceled
       later files, and missing-vs-unsafe output parents (`docs/failure-policy.md`).
-      The separate opt-in v2 journal now supplies structured errors (F13/#18),
-      but targeted F14/#19 retry and JSONL stdin/stdout policy remain open.
-- [x] Emit structured errors and outstanding failures (F13/#18). An
-      opt-in v2 SQLite journal supports fixed-code events, exact-key
-      outstanding state, durable publication intent/recovery, stable opaque
-      public sink IDs, and explicit offline copy from v1
-      (`docs/error-events.md`). Opt-in bounded JSONL history/outstanding
-      export and SHA-256 sidecar verification have landed; each file is
-      atomically replaced, but the pair is not atomic. V2 sink labels are
-      limited to 256 UTF-8 bytes while legacy v1 retains longer keys. The
-      default `run`/`repair` path still uses v1; explicit `--error-journal`
-      and `--error-retry` opt into live local-file/tree v2 processing. V2
-      `errors-init`, `errors-copy`, `errors-export`, and `errors-verify`
-      management verbs are available. Opt-in local-primary targeted retry
-      has landed; non-seekable/S3 retry and JSONL stdin/stdout journaling
-      are not included.
-- [~] Retry exact failed records and sinks (F14/#19). A read-only-after-open
-      v2 visitor now streams current outstanding full keys in stable order,
+      The opt-in current-v3 journal supplies structured errors (F13/#18) and
+      exact local targeted retry; non-seekable/S3 retry and JSONL stdin/stdout
+      journaling remain open.
+- [x] Emit structured errors and outstanding failures (F13/#18). The
+      current-v3 SQLite journal supports fixed-code events, exact-key
+      outstanding state, canonical final-event workflow recovery, stable opaque
+      public sink IDs, and targeted local retry (`docs/error-events.md`).
+      Opt-in bounded JSONL history/outstanding export and SHA-256 sidecar
+      verification have landed; each file is
+      atomically replaced, but the pair is not atomic. `errors-init` creates
+      only v3; `errors-copy --from-v1` creates an archival v2 database, while
+      export/verify accept archival v2 and current v3. Live processing refuses
+      v2 without mutation. Runs without a durability flag are non-durable.
+      Opt-in local-primary targeted retry has landed; non-seekable/S3 retry and
+      JSONL stdin/stdout journaling are not included.
+- [~] Retry exact failed records and sinks (F14/#19). The archival v2 API's
+      read-only visitor streams outstanding full keys in stable order,
       rejecting malformed stored identities and reentrant journal calls
       (`docs/error-events.md`). Opt-in `--error-targeted` selects local
       file/tree documents before content admission and requires the exact

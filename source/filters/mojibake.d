@@ -4,10 +4,10 @@
 module filters.mojibake;
 
 import pipeline : ConfiguredFilter, FilterConfiguration, FilterOptionDeclaration,
-    FilterOptionType, FilterOptions, TypedFilterOptions,
+    FilterOptionType, TypedFilterOptions,
     registerTypedFilterFactory;
 import std.array : appender;
-import std.conv : ConvException, to;
+import std.conv : to;
 import std.exception : enforce;
 import std.range.primitives : empty, front, isForwardRange, isInputRange, popFront, save;
 import std.string : split;
@@ -344,21 +344,6 @@ private void selectEncodings(ref MojibakeOptions result, string encoded) {
     }
 }
 
-private MojibakeOptions parseOptions(const ref FilterOptions options) {
-    MojibakeOptions result;
-    foreach (key; options.keys)
-        if (key != "max-passes" && key != "encodings")
-            throw new Exception("unknown option '" ~ key ~ "' for filter 'fix-mojibake'");
-    if (auto value = "max-passes" in options) {
-        try result.maxPasses = (*value).to!size_t;
-        catch (ConvException) throw new Exception("fix-mojibake max-passes must be an integer");
-    }
-    if (auto value = "encodings" in options) {
-        selectEncodings(result, *value);
-    }
-    return result;
-}
-
 private MojibakeOptions parseTypedOptions(const ref TypedFilterOptions options) {
     MojibakeOptions result;
     if (auto value = "max-passes" in options) {
@@ -554,10 +539,6 @@ private ConfiguredFilter configuredMojibake(MojibakeOptions options) {
         new immutable MojibakeConfiguration(options));
 }
 
-private ConfiguredFilter configureMojibake(const ref FilterOptions options) {
-    return configuredMojibake(parseOptions(options));
-}
-
 private ConfiguredFilter configureTypedMojibake(
         const ref TypedFilterOptions options) {
     return configuredMojibake(parseTypedOptions(options));
@@ -567,7 +548,7 @@ static this() {
     registerTypedFilterFactory("fix-mojibake", [
         FilterOptionDeclaration("encodings", FilterOptionType.text),
         FilterOptionDeclaration("max-passes", FilterOptionType.integer)
-    ], &configureTypedMojibake, &configureMojibake);
+    ], &configureTypedMojibake);
 }
 
 unittest {

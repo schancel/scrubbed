@@ -89,6 +89,11 @@ private double number(JSONValue value) {
         "expected JSON number");
     return value.type == JSONType.integer ? cast(double)value.integer : value.floating;
 }
+private bool sameFraction(double actual, double expected) {
+    auto difference = actual - expected;
+    if (difference < 0) difference = -difference;
+    return difference <= 1e-12;
+}
 private bool digestLength(string value, size_t length) {
     if (value.length != length) return false;
     foreach (c; value) if (!((c >= '0' && c <= '9') ||
@@ -1080,9 +1085,9 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
                     symbol["count"].integer >= 0 &&
                     isFinite(number(symbol["fraction"])) &&
                     number(symbol["fraction"]) >= 0 &&
-                    number(symbol["fraction"]) ==
+                    sameFraction(number(symbol["fraction"]),
                         cast(double)symbol["count"].integer /
-                            sample["accepted_stacks"].integer,
+                            sample["accepted_stacks"].integer),
                     "invalid top-symbol accounting");
         long total; double fraction = 0;
         foreach (name; ["kernel", "system", "runtime", "project", "unresolved"]) {
@@ -1090,6 +1095,10 @@ private void validateTrace(JSONValue trace, string binaryHash, string layout,
             need(part["count"].integer >= 0 && isFinite(number(part["fraction"])) &&
                 number(part["fraction"]) >= 0 && number(part["fraction"]) <= 1,
                 "invalid stack partition domain");
+            need(sameFraction(number(part["fraction"]),
+                    cast(double)part["count"].integer /
+                        sample["accepted_stacks"].integer),
+                "stack partition fraction is not derived from its count");
             total += part["count"].integer; fraction += number(part["fraction"]);
         }
         need(total == sample["accepted_stacks"].integer &&
@@ -1366,6 +1375,8 @@ private void selfTest() {
         "status": JSONValue("SUPPORTED"), "sample": parsed,
         "raw_private_sha256": JSONValue("C".replicate(64))]);
     validateTrace(trace, "A".replicate(64), "many-small", "scalar-threads1", 0);
+    validateTrace(parseJSON(trace.toString), "A".replicate(64), "many-small",
+        "scalar-threads1", 0);
     mustRejectTrace(trace, (ref JSONValue t) { t["sampled_pid"] = 0L; },
         "missing PID binding accepted");
     mustRejectTrace(trace, (ref JSONValue t) { t["config_sha256"] = "D".replicate(64); },

@@ -169,8 +169,11 @@ LDC's configuration, import tree, Phobos/druntime archives, compiler runtime,
 and non-system dynamic libraries into a bounded private closure. The closure
 rejects links and special files, limits file count, bytes, depth, and elapsed
 snapshot time, records its tree and loader identities, verifies the selected
-configuration/import and loader paths, and re-verifies the closure after the
-build. The CMake support snapshot uses the same bounded, no-link tree rules.
+configuration/import and loader paths, rejects any traced non-system library
+outside the private closure during version and compile probes, and re-verifies
+the closure after the build. Dependency discovery runs against each private
+snapshot rather than its mutable source path. The CMake support snapshot uses
+the same bounded, no-link tree rules.
 Attested builds refuse privileged invocation; all remaining system-selected
 native paths must be root-owned and non-writable by group or other.
 The v6 compiler closure intentionally pins the supported Homebrew LDC layout
@@ -178,9 +181,13 @@ and the LDC-to-LLVM-to-z3/zstd loader graph; unexpected layouts, additional
 non-system transitive libraries, or multiple compiler-runtime archives fail
 closed instead of silently broadening the attestation.
 The selected SDK is traversed before and after compilation under entry, byte,
-depth, and time bounds. Every SDK entry and resolved link target must be
-root-owned and non-writable by group or other; a metadata-tree digest and
-entry/byte totals are recorded and rechecked around the authorization harness.
+depth, and time bounds. Every SDK entry and resolved link target must remain
+inside the selected root and be root-owned and non-writable by group or other;
+a deterministic path-sorted
+digest includes regular-file contents plus entry metadata, link targets, and
+entry/byte totals and is rechecked around the authorization harness. The v6
+field retains its `sdk_tree_metadata_sha256` name for schema compatibility,
+but its value is content-complete.
 The argparse input digest is likewise verified after compilation. The supported DUB
 1.42.0 target path is derived from the described root `targetPath` plus
 `targetFileName`, required to remain the private relative path `scrubbed`, and
@@ -188,6 +195,12 @@ verified before snapshotting. The D-only build-attestation check poisons caller
 ignored artifacts, mutates private argparse and compiler-closure inputs to
 prove digest change and rejection, exercises target discovery, and requires actual v6 report
 publication. Attestation v2 and inconsistent v3 records are rejected.
+
+An attested baseline/candidate coordination comparison additionally requires
+the compiler executable/support/loader identities, DUB identity, native-tool
+and CMake-support identities, and SDK version/build/content identity to match
+exactly before measurement can authorize a candidate. Independently valid but
+different ambient build closures are not treated as a causal comparison.
 
 The target is hashed, copied to a read-only snapshot, and accepted only when
 the built-target and snapshot hashes match. Every timed case, manifest

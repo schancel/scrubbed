@@ -563,42 +563,80 @@ private TreeIdentity protectedTreeMetadata(string root, TreeBounds bounds) {
     require(isDir(resolvedRoot) && !isSymlink(resolvedRoot),
         "protected tree root must resolve to a plain directory");
     auto deadline = MonoTime.currTime + dur!"seconds"(bounds.maxSeconds);
-    SHA256 digest;
-    digestPart(digest, "scrubbed:protected-tree-metadata:v1");
-    size_t entries;
+    string[] relatives;
     ulong bytes;
     foreach (entry; dirEntries(resolvedRoot, SpanMode.depth, false)) {
-        require(MonoTime.currTime < deadline && entries < bounds.maxFiles,
+        require(MonoTime.currTime < deadline &&
+            relatives.length < bounds.maxFiles,
             "protected tree enumeration exceeds its bound");
         auto relative = relativePath(entry.name, resolvedRoot);
         require(relativeDepth(relative) <= bounds.maxDepth,
             "protected tree depth exceeds its bound");
-        ++entries;
-        digestPart(digest, relative);
+        relatives ~= relative;
         if (isSymlink(entry.name)) {
-            auto target = readLink(entry.name);
-            requireSystemProtectedPath(resolveToolPath(entry.name));
-            digestPart(digest, "link");
-            digestPart(digest, target);
+            auto resolvedTarget = resolveToolPath(entry.name);
+            requireSystemProtectedPath(resolvedTarget);
+            auto targetRelative = relativePath(resolvedTarget, resolvedRoot);
+            require(!isAbsolute(targetRelative) && targetRelative != ".." &&
+                !targetRelative.startsWith("../") &&
+                !targetRelative.startsWith("..\\"),
+                "protected tree link escapes its attested root");
             continue;
         }
         stat_t info;
         require(stat(entry.name.toStringz, &info) == 0 &&
             info.st_uid == 0 && (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
             "protected tree entry is mutable by the invoking account");
-        if (entry.isDir) digestPart(digest, "directory");
+        if (entry.isDir) continue;
         else if (entry.isFile) {
             auto fileBytes = getSize(entry.name);
             require(fileBytes <= bounds.maxBytes - bytes,
                 "protected tree byte extent exceeds its bound");
             bytes += fileBytes;
+        } else throw new Exception("protected tree contains a special file");
+    }
+    relatives.sort();
+    SHA256 digest;
+    digestPart(digest, "scrubbed:protected-tree-content:v2");
+    ulong hashedBytes;
+    foreach (relative; relatives) {
+        require(MonoTime.currTime < deadline,
+            "protected tree hashing exceeds its time bound");
+        auto path = buildPath(resolvedRoot, relative);
+        digestPart(digest, relative);
+        if (isSymlink(path)) {
+            auto target = readLink(path);
+            auto resolvedTarget = resolveToolPath(path);
+            requireSystemProtectedPath(resolvedTarget);
+            auto targetRelative = relativePath(resolvedTarget, resolvedRoot);
+            require(!isAbsolute(targetRelative) && targetRelative != ".." &&
+                !targetRelative.startsWith("../") &&
+                !targetRelative.startsWith("..\\"),
+                "protected tree link escapes its attested root");
+            digestPart(digest, "link");
+            digestPart(digest, target);
+            continue;
+        }
+        stat_t info;
+        require(stat(path.toStringz, &info) == 0 && info.st_uid == 0 &&
+            (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+            "protected tree entry changed or became mutable");
+        if (isDir(path)) digestPart(digest, "directory");
+        else if (isFile(path)) {
+            auto fileBytes = getSize(path);
+            require(fileBytes <= bounds.maxBytes - hashedBytes,
+                "protected tree hashing exceeds its byte bound");
+            hashedBytes += fileBytes;
             digestPart(digest, "file");
             digestPart(digest, fileBytes.to!string);
-        } else throw new Exception("protected tree contains a special file");
+            digestFile(digest, path, fileBytes, deadline);
+        } else throw new Exception("protected tree changed to a special file");
         digestPart(digest, info.st_mode.to!string);
     }
+    require(hashedBytes == bytes,
+        "protected tree byte extent changed while hashing");
     return TreeIdentity(toHexString(digest.finish()).to!string,
-        entries, bytes);
+        relatives.length, bytes);
 }
 
 private TreeIdentity copyRegularTree(string source, string target,
@@ -709,6 +747,47 @@ private bool traceContainsPath(string trace, string path) {
     return path.startsWith("/var/") && trace.canFind("/private" ~ path);
 }
 
+private bool sameDarwinPath(string actual, string expected) {
+    return actual == expected ||
+        (actual.startsWith("/private/var/") &&
+            expected == actual[8 .. $]) ||
+        (expected.startsWith("/private/var/") &&
+            actual == expected[8 .. $]);
+}
+
+private void verifyLoaderTrace(string trace, string loaderDirectory) {
+    string[] allowed;
+    foreach (entry; dirEntries(loaderDirectory, SpanMode.shallow, false)) {
+        require(entry.isFile && !isSymlink(entry.name),
+            "private compiler loader closure contains a non-file");
+        allowed ~= entry.name;
+    }
+    bool[] seen = new bool[allowed.length];
+    foreach (line; trace.splitLines) {
+        // DYLD_PRINT_LIBRARIES records have a dyld prefix followed by one
+        // absolute path. Compiler version output is intentionally ignored.
+        auto record = line.strip;
+        if (!record.startsWith("dyld[")) continue;
+        auto slash = record.indexOf('/');
+        require(slash >= 0, "dynamic loader trace omitted its library path");
+        auto path = record[cast(size_t)slash .. $].strip;
+        if (path.startsWith("/usr/lib/") ||
+                path.startsWith("/System/Library/")) continue;
+        bool found;
+        foreach (index, expected; allowed)
+            if (sameDarwinPath(path, expected)) {
+                found = true;
+                seen[index] = true;
+                break;
+            }
+        require(found,
+            "compiler loaded a non-system library outside its private closure");
+    }
+    foreach (selected; seen)
+        require(selected,
+            "private compiler loader snapshot was not selected");
+}
+
 private string findCompilerRuntime(string llvmLibrary) {
     auto clangRoot = buildPath(dirName(llvmLibrary), "clang");
     require(isDir(clangRoot) && !isSymlink(clangRoot),
@@ -762,27 +841,29 @@ private void snapshotCompilerClosure(ref PreparedAttestedBuild result,
         snapshotRegularFile(buildPath(sourcePrefix, "lib", name),
             buildPath(closure, "lib", name), 64UL * 1024 * 1024);
 
-    auto compilerLibraries = dynamicLibraryDependencies(sourceCompiler);
+    // Dependency names are part of the snapshotted Mach-O image. Discover
+    // them from that immutable image, never from the mutable source path.
+    auto compilerLibraries = dynamicLibraryDependencies(compilerTarget);
     require(compilerLibraries.length == 1 &&
         baseName(compilerLibraries[0]).startsWith("libLLVM."),
         "LDC dynamic loader closure differs");
     auto llvmLibrary = resolveToolPath(compilerLibraries[0]);
     auto loaderDirectory = buildPath(closure, "loader");
-    snapshotRegularFile(llvmLibrary,
-        buildPath(loaderDirectory, baseName(compilerLibraries[0])),
+    auto llvmSnapshot = buildPath(loaderDirectory,
+        baseName(compilerLibraries[0]));
+    snapshotRegularFile(llvmLibrary, llvmSnapshot,
         256UL * 1024 * 1024);
-    auto transitive = dynamicLibraryDependencies(llvmLibrary);
+    auto transitive = dynamicLibraryDependencies(llvmSnapshot);
     transitive.sort();
     require(transitive.length == 2 &&
         transitive[0].canFind("libz3") &&
         transitive[1].canFind("libzstd"),
         "LLVM dynamic loader closure differs");
     foreach (library; transitive) {
-        require(dynamicLibraryDependencies(library).length == 0,
-            "compiler loader dependency closure has an unbound transitive library");
-        snapshotRegularFile(library,
-            buildPath(loaderDirectory, baseName(library)),
-            128UL * 1024 * 1024);
+        auto snapshot = buildPath(loaderDirectory, baseName(library));
+        snapshotRegularFile(library, snapshot, 128UL * 1024 * 1024);
+        require(dynamicLibraryDependencies(snapshot).length == 0,
+            "private compiler loader snapshot has an unbound transitive library");
     }
     auto compilerRuntime = findCompilerRuntime(llvmLibrary);
     snapshotRegularFile(compilerRuntime,
@@ -1110,16 +1191,17 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     loaderProbeEnvironment["DYLD_PRINT_LIBRARIES"] = "1";
     auto loaderTrace = checkedEnv([result.compiler, "--version"],
         loaderProbeEnvironment);
-    foreach (entry; dirEntries(result.compilerLoaderDirectory,
-            SpanMode.shallow, false))
-        require(entry.isFile && loaderTrace.canFind(entry.name),
-            "private compiler loader snapshot was not selected");
+    verifyLoaderTrace(loaderTrace, result.compilerLoaderDirectory);
     auto compilerProbe = buildPath(scratchRoot, "compiler-config-probe.d");
     auto compilerProbeObject = buildPath(scratchRoot,
         "compiler-config-probe.o");
     write(compilerProbe, "module compiler_config_probe; enum value = 1;\n");
+    auto compilerProbeEnvironment = result.environment.dup;
+    compilerProbeEnvironment["DYLD_PRINT_LIBRARIES"] = "1";
     auto compilerTrace = checkedEnv([result.compiler, "-v", "-c",
-        compilerProbe, "-of=" ~ compilerProbeObject], result.environment);
+        compilerProbe, "-of=" ~ compilerProbeObject],
+        compilerProbeEnvironment);
+    verifyLoaderTrace(compilerTrace, result.compilerLoaderDirectory);
     auto configuredImport = buildPath(dirName(result.compiler), "..",
         "include", "dlang", "ldc");
     require(traceContainsPath(compilerTrace,
@@ -1250,6 +1332,24 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
             attestation["native_tools"][5]["version"].str &&
         archiveSuite["version"].str != unavailableToolVersion,
         "archive suite evidence is not bound to its exact evidence tool");
+}
+
+private void requireSameBuildToolClosure(JSONValue baseline,
+        JSONValue candidate) {
+    foreach (field; ["compiler_executable_sha256", "compiler_version",
+            "compiler_support_sha256", "compiler_support_files",
+            "compiler_support_bytes", "compiler_loader_sha256",
+            "compiler_loader_files", "dub_executable_sha256", "dub_version",
+            "native_environment_template", "cmake_support_sha256",
+            "cmake_support_files", "sdk_version", "sdk_build_version",
+            "sdk_tree_metadata_sha256", "sdk_tree_entries",
+            "sdk_tree_bytes"])
+        require(baseline[field] == candidate[field],
+            "baseline and candidate build-tool closures differ at " ~ field);
+    require(baseline["native_tools"] == candidate["native_tools"] &&
+        baseline["archive_suite_evidence"] ==
+            candidate["archive_suite_evidence"],
+        "baseline and candidate native-tool closures differ");
 }
 
 private void requireCmakeSelection(string cache, string key,
@@ -2007,6 +2107,14 @@ private void selfTest() {
     write(buildPath(supportSource, "one"), "changed");
     require(treeDigest(supportSnapshot, smallBounds) == copiedSupport,
         "support snapshot followed later original-tree replacement");
+    auto beforeEqualSizeMutation = treeDigest(supportSnapshot, smallBounds);
+    auto equalSizePath = buildPath(supportSnapshot, "one");
+    require(chmod(equalSizePath.toStringz, S_IRUSR | S_IWUSR) == 0,
+        "cannot make equal-size mutation fixture writable");
+    write(equalSizePath, "eno");
+    require(treeDigest(supportSnapshot, smallBounds) !=
+            beforeEqualSizeMutation,
+        "equal-size support content mutation retained its tree identity");
     auto sourceExecutable = buildPath(supportRoot, "cmake-original");
     auto snapExecutable = buildPath(supportRoot, "cmake-snapshot");
     copy(thisExePath(), sourceExecutable);
@@ -2016,6 +2124,22 @@ private void selfTest() {
     write(sourceExecutable, "replacement");
     require(hashFile(snapExecutable) == executableHash,
         "mutable tool snapshot followed original-path replacement");
+    auto loaderRoot = buildPath(supportRoot, "loader-trace");
+    mkdirRecurse(loaderRoot);
+    auto loaderOne = buildPath(loaderRoot, "libLLVM.test.dylib");
+    auto loaderTwo = buildPath(loaderRoot, "libzstd.test.dylib");
+    write(loaderOne, "one");
+    write(loaderTwo, "two");
+    auto validLoaderTrace = "dyld[1]: " ~ loaderOne ~ "\n" ~
+        "dyld[1]: /usr/lib/libSystem.B.dylib\n" ~
+        "dyld[1]: " ~ loaderTwo ~ "\nLDC test version\n";
+    verifyLoaderTrace(validLoaderTrace, loaderRoot);
+    bool ambientLoaderRejected;
+    try verifyLoaderTrace(validLoaderTrace ~
+        "dyld[1]: /opt/mutable/libunexpected.dylib\n", loaderRoot);
+    catch (Exception) ambientLoaderRejected = true;
+    require(ambientLoaderRejected,
+        "unexpected ambient compiler library was accepted");
     auto linkedSource = buildPath(supportRoot, "linked-source");
     mkdirRecurse(linkedSource);
     symlink(".", buildPath(linkedSource, "loop"));
@@ -2151,6 +2275,16 @@ private void selfTest() {
             "release; force; non-interactive; cache=local"),
         "build_status": JSONValue(0),
         "target_sha256": JSONValue("0".replicate(64))]);
+    auto matchingBuildAttestation = parseJSON(buildAttestation.toString);
+    requireSameBuildToolClosure(buildAttestation, matchingBuildAttestation);
+    matchingBuildAttestation["sdk_tree_metadata_sha256"] =
+        "e".replicate(64);
+    bool unequalBuildClosureRejected;
+    try requireSameBuildToolClosure(buildAttestation,
+        matchingBuildAttestation);
+    catch (Exception) unequalBuildClosureRejected = true;
+    require(unequalBuildClosureRejected,
+        "unequal baseline/candidate build-tool closures were accepted");
     attested["build_attestation"] = buildAttestation;
     foreach (ref targetSample; attested["cases"][0]["samples"].array)
         targetSample["target_binary_sha256"] = "0".replicate(64);
@@ -3027,7 +3161,7 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
         report["sampler_timeout_seconds"].integer ==
             coordinationSamplerTimeoutSeconds &&
         report["termination_policy"].str ==
-            "sample TERM process group; one-second grace; KILL process group; reap; hard SIGKILL harness watchdog at whole-run deadline" &&
+            "sample TERM process group; one-second grace; KILL process group; reap; 64 MiB RLIMIT_FSIZE per launched process; hard SIGKILL harness watchdog at whole-run deadline" &&
         report["runtime_environment_policy"].str ==
             "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only" &&
         report["control_method"].str ==
@@ -3270,7 +3404,7 @@ private JSONValue coordinationMeasurementFixture() {
         "sampler_timeout_seconds": JSONValue(
             coordinationSamplerTimeoutSeconds),
         "termination_policy": JSONValue(
-            "sample TERM process group; one-second grace; KILL process group; reap; hard SIGKILL harness watchdog at whole-run deadline"),
+            "sample TERM process group; one-second grace; KILL process group; reap; 64 MiB RLIMIT_FSIZE per launched process; hard SIGKILL harness watchdog at whole-run deadline"),
         "runtime_environment_policy": JSONValue(
             "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only"),
         "control_method": JSONValue(
@@ -3322,6 +3456,8 @@ int main(string[] args) {
             auto candidate = buildAttestedExecutable(args[4], candidateRoot);
             validateAttestation(baseline.attestation, baseline.snapshot.sha256);
             validateAttestation(candidate.attestation, candidate.snapshot.sha256);
+            requireSameBuildToolClosure(baseline.attestation,
+                candidate.attestation);
             require(baseline.attestation["source_sha"].str == args[3] &&
                 candidate.attestation["source_sha"].str == args[5],
                 "attested coordination source revision differs");

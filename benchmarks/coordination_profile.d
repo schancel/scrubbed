@@ -4,7 +4,8 @@ module benchmarks.coordination_profile;
 import core.atomic : atomicLoad, atomicStore;
 import core.stdc.errno : EINTR, errno;
 import core.sys.posix.signal : posixKill = kill, SIGKILL, SIGTERM;
-import core.sys.posix.sys.resource : rusage;
+import core.sys.posix.sys.resource : RLIMIT_FSIZE, getrlimit, rlimit, rusage,
+    setrlimit;
 import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IWUSR, S_IXUSR,
     S_IRWXU;
 import core.sys.posix.unistd : execv, getpid, link, setpgid;
@@ -93,13 +94,6 @@ private void armWholeRunWatchdog(MonoTime deadline) {
     });
     watchdog.isDaemon = true;
     watchdog.start();
-}
-
-private void registerProcessGroup(int pid) {
-    processGroupMutex.lock();
-    if (watchdogFiring) posixKill(-pid, SIGKILL);
-    else activeProcessGroups ~= pid;
-    processGroupMutex.unlock();
 }
 
 private void unregisterProcessGroup(int pid) {
@@ -372,20 +366,41 @@ private bool processDisappeared(int pid, MonoTime deadline) {
 
 private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         File stdoutFile, File stderrFile,
-        const string[string] environment_, MonoTime deadline) {
-    auto child = spawnProcess([launcherPath, "--exec-child", readyPath] ~
-        command, stdinFile, stdoutFile, stderrFile, environment_, Config.newEnv);
+        const string[string] environment_, MonoTime deadline,
+        long registrationDelayMilliseconds = 0,
+        ulong fileLimitBytes = diagnosticFileMaxBytes) {
+    // Keep child creation and registration in the same critical section. The
+    // watchdog cannot snapshot an empty registry after a child has created a
+    // separate process group but before the parent records its ownership.
+    processGroupMutex.lock();
+    if (watchdogFiring) {
+        processGroupMutex.unlock();
+        need(false, "whole-run watchdog fired before child launch");
+    }
+    Pid child;
+    try child = spawnProcess([launcherPath, "--exec-child", readyPath,
+            fileLimitBytes.to!string] ~ command, stdinFile, stdoutFile,
+        stderrFile, environment_, Config.newEnv);
+    catch (Exception error) {
+        processGroupMutex.unlock();
+        throw error;
+    }
     auto readyDeadline = MonoTime.currTime + seconds(2);
     if (deadline < readyDeadline) readyDeadline = deadline;
     while (!exists(readyPath) && MonoTime.currTime < readyDeadline)
         Thread.sleep(1.msecs);
     if (!exists(readyPath)) {
         int status; rusage usage;
-        if (posixKill(child.processID, SIGKILL) == 0)
-            reapBlocking(child.processID, status, usage);
+        posixKill(-child.processID, SIGKILL);
+        posixKill(child.processID, SIGKILL);
+        reapBlocking(child.processID, status, usage);
+        processGroupMutex.unlock();
         need(false, "child process group did not become ready");
     }
-    registerProcessGroup(child.processID);
+    if (registrationDelayMilliseconds > 0)
+        Thread.sleep(msecs(registrationDelayMilliseconds));
+    activeProcessGroups ~= child.processID;
+    processGroupMutex.unlock();
     return child;
 }
 
@@ -703,6 +718,34 @@ private void runSelfTest(string harnessPath) {
     environment["SCRUBBED_DURABLE_METRICS_V1"] = "ambient-must-not-leak";
     invoke(environmentProbe, root, root, root, 1, 1, root, false,
         fileDigest(environmentProbe));
+
+    auto overflowProbe = buildPath(root, "diagnostic-overflow-probe");
+    write(overflowProbe, "#!/bin/sh\n" ~
+        "/bin/dd if=/dev/zero bs=1048576 count=2 2>/dev/null\n");
+    need(chmod(overflowProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
+        "cannot make diagnostic overflow probe executable");
+    auto overflowOut = buildPath(root, "diagnostic-overflow.out");
+    auto overflowErr = buildPath(root, "diagnostic-overflow.err");
+    auto overflowReady = buildPath(root, "diagnostic-overflow.ready");
+    auto overflowInputFile = File("/dev/null", "rb");
+    auto overflowOutputFile = File(overflowOut, "wb");
+    auto overflowErrorFile = File(overflowErr, "wb");
+    enum testFileLimit = 1024UL * 1024;
+    auto overflowChild = spawnGrouped([overflowProbe], overflowReady,
+        overflowInputFile, overflowOutputFile, overflowErrorFile,
+        childEnvironment(false), MonoTime.currTime + seconds(5), 0,
+        testFileLimit);
+    overflowInputFile.close(); overflowOutputFile.close();
+    overflowErrorFile.close();
+    int overflowStatus; rusage overflowUsage;
+    reapBlocking(overflowChild.processID, overflowStatus, overflowUsage);
+    auto overflowGroupClean = finishExitedProcessGroup(
+        overflowChild.processID);
+    need(overflowGroupClean &&
+        (!WIFEXITED(overflowStatus) || WEXITSTATUS(overflowStatus) != 0) &&
+        getSize(overflowOut) <= testFileLimit,
+        "diagnostic output exceeded its write-time file-size limit");
+
     auto leakyProbe = buildPath(root, "leaky-success-probe");
     auto leakyPidPath = buildPath(root, "leaky-success-descendant.pid");
     write(leakyProbe, "#!/bin/sh\n" ~
@@ -1056,7 +1099,7 @@ private void runComparison(string[] args) {
         "whole_run_timeout_seconds": JSONValue(wholeRunTimeoutSeconds),
         "sampler_timeout_seconds": JSONValue(samplerTimeoutSeconds),
         "termination_policy": JSONValue(
-            "sample TERM process group; one-second grace; KILL process group; reap; hard SIGKILL harness watchdog at whole-run deadline"),
+            "sample TERM process group; one-second grace; KILL process group; reap; 64 MiB RLIMIT_FSIZE per launched process; hard SIGKILL harness watchdog at whole-run deadline"),
         "runtime_environment_policy": JSONValue(
             "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only"),
         "control_method": JSONValue(
@@ -1312,11 +1355,22 @@ private void runAttribution(string[] args) {
 
 void main(string[] args) {
     launcherPath = absolutePath(args[0]);
-    if (args.length >= 4 && args[1] == "--exec-child") {
+    if (args.length >= 5 && args[1] == "--exec-child") {
         need(setpgid(0, 0) == 0, "child process group could not be created");
+        auto requestedLimit = args[3].to!ulong;
+        need(requestedLimit > 0 && requestedLimit <= diagnosticFileMaxBytes,
+            "child file-size limit is invalid");
+        rlimit fileLimit;
+        need(getrlimit(RLIMIT_FSIZE, &fileLimit) == 0,
+            "child file-size limit could not be read");
+        if (fileLimit.rlim_max < requestedLimit)
+            requestedLimit = fileLimit.rlim_max;
+        fileLimit.rlim_cur = requestedLimit;
+        need(setrlimit(RLIMIT_FSIZE, &fileLimit) == 0,
+            "child file-size limit could not be installed");
         write(args[2], "ready");
         const(char)*[] childArguments;
-        foreach (argument; args[3 .. $])
+        foreach (argument; args[4 .. $])
             childArguments ~= argument.toStringz;
         childArguments ~= null;
         execv(childArguments[0], childArguments.ptr);
@@ -1333,7 +1387,7 @@ void main(string[] args) {
         auto probeOutput = File(probeOut, "wb");
         auto probeError = File(probeErr, "wb");
         spawnGrouped([args[2]], probeReady, probeInput, probeOutput,
-            probeError, childEnvironment(false), wholeRunDeadline);
+            probeError, childEnvironment(false), wholeRunDeadline, 1_500);
         probeInput.close(); probeOutput.close(); probeError.close();
         Thread.sleep(seconds(30));
         need(false, "whole-run watchdog probe survived");

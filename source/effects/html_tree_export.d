@@ -3,7 +3,6 @@ module effects.html_tree_export;
 
 import domain.document : Document;
 import effects.html_tree : HtmlNodeKind, HtmlTree;
-import std.conv : to;
 import std.exception : enforce;
 
 enum size_t maxTreeJsonBytes = 4 * 1024 * 1024;
@@ -14,11 +13,27 @@ class HtmlTreeOutputLimit : Exception {
 
 private struct Writer {
     char[] bytes;
+    version (unittest) size_t putCalls;
+    version (unittest) size_t lastPutLength;
 
     void put(string value) pure {
         if (value.length > maxTreeJsonBytes - bytes.length)
             throw new HtmlTreeOutputLimit;
+        version (unittest) {
+            ++putCalls;
+            lastPutLength = value.length;
+        }
         bytes ~= value;
+    }
+
+    void putDecimal(size_t value) pure {
+        char[size_t.sizeof * 3] digits;
+        size_t start = digits.length;
+        do {
+            digits[--start] = cast(char)('0' + value % 10);
+            value /= 10;
+        } while (value);
+        put(cast(string)digits[start .. $]);
     }
 
     void quoted(string value) pure {
@@ -70,7 +85,8 @@ string serializeTreeJson(Document document, const ref HtmlTree tree) pure {
         writer.put(`{"kind":`);
         writer.quoted(node.kind == HtmlNodeKind.element ? "element" : "text");
         writer.put(`,"parent":`);
-        writer.put(node.parentIndex == size_t.max ? "null" : node.parentIndex.to!string);
+        if (node.parentIndex == size_t.max) writer.put("null");
+        else writer.putDecimal(node.parentIndex);
         writer.put(`,"name":`);
         writer.quoted(node.name);
         writer.put(`,"attributes":[`);
@@ -117,4 +133,19 @@ unittest {
     controls[] = '\u0001';
     tree.nodes[0].text = controls.idup;
     assertThrown!HtmlTreeOutputLimit(serializeTreeJson(document, tree));
+
+    foreach (value; [size_t(0), 9, 10, 99, 100, size_t.max]) {
+        Writer decimal;
+        decimal.putDecimal(value);
+        import std.conv : to;
+        assert(decimal.bytes == value.to!string);
+        assert(decimal.putCalls == 1 && decimal.lastPutLength == decimal.bytes.length);
+    }
+    Writer exactFit;
+    exactFit.bytes.length = maxTreeJsonBytes - 3;
+    exactFit.putDecimal(100);
+    assert(exactFit.bytes.length == maxTreeJsonBytes);
+    Writer oneOver;
+    oneOver.bytes.length = maxTreeJsonBytes - 2;
+    assertThrown!HtmlTreeOutputLimit(oneOver.putDecimal(100));
 }

@@ -38,6 +38,22 @@ private string canonical(string path) {
     return fromStringz(resolved).idup;
 }
 
+private string legacyPlainTreeJson(Document document, const ref HtmlTree tree) {
+    auto source = document.source;
+    string result = `{"version":"tree-json:v1","documentId":"` ~ document.id.text ~
+        `","source":{"namespace":"` ~ source.datasetNamespace ~
+        `","sourceKey":"` ~ source.sourceKey ~ `","recordKey":"` ~
+        source.recordKey ~ `"},"outputName":"` ~ document.outputName.text ~
+        `","nodes":[`;
+    foreach (index, node; tree.nodes) {
+        if (index) result ~= ",";
+        result ~= `{"kind":"element","parent":` ~
+            (node.parentIndex == size_t.max ? "null" : node.parentIndex.to!string) ~
+            `,"name":"","attributes":[],"text":""}`;
+    }
+    return result ~ "]}\n";
+}
+
 int main(string[] args) {
     need(args.length == 2, "usage: cli_check <release executable>");
     need(availableStages().find("html-tree-json") !is null,
@@ -66,6 +82,18 @@ int main(string[] args) {
     try serializeTreeJson(syntheticDocument, syntheticTree);
     catch (HtmlTreeOutputLimit) outputLimitRejected = true;
     need(outputLimitRejected, "defensive serializer output cap accepted expanded data");
+    foreach (nodeCount; [size_t(102), size_t(8192)]) {
+        HtmlTree ordinalTree;
+        ordinalTree.nodes.length = nodeCount;
+        foreach (i, ref node; ordinalTree.nodes) {
+            node.kind = HtmlNodeKind.element;
+            node.parentIndex = i ? i - 1 : size_t.max;
+        }
+        auto ordinalWire = serializeTreeJson(syntheticDocument, ordinalTree);
+        need(ordinalWire == legacyPlainTreeJson(syntheticDocument, ordinalTree),
+            nodeCount == 102 ? "shallow parent ordinal bytes" :
+                "maximum reachable parent ordinal bytes");
+    }
     auto executable = args[1];
     auto root = buildPath(tempDir, "scrubbed-html-cli-" ~ randomUUID.toString);
     mkdir(root);

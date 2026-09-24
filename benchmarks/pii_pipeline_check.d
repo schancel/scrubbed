@@ -36,6 +36,8 @@ private enum handoffStdout =
     `{"text":"Contact ******************* from **********.\n"}` ~ "\n";
 private enum analyzerIdentity = "pii.four-class/four-class:v1";
 private enum policyIdentity = "pii-policy:v1";
+private enum olderResolvableRevision =
+    "3075fdf6ab7627f3ca411438de1e113b2d2fa75b";
 
 private void need(bool value, string message) {
     if (!value) throw new Exception("pii pipeline evidence: " ~ message);
@@ -74,6 +76,24 @@ private void contentPrivate(string label, string[] channels) {
         foreach (canary; ["scholar@example.org", "@example.org",
                 "192.0.2.44", "private-canary"])
             need(!channel.canFind(canary), label ~ " leaked content canary");
+}
+
+private bool privacyRejects(scope void delegate() operation) {
+    try operation();
+    catch (Exception) return true;
+    return false;
+}
+
+private void privacyNegativeControls() {
+    foreach (route; ["dry", "explain", "durable-stale"])
+        foreach (channel; ["stdout", "stderr"])
+            foreach (canary; ["scholar@example.org", "@example.org",
+                    "192.0.2.44", "private-canary"])
+                need(privacyRejects(() {
+                    contentPrivate(route ~ " " ~ channel,
+                        ["diagnostic:" ~ canary]);
+                }), "privacy negative control survived: " ~ route ~ "/" ~
+                    channel ~ "/" ~ canary);
 }
 
 private string disabledConfig() {
@@ -266,13 +286,14 @@ private JSONValue gcEvidence(string binary, string root, string inputPath) {
 }
 
 private JSONValue fileManifest(string root) {
+    auto canonicalRoot = absolutePath(root);
     string[] paths;
-    foreach (entry; dirEntries(root, SpanMode.depth, false))
-        if (entry.isFile) paths ~= relativePath(entry.name, root);
+    foreach (entry; dirEntries(canonicalRoot, SpanMode.depth, false))
+        if (entry.isFile) paths ~= relativePath(entry.name, canonicalRoot);
     paths.sort;
     JSONValue[] result;
     foreach (path; paths) {
-        auto bytes = cast(const(ubyte)[]) read(buildPath(root, path));
+        auto bytes = cast(const(ubyte)[]) read(buildPath(canonicalRoot, path));
         result ~= JSONValue(["path": JSONValue(path),
             "bytes": JSONValue(cast(long) bytes.length),
             "sha256": JSONValue(hashBytes(bytes))]);
@@ -281,6 +302,7 @@ private JSONValue fileManifest(string root) {
 }
 
 private JSONValue runMatrix(string binary, string root) {
+    privacyNegativeControls();
     auto treeInput = buildPath(root, "tree-input");
     mkdirRecurse(treeInput);
     foreach (i; 0 .. 4)
@@ -326,13 +348,27 @@ private JSONValue runMatrix(string binary, string root) {
         validation.stderrText]);
     auto dry = invoke([binary, "run", "--input", treeInput, "--output",
         buildPath(root, "dry-out"), "--sidecar-output",
-        buildPath(root, "dry-side"), "--threads", "1", "--dry-run",
-        "--explain"] ~ stageArgs("mask"), root, "dry-explain");
+        buildPath(root, "dry-side"), "--threads", "1", "--dry-run"] ~
+        stageArgs("mask"), root, "dry");
     need(dry.status == 0 && !exists(buildPath(root, "dry-out")) &&
-        !exists(buildPath(root, "dry-side")) &&
-        !dry.stdoutText.canFind("scholar@example.org") &&
-        !dry.stderrText.canFind("scholar@example.org"),
-        "dry-run/explain route or diagnostic privacy failed");
+        !exists(buildPath(root, "dry-side")),
+        "dry-run route failed");
+    contentPrivate("dry diagnostics", [dry.stdoutText,
+        dry.stderrText]);
+    auto explainOutput = buildPath(root, "explain-out");
+    auto explainSide = buildPath(root, "explain-side");
+    auto explained = invoke([binary, "run", "--input", treeInput, "--output",
+        explainOutput, "--sidecar-output", explainSide, "--threads", "1",
+        "--explain"] ~ stageArgs("mask"), root, "explain");
+    need(explained.status == 0, "explain route failed");
+    contentPrivate("explain diagnostics", [explained.stdoutText,
+        explained.stderrText]);
+    foreach (i; 0 .. 4) {
+        contentPrivate("explain transformed output", [readText(buildPath(
+            explainOutput, i.to!string ~ ".txt"))]);
+        contentPrivate("explain audit", [readText(buildPath(explainSide,
+            i.to!string ~ ".txt.pii-audit.json"))]);
+    }
 
     auto jsonlInput = buildPath(root, "input.jsonl");
     write(jsonlInput, `{"text":"scholar@example.org","keep":7}` ~ "\n");
@@ -392,22 +428,19 @@ private JSONValue runMatrix(string binary, string root) {
         "--sidecar-output", durableSide, "--manifest", manifest,
         "--threads", "1"] ~ stageArgs("mask");
     auto first = invoke(args, root, "durable-first");
-    need(first.status == 0 && !first.stdoutText.canFind("scholar@example.org") &&
-        !first.stderrText.canFind("scholar@example.org"),
-        "durable initial run failed");
+    need(first.status == 0, "durable initial run failed");
     contentPrivate("durable first", [readText(durableOut),
         readText(durableSide), first.stdoutText, first.stderrText]);
     auto expectedSide = read(durableSide);
     write(durableSide, "stale-sidecar");
     auto stale = invoke(args, root, "durable-stale");
-    need(stale.status != 0 && !stale.stdoutText.canFind("scholar@example.org") &&
-        !stale.stderrText.canFind("scholar@example.org"),
+    need(stale.status != 0,
         "stale sidecar was accepted on restart");
+    contentPrivate("durable stale diagnostics", [stale.stdoutText,
+        stale.stderrText]);
     auto retried = invoke(args ~ ["--manifest-retry"], root, "durable-retry");
-    need(retried.status == 0 && read(durableSide) == expectedSide &&
-        !retried.stdoutText.canFind("scholar@example.org") &&
-        !retried.stderrText.canFind("scholar@example.org"),
-        "durable retry or diagnostic privacy failed");
+    need(retried.status == 0 && read(durableSide) == expectedSide,
+        "durable retry failed");
     contentPrivate("durable retry", [readText(durableOut),
         readText(durableSide), retried.stdoutText, retried.stderrText]);
     return JSONValue([
@@ -424,6 +457,15 @@ private JSONValue runMatrix(string binary, string root) {
         "thread_manifests": JSONValue([
             "threads_1": JSONValue(["primary": firstTree, "sidecar": firstSide]),
             "threads_4": JSONValue(["primary": fourthTree, "sidecar": fourthSide])])]);
+}
+
+private JSONValue deterministicMatrix(string binary) {
+    enum root = ".dub/pii-pipeline-matrix-v1";
+    if (exists(root)) rmdirRecurse(root);
+    mkdirRecurse(root);
+    scope (exit) if (exists(root)) rmdirRecurse(root);
+    write(buildPath(root, "mask.json"), piiConfig("mask"));
+    return runMatrix(binary, root);
 }
 
 private JSONValue canonicalHandoffArgv() {
@@ -542,6 +584,8 @@ private void validate(JSONValue report, string binary = null) {
             "finding_fixture_sha256", "disabled_config_sha256",
             "report_config_sha256", "mask_config_sha256", "redact_config_sha256"])
         need(digest(identities[key].str), "invalid identity digest: " ~ key);
+    need(revisionDigest(identities["source_tree_git_oid"].str),
+        "invalid source tree identity");
     need(identities["clean_fixture_sha256"].str == hashText(cleanFixture()) &&
         identities["finding_fixture_sha256"].str == hashText(heavyFixture()) &&
         identities["disabled_config_sha256"].str == hashText(disabledConfig()) &&
@@ -560,10 +604,17 @@ private void validate(JSONValue report, string binary = null) {
         ":source/stages/pii_four_class.d"]);
     auto revisionAudit = execute(["git", "show", revision ~
         ":source/effects/pii_audit.d"]);
+    auto revisionHarness = execute(["git", "show", revision ~
+        ":benchmarks/pii_pipeline_check.d"]);
+    auto revisionTree = execute(["git", "rev-parse", revision ~ "^{tree}"]);
     need(revisionStage.status == 0 && revisionAudit.status == 0 &&
+        revisionHarness.status == 0 && revisionTree.status == 0 &&
         hashText(revisionStage.output) == identities["stage_source_sha256"].str &&
-        hashText(revisionAudit.output) == identities["audit_source_sha256"].str,
-        "source revision is not bound to recorded production sources");
+        hashText(revisionAudit.output) == identities["audit_source_sha256"].str &&
+        hashText(revisionHarness.output) ==
+            identities["harness_source_sha256"].str &&
+        revisionTree.output.strip == identities["source_tree_git_oid"].str,
+        "source revision is not bound to the exact recorded source tree");
     auto metrics = report["metrics"].array;
     need(metrics.length == 8, "metric cardinality mismatch");
     string[string] documentByFixture;
@@ -627,6 +678,9 @@ private void validate(JSONValue report, string binary = null) {
     }
     need(manifests["threads_1"] == manifests["threads_4"],
         "one/four-thread complete manifests differ");
+    if (binary.length)
+        need(matrix == deterministicMatrix(binary),
+            "actual-binary evidence differs from fresh bounded rerun");
     auto gc = report["gc"];
     if (gc["status"].str == "SUPPORTED")
         need(gc["allocated_bytes"].integer >= 0 &&
@@ -708,8 +762,12 @@ private void mustReject(JSONValue good, string binary,
 
 private void mutationControls(JSONValue good, string binary) {
     mustReject(good, binary, (ref JSONValue r) {
-        r["source_revision"] = JSONValue("0".replicate(40));
-    }, "wrong source revision");
+        r["source_revision"] = JSONValue(olderResolvableRevision);
+    }, "older resolvable source revision");
+    mustReject(good, binary, (ref JSONValue r) {
+        r["identities"]["source_tree_git_oid"] =
+            JSONValue("0".replicate(40));
+    }, "wrong source tree identity");
     mustReject(good, binary, (ref JSONValue r) {
         auto text = "{";
         r["handoff"]["expected_audit_utf8"] = JSONValue(text);
@@ -794,6 +852,12 @@ private void mutationControls(JSONValue good, string binary) {
             [0]["sha256"] = JSONValue(hashText("wrong-manifest"));
     }, "thread manifest digest");
     mustReject(good, binary, (ref JSONValue r) {
+        foreach (threads; ["threads_1", "threads_4"])
+            foreach (ref item; r["actual_binary"]["thread_manifests"]
+                    [threads]["primary"].array)
+                item["sha256"] = JSONValue("0".replicate(64));
+    }, "paired same-value thread manifest rebinding");
+    mustReject(good, binary, (ref JSONValue r) {
         r["actual_binary"]["thread_manifests"]["threads_4"]["sidecar"]
             .array.length = 3;
     }, "thread manifest cardinality");
@@ -841,12 +905,13 @@ private JSONValue generate(string binary, string reportPath) {
         write(buildPath(root, policy ~ ".json"), policy == "disabled" ?
             disabledConfig() : piiConfig(policy));
     auto metrics = deterministicMetrics(binary);
-    auto matrix = runMatrix(binary, root);
+    auto matrix = deterministicMatrix(binary);
     auto compiler = execute(["ldc2", "--version"]);
     auto compilerPath = execute(["which", "ldc2"]);
     auto revision = execute(["git", "rev-parse", "HEAD"]);
+    auto sourceTree = execute(["git", "rev-parse", "HEAD^{tree}"]);
     need(compiler.status == 0 && compilerPath.status == 0 &&
-        revision.status == 0,
+        revision.status == 0 && sourceTree.status == 0,
         "compiler/source identity probe failed");
     auto resolvedCompiler = compilerPath.output.strip;
     auto report = JSONValue([
@@ -857,6 +922,7 @@ private JSONValue generate(string binary, string reportPath) {
             "version": JSONValue(compiler.output.splitLines[0]),
             "flags": JSONValue(flags)]),
         "identities": JSONValue([
+            "source_tree_git_oid": JSONValue(sourceTree.output.strip),
             "target_binary_sha256": JSONValue(hashFile(binary)),
             "harness_source_sha256": JSONValue(hashFile(
                 "benchmarks/pii_pipeline_check.d")),

@@ -16,7 +16,7 @@ class HtmlMarkdownOutputLimit : Exception {
 private struct Writer {
     char[] bytes;
 
-    void put(string value) pure {
+    void put(scope const(char)[] value) pure {
         if (value.length > maxMarkdownBytes - bytes.length)
             throw new HtmlMarkdownOutputLimit;
         bytes ~= value;
@@ -251,20 +251,27 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     if (name == "img") {
         auto alt = clean(attribute(node, "alt"));
         auto src = attribute(node, "src");
-        if (safeTarget(src)) writer.put("![" ~ alt ~ "](<" ~
-            markdownTarget(src) ~ ">)");
-        else writer.putText(alt);
+        if (safeTarget(src)) {
+            writer.put("![");
+            writer.put(alt);
+            writer.put("](<");
+            writer.put(markdownTarget(src));
+            writer.put(">)");
+        } else writer.putText(alt);
         return;
     }
     if (name == "pre") {
         auto content = clean(nodeText(tree, index), true);
-        auto fence = new char[longestRun(content, '`') + 1 > 3 ?
-            longestRun(content, '`') + 1 : 3];
+        auto fenceLength = longestRun(content, '`') + 1;
+        if (fenceLength < 3) fenceLength = 3;
+        auto fence = new char[fenceLength];
         fence[] = '`';
         writer.block();
-        writer.put(fence.idup ~ "\n" ~ content);
+        writer.put(fence);
+        writer.put("\n");
+        writer.put(content);
         if (!content.length || content[$ - 1] != '\n') writer.put("\n");
-        writer.put(fence.idup);
+        writer.put(fence);
         writer.block();
         return;
     }
@@ -273,10 +280,12 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         if (!content.length) return;
         auto ticks = new char[longestRun(content, '`') + 1];
         ticks[] = '`';
-        auto delimiter = ticks.idup;
-        if (content[0] == '`' || content[$ - 1] == '`')
-            writer.put(delimiter ~ " " ~ content ~ " " ~ delimiter);
-        else writer.put(delimiter ~ content ~ delimiter);
+        const padded = content[0] == '`' || content[$ - 1] == '`';
+        writer.put(ticks);
+        if (padded) writer.put(" ");
+        writer.put(content);
+        if (padded) writer.put(" ");
+        writer.put(ticks);
         return;
     }
     if (name == "ul" || name == "ol") {
@@ -374,7 +383,11 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         const safe = safeTarget(href);
         if (safe) writer.put("[");
         renderChildren(tree, index, writer, depth + 1);
-        if (safe) writer.put("](<" ~ markdownTarget(href) ~ ">)");
+        if (safe) {
+            writer.put("](<");
+            writer.put(markdownTarget(href));
+            writer.put(">)");
+        }
     } else renderChildren(tree, index, writer, depth + 1);
     if (block) writer.block();
 }

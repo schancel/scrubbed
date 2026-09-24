@@ -402,7 +402,7 @@ unbounded profile from an option value.
 ```sh
 ldc2 -O3 -release -preview=dip1000 -d-version=MojibakeWorkProbe \
   -d-version=MojibakeWorkO3Release \
-  -d-version=MojibakeBase_b51a5155d4f1edab3866c75e1ba3547a70a00848 \
+  -d-version=MojibakeBase_c9c6937355bcdbbb7b68b416352ec9b939eff0ad \
   -Isource -J. \
   benchmarks/mojibake_work.d source/filters/mojibake.d source/pipeline.d \
   -of=/tmp/scrubbed-mojibake-work
@@ -416,6 +416,12 @@ also checks the exact invalid-UTF-8 exception, fixed pass capacity, and two
 concurrent caller-owned runs. The JSON output retains every entered pass and
 separate Latin-1/CP1252 counts for legacy-byte mapping, sequence scans,
 encodability, candidate decoding, plausibility, grouping and materialization.
+Schema v4 also distinguishes direct CP1252 inverse-lookup calls from eliminated
+linear table-entry visits. Across the ten authored cases, the frozen merged
+base visits 1,003 CP1252 table entries; the direct switch performs 69 inverse
+lookups and visits no table entries. Per-case lookup-call goldens are enforced,
+and all other shared work counters and outputs remain unchanged. This
+authorizes only the inverse-map replacement, not a wall-time claim.
 It embeds, hashes, and validates the exact probe and harness sources. A required
 build marker and a separate compile-time assertion bind the frozen source base.
 The report also hashes every case input and its option-bearing identity and

@@ -31,21 +31,56 @@ dchar cp1252ToUnicode(ubyte b) pure {
     return cast(dchar) b;
 }
 
+/// Map the non-identity Unicode portion of CP1252 without linearly scanning
+/// the forward table on every candidate scalar.
+private bool cp1252FromUnicode(dchar c, out ubyte result) pure {
+    switch (c) {
+    case 0x20AC: result = 0x80; return true;
+    case 0x201A: result = 0x82; return true;
+    case 0x0192: result = 0x83; return true;
+    case 0x201E: result = 0x84; return true;
+    case 0x2026: result = 0x85; return true;
+    case 0x2020: result = 0x86; return true;
+    case 0x2021: result = 0x87; return true;
+    case 0x02C6: result = 0x88; return true;
+    case 0x2030: result = 0x89; return true;
+    case 0x0160: result = 0x8A; return true;
+    case 0x2039: result = 0x8B; return true;
+    case 0x0152: result = 0x8C; return true;
+    case 0x017D: result = 0x8E; return true;
+    case 0x2018: result = 0x91; return true;
+    case 0x2019: result = 0x92; return true;
+    case 0x201C: result = 0x93; return true;
+    case 0x201D: result = 0x94; return true;
+    case 0x2022: result = 0x95; return true;
+    case 0x2013: result = 0x96; return true;
+    case 0x2014: result = 0x97; return true;
+    case 0x02DC: result = 0x98; return true;
+    case 0x2122: result = 0x99; return true;
+    case 0x0161: result = 0x9A; return true;
+    case 0x203A: result = 0x9B; return true;
+    case 0x0153: result = 0x9C; return true;
+    case 0x017E: result = 0x9E; return true;
+    case 0x0178: result = 0x9F; return true;
+    default: return false;
+    }
+}
+
 private enum LegacyEncoding { latin1, cp1252 }
+
+private bool usesCp1252InverseLookup(dchar c,
+        LegacyEncoding encoding) pure {
+    return encoding == LegacyEncoding.cp1252 &&
+        !(c <= 0xFF && (c <= 0x7F || c >= 0xA0));
+}
 
 private bool legacyByte(dchar c, LegacyEncoding encoding, out ubyte result) pure {
     if (c <= 0xFF && (encoding == LegacyEncoding.latin1 || c <= 0x7F || c >= 0xA0)) {
         result = cast(ubyte) c;
         return true;
     }
-    if (encoding == LegacyEncoding.cp1252) {
-        foreach (i, mapped; cp1252HighRange) {
-            if (mapped == c) {
-                result = cast(ubyte)(0x80 + i);
-                return true;
-            }
-        }
-    }
+    if (usesCp1252InverseLookup(c, encoding))
+        return cp1252FromUnicode(c, result);
     return false;
 }
 
@@ -543,6 +578,7 @@ version (MojibakeWorkProbe) {
         ulong legacyByteCalls;
         ulong legacyByteScalars;
         ulong cp1252TableEntries;
+        ulong cp1252LookupCalls;
         ulong legacyByteMapped;
         ulong legacyByteUnmapped;
         ulong sequenceCalls;
@@ -594,14 +630,9 @@ version (MojibakeWorkProbe) {
             out ubyte result, ref MojibakeEncodingWork work) pure {
         ++work.legacyByteCalls;
         ++work.legacyByteScalars;
+        const inverseLookup = usesCp1252InverseLookup(c, encoding);
         const mapped = legacyByte(c, encoding, result);
-        if (encoding == LegacyEncoding.cp1252 &&
-                !(c <= 0xFF && (c <= 0x7F || c >= 0xA0))) {
-            foreach (candidate; cp1252HighRange) {
-                ++work.cp1252TableEntries;
-                if (candidate == c) break;
-            }
-        }
+        if (inverseLookup) ++work.cp1252LookupCalls;
         if (mapped) ++work.legacyByteMapped;
         else ++work.legacyByteUnmapped;
         return mapped;
@@ -954,6 +985,15 @@ static this() {
 unittest {
     import pipeline : FilterOption, Pipeline, TypedFilterSpec;
     import std.exception : assertThrown, enforce;
+    foreach (value; 0 .. 256) {
+        const byteValue = cast(ubyte) value;
+        const scalar = cp1252ToUnicode(byteValue);
+        if (byteValue >= 0x80 && byteValue <= 0x9F &&
+                scalar == dchar.init) continue;
+        ubyte roundTripped;
+        assert(legacyByte(scalar, LegacyEncoding.cp1252, roundTripped));
+        assert(roundTripped == byteValue);
+    }
     enforce(mojibakeBadness("CafÃ© at noon; the sign said rÃ©sumÃ©.\n") == 7,
         "mojibake scorer rule weights changed on the benchmark fixture");
     auto bytes = legacyBytes("schÃ¶n", LegacyEncoding.cp1252);

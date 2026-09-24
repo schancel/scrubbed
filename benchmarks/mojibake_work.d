@@ -21,7 +21,7 @@ version (LDC) {} else static assert(false,
     "mojibake work evidence requires the pinned LDC recipe");
 version (MojibakeWorkO3Release) {} else static assert(false,
     "mojibake work evidence requires the O3/release build marker");
-version (MojibakeBase_b51a5155d4f1edab3866c75e1ba3547a70a00848) {}
+version (MojibakeBase_c9c6937355bcdbbb7b68b416352ec9b939eff0ad) {}
 else static assert(false,
     "mojibake work evidence requires the frozen-base build marker");
 version (assert) static assert(false,
@@ -31,19 +31,19 @@ static assert(__VERSION__ == 2113,
 
 private enum probeSourcePath = "source/filters/mojibake.d";
 private enum harnessSourcePath = "benchmarks/mojibake_work.d";
-private enum sourceBase = "b51a5155d4f1edab3866c75e1ba3547a70a00848";
+private enum sourceBase = "c9c6937355bcdbbb7b68b416352ec9b939eff0ad";
 static assert(sourceBase ==
-    "b51a5155d4f1edab3866c75e1ba3547a70a00848",
+    "c9c6937355bcdbbb7b68b416352ec9b939eff0ad",
     "mojibake work evidence source base changed");
 private enum embeddedProbeSource = import("source/filters/mojibake.d");
 private enum embeddedHarnessSource = import("benchmarks/mojibake_work.d");
 private enum expectedProbeSourceSha256 =
-    "7156FA94DCDE593D96909B12728944C8D600D4443277F080BD5C361641D3A432";
+    "58DDE10FE82360870A005BA5F1D3A79EAEEA1CC33CECF2D569CDE8A64A8FDEF8";
 private enum expectedCompilerVersion =
     "LDC - the LLVM D compiler (1.43.0):";
 private enum buildFlags = "-O3 -release -d-version=MojibakeWorkProbe " ~
     "-d-version=MojibakeWorkO3Release " ~
-    "-d-version=MojibakeBase_b51a5155d4f1edab3866c75e1ba3547a70a00848 " ~
+    "-d-version=MojibakeBase_c9c6937355bcdbbb7b68b416352ec9b939eff0ad " ~
     "-Isource -J.";
 private enum buildMode = "O3-release";
 
@@ -100,6 +100,7 @@ private JSONValue encodingJson(ref const MojibakeEncodingWork work) {
     value["legacy_byte_calls"] = cast(long) work.legacyByteCalls;
     value["legacy_byte_scalars"] = cast(long) work.legacyByteScalars;
     value["cp1252_table_entries"] = cast(long) work.cp1252TableEntries;
+    value["cp1252_lookup_calls"] = cast(long) work.cp1252LookupCalls;
     value["legacy_byte_mapped"] = cast(long) work.legacyByteMapped;
     value["legacy_byte_unmapped"] = cast(long) work.legacyByteUnmapped;
     value["sequence_calls"] = cast(long) work.sequenceCalls;
@@ -192,7 +193,7 @@ private JSONValue caseJson(ref const Case spec) {
 
 private JSONValue buildReport() {
     JSONValue root;
-    root["schema"] = "scrubbed-mojibake-work-v3";
+    root["schema"] = "scrubbed-mojibake-work-v4";
     root["source_base"] = sourceBase;
     JSONValue attribution;
     attribution["probe_source_path"] = probeSourcePath;
@@ -208,7 +209,7 @@ private JSONValue buildReport() {
     root["attribution"] = attribution;
     root["ordinary_algorithm_changed"] = true;
     root["production_optimization_authorized"] = true;
-    root["reason"] = "exact work counters and unchanged output authorize bypassing impossible ASCII sequence starts in local repair";
+    root["reason"] = "exact inverse-map work counts and unchanged output authorize replacing the linear CP1252 table scan with direct lookup";
     JSONValue[] results;
     foreach (ref spec; cases) results ~= caseJson(spec);
     root["cases"] = JSONValue(results);
@@ -218,6 +219,24 @@ private JSONValue buildReport() {
 private void validatePublishedGoldens(ref const JSONValue report) {
     auto rows = report["cases"].array;
     enforce(rows.length == cases.length, "work case cardinality differs");
+
+    immutable long[10] expectedCp1252LookupCalls =
+        [0, 0, 0, 6, 3, 27, 18, 4, 0, 11];
+    long totalCp1252LookupCalls;
+    foreach (index, row; rows) {
+        long tableEntries;
+        long lookupCalls;
+        foreach (pass; row["passes"].array) {
+            tableEntries += pass["cp1252"]["cp1252_table_entries"].integer;
+            lookupCalls += pass["cp1252"]["cp1252_lookup_calls"].integer;
+        }
+        enforce(tableEntries == 0 &&
+            lookupCalls == expectedCp1252LookupCalls[index],
+            "CP1252 inverse-lookup golden differs");
+        totalCp1252LookupCalls += lookupCalls;
+    }
+    enforce(totalCp1252LookupCalls == 69,
+        "CP1252 inverse-lookup total differs");
 
     // These are the exact counts and outcomes published in the README.
     auto local = rows[6];
@@ -269,7 +288,7 @@ private void validatePublishedGoldens(ref const JSONValue report) {
 }
 
 private void validateReport(ref const JSONValue report) {
-    enforce(report["schema"].str == "scrubbed-mojibake-work-v3",
+    enforce(report["schema"].str == "scrubbed-mojibake-work-v4",
         "work evidence schema differs");
     enforce(report["source_base"].str == sourceBase,
         "work evidence source base differs");
@@ -318,11 +337,22 @@ private void selfTest() {
     auto report = buildReport();
     validateReport(report);
 
+    auto c1Control = measureMojibakeWork("Ã\u0080", 1);
+    enforce(c1Control.passes[0].cp1252.cp1252LookupCalls != 0 &&
+        c1Control.passes[0].cp1252.cp1252TableEntries == 0,
+        "CP1252 C1-control inverse lookup was not attributed");
+
     auto counterMutant = parseJSON(report.toString);
     counterMutant["cases"].array[6]["passes"].array[0]
         ["latin1"]["legacy_byte_calls"] = 39;
     expectInvalid(counterMutant,
         "published exact-count mutation was accepted");
+
+    auto lookupMutant = parseJSON(report.toString);
+    lookupMutant["cases"].array[6]["passes"].array[0]
+        ["cp1252"]["cp1252_lookup_calls"] = 19;
+    expectInvalid(lookupMutant,
+        "CP1252 inverse-lookup mutation was accepted");
 
     auto identityMutant = parseJSON(report.toString);
     identityMutant["attribution"]["probe_source_sha256"] =
@@ -396,8 +426,8 @@ private void selfTest() {
     enforce(outputs == ["Français", "🙂 schön 🐈"],
         "concurrent caller-owned probes interfere");
     writeln("mojibake work probe self-test passed: ", cases.length,
-        " equivalence cases, seven mutants, exact attribution/goldens, ",
-        "invalid UTF-8, fixed capacity, concurrent reuse");
+        " equivalence cases, eight mutants, exact attribution/goldens, ",
+        "C1 controls, invalid UTF-8, fixed capacity, concurrent reuse");
 }
 
 void main(string[] args) {

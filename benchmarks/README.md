@@ -174,7 +174,7 @@ allocation.
 |---|---|---|
 | mapped view -> borrowed `ContentPiece` | Descriptor retains a checked `DocumentViewOwner`; even an empty borrow fails after close. | No payload copy; mandatory zero-copy admission seam. |
 | `Content` descriptor snapshot/edit/split | Descriptor arrays may be copied, every borrow still requires its live owner, and split children may share immutable input. An owned fragment is compacted only when its backing allocation would exceed the same 2× plus 64 KiB retention bound. | Borrowed payloads are never copied. Allocation-sized owned fragments share storage; pathological shrinking edits copy only the surviving fragment. |
-| `Content` -> UTF-8 string | `composition.executor` appends pieces into a growing GC-owned byte array, validates it, and exposes the resulting owning string before the public filter ABI. | One logical payload copy; mandatory while filters accept `string`; allocation can exceed final payload bytes while the array grows. |
+| `Content` -> UTF-8 string | `composition.executor` and the selected-field JSONL sink use `Content.copy` to allocate the exact final byte length; the executor validates it before the public filter ABI. | One exact-size payload copy; mandatory while filters and JSONL field results accept owning `string` values. |
 | fused scalar run | Up to 16 consecutive caller-owned transducers borrow the input string and materialize one owning result. | One result materialization per fused run; longer runs intentionally form another bounded barrier. |
 | whole-text filter | The pure public filter may return the identical input, a borrowed prefix/suffix/interior/empty subslice, a partially overlapping slice, or distinct GC-owned storage. The probe uses integer byte intervals rather than ordering unrelated pointers and records borrowed/overlap/distinct calls and bytes without retaining mutable state. | Borrowed subslices are not materializations; partial overlaps are never reported as distinct. Distinct algorithm-owned work is not removable by orchestration evidence alone. |
 | filter result -> owned `ContentPiece` | The source-compatible public filter ABI still copies results. Built-ins may opt into a DIP1000-checked safe registration seam; `composition.executor` retains those immutable GC results only when the backing allocation is bounded. Unknown provenance, unsafe `NO_INTERIOR` subslices, empty interior slices, and GC backing larger than twice the logical length plus 64 KiB are copied. `ContentPiece` applies the same rule again when edits form owned subpieces. | Zero logical payload copies for allocation-sized results from the safe seam. For a 2 MiB result the release probe observed 224 bookkeeping bytes rather than the 2,101,472-byte baseline allocation; two 2 MiB results observed 448 bytes rather than 4,202,944. Legacy/custom callbacks keep copy isolation, and pathological shrinking slices retain at most 2× their logical size plus 64 KiB of backing. These are deterministic allocation observations, not wall-time claims. |
@@ -213,12 +213,13 @@ wall-time or throughput claim on the loaded development host.
 
 ### Exact-size content materialization work
 
-`content_materialize_work.d` compares the prior executor materialization path
+`content_materialize_work.d` compares the prior growable materialization path
 (checked `Content.stream` copy into its bounded buffer, followed by append into
-the result) with the exact-size `Content.copy` path used by the executor. The
-probe verifies identical bytes and post-owner-close lifetime, and accounts for
-the two former payload copies versus one exact-size payload copy and allocation.
-It deliberately makes no loaded-host timing claim.
+the result) with the exact-size `Content.copy` path used by the executor and
+selected-field JSONL sink. The probe verifies identical bytes and
+post-owner-close lifetime, and accounts for the two former payload copies
+versus one exact-size payload copy and allocation. It deliberately makes no
+loaded-host timing claim.
 
 ```sh
 ldc2 -i -O3 -release -preview=dip1000 \

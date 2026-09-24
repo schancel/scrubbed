@@ -3,6 +3,7 @@ module pipeline_resource_check;
 
 import std.conv : to;
 import std.algorithm.searching : canFind;
+import std.array : replicate;
 import std.file : readText;
 import std.json : JSONValue, parseJSON;
 import std.math : isFinite;
@@ -15,6 +16,53 @@ private bool digest(string value, size_t length) {
               (letter >= 'a' && letter <= 'f') ||
               (letter >= 'A' && letter <= 'F'))) return false;
     return true;
+}
+
+private bool validSdkIdentity(JSONValue attestation) {
+    try {
+        if (attestation["schema"].str !=
+                "scrubbed-build-attestation-v6") return true;
+        return digest(attestation["sdk_tree_content_sha256"].str, 64) &&
+            attestation["sdk_tree_entries"].integer > 0 &&
+            attestation["sdk_tree_bytes"].integer > 0;
+    } catch (Exception) { return false; }
+}
+
+private void selfTest() {
+    auto valid = JSONValue([
+        "schema": JSONValue("scrubbed-build-attestation-v6"),
+        "sdk_tree_content_sha256": JSONValue("a".replicate(64)),
+        "sdk_tree_entries": JSONValue(1),
+        "sdk_tree_bytes": JSONValue(1)]);
+    if (!validSdkIdentity(valid))
+        throw new Exception("valid v6 SDK identity was rejected");
+    foreach (field; ["sdk_tree_content_sha256", "sdk_tree_entries",
+            "sdk_tree_bytes"]) {
+        auto missing = parseJSON(valid.toString);
+        missing.object.remove(field);
+        if (validSdkIdentity(missing))
+            throw new Exception("v6 SDK identity accepted without " ~ field);
+    }
+    auto legacySubstitution = parseJSON(valid.toString);
+    legacySubstitution["sdk_tree_metadata_sha256"] = "b".replicate(64);
+    legacySubstitution.object.remove("sdk_tree_content_sha256");
+    if (validSdkIdentity(legacySubstitution))
+        throw new Exception("legacy metadata-only v6 SDK identity was accepted");
+    foreach (field; ["sdk_tree_entries", "sdk_tree_bytes"]) {
+        auto zero = parseJSON(valid.toString);
+        zero[field] = 0;
+        if (validSdkIdentity(zero))
+            throw new Exception("v6 SDK identity accepted zero " ~ field);
+    }
+    auto malformed = parseJSON(valid.toString);
+    malformed["sdk_tree_content_sha256"] = "not-a-digest";
+    if (validSdkIdentity(malformed))
+        throw new Exception("malformed v6 SDK content identity was accepted");
+    auto historical = JSONValue([
+        "schema": JSONValue("scrubbed-build-attestation-v5")]);
+    if (!validSdkIdentity(historical))
+        throw new Exception("historical attestation SDK handling changed");
+    writeln("pipeline resource checker self-test passed (7 negatives)");
 }
 
 private bool validProfileSample(JSONValue sample,
@@ -51,8 +99,15 @@ private bool validProfileSample(JSONValue sample,
 }
 
 int main(string[] args) {
+    if (args.length == 2 && args[1] == "--self-test") {
+        try { selfTest(); return 0; }
+        catch (Exception error) {
+            writeln("resource checker self-test failed: ", error.msg);
+            return 1;
+        }
+    }
     if (args.length != 2) {
-        writeln("usage: pipeline_resource_check REPORT_JSON");
+        writeln("usage: pipeline_resource_check --self-test | REPORT_JSON");
         return 2;
     }
     try {
@@ -65,6 +120,7 @@ int main(string[] args) {
                     "scrubbed-build-attestation-v5" &&
                  report["build_attestation"]["schema"].str !=
                     "scrubbed-build-attestation-v6") ||
+                !validSdkIdentity(report["build_attestation"]) ||
                 report["build_attestation"]["target_sha256"].str !=
                     report["binary_sha256"].str ||
                 !digest(report["binary_sha256"].str, 64) ||
@@ -150,6 +206,7 @@ int main(string[] args) {
                     "scrubbed-build-attestation-v5" &&
                  report["build_attestation"]["schema"].str !=
                     "scrubbed-build-attestation-v6") ||
+             !validSdkIdentity(report["build_attestation"]) ||
              report["build_attestation"]["target_sha256"].str !=
                 report["binary_sha256"].str ||
              !digest(report["build_attestation"]["source_archive_sha256"].str, 64) ||

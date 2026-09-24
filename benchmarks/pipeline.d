@@ -557,6 +557,56 @@ private TreeIdentity treeDigest(string root, TreeBounds bounds) {
         relatives.length, totalBytes);
 }
 
+private TreeIdentity hashProtectedTreeContent(string resolvedRoot,
+        string[] relatives, ulong bytes, TreeBounds bounds, MonoTime deadline,
+        bool verifySystemProtection) {
+    SHA256 digest;
+    digestPart(digest, "scrubbed:protected-tree-content:v2");
+    ulong hashedBytes;
+    foreach (relative; relatives) {
+        require(MonoTime.currTime < deadline,
+            "protected tree hashing exceeds its time bound");
+        auto path = buildPath(resolvedRoot, relative);
+        digestPart(digest, relative);
+        if (isSymlink(path)) {
+            auto target = readLink(path);
+            auto resolvedTarget = resolveToolPath(path);
+            if (verifySystemProtection)
+                requireSystemProtectedPath(resolvedTarget);
+            auto targetRelative = relativePath(resolvedTarget, resolvedRoot);
+            require(!isAbsolute(targetRelative) && targetRelative != ".." &&
+                !targetRelative.startsWith("../") &&
+                !targetRelative.startsWith("..\\"),
+                "protected tree link escapes its attested root");
+            digestPart(digest, "link");
+            digestPart(digest, target);
+            continue;
+        }
+        stat_t info;
+        require(stat(path.toStringz, &info) == 0,
+            "protected tree entry disappeared while hashing");
+        if (verifySystemProtection)
+            require(info.st_uid == 0 &&
+                (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+                "protected tree entry changed or became mutable");
+        if (isDir(path)) digestPart(digest, "directory");
+        else if (isFile(path)) {
+            auto fileBytes = getSize(path);
+            require(fileBytes <= bounds.maxBytes - hashedBytes,
+                "protected tree hashing exceeds its byte bound");
+            hashedBytes += fileBytes;
+            digestPart(digest, "file");
+            digestPart(digest, fileBytes.to!string);
+            digestFile(digest, path, fileBytes, deadline);
+        } else throw new Exception("protected tree changed to a special file");
+        digestPart(digest, info.st_mode.to!string);
+    }
+    require(hashedBytes == bytes,
+        "protected tree byte extent changed while hashing");
+    return TreeIdentity(toHexString(digest.finish()).to!string,
+        relatives.length, bytes);
+}
+
 private TreeIdentity protectedTreeIdentity(string root, TreeBounds bounds) {
     auto resolvedRoot = resolveToolPath(root);
     requireSystemProtectedPath(resolvedRoot);
@@ -596,47 +646,8 @@ private TreeIdentity protectedTreeIdentity(string root, TreeBounds bounds) {
         } else throw new Exception("protected tree contains a special file");
     }
     relatives.sort();
-    SHA256 digest;
-    digestPart(digest, "scrubbed:protected-tree-content:v2");
-    ulong hashedBytes;
-    foreach (relative; relatives) {
-        require(MonoTime.currTime < deadline,
-            "protected tree hashing exceeds its time bound");
-        auto path = buildPath(resolvedRoot, relative);
-        digestPart(digest, relative);
-        if (isSymlink(path)) {
-            auto target = readLink(path);
-            auto resolvedTarget = resolveToolPath(path);
-            requireSystemProtectedPath(resolvedTarget);
-            auto targetRelative = relativePath(resolvedTarget, resolvedRoot);
-            require(!isAbsolute(targetRelative) && targetRelative != ".." &&
-                !targetRelative.startsWith("../") &&
-                !targetRelative.startsWith("..\\"),
-                "protected tree link escapes its attested root");
-            digestPart(digest, "link");
-            digestPart(digest, target);
-            continue;
-        }
-        stat_t info;
-        require(stat(path.toStringz, &info) == 0 && info.st_uid == 0 &&
-            (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
-            "protected tree entry changed or became mutable");
-        if (isDir(path)) digestPart(digest, "directory");
-        else if (isFile(path)) {
-            auto fileBytes = getSize(path);
-            require(fileBytes <= bounds.maxBytes - hashedBytes,
-                "protected tree hashing exceeds its byte bound");
-            hashedBytes += fileBytes;
-            digestPart(digest, "file");
-            digestPart(digest, fileBytes.to!string);
-            digestFile(digest, path, fileBytes, deadline);
-        } else throw new Exception("protected tree changed to a special file");
-        digestPart(digest, info.st_mode.to!string);
-    }
-    require(hashedBytes == bytes,
-        "protected tree byte extent changed while hashing");
-    return TreeIdentity(toHexString(digest.finish()).to!string,
-        relatives.length, bytes);
+    return hashProtectedTreeContent(resolvedRoot, relatives, bytes, bounds,
+        deadline, true);
 }
 
 private TreeIdentity copyRegularTree(string source, string target,
@@ -2150,10 +2161,19 @@ private void selfTest() {
     auto equalSizePath = buildPath(supportSnapshot, "one");
     require(chmod(equalSizePath.toStringz, S_IRUSR | S_IWUSR) == 0,
         "cannot make equal-size mutation fixture writable");
+    auto protectedFixtureRelatives = ["one", "two"];
+    auto beforeProtectedContentMutation = hashProtectedTreeContent(
+        supportSnapshot, protectedFixtureRelatives, 6, smallBounds,
+        MonoTime.currTime + dur!"seconds"(smallBounds.maxSeconds), false);
     write(equalSizePath, "eno");
     require(treeDigest(supportSnapshot, smallBounds) !=
             beforeEqualSizeMutation,
         "equal-size support content mutation retained its tree identity");
+    require(hashProtectedTreeContent(supportSnapshot,
+            protectedFixtureRelatives, 6, smallBounds,
+            MonoTime.currTime + dur!"seconds"(smallBounds.maxSeconds), false) !=
+            beforeProtectedContentMutation,
+        "equal-size SDK content mutation retained its tree identity");
     auto sourceExecutable = buildPath(supportRoot, "cmake-original");
     auto snapExecutable = buildPath(supportRoot, "cmake-snapshot");
     copy(thisExePath(), sourceExecutable);

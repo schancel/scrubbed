@@ -258,6 +258,7 @@ ldc2 -O3 -release benchmarks/pipeline_profile_check.d \
   benchmarks/pipeline-canonical-profile.json
 ldc2 -O3 -release benchmarks/pipeline_resource_check.d \
   -of=/tmp/scrubbed-pipeline-resource-check
+/tmp/scrubbed-pipeline-resource-check --self-test
 /tmp/scrubbed-pipeline-resource-check \
   benchmarks/pipeline-canonical-profile.json
 ```
@@ -266,6 +267,10 @@ The checker command above is the exact identity recipe: do not add compiler
 flags or change the output basename. The run verifies the resolved `ldc2`
 hash and version against the attested build-tool closure, and `--check` binds
 the resulting Mach-O hash to the report.
+
+The resource-checker self-test rejects v6 attestations whose SDK content
+digest or positive entry/byte counts are missing, malformed, zero, or replaced
+by the retired metadata-only field, while retaining historical v4/v5 handling.
 
 The report binds source/compiler/dependency/build attestation, executed binary,
 harness, frozen record table, configs, input and expected file sets, and every

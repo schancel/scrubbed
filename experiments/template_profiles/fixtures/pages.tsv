@@ -1,0 +1,16 @@
+page_id	split	origin	family	revision	path	file	sha256
+docs-guide-h1	heldout	https://docs.example	guide	v1	/guides/delta	docs-guide-heldout.html	4d6dba2b67d5896845b5bc00392313b15f6ea382ad5c97ebd44942dd608ace8d
+docs-guide-t1	train	https://docs.example	guide	v1	/guides/alpha	docs-guide-train-1.html	2ae0c61fed70bc8dbac88cbe11fa7c79a516d12f014d5fb3e081b68d5404dfd7
+docs-guide-t2	train	https://docs.example	guide	v1	/guides/beta	docs-guide-train-2.html	574c6ac1b9a84fd9e508032679e70ee156b9322881dd131b6192a2163d7871e8
+docs-guide-t3	train	https://docs.example	guide	v1	/guides/gamma	docs-guide-train-3.html	354dc4b5440021dae56dcaae0a6384a2c84374dc71244c3807d381743f2268f2
+news-article-drift-h1	heldout	https://news.example	article	v2	/story/redesign	news-article-drift-heldout.html	c3aa5c214a8b88b21be065dcd7495dce3c90e07a8c4e552d68c8344f54ae3758
+news-article-h1	heldout	https://news.example	article	v1	/story/delta	news-article-heldout.html	ef8a8e9a818cbe60cc75ef2f71df1ec0b1def5413c6c4f682ae25d64a4fcf1e7
+news-article-t1	train	https://news.example	article	v1	/story/alpha	news-article-train-1.html	8e9103daefc94d3efea7e989a0972f45c7c39353fa0fd618436a25c944f9fea0
+news-article-t2	train	https://news.example	article	v1	/story/beta	news-article-train-2.html	e675057f68772da32814e3c541ccbed0dec689d2a8a7b0c5189c9cc78c58ae75
+news-article-t3	train	https://news.example	article	v1	/story/gamma	news-article-train-3.html	df2d39070ab0f33e3cbb89908124ea2879398622fb59922ec7fb4ce01442e8e6
+news-gallery-h1	heldout	https://news.example	gallery	v1	/photos/delta	news-gallery-heldout.html	0a67e3a2e41667713c06af9cdf3e13fe89d938b20fdbd10f12aee8ed10533c62
+news-gallery-t1	train	https://news.example	gallery	v1	/photos/alpha	news-gallery-train-1.html	2cfb2fbe217115b7f575be8622f79169cbc899972f9895446e75bf4ad67a6af7
+news-gallery-t2	train	https://news.example	gallery	v1	/photos/beta	news-gallery-train-2.html	f940e767128daf9713b8571290d85bc83a80094c3ecab6c6b200a974860bb6c2
+news-gallery-t3	train	https://news.example	gallery	v1	/photos/gamma	news-gallery-train-3.html	941d077d8e55ce4f084f57b2b691b1ac482276dd457d22885c58f09ccc7c9b77
+sparse-h1	heldout	https://reports.example	report	v1	/reports/two	sparse-heldout.html	e850304f1aa6ba89a22edc9529167e89e563f538d013e5a2f0b62ef1a9d15e72
+sparse-t1	train	https://reports.example	report	v1	/reports/one	sparse-train-1.html	409ef01203e19d27fcc882e9e7ac54d18776f177f0355f30d3a5fbb13f0f8a3a

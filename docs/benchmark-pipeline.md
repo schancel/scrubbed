@@ -186,8 +186,8 @@ inside the selected root and be root-owned and non-writable by group or other;
 a deterministic path-sorted
 digest includes regular-file contents plus entry metadata, link targets, and
 entry/byte totals and is rechecked around the authorization harness. The v6
-field retains its `sdk_tree_metadata_sha256` name for schema compatibility,
-but its value is content-complete.
+field is named `sdk_tree_content_sha256` so metadata-only v6 attestations
+cannot be mistaken for the content-complete contract.
 The argparse input digest is likewise verified after compilation. The supported DUB
 1.42.0 target path is derived from the described root `targetPath` plus
 `targetFileName`, required to remain the private relative path `scrubbed`, and
@@ -198,9 +198,10 @@ publication. Attestation v2 and inconsistent v3 records are rejected.
 
 An attested baseline/candidate coordination comparison additionally requires
 the compiler executable/support/loader identities, DUB identity, native-tool
-and CMake-support identities, and SDK version/build/content identity to match
-exactly before measurement can authorize a candidate. Independently valid but
-different ambient build closures are not treated as a causal comparison.
+and CMake-support identities, resolved argparse recipe/input identity, and SDK
+version/build/content identity to match exactly before measurement can
+authorize a candidate. Independently valid but different build closures are
+not treated as a causal comparison.
 
 The target is hashed, copied to a read-only snapshot, and accepted only when
 the built-target and snapshot hashes match. Every timed case, manifest

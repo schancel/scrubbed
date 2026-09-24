@@ -89,7 +89,12 @@ private void armWholeRunWatchdog(MonoTime deadline) {
         watchdogFiring = true;
         auto groups = activeProcessGroups.dup;
         processGroupMutex.unlock();
-        foreach (pid; groups) posixKill(-pid, SIGKILL);
+        foreach (pid; groups) {
+            // Registration precedes the launcher's setpgid handshake. Cover
+            // both states without delaying the hard deadline on readiness.
+            posixKill(-pid, SIGKILL);
+            posixKill(pid, SIGKILL);
+        }
         posixKill(getpid(), SIGKILL);
     });
     watchdog.isDaemon = true;
@@ -369,9 +374,10 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         const string[string] environment_, MonoTime deadline,
         long registrationDelayMilliseconds = 0,
         ulong fileLimitBytes = diagnosticFileMaxBytes) {
-    // Keep child creation and registration in the same critical section. The
-    // watchdog cannot snapshot an empty registry after a child has created a
-    // separate process group but before the parent records its ownership.
+    // Spawn and register in one short critical section, before waiting for the
+    // launcher to create its group. The watchdog kills both PID and -PGID, so
+    // it owns the child on either side of that handshake without postponing
+    // the hard deadline.
     processGroupMutex.lock();
     if (watchdogFiring) {
         processGroupMutex.unlock();
@@ -385,6 +391,8 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         processGroupMutex.unlock();
         throw error;
     }
+    activeProcessGroups ~= child.processID;
+    processGroupMutex.unlock();
     auto readyDeadline = MonoTime.currTime + seconds(2);
     if (deadline < readyDeadline) readyDeadline = deadline;
     while (!exists(readyPath) && MonoTime.currTime < readyDeadline)
@@ -394,13 +402,11 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         posixKill(-child.processID, SIGKILL);
         posixKill(child.processID, SIGKILL);
         reapBlocking(child.processID, status, usage);
-        processGroupMutex.unlock();
+        unregisterProcessGroup(child.processID);
         need(false, "child process group did not become ready");
     }
     if (registrationDelayMilliseconds > 0)
         Thread.sleep(msecs(registrationDelayMilliseconds));
-    activeProcessGroups ~= child.processID;
-    processGroupMutex.unlock();
     return child;
 }
 
@@ -811,7 +817,8 @@ private void runSelfTest(string harnessPath) {
     auto watchdogInput = File("/dev/null", "rb");
     auto watchdogOutput = File(watchdogOut, "wb");
     auto watchdogError = File(watchdogErr, "wb");
-    auto watchdogDeadline = MonoTime.currTime + seconds(3);
+    auto watchdogDeadline = MonoTime.currTime + seconds(4);
+    auto watchdogTimer = StopWatch(AutoStart.yes);
     auto watchdogChild = spawnGrouped(
         [harnessPath, "--self-test-whole-timeout-probe", hangingProbe, root],
         watchdogReady,
@@ -821,11 +828,13 @@ private void runSelfTest(string harnessPath) {
     int watchdogStatus; rusage watchdogUsage;
     auto watchdogReaped = reapUntil(watchdogChild.processID,
         watchdogDeadline, watchdogStatus, watchdogUsage);
+    watchdogTimer.stop();
     if (!watchdogReaped)
         terminateGroupAndReap(watchdogChild.processID, watchdogStatus,
             watchdogUsage);
     need(watchdogReaped && WIFSIGNALED(watchdogStatus) &&
-        WTERMSIG(watchdogStatus) == SIGKILL,
+        WTERMSIG(watchdogStatus) == SIGKILL &&
+        watchdogTimer.peek.total!"msecs" < 2_000,
         "whole-run watchdog did not terminate a stalled non-child phase");
     need(exists(descendantPidPath),
         "whole-run watchdog probe did not record its descendant");
@@ -1387,7 +1396,7 @@ void main(string[] args) {
         auto probeOutput = File(probeOut, "wb");
         auto probeError = File(probeErr, "wb");
         spawnGrouped([args[2]], probeReady, probeInput, probeOutput,
-            probeError, childEnvironment(false), wholeRunDeadline, 1_500);
+            probeError, childEnvironment(false), wholeRunDeadline, 2_500);
         probeInput.close(); probeOutput.close(); probeError.close();
         Thread.sleep(seconds(30));
         need(false, "whole-run watchdog probe survived");

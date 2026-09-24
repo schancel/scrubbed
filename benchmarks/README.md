@@ -220,8 +220,8 @@ root. The current closure deliberately pins the supported Homebrew LDC layout
 and rejects loader-graph drift beyond LLVM, z3, and zstd. The selected SDK's
 protected tree is hashed in deterministic path order including regular-file
 contents, bounded, recorded, and rechecked before and after compilation.
-The legacy-named `sdk_tree_metadata_sha256` v6 field carries that
-content-complete identity. Per-executable archive versions are never
+The v6 `sdk_tree_content_sha256` field carries that content-complete identity.
+Per-executable archive versions are never
 borrowed from another binary: unavailable `ar` versions are explicit, with
 separately hash-bound archive-suite evidence.
 `pipeline_attestation_check.d` is the D-only changed-executable control: two

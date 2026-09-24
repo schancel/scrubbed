@@ -55,7 +55,7 @@ private struct AttestedExecutable {
     string compilerLoaderDirectory;
     string compilerLoaderSha256;
     size_t compilerLoaderFiles;
-    string sdkTreeMetadataSha256;
+    string sdkTreeContentSha256;
     size_t sdkTreeEntries;
     ulong sdkTreeBytes;
 }
@@ -405,7 +405,7 @@ private struct PreparedAttestedBuild {
     string sdkRoot;
     string sdkVersion;
     string sdkBuildVersion;
-    string sdkTreeMetadataSha256;
+    string sdkTreeContentSha256;
     size_t sdkTreeEntries;
     ulong sdkTreeBytes;
     string target;
@@ -557,7 +557,7 @@ private TreeIdentity treeDigest(string root, TreeBounds bounds) {
         relatives.length, totalBytes);
 }
 
-private TreeIdentity protectedTreeMetadata(string root, TreeBounds bounds) {
+private TreeIdentity protectedTreeIdentity(string root, TreeBounds bounds) {
     auto resolvedRoot = resolveToolPath(root);
     requireSystemProtectedPath(resolvedRoot);
     require(isDir(resolvedRoot) && !isSymlink(resolvedRoot),
@@ -770,7 +770,15 @@ private void verifyLoaderTrace(string trace, string loaderDirectory,
         auto record = line.strip;
         if (!record.startsWith("dyld[")) continue;
         auto slash = record.indexOf('/');
-        require(slash >= 0, "dynamic loader trace omitted its library path");
+        if (slash < 0) {
+            enum delayedMarker = "]: move loaded to delayed: ";
+            auto delayed = record.indexOf(delayedMarker);
+            require(delayed >= 0 &&
+                record[cast(size_t)delayed + delayedMarker.length .. $]
+                    .length != 0,
+                "dynamic loader trace omitted its library path");
+            continue;
+        }
         auto path = record[cast(size_t)slash .. $].strip;
         if (path.startsWith("/usr/lib/") ||
                 path.startsWith("/System/Library/")) continue;
@@ -922,8 +930,8 @@ private void verifyCompilerClosure(const ref AttestedExecutable result) {
 }
 
 private void verifySdkTree(const ref PreparedAttestedBuild result) {
-    auto actual = protectedTreeMetadata(result.sdkRoot, sdkTreeBounds);
-    require(actual.sha256 == result.sdkTreeMetadataSha256 &&
+    auto actual = protectedTreeIdentity(result.sdkRoot, sdkTreeBounds);
+    require(actual.sha256 == result.sdkTreeContentSha256 &&
         actual.files == result.sdkTreeEntries &&
         actual.bytes == result.sdkTreeBytes,
         "selected SDK protected-tree metadata changed");
@@ -931,8 +939,8 @@ private void verifySdkTree(const ref PreparedAttestedBuild result) {
 
 private void verifySdkTree(const ref AttestedExecutable result,
         string sdkRoot) {
-    auto actual = protectedTreeMetadata(sdkRoot, sdkTreeBounds);
-    require(actual.sha256 == result.sdkTreeMetadataSha256 &&
+    auto actual = protectedTreeIdentity(sdkRoot, sdkTreeBounds);
+    require(actual.sha256 == result.sdkTreeContentSha256 &&
         actual.files == result.sdkTreeEntries &&
         actual.bytes == result.sdkTreeBytes,
         "selected SDK protected-tree metadata changed");
@@ -1169,8 +1177,8 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
         !result.sdkVersion.canFind('/') &&
         !result.sdkBuildVersion.canFind('/'),
         "invalid selected SDK version identity");
-    auto sdkIdentity = protectedTreeMetadata(result.sdkRoot, sdkTreeBounds);
-    result.sdkTreeMetadataSha256 = sdkIdentity.sha256;
+    auto sdkIdentity = protectedTreeIdentity(result.sdkRoot, sdkTreeBounds);
+    result.sdkTreeContentSha256 = sdkIdentity.sha256;
     result.sdkTreeEntries = sdkIdentity.files;
     result.sdkTreeBytes = sdkIdentity.bytes;
     auto dubHome = buildPath(scratchRoot, "dub-home-" ~ randomUUID.toString);
@@ -1249,7 +1257,7 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
                    "dub_recipe_sha256", "dependency_lock_sha256",
                    "compiler_executable_sha256", "dub_executable_sha256",
                    "compiler_support_sha256", "compiler_loader_sha256",
-                   "sdk_tree_metadata_sha256",
+                   "sdk_tree_content_sha256",
                    "argparse_recipe_sha256", "argparse_inputs_sha256",
                    "native_prebuild_commands_sha256",
                    "target_sha256"])
@@ -1345,9 +1353,11 @@ private void requireSameBuildToolClosure(JSONValue baseline,
             "compiler_support_sha256", "compiler_support_files",
             "compiler_support_bytes", "compiler_loader_sha256",
             "compiler_loader_files", "dub_executable_sha256", "dub_version",
+            "argparse_recipe_sha256", "argparse_inputs_sha256",
+            "argparse_input_files",
             "native_environment_template", "cmake_support_sha256",
             "cmake_support_files", "sdk_version", "sdk_build_version",
-            "sdk_tree_metadata_sha256", "sdk_tree_entries",
+            "sdk_tree_content_sha256", "sdk_tree_entries",
             "sdk_tree_bytes"])
         require(baseline[field] == candidate[field],
             "baseline and candidate build-tool closures differ at " ~ field);
@@ -1501,8 +1511,8 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
             "COMPILER_PATH private ld selected by attested compiler -### trace"),
         "sdk_version": JSONValue(prepared.sdkVersion),
         "sdk_build_version": JSONValue(prepared.sdkBuildVersion),
-        "sdk_tree_metadata_sha256": JSONValue(
-            prepared.sdkTreeMetadataSha256),
+        "sdk_tree_content_sha256": JSONValue(
+            prepared.sdkTreeContentSha256),
         "sdk_tree_entries": JSONValue(cast(long)prepared.sdkTreeEntries),
         "sdk_tree_bytes": JSONValue(cast(long)prepared.sdkTreeBytes),
         "target_relative_path": JSONValue(prepared.targetRelative),
@@ -1521,7 +1531,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         prepared.compilerSupportSha256, prepared.compilerSupportFiles,
         prepared.compilerSupportBytes, prepared.compilerLoaderDirectory,
         prepared.compilerLoaderSha256, prepared.compilerLoaderFiles,
-        prepared.sdkTreeMetadataSha256, prepared.sdkTreeEntries,
+        prepared.sdkTreeContentSha256, prepared.sdkTreeEntries,
         prepared.sdkTreeBytes);
 }
 
@@ -2158,13 +2168,16 @@ private void selfTest() {
     auto loaderTwo = buildPath(loaderRoot, "libzstd.test.dylib");
     write(loaderOne, "one");
     write(loaderTwo, "two");
-    auto validLoaderTrace = "dyld[1]: " ~ loaderOne ~ "\n" ~
+    auto validLoaderTrace = "dyld[1]: <UUID> " ~ snapExecutable ~ "\n" ~
+        "dyld[1]: move loaded to delayed: XPCSupport\n" ~
+        "dyld[1]: " ~ loaderOne ~ "\n" ~
         "dyld[1]: /usr/lib/libSystem.B.dylib\n" ~
         "dyld[1]: " ~ loaderTwo ~ "\nLDC test version\n";
-    verifyLoaderTrace(validLoaderTrace, loaderRoot);
+    verifyLoaderTrace(validLoaderTrace, loaderRoot, snapExecutable);
     bool ambientLoaderRejected;
     try verifyLoaderTrace(validLoaderTrace ~
-        "dyld[1]: /opt/mutable/libunexpected.dylib\n", loaderRoot);
+        "dyld[1]: /opt/mutable/libunexpected.dylib\n", loaderRoot,
+        snapExecutable);
     catch (Exception) ambientLoaderRejected = true;
     require(ambientLoaderRejected,
         "unexpected ambient compiler library was accepted");
@@ -2259,7 +2272,7 @@ private void selfTest() {
         "compiler_support_bytes": JSONValue(1024),
         "compiler_loader_sha256": JSONValue("c".replicate(64)),
         "compiler_loader_files": JSONValue(3),
-        "sdk_tree_metadata_sha256": JSONValue("d".replicate(64)),
+        "sdk_tree_content_sha256": JSONValue("d".replicate(64)),
         "sdk_tree_entries": JSONValue(100),
         "sdk_tree_bytes": JSONValue(1024),
         "compiler_config_policy": JSONValue(
@@ -2305,14 +2318,50 @@ private void selfTest() {
         "target_sha256": JSONValue("0".replicate(64))]);
     auto matchingBuildAttestation = parseJSON(buildAttestation.toString);
     requireSameBuildToolClosure(buildAttestation, matchingBuildAttestation);
-    matchingBuildAttestation["sdk_tree_metadata_sha256"] =
-        "e".replicate(64);
-    bool unequalBuildClosureRejected;
+    foreach (field; ["sdk_tree_content_sha256", "argparse_recipe_sha256",
+            "argparse_inputs_sha256"]) {
+        auto unequal = parseJSON(buildAttestation.toString);
+        unequal[field] = "e".replicate(64);
+        bool rejected;
+        try requireSameBuildToolClosure(buildAttestation, unequal);
+        catch (Exception) rejected = true;
+        require(rejected, "unequal baseline/candidate " ~ field ~
+            " was accepted");
+    }
+    auto unequalDependencyCount = parseJSON(buildAttestation.toString);
+    unequalDependencyCount["argparse_input_files"] = 41;
+    bool unequalDependencyCountRejected;
     try requireSameBuildToolClosure(buildAttestation,
-        matchingBuildAttestation);
-    catch (Exception) unequalBuildClosureRejected = true;
-    require(unequalBuildClosureRejected,
-        "unequal baseline/candidate build-tool closures were accepted");
+        unequalDependencyCount);
+    catch (Exception) unequalDependencyCountRejected = true;
+    require(unequalDependencyCountRejected,
+        "unequal baseline/candidate dependency count was accepted");
+    auto sdkPathA = buildPath(supportRoot, "sdk-path-a");
+    auto sdkPathB = buildPath(supportRoot, "sdk-path-b");
+    mkdirRecurse(sdkPathA);
+    mkdirRecurse(sdkPathB);
+    AttestedExecutable closureA, closureB;
+    closureA.attestation = buildAttestation;
+    closureB.attestation = parseJSON(buildAttestation.toString);
+    closureA.buildEnvironment = ["SDKROOT": sdkPathA];
+    closureB.buildEnvironment = ["SDKROOT": sdkPathA];
+    closureA.nativeTools = [NativeTool("cc-compiler", sourceExecutable,
+        executableHash, "test", "test")];
+    closureB.nativeTools = closureA.nativeTools.dup;
+    requireSameBuildToolClosure(closureA, closureB);
+    closureB.buildEnvironment["SDKROOT"] = sdkPathB;
+    bool unequalSdkPathRejected;
+    try requireSameBuildToolClosure(closureA, closureB);
+    catch (Exception) unequalSdkPathRejected = true;
+    require(unequalSdkPathRejected,
+        "unequal baseline/candidate SDK paths were accepted");
+    closureB.buildEnvironment["SDKROOT"] = sdkPathA;
+    closureB.nativeTools[0].path = snapExecutable;
+    bool unequalToolPathRejected;
+    try requireSameBuildToolClosure(closureA, closureB);
+    catch (Exception) unequalToolPathRejected = true;
+    require(unequalToolPathRejected,
+        "unequal baseline/candidate native-tool paths were accepted");
     attested["build_attestation"] = buildAttestation;
     foreach (ref targetSample; attested["cases"][0]["samples"].array)
         targetSample["target_binary_sha256"] = "0".replicate(64);

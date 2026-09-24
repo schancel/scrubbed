@@ -711,7 +711,7 @@ private void validateAttestation(JSONValue value, string binaryHash) {
             key == "source_sha" || key == "source_tree_id" ? 40 : 64),
             "invalid attestation digest " ~ key);
     if (v6) foreach (key; ["compiler_support_sha256",
-            "compiler_loader_sha256", "sdk_tree_metadata_sha256"])
+            "compiler_loader_sha256", "sdk_tree_content_sha256"])
         need(digestLength(value[key].str, 64),
             "invalid attestation digest " ~ key);
     need(value["source_status"].str == "clean-before-and-after" &&

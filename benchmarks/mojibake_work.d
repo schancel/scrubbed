@@ -21,6 +21,9 @@ version (LDC) {} else static assert(false,
     "mojibake work evidence requires the pinned LDC recipe");
 version (MojibakeWorkO3Release) {} else static assert(false,
     "mojibake work evidence requires the O3/release build marker");
+version (MojibakeBase_b51a5155d4f1edab3866c75e1ba3547a70a00848) {}
+else static assert(false,
+    "mojibake work evidence requires the frozen-base build marker");
 version (assert) static assert(false,
     "mojibake work evidence must be compiled with -release");
 static assert(__VERSION__ == 2113,
@@ -28,12 +31,20 @@ static assert(__VERSION__ == 2113,
 
 private enum probeSourcePath = "source/filters/mojibake.d";
 private enum harnessSourcePath = "benchmarks/mojibake_work.d";
+private enum sourceBase = "b51a5155d4f1edab3866c75e1ba3547a70a00848";
+static assert(sourceBase ==
+    "b51a5155d4f1edab3866c75e1ba3547a70a00848",
+    "mojibake work evidence source base changed");
+private enum embeddedProbeSource = import("source/filters/mojibake.d");
+private enum embeddedHarnessSource = import("benchmarks/mojibake_work.d");
 private enum expectedProbeSourceSha256 =
-    "A71A31E9A7DCB859B04D0311DEC82A28A3DAA5AE406A0F8854198248BB70A694";
+    "7156FA94DCDE593D96909B12728944C8D600D4443277F080BD5C361641D3A432";
 private enum expectedCompilerVersion =
     "LDC - the LLVM D compiler (1.43.0):";
 private enum buildFlags = "-O3 -release -d-version=MojibakeWorkProbe " ~
-    "-d-version=MojibakeWorkO3Release -Isource";
+    "-d-version=MojibakeWorkO3Release " ~
+    "-d-version=MojibakeBase_b51a5155d4f1edab3866c75e1ba3547a70a00848 " ~
+    "-Isource -J.";
 private enum buildMode = "O3-release";
 
 private string digest(T)(T value) {
@@ -146,6 +157,7 @@ private JSONValue passJson(ref const MojibakePassWork pass, size_t index) {
         cast(long) pass.currentPlausibilityCalls;
     value["current_plausibility_scalars"] =
         cast(long) pass.currentPlausibilityScalars;
+    value["local_ascii_bytes"] = cast(long) pass.localAsciiBytes;
     value["score_zero"] = cast(long) pass.scoreZeroExits;
     value["whole_winner"] = cast(long) pass.wholeWinnerExits;
     value["local_repair"] = cast(long) pass.localRepairExits;
@@ -180,14 +192,13 @@ private JSONValue caseJson(ref const Case spec) {
 
 private JSONValue buildReport() {
     JSONValue root;
-    root["schema"] = "scrubbed-mojibake-work-v2";
-    root["source_base"] =
-        "7eecd67768c7c16a87011cdb7420520468faa16c";
+    root["schema"] = "scrubbed-mojibake-work-v3";
+    root["source_base"] = sourceBase;
     JSONValue attribution;
     attribution["probe_source_path"] = probeSourcePath;
-    attribution["probe_source_sha256"] = hashFile(probeSourcePath);
+    attribution["probe_source_sha256"] = digest(embeddedProbeSource);
     attribution["harness_source_path"] = harnessSourcePath;
-    attribution["harness_source_sha256"] = hashFile(harnessSourcePath);
+    attribution["harness_source_sha256"] = digest(embeddedHarnessSource);
     attribution["compiler_vendor"] = __VENDOR__;
     attribution["compiler_version"] = compilerVersion();
     attribution["compiler_frontend_version"] = cast(long) __VERSION__;
@@ -195,9 +206,9 @@ private JSONValue buildReport() {
     attribution["build_mode"] = buildMode;
     attribution["case_set_sha256"] = caseSetIdentity();
     root["attribution"] = attribution;
-    root["ordinary_algorithm_changed"] = false;
-    root["production_optimization_authorized"] = false;
-    root["reason"] = "evidence-only landing; no candidate comparison";
+    root["ordinary_algorithm_changed"] = true;
+    root["production_optimization_authorized"] = true;
+    root["reason"] = "exact work counters and unchanged output authorize bypassing impossible ASCII sequence starts in local repair";
     JSONValue[] results;
     foreach (ref spec; cases) results ~= caseJson(spec);
     root["cases"] = JSONValue(results);
@@ -215,10 +226,11 @@ private void validatePublishedGoldens(ref const JSONValue report) {
     auto localPasses = local["passes"].array;
     enforce(localPasses.length == 2 &&
         localPasses[0]["pass"].integer == 0 &&
-        localPasses[0]["latin1"]["sequence_calls"].integer == 19 &&
-        localPasses[0]["latin1"]["legacy_byte_calls"].integer == 38 &&
-        localPasses[0]["cp1252"]["sequence_calls"].integer == 20 &&
-        localPasses[0]["cp1252"]["legacy_byte_calls"].integer == 58 &&
+        localPasses[0]["local_ascii_bytes"].integer == 12 &&
+        localPasses[0]["latin1"]["sequence_calls"].integer == 7 &&
+        localPasses[0]["latin1"]["legacy_byte_calls"].integer == 26 &&
+        localPasses[0]["cp1252"]["sequence_calls"].integer == 8 &&
+        localPasses[0]["cp1252"]["legacy_byte_calls"].integer == 46 &&
         localPasses[0]["local_repair"].integer == 1 &&
         localPasses[0]["whole_winner"].integer == 0 &&
         localPasses[0]["unchanged"].integer == 0 &&
@@ -236,10 +248,11 @@ private void validatePublishedGoldens(ref const JSONValue report) {
     auto ambiguousPasses = ambiguous["passes"].array;
     enforce(ambiguousPasses.length == 1 &&
         ambiguousPasses[0]["pass"].integer == 0 &&
-        ambiguousPasses[0]["latin1"]["sequence_calls"].integer == 11 &&
-        ambiguousPasses[0]["latin1"]["legacy_byte_calls"].integer == 22 &&
-        ambiguousPasses[0]["cp1252"]["sequence_calls"].integer == 11 &&
-        ambiguousPasses[0]["cp1252"]["legacy_byte_calls"].integer == 22 &&
+        ambiguousPasses[0]["local_ascii_bytes"].integer == 6 &&
+        ambiguousPasses[0]["latin1"]["sequence_calls"].integer == 5 &&
+        ambiguousPasses[0]["latin1"]["legacy_byte_calls"].integer == 16 &&
+        ambiguousPasses[0]["cp1252"]["sequence_calls"].integer == 5 &&
+        ambiguousPasses[0]["cp1252"]["legacy_byte_calls"].integer == 16 &&
         ambiguousPasses[0]["unchanged"].integer == 1 &&
         ambiguousPasses[0]["local_repair"].integer == 0 &&
         ambiguousPasses[0]["whole_winner"].integer == 0 &&
@@ -256,14 +269,19 @@ private void validatePublishedGoldens(ref const JSONValue report) {
 }
 
 private void validateReport(ref const JSONValue report) {
-    enforce(report["schema"].str == "scrubbed-mojibake-work-v2",
+    enforce(report["schema"].str == "scrubbed-mojibake-work-v3",
         "work evidence schema differs");
+    enforce(report["source_base"].str == sourceBase,
+        "work evidence source base differs");
     auto attribution = report["attribution"];
     enforce(attribution["probe_source_path"].str == probeSourcePath &&
         attribution["probe_source_sha256"].str == expectedProbeSourceSha256 &&
+        attribution["probe_source_sha256"].str == digest(embeddedProbeSource) &&
         attribution["probe_source_sha256"].str == hashFile(probeSourcePath),
         "probe source identity differs");
     enforce(attribution["harness_source_path"].str == harnessSourcePath &&
+        attribution["harness_source_sha256"].str ==
+            digest(embeddedHarnessSource) &&
         attribution["harness_source_sha256"].str == hashFile(harnessSourcePath),
         "harness source identity differs");
     enforce(attribution["compiler_vendor"].str == __VENDOR__ &&
@@ -283,9 +301,9 @@ private void validateReport(ref const JSONValue report) {
             rows[index]["case_identity_sha256"].str == caseIdentity(spec),
             "work case/input identity differs");
     }
-    enforce(!report["ordinary_algorithm_changed"].boolean &&
-        !report["production_optimization_authorized"].boolean,
-        "negative evidence decision differs");
+    enforce(report["ordinary_algorithm_changed"].boolean &&
+        report["production_optimization_authorized"].boolean,
+        "positive evidence decision differs");
     validatePublishedGoldens(report);
 }
 
@@ -310,6 +328,17 @@ private void selfTest() {
     identityMutant["attribution"]["probe_source_sha256"] =
         "B71A31E9A7DCB859B04D0311DEC82A28A3DAA5AE406A0F8854198248BB70A694";
     expectInvalid(identityMutant, "probe identity mutation was accepted");
+
+    auto harnessIdentityMutant = parseJSON(report.toString);
+    harnessIdentityMutant["attribution"]["harness_source_sha256"] =
+        "0000000000000000000000000000000000000000000000000000000000000000";
+    expectInvalid(harnessIdentityMutant,
+        "harness identity mutation was accepted");
+
+    auto sourceBaseMutant = parseJSON(report.toString);
+    sourceBaseMutant["source_base"] =
+        "ffffffffffffffffffffffffffffffffffffffff";
+    expectInvalid(sourceBaseMutant, "source-base mutation was accepted");
 
     auto inputHashMutant = parseJSON(report.toString);
     inputHashMutant["cases"].array[7]["input_sha256"] =
@@ -367,7 +396,7 @@ private void selfTest() {
     enforce(outputs == ["Français", "🙂 schön 🐈"],
         "concurrent caller-owned probes interfere");
     writeln("mojibake work probe self-test passed: ", cases.length,
-        " equivalence cases, five mutants, exact attribution/goldens, ",
+        " equivalence cases, seven mutants, exact attribution/goldens, ",
         "invalid UTF-8, fixed capacity, concurrent reuse");
 }
 

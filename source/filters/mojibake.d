@@ -398,6 +398,13 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
     size_t copiedUntil;
     size_t at;
     while (at < text.length) {
+        // ASCII is one byte wide and cannot begin a legacy representation of
+        // a multi-byte UTF-8 sequence. Avoid decoding and rejecting it once
+        // per enabled legacy encoding.
+        if (cast(ubyte) text[at] < 0x80) {
+            ++at;
+            continue;
+        }
         size_t bestEnd;
         LegacyEncoding bestEncoding;
         long bestGain;
@@ -564,6 +571,7 @@ version (MojibakeWorkProbe) {
         ulong entered;
         ulong currentPlausibilityCalls;
         ulong currentPlausibilityScalars;
+        ulong localAsciiBytes;
         ulong scoreZeroExits;
         ulong wholeWinnerExits;
         ulong localRepairExits;
@@ -764,6 +772,11 @@ version (MojibakeWorkProbe) {
         size_t copiedUntil;
         size_t at;
         while (at < text.length) {
+            if (cast(ubyte) text[at] < 0x80) {
+                ++pass.localAsciiBytes;
+                ++at;
+                continue;
+            }
             size_t bestEnd;
             LegacyEncoding bestEncoding;
             long bestGain;

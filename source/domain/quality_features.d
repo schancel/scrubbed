@@ -4,9 +4,9 @@ module domain.quality_features;
 import domain.document : DocumentId, OutputName, SourceLocator;
 import domain.shard_format : ShardDocument, maxDocumentPayload;
 import crypto.sha256 : sha256Of;
+import core.exception : UnicodeException;
 import std.exception : enforce;
 import std.uni : unicode;
-import std.utf : UTFException, validate;
 
 enum uint featureSchema = 1;
 enum uint policySchema = 1;
@@ -157,20 +157,30 @@ MeasuredFeatures measure(ShardDocument source) {
     result.documentId = source.id;
     result.contentDigest = source.contentDigest;
     result.byteLength = cast(uint)source.content.length;
-    try validate(cast(string)source.content);
-    catch (UTFException) {
+    auto text = cast(string)source.content;
+    static immutable letters = unicode("Letter");
+    // Scalar iteration is the strict UTF-8 validation pass as well as the
+    // feature pass; do not decode every valid document once before counting.
+    uint scalarCount;
+    uint letterCount;
+    uint controlCount;
+    uint replacementCount;
+    try {
+        foreach (dchar scalar; text) {
+            ++scalarCount;
+            if (scalar in letters) ++letterCount;
+            if (scalar <= 0x1f || (scalar >= 0x7f && scalar <= 0x9f))
+                ++controlCount;
+            if (scalar == 0xfffd) ++replacementCount;
+        }
+    } catch (UnicodeException) {
         result.status = FeatureStatus.invalidUtf8;
         return result;
     }
-    auto text = cast(string)source.content;
-    static immutable letters = unicode("Letter");
-    foreach (dchar scalar; text) {
-        ++result.scalarCount;
-        if (scalar in letters) ++result.letterCount;
-        if (scalar <= 0x1f || (scalar >= 0x7f && scalar <= 0x9f))
-            ++result.controlCount;
-        if (scalar == 0xfffd) ++result.replacementCount;
-    }
+    result.scalarCount = scalarCount;
+    result.letterCount = letterCount;
+    result.controlCount = controlCount;
+    result.replacementCount = replacementCount;
     // Lines are LF-delimited non-phantom segments. The final unterminated
     // segment counts; a trailing LF does not create an extra empty line.
     bool[string] seen;
@@ -260,6 +270,23 @@ unittest {
     auto measured = measure(doc);
     assert(measured.byteLength == 3 && measured.lineCount == 2 &&
         measured.duplicateLineCount == 1);
+    auto invalid = ShardDocument(SourceLocator("unit", "source", "bad"),
+        OutputName("bad"), [cast(ubyte)0xef, 0xbf, 0xbd, '\t', 'A', 0xc3]);
+    auto invalidMeasured = measure(invalid);
+    assert(invalidMeasured.status == FeatureStatus.invalidUtf8 &&
+        invalidMeasured.byteLength == 6 && invalidMeasured.scalarCount == 0 &&
+        invalidMeasured.letterCount == 0 && invalidMeasured.controlCount == 0 &&
+        invalidMeasured.replacementCount == 0 && invalidMeasured.lineCount == 0 &&
+        invalidMeasured.duplicateLineCount == 0);
+    auto unicodeDoc = ShardDocument(SourceLocator("unit", "source", "unicode"),
+        OutputName("unicode"), cast(ubyte[])"é�\né�".dup);
+    auto unicodeMeasured = measure(unicodeDoc);
+    assert(unicodeMeasured.status == FeatureStatus.valid &&
+        unicodeMeasured.byteLength == 11 && unicodeMeasured.scalarCount == 5 &&
+        unicodeMeasured.letterCount == 2 && unicodeMeasured.controlCount == 1 &&
+        unicodeMeasured.replacementCount == 2 &&
+        unicodeMeasured.lineCount == 2 &&
+        unicodeMeasured.duplicateLineCount == 1);
     auto stored = encodeMeasured(measured);
     auto replayed = decodeMeasured(stored, doc.id, doc.contentDigest);
     auto permissive = QualityPolicy(0, partsPerMillion, partsPerMillion,

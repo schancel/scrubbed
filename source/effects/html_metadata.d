@@ -7,7 +7,7 @@ import std.conv : to;
 import std.json : JSONValue;
 import std.string : indexOf;
 import std.uni : isWhite;
-import std.utf : byDchar, toUTF8;
+import std.utf : decode, replacementDchar, UseReplacementDchar;
 
 enum size_t maxMetadataCandidates = 16;
 enum size_t maxMetadataValueBytes = 512;
@@ -37,17 +37,58 @@ struct HtmlMetadata {
 
 private string normalized(string input) pure {
     string result;
-    bool pending;
-    foreach (ch; input.byDchar) {
-        if (isWhite(ch)) { if (result.length) pending = true; }
-        else {
-            if (pending) result ~= " ";
-            result ~= toUTF8([ch]);
-            pending = false;
-            if (result.length > maxMetadataValueBytes) return null;
+    size_t outputLength, runStart;
+    bool whitespace;
+    size_t at;
+    while (at < input.length) {
+        auto start = at;
+        auto ch = decode!(UseReplacementDchar.yes)(input, at);
+        if (isWhite(ch)) {
+            if (!whitespace && runStart < start) result ~= input[runStart .. start];
+            whitespace = true;
+            continue;
+        }
+        if (whitespace) {
+            if (outputLength) {
+                ++outputLength;
+                if (outputLength <= maxMetadataValueBytes) result ~= " ";
+            }
+            whitespace = false;
+            runStart = start;
+        }
+        auto width = ch <= 0x7f ? 1 : ch <= 0x7ff ? 2 : ch <= 0xffff ? 3 : 4;
+        outputLength += width;
+        if (outputLength > maxMetadataValueBytes) return null;
+        if (ch == replacementDchar && input[start .. at] != "�") {
+            if (runStart < start) result ~= input[runStart .. start];
+            result ~= "�";
+            runStart = at;
         }
     }
+    if (!whitespace && runStart < input.length) result ~= input[runStart .. $];
     return result;
+}
+
+unittest {
+    import std.array : replicate;
+
+    assert(normalized("") is null);
+    assert(normalized(" \t\r\n\f") is null);
+    assert(normalized("  alpha \t β\n gamma  ") == "alpha β gamma");
+    auto exact = replicate("a", maxMetadataValueBytes);
+    assert(normalized(exact) == exact);
+    assert(normalized(exact ~ "b") is null);
+    auto spacedExact = replicate("a", maxMetadataValueBytes - 2) ~ " b";
+    assert(normalized(spacedExact) == spacedExact);
+    assert(normalized(replicate("a", maxMetadataValueBytes - 1) ~ " b") is null);
+    auto utf8Exact = replicate("a", maxMetadataValueBytes - 2) ~ "é";
+    assert(normalized(utf8Exact) == utf8Exact);
+    auto malformed = cast(string) [cast(char) 0xff];
+    assert(normalized(malformed) == "�");
+    assert(normalized("a" ~ malformed ~ " b") == "a�b");
+    assert(normalized(replicate("a", maxMetadataValueBytes - 3) ~ malformed) ==
+        replicate("a", maxMetadataValueBytes - 3) ~ "�");
+    assert(normalized(replicate("a", maxMetadataValueBytes - 2) ~ malformed) is null);
 }
 
 private string attribute(const ref HtmlNode node, string name) pure {

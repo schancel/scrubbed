@@ -18,7 +18,7 @@ import std.digest.sha : SHA256, sha256Of;
 import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
     rmdirRecurse, tempDir, write;
 import std.json : JSONValue, parseJSON;
-import std.math : abs;
+import std.math.operations : nextDown, nextUp;
 import std.path : absolutePath, buildPath, relativePath;
 import std.process : execute, spawnProcess;
 import std.stdio : File, writeln;
@@ -40,7 +40,7 @@ private enum ulong maxTimeRegressionUs = 50_000;
 private enum ulong maxPhaseRegressionNs = 5_000_000;
 private enum double maxRssRegressionPercent = 10.0;
 private enum ulong maxRssRegressionBytes = 4 * 1024 * 1024;
-private enum double comparisonPercentageTolerance = 1e-12;
+private enum comparisonPercentageUlps = 4;
 private immutable string[] phaseNames = [
     "compiled_execution", "identity", "ledger_query", "ledger_transaction",
     "output_hash", "output_read", "output_safe_open", "publication",
@@ -548,6 +548,20 @@ private void comparisonScheduleSelfTest() {
         "comparison acquisition schedule mismatch");
 }
 
+private void comparisonPercentageSelfTest() {
+    double upper = 1.0;
+    double lower = 1.0;
+    foreach (_; 0 .. comparisonPercentageUlps) {
+        upper = nextUp(upper);
+        lower = nextDown(lower);
+    }
+    need(sameSerializedPercentage(upper, 1.0) &&
+        sameSerializedPercentage(lower, 1.0) &&
+        !sameSerializedPercentage(nextUp(upper), 1.0) &&
+        !sameSerializedPercentage(nextDown(lower), 1.0),
+        "comparison percentage ULP boundary mismatch");
+}
+
 private ulong[] scalarSamples(ref JSONValue layout, string route, string mode,
         string role, string field) {
     ulong[] values;
@@ -613,6 +627,16 @@ private double percentChange(ulong before, ulong after) {
     return (cast(double)after - before) * 100.0 / before;
 }
 
+private bool sameSerializedPercentage(double recorded, double derived) {
+    auto lower = derived;
+    auto upper = derived;
+    foreach (_; 0 .. comparisonPercentageUlps) {
+        lower = nextDown(lower);
+        upper = nextUp(upper);
+    }
+    return recorded >= lower && recorded <= upper;
+}
+
 private bool sameDerivedComparison(ref JSONValue recorded,
         ref JSONValue derived) {
     immutable fields = ["layout", "route", "mode", "base_wall_us",
@@ -636,8 +660,8 @@ private bool sameDerivedComparison(ref JSONValue recorded,
         if (recorded[field].integer != derived[field].integer) return false;
     foreach (field; ["wall_percent", "cpu_percent", "rss_percent",
             "source_hash_percent", "output_hash_percent"])
-        if (abs(recorded[field].floating - derived[field].floating) >
-                comparisonPercentageTolerance) return false;
+        if (!sameSerializedPercentage(recorded[field].floating,
+                derived[field].floating)) return false;
     return true;
 }
 
@@ -1093,6 +1117,7 @@ private void comparisonDecisionSelfTest(ref const JSONValue good) {
 
 private void comparisonValidatorSelfTest(string harnessBinary) {
     comparisonScheduleSelfTest();
+    comparisonPercentageSelfTest();
     auto root = buildPath(tempDir, "scrubbed-sha-comparison-selftest-" ~
         randomUUID.toString);
     mkdirRecurse(root);
@@ -1142,10 +1167,17 @@ private void comparisonValidatorSelfTest(string harnessBinary) {
                 row["ordinal"].integer < 3)
             row["wall_us"] = 2_000_000;
     mustReject(observation, "observation mutation accepted");
-    auto derivedPercentage = parseJSON(good.toString);
-    derivedPercentage["comparisons"][0]["wall_percent"] =
-        derivedPercentage["comparisons"][0]["wall_percent"].floating + 0.001;
-    mustReject(derivedPercentage, "derived percentage mutation accepted");
+    foreach (field; ["wall_percent", "cpu_percent", "rss_percent",
+            "source_hash_percent", "output_hash_percent"]) {
+        auto derivedPercentage = parseJSON(good.toString);
+        derivedPercentage["comparisons"][0][field] =
+            derivedPercentage["comparisons"][0][field].floating + 0.001;
+        mustReject(derivedPercentage,
+            "derived percentage mutation accepted: " ~ field);
+    }
+    auto comparisonShape = parseJSON(good.toString);
+    comparisonShape["comparisons"][0]["unexpected"] = true;
+    mustReject(comparisonShape, "comparison row schema extension accepted");
     auto source = parseJSON(good.toString);
     source["candidate_source_sha"] = "c".replicate(40);
     mustReject(source, "forged source identity accepted");

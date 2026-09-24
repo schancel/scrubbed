@@ -652,7 +652,8 @@ forceable, and digest state belongs to each facade instance.
 
 The evidence binds a sanitized host identity: Darwin release, architecture,
 and CPU brand, with no serial number or other private identifier. On the
-recorded Apple M4 AArch64 host, ARM execution and disassembly prove
+recorded hosted `Apple M1 (Virtual)` AArch64 host, ARM execution and
+disassembly prove
 `sha256h`, `sha256h2`, `sha256su0`, and `sha256su1`. The D source also
 cross-compiles to x86-64 Mach-O and Linux objects whose disassembly contains
 32 `sha256rnds2` instructions. Because this process is AArch64, x86 execution
@@ -672,11 +673,15 @@ schema, source hashes, benchmark rows, and digests. Caller-only source changes
 trigger the workflow; a macOS ARM job also tests and builds the production
 package. Workflow actions and LDC 1.43.0 are pinned; the workflow has read-only
 repository permission.
-Run `35914157081` passed both native jobs. The committed sanitized artifacts
-record `SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on
-x86-64 and `armv8-sha2` on arm64, and identical source hashes across both
-architectures. Native x86 execution is therefore no longer an external
-blocker.
+Run `35955574514` at source head
+`9857764f3185e57a23d4df37caccb4e182152199` generated the committed backend
+and native artifacts. Both native generation/self-validation steps and the
+hosted backend report step passed; the overall bootstrap run later failed on
+the deliberately stale committed-native checks and the comparison-validator
+defect corrected in the following candidate. The native artifacts record
+`SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on x86-64 and
+`armv8-sha2` on arm64, and identical source hashes across both architectures.
+Native x86 execution is therefore no longer an external blocker.
 
 `sha256-backend-evidence.json` contains five interleaved scalar/selected
 samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,

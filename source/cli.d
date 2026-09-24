@@ -35,6 +35,7 @@ import effects.html_tree_json_stage;
 import effects.html_markdown_stage;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, StageEvent;
+import stages.pii_four_class;
 import stages.text_transform;
 import job.cli_tokens : parseJobTokens;
 import job.json : canonicalJobJson, parseJobJson;

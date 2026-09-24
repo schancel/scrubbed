@@ -3,14 +3,14 @@ module benchmarks.coordination_profile;
 
 import core.atomic : atomicLoad, atomicStore;
 import core.stdc.errno : EINTR, errno;
-import core.sys.posix.signal : posixKill = kill, SIGKILL, SIGTERM;
+import core.sys.posix.signal : posixKill = kill, siginfo_t, SIGKILL, SIGTERM;
 import core.sys.posix.sys.resource : RLIMIT_FSIZE, getrlimit, rlimit, rusage,
     setrlimit;
 import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IWUSR, S_IXUSR,
     S_IRWXU;
 import core.sys.posix.unistd : execv, getpid, link, setpgid;
-import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WIFSIGNALED, WNOHANG,
-    WTERMSIG;
+import core.sys.posix.sys.wait : idtype_t, WEXITED, WEXITSTATUS, WIFEXITED,
+    WIFSIGNALED, WNOHANG, WNOWAIT, WTERMSIG, waitid;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : msecs, seconds;
@@ -35,6 +35,8 @@ import std.string : splitLines, strip, toStringz;
 import std.uuid : randomUUID;
 
 extern(C) int wait4(int pid, int* status, int options, rusage* usage);
+extern(C) int proc_listpids(uint type, uint typeInfo, void* buffer,
+    int bufferSize);
 
 private enum recordBytes = 256;
 private enum recordCount = 524_288;
@@ -46,11 +48,7 @@ private enum executableSnapshotMaxBytes = 512UL * 1024 * 1024;
 private enum diagnosticFileMaxBytes = 64UL * 1024 * 1024;
 private __gshared string launcherPath;
 private __gshared Mutex processGroupMutex;
-private struct ActiveProcessGroup {
-    int pid;
-    bool leaderReaped;
-}
-private __gshared ActiveProcessGroup[] activeProcessGroups;
+private __gshared int[] activeProcessGroups;
 private __gshared bool watchdogFiring;
 private MonoTime wholeRunDeadline;
 private enum fixtureTablePin =
@@ -91,12 +89,12 @@ private void armWholeRunWatchdog(MonoTime deadline) {
         while (MonoTime.currTime < deadline) Thread.sleep(10.msecs);
         processGroupMutex.lock();
         watchdogFiring = true;
-        foreach (group; activeProcessGroups) {
+        foreach (pid; activeProcessGroups) {
             // Registration precedes the launcher's setpgid handshake. Stop an
-            // unreaped leader first so it cannot create the group after the
-            // group signal. A reaped PID is never signalled because it may
-            // already identify an unrelated process.
-            foreach (target; watchdogTargets(group))
+            // leader first so it cannot create the group after the group
+            // signal. Normal cleanup observes exit without reaping and holds
+            // this mutex until the pinned PID/PGID is cleaned and retired.
+            foreach (target; watchdogTargets(pid))
                 posixKill(target, SIGKILL);
         }
         processGroupMutex.unlock();
@@ -106,40 +104,17 @@ private void armWholeRunWatchdog(MonoTime deadline) {
     watchdog.start();
 }
 
-private void unregisterProcessGroup(int pid) {
-    processGroupMutex.lock();
-    removeProcessGroupLocked(pid);
-    processGroupMutex.unlock();
-}
-
 private void removeProcessGroupLocked(int pid) {
     foreach (index, active; activeProcessGroups)
-        if (active.pid == pid) {
+        if (active == pid) {
             activeProcessGroups[index] = activeProcessGroups[$ - 1];
             activeProcessGroups.length = activeProcessGroups.length - 1;
             break;
         }
 }
 
-private int[] watchdogTargets(const ActiveProcessGroup group) {
-    int[] result;
-    if (!group.leaderReaped) result ~= group.pid;
-    result ~= -group.pid;
-    return result;
-}
-
-private int waitAndRecordReap(int pid, int* status, int options,
-        rusage* usage) {
-    processGroupMutex.lock();
-    auto waited = wait4(pid, status, options, usage);
-    if (waited == pid)
-        foreach (ref group; activeProcessGroups)
-            if (group.pid == pid) {
-                group.leaderReaped = true;
-                break;
-            }
-    processGroupMutex.unlock();
-    return waited;
+private int[] watchdogTargets(int pid) {
+    return [pid, -pid];
 }
 
 private string hexDigest(const(ubyte)[] value) {
@@ -346,58 +321,88 @@ private string[string] childEnvironment(bool instrumented,
     return result;
 }
 
-private void reapBlocking(int pid, out int status, out rusage usage) {
+private bool processGroupHasDescendants(int pid) {
+    enum procPgrpOnly = 2U;
+    auto required = proc_listpids(procPgrpOnly, cast(uint)pid, null, 0);
+    need(required >= 0 && required <= 4 * 65_536,
+        "process-group membership could not be bounded");
+    auto slots = cast(size_t)(required / int.sizeof) + 16;
+    auto members = new int[slots];
+    auto used = proc_listpids(procPgrpOnly, cast(uint)pid, members.ptr,
+        cast(int)(members.length * int.sizeof));
+    need(used >= 0 && used <= members.length * int.sizeof,
+        "process-group membership could not be read");
+    foreach (member; members[0 .. cast(size_t)used / int.sizeof])
+        if (member > 0 && member != pid) return true;
+    return false;
+}
+
+private bool tryReapExited(int pid, out int status, out rusage usage,
+        out bool groupClean) {
+    processGroupMutex.lock();
+    siginfo_t information;
+    int observed;
+    do observed = waitid(idtype_t.P_PID, cast(uint)pid, &information,
+        WEXITED | WNOHANG | WNOWAIT);
+    while (observed < 0 && errno == EINTR);
+    if (observed < 0) {
+        processGroupMutex.unlock();
+        need(false, "child exit could not be observed");
+    }
+    if (information.si_pid != pid) {
+        processGroupMutex.unlock();
+        return false;
+    }
+    groupClean = !processGroupHasDescendants(pid);
+    // The unreaped leader pins both numeric identities while every possible
+    // descendant receives the terminal signal.
+    posixKill(-pid, SIGKILL);
     int waited;
-    do {
-        waited = waitAndRecordReap(pid, &status, WNOHANG, &usage);
-        if (waited == 0) Thread.sleep(10.msecs);
-    } while (waited == 0 || (waited < 0 && errno == EINTR));
-    need(waited == pid, "child could not be reaped");
+    do waited = wait4(pid, &status, WNOHANG, &usage);
+    while (waited < 0 && errno == EINTR);
+    if (waited == pid) removeProcessGroupLocked(pid);
+    processGroupMutex.unlock();
+    need(waited == pid, "observed child could not be reaped");
+    return true;
 }
 
 private bool reapUntil(int pid, MonoTime deadline, out int status,
-        out rusage usage) {
-    while (true) {
-        auto waited = waitAndRecordReap(pid, &status, WNOHANG, &usage);
-        if (waited == pid) return true;
-        if (waited < 0 && errno != EINTR)
-            need(false, "wait4 failed");
+        out rusage usage, out bool groupClean) {
+    while (!tryReapExited(pid, status, usage, groupClean)) {
         if (MonoTime.currTime >= deadline) return false;
         Thread.sleep(10.msecs);
     }
+    return true;
+}
+
+private bool reapBlocking(int pid, out int status, out rusage usage) {
+    bool groupClean;
+    while (!tryReapExited(pid, status, usage, groupClean))
+        Thread.sleep(10.msecs);
+    return groupClean;
+}
+
+private void signalRegisteredProcess(int pid, int signal,
+        bool includeLeader) {
+    processGroupMutex.lock();
+    foreach (active; activeProcessGroups)
+        if (active == pid) {
+            if (includeLeader) posixKill(pid, signal);
+            posixKill(-pid, signal);
+            break;
+        }
+    processGroupMutex.unlock();
 }
 
 private void terminateGroupAndReap(int pid, out int status,
         out rusage usage) {
-    // The launcher creates the group before publishing its readiness file.
-    if (posixKill(-pid, SIGTERM) != 0) posixKill(pid, SIGTERM);
+    signalRegisteredProcess(pid, SIGTERM, true);
     auto graceDeadline = MonoTime.currTime + seconds(1);
-    auto leaderReaped = reapUntil(pid, graceDeadline, status, usage);
-    if (leaderReaped)
-        while (MonoTime.currTime < graceDeadline && posixKill(-pid, 0) == 0)
-            Thread.sleep(10.msecs);
-    posixKill(-pid, SIGKILL);
-    if (!leaderReaped) reapBlocking(pid, status, usage);
-    unregisterProcessGroup(pid);
-}
-
-private bool finishExitedProcessGroup(int pid) {
-    processGroupMutex.lock();
-    if (posixKill(-pid, 0) != 0) {
-        removeProcessGroupLocked(pid);
-        processGroupMutex.unlock();
-        return true;
+    bool groupClean;
+    if (!reapUntil(pid, graceDeadline, status, usage, groupClean)) {
+        signalRegisteredProcess(pid, SIGKILL, true);
+        reapBlocking(pid, status, usage);
     }
-    processGroupMutex.unlock();
-    posixKill(-pid, SIGTERM);
-    auto graceDeadline = MonoTime.currTime + seconds(1);
-    while (MonoTime.currTime < graceDeadline && posixKill(-pid, 0) == 0)
-        Thread.sleep(10.msecs);
-    processGroupMutex.lock();
-    posixKill(-pid, SIGKILL);
-    removeProcessGroupLocked(pid);
-    processGroupMutex.unlock();
-    return false;
 }
 
 private bool processDisappeared(int pid, MonoTime deadline) {
@@ -428,7 +433,7 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         processGroupMutex.unlock();
         throw error;
     }
-    activeProcessGroups ~= ActiveProcessGroup(child.processID, false);
+    activeProcessGroups ~= child.processID;
     processGroupMutex.unlock();
     auto readyDeadline = MonoTime.currTime + seconds(2);
     if (deadline < readyDeadline) readyDeadline = deadline;
@@ -436,10 +441,8 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         Thread.sleep(1.msecs);
     if (!exists(readyPath)) {
         int status; rusage usage;
-        posixKill(-child.processID, SIGKILL);
-        posixKill(child.processID, SIGKILL);
+        signalRegisteredProcess(child.processID, SIGKILL, true);
         reapBlocking(child.processID, status, usage);
-        unregisterProcessGroup(child.processID);
         need(false, "child process group did not become ready");
     }
     if (registrationDelayMilliseconds > 0)
@@ -470,12 +473,13 @@ private string boundedCommandOutput(string[] command, string root,
         stderrFile, childEnvironment(false), commandDeadline);
     catch (Exception) return null;
     stdinFile.close(); stdoutFile.close(); stderrFile.close();
-    int status; rusage usage;
-    if (!reapUntil(child.processID, commandDeadline, status, usage)) {
+    int status; rusage usage; bool groupClean;
+    if (!reapUntil(child.processID, commandDeadline, status, usage,
+            groupClean)) {
         terminateGroupAndReap(child.processID, status, usage);
         return null;
     }
-    if (!finishExitedProcessGroup(child.processID)) return null;
+    if (!groupClean) return null;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return null;
     if (getSize(stdoutPath) > diagnosticFileMaxBytes ||
         getSize(stderrPath) > diagnosticFileMaxBytes) return null;
@@ -525,7 +529,7 @@ private JSONValue invoke(string binary, string input, string output,
             if (getSize(stdoutPath) > diagnosticFileMaxBytes ||
                     getSize(stderrPath) > diagnosticFileMaxBytes) {
                 atomicStore(diagnosticOverflow, true);
-                posixKill(-child.processID, SIGKILL);
+                signalRegisteredProcess(child.processID, SIGKILL, false);
                 break;
             }
             auto seen = boundedCommandOutput(["/usr/sbin/lsof", "-p",
@@ -566,13 +570,14 @@ private JSONValue invoke(string binary, string input, string output,
             if (body.length) stackHash = hexDigest(body);
         } else stackStatus = "unsupported-sample-failed";
     }
-    int status; rusage usage;
-    childReaped = reapUntil(child.processID, sampleDeadline, status, usage);
+    int status; rusage usage; bool groupClean;
+    childReaped = reapUntil(child.processID, sampleDeadline, status, usage,
+        groupClean);
     bool timedOut = !childReaped;
     if (timedOut) {
         terminateGroupAndReap(child.processID, status, usage);
         childReaped = true;
-    } else need(finishExitedProcessGroup(child.processID),
+    } else need(groupClean,
         "child exited while descendants remained in its process group");
     timer.stop();
     atomicStore(stopped, true); sampler.join();
@@ -714,10 +719,8 @@ private void runSelfTest(string harnessPath) {
     scope(exit) if (exists(root)) rmdirRecurse(root);
     need((getAttributes(root) & 511) == S_IRWXU,
         "benchmark scratch permissions differ");
-    need(watchdogTargets(ActiveProcessGroup(73, false)) == [73, -73],
+    need(watchdogTargets(73) == [73, -73],
         "watchdog does not stop an unreaped leader before its process group");
-    need(watchdogTargets(ActiveProcessGroup(73, true)) == [-73],
-        "watchdog can signal a recycled reaped PID");
 
     auto mutableExecutable = buildPath(root, "mutable-executable");
     write(mutableExecutable, "#!/bin/sh\nexit 0\n");
@@ -785,9 +788,8 @@ private void runSelfTest(string harnessPath) {
     overflowInputFile.close(); overflowOutputFile.close();
     overflowErrorFile.close();
     int overflowStatus; rusage overflowUsage;
-    reapBlocking(overflowChild.processID, overflowStatus, overflowUsage);
-    auto overflowGroupClean = finishExitedProcessGroup(
-        overflowChild.processID);
+    auto overflowGroupClean = reapBlocking(overflowChild.processID,
+        overflowStatus, overflowUsage);
     need(overflowGroupClean &&
         (!WIFEXITED(overflowStatus) || WEXITSTATUS(overflowStatus) != 0) &&
         getSize(overflowOut) <= testFileLimit,
@@ -867,14 +869,16 @@ private void runSelfTest(string harnessPath) {
         watchdogDeadline);
     watchdogInput.close(); watchdogOutput.close(); watchdogError.close();
     int watchdogStatus; rusage watchdogUsage;
+    bool watchdogGroupClean;
     auto watchdogReaped = reapUntil(watchdogChild.processID,
-        watchdogDeadline, watchdogStatus, watchdogUsage);
+        watchdogDeadline, watchdogStatus, watchdogUsage,
+        watchdogGroupClean);
     watchdogTimer.stop();
     if (!watchdogReaped)
         terminateGroupAndReap(watchdogChild.processID, watchdogStatus,
             watchdogUsage);
     else
-        need(finishExitedProcessGroup(watchdogChild.processID),
+        need(watchdogGroupClean,
             "whole-run watchdog left its registered process group alive");
     need(watchdogReaped && WIFSIGNALED(watchdogStatus) &&
         WTERMSIG(watchdogStatus) == SIGKILL &&

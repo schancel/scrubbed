@@ -57,7 +57,9 @@ filters should expose a typed factory whose result is a plain
 function pointer plus transitive-immutable parsed configuration; configured
 delegates and mutable retained state are rejected at this boundary. A plain filter rejects
 nonempty options. [`entities.d`](entities.d)
-decodes a limited set of HTML entities and uses `mojibake`'s CP1252 helper;
+decodes a limited set of HTML entities and uses `mojibake`'s CP1252 helper. It
+defers materialization until the first accepted reference, returns the original
+string when nothing changes, and bulk-copies unchanged spans around replacements;
 [`punctuation.d`](punctuation.d) owns quote normalization.
 
 `fix-mojibake` first scores the existing whole-string Latin-1/CP1252 round

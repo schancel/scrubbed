@@ -60,21 +60,21 @@ private string numericReference(string text, ref size_t end) pure {
 /// RAWTEXT, script, comments and other tokenizer states are not supported.
 string decodeHtmlEntities(string text, EntityContext context = EntityContext.text) pure {
     auto output = appender!string;
-    output.reserve(text.length);
+    size_t copiedUntil;
     size_t position;
     while (position < text.length) {
         if (text[position] != '&') {
-            output.put(text[position++]);
+            position++;
             continue;
         }
         const start = position;
         size_t cursor = start + 1;
+        string replacement;
+        size_t replacementEnd;
         if (cursor < text.length && text[cursor] == '#') {
-            auto replacement = numericReference(text, cursor);
+            replacement = numericReference(text, cursor);
             if (replacement !is null) {
-                output.put(replacement);
-                position = cursor;
-                continue;
+                replacementEnd = cursor;
             }
         } else {
             string longest;
@@ -102,14 +102,22 @@ string decodeHtmlEntities(string text, EntityContext context = EntityContext.tex
                 !(context == EntityContext.attribute && text[longestEnd - 1] != ';' &&
                   longestEnd < text.length &&
                   (asciiAlphaNumeric(text[longestEnd]) || text[longestEnd] == '='))) {
-                output.put(longest);
-                position = longestEnd;
-                continue;
+                replacement = longest;
+                replacementEnd = longestEnd;
             }
         }
-        output.put(text[start]);
-        position = start + 1;
+        if (replacement is null) {
+            position = start + 1;
+            continue;
+        }
+        if (copiedUntil == 0) output.reserve(text.length);
+        output.put(text[copiedUntil .. start]);
+        output.put(replacement);
+        copiedUntil = replacementEnd;
+        position = replacementEnd;
     }
+    if (copiedUntil == 0) return text;
+    output.put(text[copiedUntil .. $]);
     return output.data;
 }
 
@@ -140,4 +148,12 @@ unittest {
     assert(decodeHtmlEntities("&#x41= &#128") == "A= €");
     assert(decodeHtmlEntities("&amp;lt;") == "&lt;");
     assert(decodeHtmlEntities(decodeHtmlEntities("&amp;lt;")) == "<"); // caller-requested second pass only
+    assert(decodeHtmlEntities("left &unknown; &amp; &bogus; right") ==
+        "left &unknown; & &bogus; right");
+    assert(decodeHtmlEntities("&amp;&lt;") == "&<");
+
+    auto clean = "plain café text";
+    auto invalidOnly = "fish & chips &unknown; &#x;";
+    assert(decodeHtmlEntities(clean).ptr is clean.ptr);
+    assert(decodeHtmlEntities(invalidOnly).ptr is invalidOnly.ptr);
 }

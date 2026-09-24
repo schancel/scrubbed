@@ -126,7 +126,9 @@ for explicitly supported document formats are tracked separately (#67, #156).
       all 2,231 pinned WHATWG named references, with explicit text and
       attribute-value modes. The registered filter uses text mode; this is
       not a full HTML tokenizer. The generated table has a D-only
-      regeneration/check script under `scripts/`.
+      regeneration/check script under `scripts/`. No-op and invalid-only input
+      returns its original storage; changed input materializes only from the
+      first accepted reference and copies unchanged spans in bulk.
 - [x] Curly-quote / smart-punctuation normalization (ftfy's
       `uncurl_quotes`-equivalent), implemented as a lazy range. It can run
       before mojibake repair when intentional curly quotes would otherwise

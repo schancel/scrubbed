@@ -1,4 +1,4 @@
-/// Release-active, evidence-only materialization accounting for issue #183.
+/// Release-active materialization accounting and copy-removal proof for #183.
 /// Build with -version=MaterializationWorkProbe; ordinary builds have no probe API.
 module benchmarks.materialization_work;
 
@@ -41,6 +41,7 @@ private enum oneMiB = 1024 * 1024;
 private enum fourMiB = 4 * oneMiB;
 private enum evidenceSourcePaths = [
     "source/content/pieces.d",
+    "source/composition/compiler.d",
     "source/composition/executor.d",
     "source/pipeline.d",
     "source/effects/atomic_piece_sink.d",
@@ -51,10 +52,18 @@ private enum frozenBaselinePaths = [
     "benchmarks/pipeline-canonical-attribution.json"
 ];
 
+private immutable string knownGcOutput;
+
+shared static this() {
+    knownGcOutput = "ordinary-safe-output".idup;
+}
+
 private string embeddedSource(string path) pure {
     final switch (path) {
     case "source/content/pieces.d":
         return import("source/content/pieces.d");
+    case "source/composition/compiler.d":
+        return import("source/composition/compiler.d");
     case "source/composition/executor.d":
         return import("source/composition/executor.d");
     case "source/pipeline.d":
@@ -87,15 +96,17 @@ private size_t duplicatePush(ref StreamingState, dchar input,
     return 2;
 }
 
-private string wholeIdentity(string input) pure { return input; }
-private string wholePrefix(string input) pure { return input[0 .. $ - 1]; }
-private string wholeSuffix(string input) pure { return input[1 .. $]; }
-private string wholeInterior(string input) pure { return input[1 .. $ - 1]; }
-private string wholeEmptyBorrowed(string input) pure { return input[2 .. 2]; }
-private string wholeDistinct(string input) pure {
+private string wholeIdentity(string input) pure @safe { return input; }
+private string wholePrefix(string input) pure @safe { return input[0 .. $ - 1]; }
+private string wholeSuffix(string input) pure @safe { return input[1 .. $]; }
+private string wholeInterior(string input) pure @safe { return input[1 .. $ - 1]; }
+private string wholeEmptyBorrowed(string input) pure @safe { return input[2 .. 2]; }
+private string wholeTiny(string input) pure @safe { return input[0 .. 1]; }
+private string wholeDistinct(string input) pure @safe {
     auto allocated = input ~ "!";
     return allocated[0 .. input.length];
 }
+private string wholeKnownGcOutput(string) pure @safe { return knownGcOutput; }
 
 private StageDecision mapStage(StageDocument input,
         immutable(StageConfiguration)) pure {
@@ -164,12 +175,16 @@ private FilterRegistry filters() {
         StreamingState.init, &identityPush, null));
     result.addStreamingFilter("duplicate", StreamingFilter(
         StreamingState.init, &duplicatePush, null));
-    result.addFilter("whole-identity", cast(Filter)&wholeIdentity);
-    result.addFilter("whole-prefix", cast(Filter)&wholePrefix);
-    result.addFilter("whole-suffix", cast(Filter)&wholeSuffix);
-    result.addFilter("whole-interior", cast(Filter)&wholeInterior);
-    result.addFilter("whole-empty-borrowed", cast(Filter)&wholeEmptyBorrowed);
-    result.addFilter("whole-distinct", cast(Filter)&wholeDistinct);
+    result.addSafeFilter("whole-identity", &wholeIdentity);
+    result.addSafeFilter("whole-prefix", &wholePrefix);
+    result.addSafeFilter("whole-suffix", &wholeSuffix);
+    result.addSafeFilter("whole-interior", &wholeInterior);
+    result.addSafeFilter("whole-empty-borrowed", &wholeEmptyBorrowed);
+    result.addSafeFilter("whole-tiny", &wholeTiny);
+    result.addSafeFilter("whole-distinct", &wholeDistinct);
+    result.addSafeFilter("whole-known-gc-output", &wholeKnownGcOutput);
+    result.addFilter("legacy-identity", &wholeIdentity);
+    result.addFilter("legacy-known-gc-output", &wholeKnownGcOutput);
     return result;
 }
 
@@ -249,17 +264,25 @@ private void validateEvidence(ref const Evidence evidence) {
         evidence.before.filterResultToOwnedPiece.calls == 1 &&
         evidence.before.filterResultToOwnedPiece.inputBytes == 2 * oneMiB &&
         evidence.before.filterResultToOwnedPiece.outputBytes == 2 * oneMiB &&
-        evidence.before.filterResultToOwnedPiece.logicalCopiedBytes == 2 * oneMiB &&
+        evidence.before.filterResultToOwnedPiece.logicalCopiedBytes == 0 &&
+        evidence.before.filterResultToOwnedPiece.gcAllocatedBytes < 64 * 1024 &&
         evidence.before.emittedFilterApplications == 1 &&
         evidence.before.terminalFilterSkips == 0,
         "before-filter accounting does not reconcile");
     need(evidence.split.contentToUtf8.calls == 2 &&
         evidence.split.contentToUtf8.inputBytes == 4 * oneMiB &&
+        evidence.split.contentToUtf8.outputBytes == 4 * oneMiB &&
+        evidence.split.contentToUtf8.logicalCopiedBytes == 4 * oneMiB &&
         evidence.split.filterExecution.calls == 2 &&
+        evidence.split.filterExecution.inputBytes == 4 * oneMiB &&
+        evidence.split.filterExecution.outputBytes == 4 * oneMiB &&
         evidence.split.filterExecution.distinctOutputCalls == 2 &&
         evidence.split.filterExecution.distinctOutputBytes == 4 * oneMiB &&
         evidence.split.filterResultToOwnedPiece.calls == 2 &&
-        evidence.split.filterResultToOwnedPiece.logicalCopiedBytes == 4 * oneMiB &&
+        evidence.split.filterResultToOwnedPiece.inputBytes == 4 * oneMiB &&
+        evidence.split.filterResultToOwnedPiece.outputBytes == 4 * oneMiB &&
+        evidence.split.filterResultToOwnedPiece.logicalCopiedBytes == 0 &&
+        evidence.split.filterResultToOwnedPiece.gcAllocatedBytes < 64 * 1024 &&
         evidence.split.emittedFilterApplications == 2 &&
         evidence.split.terminalFilterSkips == 0,
         "split accounting does not reconcile");
@@ -335,10 +358,12 @@ private Evidence measure() {
         beforePlan.stages[0], evidence.before);
     sameResult(ordinaryBefore, measuredBefore);
     need(evidence.before.contentToUtf8.logicalCopiedBytes == oneMiB &&
-        evidence.before.filterResultToOwnedPiece.logicalCopiedBytes == 2 * oneMiB &&
+        evidence.before.filterResultToOwnedPiece.logicalCopiedBytes == 0 &&
+        evidence.before.filterResultToOwnedPiece.gcAllocatedBytes < 64 * 1024 &&
         evidence.before.emittedFilterApplications == 1,
         "before-filter logical copy accounting differs");
     measuredOwner.close;
+    GC.collect();
     need(bytes(measuredBefore.events[0].payload.content).length == 2 * oneMiB,
         "filtered output did not outlive borrowed owner");
     bool borrowedRefused;
@@ -494,14 +519,16 @@ private void aliasClassificationControl() {
         string name;
         string expected;
         OutputStorageRelation relation;
+        bool copiesResult;
     }
     immutable cases = [
-        Case("whole-identity", "abcdef", OutputStorageRelation.borrowed),
-        Case("whole-prefix", "abcde", OutputStorageRelation.borrowed),
-        Case("whole-suffix", "bcdef", OutputStorageRelation.borrowed),
-        Case("whole-interior", "bcde", OutputStorageRelation.borrowed),
-        Case("whole-empty-borrowed", "", OutputStorageRelation.borrowed),
-        Case("whole-distinct", "abcdef", OutputStorageRelation.distinct)
+        Case("whole-identity", "abcdef", OutputStorageRelation.borrowed, false),
+        Case("whole-prefix", "abcde", OutputStorageRelation.borrowed, false),
+        Case("whole-suffix", "bcdef", OutputStorageRelation.borrowed, false),
+        Case("whole-interior", "bcde", OutputStorageRelation.borrowed, false),
+        Case("whole-empty-borrowed", "", OutputStorageRelation.borrowed, true),
+        Case("whole-distinct", "abcdef", OutputStorageRelation.distinct, false),
+        Case("legacy-identity", "abcdef", OutputStorageRelation.borrowed, true)
     ];
     auto registry = filters;
     auto stageRegistry = stages;
@@ -535,7 +562,47 @@ private void aliasClassificationControl() {
             test.name ~ " executor output differs");
         needRelation(executorWork.filterExecution, test.relation,
             test.expected.length, test.name ~ " executor");
+        need(executorWork.filterResultToOwnedPiece.logicalCopiedBytes ==
+                (test.copiesResult ? test.expected.length : 0),
+            test.name ~ " executor retention policy differs");
     }
+
+    need(GC.addrOf(knownGcOutput.ptr) !is null,
+        "ordinary retention control is not GC-backed");
+    foreach (name, retains; ["whole-known-gc-output": true,
+            "legacy-known-gc-output": false]) {
+        auto spec = parseJobJson(`{"version":3,"stages":[{"id":"ordinary",` ~
+            `"implementation":"map","filters":[{"name":"` ~ name ~
+            `"}]}]}`);
+        auto plan = compileJob(spec, &stageRegistry, &registry);
+        auto ordinary = runCompiledStage([StageDocument(document,
+            new Content([ContentPiece.own(cast(const(ubyte)[])"input")]))],
+            plan.stages[0]);
+        auto output = ordinary.events[0].payload.content;
+        need(bytes(output) == knownGcOutput,
+            name ~ " ordinary executor output differs");
+        need(output.retainsImmutableStorage(
+                cast(immutable(ubyte)[])knownGcOutput) == retains,
+            name ~ " ordinary executor retention policy differs");
+    }
+
+    auto largeBytes = new ubyte[oneMiB];
+    largeBytes[] = 'a';
+    auto largeOwner = new DocumentViewOwner(largeBytes);
+    auto tinySpec = parseJobJson(`{"version":3,"stages":[{"id":"tiny",` ~
+        `"implementation":"map","filters":[{"name":"whole-tiny"}]}]}`);
+    auto tinyPlan = compileJob(tinySpec, &stageRegistry, &registry);
+    ExecutorMaterializationWorkV1 tinyWork;
+    auto tiny = runCompiledStageMeasured([StageDocument(document,
+        new Content([ContentPiece.borrow(largeOwner.view(0, oneMiB))]))],
+        tinyPlan.stages[0], tinyWork);
+    need(tinyWork.filterResultToOwnedPiece.logicalCopiedBytes == 1 &&
+        tinyWork.filterResultToOwnedPiece.gcAllocatedBytes < 64 * 1024,
+        "tiny retained slice did not use bounded compaction");
+    largeOwner.close;
+    GC.collect();
+    need(bytes(tiny.events[0].payload.content) == "a",
+        "compacted tiny output did not outlive borrowed owner");
 
     auto backing = "012345";
     need(classifyOutputStorage(backing[1 .. 5], backing[0 .. 3]) ==
@@ -631,9 +698,10 @@ private JSONValue report(ref const Evidence evidence) {
     root["compiler_vendor"] = __VENDOR__;
     root["compiler_version"] = cast(long)__VERSION__;
     root["build"] = "D_Optimized+release-required-command";
-    root["ordinary_algorithm_changed"] = false;
-    root["representation_change_authorized"] = false;
-    root["reason"] = "evidence-only landing; no boundary-removal candidate or paired threshold proof";
+    root["ordinary_algorithm_changed"] = true;
+    root["representation_change_authorized"] = true;
+    root["performance_claim_authorized"] = false;
+    root["reason"] = "DIP1000-checked allocation-sized filter results are retained without a payload copy while legacy results and pathological slices are copied; deterministic allocation and lifetime proof passed, but loaded-host wall timing is not a performance claim";
     JSONValue sources;
     foreach (path; evidenceSourcePaths)
         sources[path] = digestText(embeddedSource(path));
@@ -762,6 +830,10 @@ void main(string[] args) {
     ++copyMutant.before.contentToUtf8.logicalCopiedBytes;
     expectInvalid(() { validateEvidence(copyMutant); },
         "logical-copy accounting");
+    auto splitBoundaryMutant = evidence;
+    ++splitBoundaryMutant.split.filterResultToOwnedPiece.outputBytes;
+    expectInvalid(() { validateEvidence(splitBoundaryMutant); },
+        "split boundary accounting");
     auto outcomeMutant = evidence;
     outcomeMutant.reject.terminalFilterSkips = 0;
     expectInvalid(() { validateEvidence(outcomeMutant); },

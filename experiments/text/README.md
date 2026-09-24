@@ -3,7 +3,7 @@
 From the repository root:
 
 ```sh
-ldc2 -O -release -enable-inlining -Isource experiments/text/local_mojibake.d \
+ldc2 -O -release -preview=dip1000 -enable-inlining -Isource experiments/text/local_mojibake.d \
   source/filters/mojibake.d source/pipeline.d -of=/tmp/scrubbed-local-mojibake
 /tmp/scrubbed-local-mojibake
 ```

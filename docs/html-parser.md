@@ -132,7 +132,7 @@ Release-active actual-binary check:
 
 ```sh
 dub build --build=release
-ldc2 -i -O3 -release -Isource -of=.dub/html-cli-check \
+ldc2 -i -O3 -release -preview=dip1000 -Isource -of=.dub/html-cli-check \
   experiments/html_parser/cli_check.d .dub/lexbor/liblexbor_static.a
 .dub/html-cli-check ./scrubbed
 ```

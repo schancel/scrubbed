@@ -110,11 +110,11 @@ count, with no current-record output.
 Run the release-active harness with:
 
 ```sh
-ldc2 -O -release -enable-inlining -i -I=source experiments/jsonl_stream/check.d -of=/tmp/issue16-check
+ldc2 -O -release -preview=dip1000 -enable-inlining -i -I=source experiments/jsonl_stream/check.d -of=/tmp/issue16-check
 /tmp/issue16-check
 ldc2 -O -release experiments/jsonl_stream/cli_check.d -of=/tmp/issue16-cli-check
 /tmp/issue16-cli-check ./scrubbed
-ldc2 -O3 -release -i -Isource experiments/jsonl_stream/job_resource_check.d \
+ldc2 -O3 -release -preview=dip1000 -i -Isource experiments/jsonl_stream/job_resource_check.d \
   -of=/tmp/issue148-jsonl-resource-check
 /tmp/issue148-jsonl-resource-check ./scrubbed
 ```

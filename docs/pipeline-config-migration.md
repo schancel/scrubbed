@@ -41,7 +41,7 @@ ldc2 -O3 -release experiments/pipeline_config/legacy_check.d \
 ldc2 -O3 -release experiments/pipeline_config/shipping_check.d \
   -of=/tmp/scrubbed-pipeline-shipping-check
 /tmp/scrubbed-pipeline-shipping-check "$(pwd)/scrubbed"
-ldc2 -O3 -release -i -Isource \
+ldc2 -O3 -release -preview=dip1000 -i -Isource \
   experiments/pipeline_config/resource_check.d \
   -of=/tmp/scrubbed-pipeline-resource-check
 /tmp/scrubbed-pipeline-resource-check "$(pwd)/scrubbed"

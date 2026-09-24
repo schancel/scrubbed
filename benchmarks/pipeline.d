@@ -55,6 +55,9 @@ private struct AttestedExecutable {
     string compilerLoaderDirectory;
     string compilerLoaderSha256;
     size_t compilerLoaderFiles;
+    string sdkTreeMetadataSha256;
+    size_t sdkTreeEntries;
+    ulong sdkTreeBytes;
 }
 
 private struct ControlVariant {
@@ -62,6 +65,8 @@ private struct ControlVariant {
     string builtPath;
     ExecutableSnapshot snapshot;
 }
+
+private enum executableSnapshotMaxBytes = 512UL * 1024 * 1024;
 
 private string privateScratch(string prefix) {
     auto root = buildPath(tempDir, prefix ~ randomUUID.toString);
@@ -73,10 +78,9 @@ private string privateScratch(string prefix) {
 private ExecutableSnapshot snapshotExecutable(string source, string root,
                                                string name) {
     auto target = buildPath(root, name);
-    copy(source, target);
-    require(chmod(target.toStringz, S_IRUSR | S_IXUSR) == 0,
-        "cannot make executable snapshot read-only");
-    return ExecutableSnapshot(target, hashFile(target));
+    snapshotRegularFile(source, target, executableSnapshotMaxBytes, true);
+    return ExecutableSnapshot(target,
+        hashBoundedFile(target, executableSnapshotMaxBytes));
 }
 
 private void verifySnapshot(ExecutableSnapshot snapshot) {
@@ -401,6 +405,9 @@ private struct PreparedAttestedBuild {
     string sdkRoot;
     string sdkVersion;
     string sdkBuildVersion;
+    string sdkTreeMetadataSha256;
+    size_t sdkTreeEntries;
+    ulong sdkTreeBytes;
     string target;
     string targetRelative;
     string[string] environment;
@@ -424,6 +431,8 @@ private enum supportTreeBounds = TreeBounds(8_192, 256UL * 1024 * 1024,
     32, 120);
 private enum compilerTreeBounds = TreeBounds(8_192, 512UL * 1024 * 1024,
     32, 180);
+private enum sdkTreeBounds = TreeBounds(200_000, 8UL * 1024 * 1024 * 1024,
+    64, 300);
 
 private struct NativeTool {
     string name;
@@ -467,6 +476,22 @@ private void digestFile(ref SHA256 digest, string path, ulong expectedBytes,
     }
     require(total == expectedBytes && getSize(path) == expectedBytes,
         "support file changed while being hashed");
+}
+
+private string hashBoundedFile(string path, ulong maxBytes) {
+    auto resolved = resolveToolPath(path);
+    require(isFile(resolved) && !isSymlink(resolved),
+        "bounded hash input must be a regular file");
+    auto bytes = getSize(resolved);
+    require(bytes <= maxBytes, "bounded hash input exceeds its byte limit");
+    SHA256 digest;
+    digestFile(digest, resolved, bytes,
+        MonoTime.currTime + dur!"seconds"(compilerTreeBounds.maxSeconds));
+    return toHexString(digest.finish()).to!string;
+}
+
+private string nativeToolHash(string path) {
+    return hashBoundedFile(path, executableSnapshotMaxBytes);
 }
 
 private void copyBoundedFile(string source, string target,
@@ -530,6 +555,50 @@ private TreeIdentity treeDigest(string root, TreeBounds bounds) {
     }
     return TreeIdentity(toHexString(digest.finish()).to!string,
         relatives.length, totalBytes);
+}
+
+private TreeIdentity protectedTreeMetadata(string root, TreeBounds bounds) {
+    auto resolvedRoot = resolveToolPath(root);
+    requireSystemProtectedPath(resolvedRoot);
+    require(isDir(resolvedRoot) && !isSymlink(resolvedRoot),
+        "protected tree root must resolve to a plain directory");
+    auto deadline = MonoTime.currTime + dur!"seconds"(bounds.maxSeconds);
+    SHA256 digest;
+    digestPart(digest, "scrubbed:protected-tree-metadata:v1");
+    size_t entries;
+    ulong bytes;
+    foreach (entry; dirEntries(resolvedRoot, SpanMode.depth, false)) {
+        require(MonoTime.currTime < deadline && entries < bounds.maxFiles,
+            "protected tree enumeration exceeds its bound");
+        auto relative = relativePath(entry.name, resolvedRoot);
+        require(relativeDepth(relative) <= bounds.maxDepth,
+            "protected tree depth exceeds its bound");
+        ++entries;
+        digestPart(digest, relative);
+        if (isSymlink(entry.name)) {
+            auto target = readLink(entry.name);
+            requireSystemProtectedPath(resolveToolPath(entry.name));
+            digestPart(digest, "link");
+            digestPart(digest, target);
+            continue;
+        }
+        stat_t info;
+        require(stat(entry.name.toStringz, &info) == 0 &&
+            info.st_uid == 0 && (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+            "protected tree entry is mutable by the invoking account");
+        if (entry.isDir) digestPart(digest, "directory");
+        else if (entry.isFile) {
+            auto fileBytes = getSize(entry.name);
+            require(fileBytes <= bounds.maxBytes - bytes,
+                "protected tree byte extent exceeds its bound");
+            bytes += fileBytes;
+            digestPart(digest, "file");
+            digestPart(digest, fileBytes.to!string);
+        } else throw new Exception("protected tree contains a special file");
+        digestPart(digest, info.st_mode.to!string);
+    }
+    return TreeIdentity(toHexString(digest.finish()).to!string,
+        entries, bytes);
 }
 
 private TreeIdentity copyRegularTree(string source, string target,
@@ -768,6 +837,23 @@ private void verifyCompilerClosure(const ref AttestedExecutable result) {
         "private compiler closure changed");
 }
 
+private void verifySdkTree(const ref PreparedAttestedBuild result) {
+    auto actual = protectedTreeMetadata(result.sdkRoot, sdkTreeBounds);
+    require(actual.sha256 == result.sdkTreeMetadataSha256 &&
+        actual.files == result.sdkTreeEntries &&
+        actual.bytes == result.sdkTreeBytes,
+        "selected SDK protected-tree metadata changed");
+}
+
+private void verifySdkTree(const ref AttestedExecutable result,
+        string sdkRoot) {
+    auto actual = protectedTreeMetadata(sdkRoot, sdkTreeBounds);
+    require(actual.sha256 == result.sdkTreeMetadataSha256 &&
+        actual.files == result.sdkTreeEntries &&
+        actual.bytes == result.sdkTreeBytes,
+        "selected SDK protected-tree metadata changed");
+}
+
 private enum unavailableToolVersion = "UNAVAILABLE";
 
 private string toolVersion(string name, string path) {
@@ -790,10 +876,10 @@ private NativeTool[] resolveNativeTools() {
     require(checkedSystem([ccDriver, "--version"]).splitLines[0] ==
         toolVersion("cc-compiler", ccCompiler),
         "cc driver did not select the attested Clang compiler");
-    result ~= NativeTool("cc-driver", ccDriver, hashFile(ccDriver),
+    result ~= NativeTool("cc-driver", ccDriver, nativeToolHash(ccDriver),
         toolVersion("cc-driver", ccDriver),
         "ambient cc command selector");
-    result ~= NativeTool("cc-compiler", ccCompiler, hashFile(ccCompiler),
+    result ~= NativeTool("cc-compiler", ccCompiler, nativeToolHash(ccCompiler),
         toolVersion("cc-compiler", ccCompiler),
         "selected C compiler for SQLite, Lexbor, and zstd");
     auto arDriver = selectedCommand("ar");
@@ -806,11 +892,11 @@ private NativeTool[] resolveNativeTools() {
         "selected static archive index writer"];
     foreach (index, name; archiveNames)
         result ~= NativeTool(name, archivePaths[index],
-            hashFile(archivePaths[index]),
+            nativeToolHash(archivePaths[index]),
             toolVersion(name, archivePaths[index]),
             archiveRoles[index]);
     auto linker = checkedSystem(["/usr/bin/xcrun", "--find", "ld"]);
-    result ~= NativeTool("linker", linker, hashFile(linker),
+    result ~= NativeTool("linker", linker, nativeToolHash(linker),
         toolVersion("linker", linker),
         "selected final executable linker");
     auto names = ["cmake", "make"];
@@ -821,7 +907,7 @@ private NativeTool[] resolveNativeTools() {
             checkedSystem(["/usr/bin/xcrun", "--find", "make"]) :
             selectedCommand(name);
         require(baseName(path) == name, "native tool basename mismatch");
-        result ~= NativeTool(name, path, hashFile(path),
+        result ~= NativeTool(name, path, nativeToolHash(path),
             toolVersion(name, path), roles[index]);
     }
     return result;
@@ -855,7 +941,7 @@ private NativeTool nativeTool(const(NativeTool)[] tools, string name) {
 
 private void verifyNativeTools(const(NativeTool)[] tools) {
     foreach (tool; tools)
-        require(hashFile(tool.path) == tool.sha256 &&
+        require(nativeToolHash(tool.path) == tool.sha256 &&
             toolVersion(tool.name, tool.path) == tool.version_,
             "native build tool changed during attested build");
 }
@@ -869,7 +955,7 @@ private void verifyPinnedNativeTools(const(NativeTool)[] tools,
             tool.name == "linker" ? "ld" : tool.name;
         auto pinnedPath = buildPath(pinnedDirectory, pinnedName);
         require(isSymlink(pinnedPath) && readLink(pinnedPath) == tool.path &&
-            hashFile(pinnedPath) == tool.sha256,
+            nativeToolHash(pinnedPath) == tool.sha256,
             "pinned native build tool binding changed");
     }
 }
@@ -924,13 +1010,14 @@ private void pinNativeTools(ref PreparedAttestedBuild result,
         result.cmakeSupportFiles = supportSnapshot.files;
         snapshotPath = buildPath(snapshots, "cmake-root", "bin", "cmake");
         mkdirRecurse(dirName(snapshotPath));
-        copy(resolved, snapshotPath);
-        require(chmod(snapshotPath.toStringz, S_IRUSR | S_IXUSR) == 0 &&
-            hashFile(snapshotPath) == originalHash &&
-            hashFile(originalPath) == originalHash,
+        snapshotRegularFile(resolved, snapshotPath,
+            executableSnapshotMaxBytes, true);
+        require(
+            nativeToolHash(snapshotPath) == originalHash &&
+            nativeToolHash(originalPath) == originalHash,
             "native tool changed while being snapshotted");
         tool.path = snapshotPath;
-        tool.sha256 = hashFile(snapshotPath);
+        tool.sha256 = nativeToolHash(snapshotPath);
         require(toolVersion(tool.name, tool.path) == tool.version_,
             "native tool snapshot version differs");
         symlink(tool.path, buildPath(result.pinnedToolDirectory, pinnedName));
@@ -998,6 +1085,10 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
         !result.sdkVersion.canFind('/') &&
         !result.sdkBuildVersion.canFind('/'),
         "invalid selected SDK version identity");
+    auto sdkIdentity = protectedTreeMetadata(result.sdkRoot, sdkTreeBounds);
+    result.sdkTreeMetadataSha256 = sdkIdentity.sha256;
+    result.sdkTreeEntries = sdkIdentity.files;
+    result.sdkTreeBytes = sdkIdentity.bytes;
     auto dubHome = buildPath(scratchRoot, "dub-home-" ~ randomUUID.toString);
     mkdirRecurse(dubHome);
     require(chmod(dubHome.toStringz, S_IRWXU) == 0,
@@ -1071,6 +1162,7 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
                    "dub_recipe_sha256", "dependency_lock_sha256",
                    "compiler_executable_sha256", "dub_executable_sha256",
                    "compiler_support_sha256", "compiler_loader_sha256",
+                   "sdk_tree_metadata_sha256",
                    "argparse_recipe_sha256", "argparse_inputs_sha256",
                    "native_prebuild_commands_sha256",
                    "target_sha256"])
@@ -1089,6 +1181,8 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
         attestation["compiler_support_files"].integer > 0 &&
         attestation["compiler_support_bytes"].integer > 0 &&
         attestation["compiler_loader_files"].integer == 3 &&
+        attestation["sdk_tree_entries"].integer > 0 &&
+        attestation["sdk_tree_bytes"].integer > 0 &&
         attestation["compiler_config_policy"].str ==
             "private relative-path ldc2.conf selected by compile trace" &&
         attestation["compiler_loader_policy"].str ==
@@ -1192,6 +1286,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     verifyPinnedNativeTools(prepared.nativeTools, prepared.pinnedToolDirectory);
     verifyCmakeSupport(prepared.pinnedToolDirectory,
         prepared.cmakeSupportSha256, prepared.cmakeSupportFiles);
+    verifySdkTree(prepared);
     auto cmakeCache = readText(buildPath(prepared.privateSource, ".dub",
         "lexbor", "CMakeCache.txt"));
     requireCmakeSelection(cmakeCache, "CMAKE_C_COMPILER",
@@ -1278,6 +1373,10 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
             "COMPILER_PATH private ld selected by attested compiler -### trace"),
         "sdk_version": JSONValue(prepared.sdkVersion),
         "sdk_build_version": JSONValue(prepared.sdkBuildVersion),
+        "sdk_tree_metadata_sha256": JSONValue(
+            prepared.sdkTreeMetadataSha256),
+        "sdk_tree_entries": JSONValue(cast(long)prepared.sdkTreeEntries),
+        "sdk_tree_bytes": JSONValue(cast(long)prepared.sdkTreeBytes),
         "target_relative_path": JSONValue(prepared.targetRelative),
         "target_discovery": JSONValue(
             "DUB 1.42.0 describe root targetPath plus targetFileName"),
@@ -1293,7 +1392,9 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         prepared.pinnedToolDirectory, prepared.compilerSupportRoot,
         prepared.compilerSupportSha256, prepared.compilerSupportFiles,
         prepared.compilerSupportBytes, prepared.compilerLoaderDirectory,
-        prepared.compilerLoaderSha256, prepared.compilerLoaderFiles);
+        prepared.compilerLoaderSha256, prepared.compilerLoaderFiles,
+        prepared.sdkTreeMetadataSha256, prepared.sdkTreeEntries,
+        prepared.sdkTreeBytes);
 }
 
 private void validateBuildProvenance(JSONValue report, bool comparator,
@@ -2006,6 +2107,9 @@ private void selfTest() {
         "compiler_support_bytes": JSONValue(1024),
         "compiler_loader_sha256": JSONValue("c".replicate(64)),
         "compiler_loader_files": JSONValue(3),
+        "sdk_tree_metadata_sha256": JSONValue("d".replicate(64)),
+        "sdk_tree_entries": JSONValue(100),
+        "sdk_tree_bytes": JSONValue(1024),
         "compiler_config_policy": JSONValue(
             "private relative-path ldc2.conf selected by compile trace"),
         "compiler_loader_policy": JSONValue(
@@ -3239,6 +3343,7 @@ int main(string[] args) {
             auto harnessTarget = buildPath(root, "coordination-profile-built");
             verifySnapshot(candidate.compiler);
             verifyCompilerClosure(candidate);
+            verifySdkTree(candidate, candidate.buildEnvironment["SDKROOT"]);
             verifyNativeTools(candidate.nativeTools);
             verifyPinnedNativeTools(candidate.nativeTools,
                 candidate.pinnedToolDirectory);
@@ -3253,6 +3358,7 @@ int main(string[] args) {
             verifySnapshot(harnessSourceSnapshot);
             verifySnapshot(candidate.compiler);
             verifyCompilerClosure(candidate);
+            verifySdkTree(candidate, candidate.buildEnvironment["SDKROOT"]);
             verifyNativeTools(candidate.nativeTools);
             verifyPinnedNativeTools(candidate.nativeTools,
                 candidate.pinnedToolDirectory);

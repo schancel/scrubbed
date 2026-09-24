@@ -177,6 +177,10 @@ The v6 compiler closure intentionally pins the supported Homebrew LDC layout
 and the LDC-to-LLVM-to-z3/zstd loader graph; unexpected layouts, additional
 non-system transitive libraries, or multiple compiler-runtime archives fail
 closed instead of silently broadening the attestation.
+The selected SDK is traversed before and after compilation under entry, byte,
+depth, and time bounds. Every SDK entry and resolved link target must be
+root-owned and non-writable by group or other; a metadata-tree digest and
+entry/byte totals are recorded and rechecked around the authorization harness.
 The argparse input digest is likewise verified after compilation. The supported DUB
 1.42.0 target path is derived from the described root `targetPath` plus
 `targetFileName`, required to remain the private relative path `scrubbed`, and

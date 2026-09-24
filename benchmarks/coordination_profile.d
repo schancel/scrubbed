@@ -10,8 +10,10 @@ import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IWUSR, S_IXUSR,
 import core.sys.posix.unistd : execv, getpid, link, setpgid;
 import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WIFSIGNALED, WNOHANG,
     WTERMSIG;
+import core.sync.mutex : Mutex;
 import core.thread : Thread;
 import core.time : msecs, seconds;
+import std.algorithm.comparison : min;
 import std.algorithm.sorting : sort;
 import std.algorithm.searching : canFind;
 import std.array : appender;
@@ -19,8 +21,9 @@ import std.conv : to;
 import std.datetime.stopwatch : AutoStart, MonoTime, StopWatch;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : SHA256, sha256Of;
-import std.file : SpanMode, copy, dirEntries, exists, getAttributes, isFile,
-    isSymlink, mkdirRecurse, read, readText, remove, rmdirRecurse,
+import std.file : SpanMode, dirEntries, exists, getAttributes,
+    getAvailableDiskSpace, getSize, isFile, isSymlink, mkdirRecurse, read,
+    readText, remove, rmdirRecurse,
     setAttributes, tempDir, write;
 import std.format : format;
 import std.json : JSONType, JSONValue, parseJSON;
@@ -38,7 +41,12 @@ private enum runs = 5;
 private enum sampleTimeoutSeconds = 900L;
 private enum wholeRunTimeoutSeconds = 21_600L;
 private enum samplerTimeoutSeconds = 2L;
+private enum executableSnapshotMaxBytes = 512UL * 1024 * 1024;
+private enum diagnosticFileMaxBytes = 64UL * 1024 * 1024;
 private __gshared string launcherPath;
+private __gshared Mutex processGroupMutex;
+private __gshared int[] activeProcessGroups;
+private __gshared bool watchdogFiring;
 private MonoTime wholeRunDeadline;
 private enum fixtureTablePin =
     "34B08DAEE0547466C0EEF809A0A1BEDBDC4FEE26BEABE23F4478BBDAFFF0727E";
@@ -76,10 +84,33 @@ private void need(bool value, string message) {
 private void armWholeRunWatchdog(MonoTime deadline) {
     auto watchdog = new Thread({
         while (MonoTime.currTime < deadline) Thread.sleep(10.msecs);
+        processGroupMutex.lock();
+        watchdogFiring = true;
+        auto groups = activeProcessGroups.dup;
+        processGroupMutex.unlock();
+        foreach (pid; groups) posixKill(-pid, SIGKILL);
         posixKill(getpid(), SIGKILL);
     });
     watchdog.isDaemon = true;
     watchdog.start();
+}
+
+private void registerProcessGroup(int pid) {
+    processGroupMutex.lock();
+    if (watchdogFiring) posixKill(-pid, SIGKILL);
+    else activeProcessGroups ~= pid;
+    processGroupMutex.unlock();
+}
+
+private void unregisterProcessGroup(int pid) {
+    processGroupMutex.lock();
+    foreach (index, active; activeProcessGroups)
+        if (active == pid) {
+            activeProcessGroups[index] = activeProcessGroups[$ - 1];
+            activeProcessGroups.length = activeProcessGroups.length - 1;
+            break;
+        }
+    processGroupMutex.unlock();
 }
 
 private string hexDigest(const(ubyte)[] value) {
@@ -87,7 +118,15 @@ private string hexDigest(const(ubyte)[] value) {
 }
 
 private string fileDigest(string path) {
-    return hexDigest(cast(const(ubyte)[])read(path));
+    auto input = File(path, "rb");
+    ubyte[64 * 1024] buffer;
+    SHA256 digest;
+    while (!input.eof) {
+        auto chunk = input.rawRead(buffer[]);
+        if (!chunk.length) break;
+        digest.put(chunk);
+    }
+    return toHexString(digest.finish()).idup;
 }
 
 private struct ExecutableSnapshot { string path, digest; }
@@ -103,8 +142,31 @@ private ExecutableSnapshot snapshotExecutable(string source, string root,
         string label) {
     need(isFile(source) && !isSymlink(source),
         label ~ " binary must be a regular non-symlink file");
+    auto expectedBytes = getSize(source);
+    need(expectedBytes <= executableSnapshotMaxBytes &&
+        getAvailableDiskSpace(root) >= expectedBytes * 2,
+        label ~ " binary exceeds snapshot resource bounds");
     auto destination = buildPath(root, label ~ "-executable");
-    copy(source, destination);
+    auto input = File(source, "rb");
+    auto output = File(destination, "wb");
+    ubyte[64 * 1024] buffer;
+    ulong copied;
+    auto deadline = MonoTime.currTime + seconds(120);
+    while (copied < expectedBytes) {
+        need(MonoTime.currTime < deadline,
+            label ~ " executable snapshot exceeded its time bound");
+        auto wanted = min(cast(size_t)(expectedBytes - copied), buffer.length);
+        auto chunk = input.rawRead(buffer[0 .. wanted]);
+        need(chunk.length != 0,
+            label ~ " binary shrank while snapshotting");
+        output.rawWrite(chunk);
+        copied += chunk.length;
+    }
+    ubyte[1] extra;
+    need(input.rawRead(extra[]).length == 0 &&
+        getSize(source) == expectedBytes,
+        label ~ " binary grew while snapshotting");
+    input.close(); output.close();
     need(chmod(destination.toStringz, S_IRUSR | S_IXUSR) == 0,
         label ~ " executable snapshot could not be made read-only");
     need(isFile(destination) && !isSymlink(destination),
@@ -285,6 +347,21 @@ private void terminateGroupAndReap(int pid, out int status,
             Thread.sleep(10.msecs);
     posixKill(-pid, SIGKILL);
     if (!leaderReaped) reapBlocking(pid, status, usage);
+    unregisterProcessGroup(pid);
+}
+
+private bool finishExitedProcessGroup(int pid) {
+    if (posixKill(-pid, 0) != 0) {
+        unregisterProcessGroup(pid);
+        return true;
+    }
+    posixKill(-pid, SIGTERM);
+    auto graceDeadline = MonoTime.currTime + seconds(1);
+    while (MonoTime.currTime < graceDeadline && posixKill(-pid, 0) == 0)
+        Thread.sleep(10.msecs);
+    posixKill(-pid, SIGKILL);
+    unregisterProcessGroup(pid);
+    return false;
 }
 
 private bool processDisappeared(int pid, MonoTime deadline) {
@@ -308,6 +385,7 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
             reapBlocking(child.processID, status, usage);
         need(false, "child process group did not become ready");
     }
+    registerProcessGroup(child.processID);
     return child;
 }
 
@@ -339,7 +417,10 @@ private string boundedCommandOutput(string[] command, string root,
         terminateGroupAndReap(child.processID, status, usage);
         return null;
     }
+    if (!finishExitedProcessGroup(child.processID)) return null;
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return null;
+    if (getSize(stdoutPath) > diagnosticFileMaxBytes ||
+        getSize(stderrPath) > diagnosticFileMaxBytes) return null;
     return readText(stdoutPath);
 }
 
@@ -379,9 +460,16 @@ private JSONValue invoke(string binary, string input, string output,
         terminateGroupAndReap(child.processID, cleanupStatus, cleanupUsage);
     }
     shared bool stopped;
+    shared bool diagnosticOverflow;
     shared size_t peakFd;
     auto sampler = new Thread({
         while (!atomicLoad(stopped) && MonoTime.currTime < sampleDeadline) {
+            if (getSize(stdoutPath) > diagnosticFileMaxBytes ||
+                    getSize(stderrPath) > diagnosticFileMaxBytes) {
+                atomicStore(diagnosticOverflow, true);
+                posixKill(-child.processID, SIGKILL);
+                break;
+            }
             auto seen = boundedCommandOutput(["/usr/sbin/lsof", "-p",
                 child.processID.to!string], root, label ~ "-lsof",
                 sampleDeadline);
@@ -413,7 +501,8 @@ private JSONValue invoke(string binary, string input, string output,
         auto sampled = boundedCommandOutput(["/usr/bin/sample",
             child.processID.to!string, "1", "10", "-file", stackPath],
             root, label ~ "-sample", sampleDeadline);
-        if (sampled.length && exists(stackPath)) {
+        if (sampled.length && exists(stackPath) &&
+                getSize(stackPath) <= diagnosticFileMaxBytes) {
             auto body = cast(const(ubyte)[])read(stackPath);
             stackStatus = body.length ? "supported" : "unsupported-empty";
             if (body.length) stackHash = hexDigest(body);
@@ -425,11 +514,16 @@ private JSONValue invoke(string binary, string input, string output,
     if (timedOut) {
         terminateGroupAndReap(child.processID, status, usage);
         childReaped = true;
-    }
+    } else need(finishExitedProcessGroup(child.processID),
+        "child exited while descendants remained in its process group");
     timer.stop();
     atomicStore(stopped, true); sampler.join();
     samplerJoined = true;
     need(!timedOut, "child exceeded the per-sample deadline");
+    need(!atomicLoad(diagnosticOverflow) &&
+        getSize(stdoutPath) <= diagnosticFileMaxBytes &&
+        getSize(stderrPath) <= diagnosticFileMaxBytes,
+        "child diagnostics exceeded their byte bound");
     need(WIFEXITED(status) && WEXITSTATUS(status) == 0,
         "child failed: " ~ readText(stderrPath));
     auto log = readText(stdoutPath);
@@ -451,6 +545,8 @@ private JSONValue invoke(string binary, string input, string output,
             "supported" : "not-attempted"),
         "syscall_status": JSONValue("unsupported-no-exact-child-counter")]);
     if (instrumented) {
+        need(getSize(metricsPath) <= diagnosticFileMaxBytes,
+            "coordination metrics exceeded their byte bound");
         auto metrics = parseJSON(readText(metricsPath));
         need(metrics["schema"].str == "scrubbed.coordination-metrics.v2",
             "metrics schema differs");
@@ -607,6 +703,25 @@ private void runSelfTest(string harnessPath) {
     environment["SCRUBBED_DURABLE_METRICS_V1"] = "ambient-must-not-leak";
     invoke(environmentProbe, root, root, root, 1, 1, root, false,
         fileDigest(environmentProbe));
+    auto leakyProbe = buildPath(root, "leaky-success-probe");
+    auto leakyPidPath = buildPath(root, "leaky-success-descendant.pid");
+    write(leakyProbe, "#!/bin/sh\n" ~
+        "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &\n" ~
+        "echo $! > '" ~ leakyPidPath ~ "'\n" ~
+        "echo 'done. leaky leader'\n");
+    need(chmod(leakyProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
+        "cannot make leaky-success probe executable");
+    bool leakySuccessRejected;
+    try invoke(leakyProbe, root, root, root, 1, 2, root, false,
+        fileDigest(leakyProbe), false, 5);
+    catch (Exception error)
+        leakySuccessRejected = error.msg.canFind(
+            "descendants remained in its process group");
+    need(leakySuccessRejected && exists(leakyPidPath),
+        "successful leader with a live descendant was accepted");
+    auto leakyPid = readText(leakyPidPath).strip.to!int;
+    need(processDisappeared(leakyPid, MonoTime.currTime + seconds(1)),
+        "successful leader left a descendant running");
     auto hangingProbe = buildPath(root, "hanging-probe");
     auto descendantPidPath = buildPath(root, "hanging-descendant.pid");
     write(hangingProbe, "#!/bin/sh\n" ~
@@ -645,6 +760,7 @@ private void runSelfTest(string harnessPath) {
     auto descendantPid = readText(descendantPidPath).strip.to!int;
     need(processDisappeared(descendantPid, MonoTime.currTime + seconds(1)),
         "timed-out process group left a descendant running");
+    remove(descendantPidPath);
 
     auto watchdogOut = buildPath(root, "whole-watchdog.out");
     auto watchdogErr = buildPath(root, "whole-watchdog.err");
@@ -654,7 +770,8 @@ private void runSelfTest(string harnessPath) {
     auto watchdogError = File(watchdogErr, "wb");
     auto watchdogDeadline = MonoTime.currTime + seconds(3);
     auto watchdogChild = spawnGrouped(
-        [harnessPath, "--self-test-whole-timeout-probe"], watchdogReady,
+        [harnessPath, "--self-test-whole-timeout-probe", hangingProbe, root],
+        watchdogReady,
         watchdogInput, watchdogOutput, watchdogError, childEnvironment(false),
         watchdogDeadline);
     watchdogInput.close(); watchdogOutput.close(); watchdogError.close();
@@ -667,6 +784,12 @@ private void runSelfTest(string harnessPath) {
     need(watchdogReaped && WIFSIGNALED(watchdogStatus) &&
         WTERMSIG(watchdogStatus) == SIGKILL,
         "whole-run watchdog did not terminate a stalled non-child phase");
+    need(exists(descendantPidPath),
+        "whole-run watchdog probe did not record its descendant");
+    auto watchdogDescendantPid = readText(descendantPidPath).strip.to!int;
+    need(processDisappeared(watchdogDescendantPid,
+            MonoTime.currTime + seconds(1)),
+        "whole-run watchdog left a descendant running");
 
     enum validMetrics = `{"user_us":1000,"system_us":1000,"metrics":{` ~
         `"schema":"scrubbed.coordination-metrics.v2","version":2,` ~
@@ -1199,9 +1322,19 @@ void main(string[] args) {
         execv(childArguments[0], childArguments.ptr);
         need(false, "child exec failed");
     }
-    if (args.length == 2 && args[1] == "--self-test-whole-timeout-probe") {
+    processGroupMutex = new Mutex;
+    if (args.length == 4 && args[1] == "--self-test-whole-timeout-probe") {
         wholeRunDeadline = MonoTime.currTime + seconds(1);
         armWholeRunWatchdog(wholeRunDeadline);
+        auto probeOut = buildPath(args[3], "whole-probe-child.out");
+        auto probeErr = buildPath(args[3], "whole-probe-child.err");
+        auto probeReady = buildPath(args[3], "whole-probe-child.ready");
+        auto probeInput = File("/dev/null", "rb");
+        auto probeOutput = File(probeOut, "wb");
+        auto probeError = File(probeErr, "wb");
+        spawnGrouped([args[2]], probeReady, probeInput, probeOutput,
+            probeError, childEnvironment(false), wholeRunDeadline);
+        probeInput.close(); probeOutput.close(); probeError.close();
         Thread.sleep(seconds(30));
         need(false, "whole-run watchdog probe survived");
     }

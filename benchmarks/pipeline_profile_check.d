@@ -815,7 +815,7 @@ private void validateAttestation(JSONValue attestation, string binaryHash) {
             key == "source_sha" || key == "source_tree_id" ? 40 : 64),
             "invalid attestation digest " ~ key);
     if (v6) foreach (key; ["compiler_support_sha256",
-            "compiler_loader_sha256"])
+            "compiler_loader_sha256", "sdk_tree_metadata_sha256"])
         need(digestLength(attestation[key].str, 64),
             "invalid attestation digest " ~ key);
     need(attestation["source_status"].str == "clean-before-and-after" &&
@@ -833,6 +833,8 @@ private void validateAttestation(JSONValue attestation, string binaryHash) {
         (!v6 || (attestation["compiler_support_files"].integer > 0 &&
             attestation["compiler_support_bytes"].integer > 0 &&
             attestation["compiler_loader_files"].integer == 3 &&
+            attestation["sdk_tree_entries"].integer > 0 &&
+            attestation["sdk_tree_bytes"].integer > 0 &&
             attestation["compiler_config_policy"].str ==
                 "private relative-path ldc2.conf selected by compile trace" &&
             attestation["compiler_loader_policy"].str ==
@@ -1386,6 +1388,9 @@ private JSONValue syntheticAttestation(string hash) {
         "compiler_support_bytes": JSONValue(1024L),
         "compiler_loader_sha256": JSONValue(hash),
         "compiler_loader_files": JSONValue(3L),
+        "sdk_tree_metadata_sha256": JSONValue(hash),
+        "sdk_tree_entries": JSONValue(100L),
+        "sdk_tree_bytes": JSONValue(1024L),
         "compiler_config_policy": JSONValue("private relative-path ldc2.conf selected by compile trace"),
         "compiler_loader_policy": JSONValue("private hashed LLVM/Z3/zstd snapshots selected by DYLD trace"),
         "dub_version": JSONValue("DUB version 1.42.0, test"),

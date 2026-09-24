@@ -97,6 +97,9 @@ int main(string[] args) {
             nativeAttestation["compiler_support_bytes"].integer > 0 &&
             digest(nativeAttestation["compiler_loader_sha256"].str) &&
             nativeAttestation["compiler_loader_files"].integer == 3 &&
+            digest(nativeAttestation["sdk_tree_metadata_sha256"].str) &&
+            nativeAttestation["sdk_tree_entries"].integer > 0 &&
+            nativeAttestation["sdk_tree_bytes"].integer > 0 &&
             digest(nativeAttestation["cmake_support_sha256"].str) &&
             nativeAttestation["cmake_support_files"].integer > 0 &&
             nativeAttestation["primary_tool_policy"].str ==
@@ -169,6 +172,9 @@ int main(string[] args) {
             attestation["compiler_support_bytes"].integer > 0 &&
             digest(attestation["compiler_loader_sha256"].str) &&
             attestation["compiler_loader_files"].integer == 3 &&
+            digest(attestation["sdk_tree_metadata_sha256"].str) &&
+            attestation["sdk_tree_entries"].integer > 0 &&
+            attestation["sdk_tree_bytes"].integer > 0 &&
             digest(attestation["cmake_support_sha256"].str) &&
             attestation["cmake_support_files"].integer > 0 &&
             attestation["native_tools"].array.length == 9 &&

@@ -711,7 +711,7 @@ private void validateAttestation(JSONValue value, string binaryHash) {
             key == "source_sha" || key == "source_tree_id" ? 40 : 64),
             "invalid attestation digest " ~ key);
     if (v6) foreach (key; ["compiler_support_sha256",
-            "compiler_loader_sha256"])
+            "compiler_loader_sha256", "sdk_tree_metadata_sha256"])
         need(digestLength(value[key].str, 64),
             "invalid attestation digest " ~ key);
     need(value["source_status"].str == "clean-before-and-after" &&
@@ -730,6 +730,8 @@ private void validateAttestation(JSONValue value, string binaryHash) {
         (!v6 || (value["compiler_support_files"].integer > 0 &&
             value["compiler_support_bytes"].integer > 0 &&
             value["compiler_loader_files"].integer == 3 &&
+            value["sdk_tree_entries"].integer > 0 &&
+            value["sdk_tree_bytes"].integer > 0 &&
             value["compiler_config_policy"].str ==
                 "private relative-path ldc2.conf selected by compile trace" &&
             value["compiler_loader_policy"].str ==

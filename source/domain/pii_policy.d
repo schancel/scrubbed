@@ -116,13 +116,24 @@ PiiPolicyResult applyPiiPolicy(const(ubyte)[] source,
 
     if (policy == PiiPolicy.redact) {
         enum marker = cast(const(ubyte)[]) "[REDACTED]";
-        size_t cursor;
+        size_t outputLength = source.length;
+        foreach (span; result.audit)
+            outputLength = outputLength - (span.end - span.start) + marker.length;
+        if (outputLength) result.output = new ubyte[outputLength];
+        size_t sourceCursor;
+        size_t outputCursor;
         foreach (span; result.audit) {
-            result.output ~= source[cursor .. span.start];
-            result.output ~= marker;
-            cursor = span.end;
+            auto prefix = source[sourceCursor .. span.start];
+            result.output[outputCursor .. outputCursor + prefix.length] = prefix;
+            outputCursor += prefix.length;
+            result.output[outputCursor .. outputCursor + marker.length] = marker;
+            outputCursor += marker.length;
+            sourceCursor = span.end;
         }
-        result.output ~= source[cursor .. $];
+        auto suffix = source[sourceCursor .. $];
+        result.output[outputCursor .. outputCursor + suffix.length] = suffix;
+        outputCursor += suffix.length;
+        assert(outputCursor == outputLength);
     } else {
         result.output = source.dup;
         if (policy == PiiPolicy.mask)

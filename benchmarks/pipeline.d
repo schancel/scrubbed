@@ -1353,6 +1353,7 @@ private void requireSameBuildToolClosure(JSONValue baseline,
             "compiler_support_sha256", "compiler_support_files",
             "compiler_support_bytes", "compiler_loader_sha256",
             "compiler_loader_files", "dub_executable_sha256", "dub_version",
+            "dub_recipe_sha256", "dependency_lock_sha256",
             "argparse_recipe_sha256", "argparse_inputs_sha256",
             "argparse_input_files",
             "native_environment_template", "cmake_support_sha256",
@@ -2318,7 +2319,8 @@ private void selfTest() {
         "target_sha256": JSONValue("0".replicate(64))]);
     auto matchingBuildAttestation = parseJSON(buildAttestation.toString);
     requireSameBuildToolClosure(buildAttestation, matchingBuildAttestation);
-    foreach (field; ["sdk_tree_content_sha256", "argparse_recipe_sha256",
+    foreach (field; ["sdk_tree_content_sha256", "dub_recipe_sha256",
+            "dependency_lock_sha256", "argparse_recipe_sha256",
             "argparse_inputs_sha256"]) {
         auto unequal = parseJSON(buildAttestation.toString);
         unequal[field] = "e".replicate(64);

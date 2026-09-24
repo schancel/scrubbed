@@ -121,6 +121,14 @@ source_dir="$scratch/nats.c-${NATS_C_VERSION}"
 install_dir="$scratch/install"
 build_dir="$scratch/build"
 openssl_prefix=$(pkg-config --variable=prefix openssl)
+openssl_version=$(pkg-config --modversion openssl)
+openssl_pc_dir=$(pkg-config --variable=pcfiledir openssl)
+openssl_link_flags=$(pkg-config --libs openssl)
+[ -n "$openssl_prefix" ] && [ -n "$openssl_version" ] &&
+    [ -n "$openssl_pc_dir" ] && [ -n "$openssl_link_flags" ] || {
+    echo "jetstream evaluation: incomplete OpenSSL pkg-config identity" >&2
+    exit 2
+}
 cmake -S "$source_dir" -B "$build_dir" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$install_dir" \
@@ -142,7 +150,7 @@ static_library=$(find "$install_dir" -name 'libnats_static.a' -type f -print | s
     exit 2
 }
 cc -std=c11 -O2 -Wall -Wextra -Werror -I"$install_dir/include" \
-    "$here/probe.c" "$static_library" $(pkg-config --libs openssl) -pthread \
+    "$here/probe.c" "$static_library" $openssl_link_flags -pthread \
     -o "$scratch/probe"
 
 case "$platform" in
@@ -219,6 +227,20 @@ write_config()
     } > "$config_path"
 }
 
+write_control_config()
+{
+    config_path=$1
+    port=$2
+    {
+        printf 'server_name: scrubd-jetstream-plaintext-control\n'
+        printf 'host: 127.0.0.1\n'
+        printf 'port: %s\n' "$port"
+        printf 'max_payload: 1024\n'
+        printf 'max_pending: 1MB\n'
+        printf 'authorization { token: "%s"; timeout: 1 }\n' "$token"
+    } > "$config_path"
+}
+
 generation=0
 start_server()
 {
@@ -245,8 +267,60 @@ start_server()
     exit 2
 }
 
+wait_probe_pid()
+{
+    probe_pid=$1
+    probe_label=$2
+    probe_checks=0
+    while kill -0 "$probe_pid" 2>/dev/null && [ "$probe_checks" -lt 320 ]; do
+        sleep 0.05
+        probe_checks=$((probe_checks + 1))
+    done
+    if kill -0 "$probe_pid" 2>/dev/null; then
+        stop_pid "$probe_pid" "$probe_label"
+        echo "jetstream evaluation: $probe_label exceeded exact-PID 16s outer deadline" >&2
+        return 2
+    fi
+    if wait "$probe_pid"; then
+        return 0
+    else
+        probe_status=$?
+        echo "jetstream evaluation: $probe_label PID $probe_pid exited $probe_status" >&2
+        return "$probe_status"
+    fi
+}
+
+run_probe()
+{
+    probe_label=$1
+    shift
+    (
+        ulimit -n 64
+        exec "$scratch/probe" "$@"
+    ) >> "$results" &
+    probe_pid=$!
+    wait_probe_pid "$probe_pid" "$probe_label"
+}
+
 bootstrap_config="$scratch/server-bootstrap.conf"
 fixed_config="$scratch/server.conf"
+control_config="$scratch/server-control.conf"
+write_control_config "$control_config" -1
+export NATS_TOKEN=$token
+export NATS_C_EXPECTED_VERSION=$NATS_C_VERSION
+results="$scratch/results.tsv"
+
+start_server "$control_config"
+control_port=$(sed -n 's/.*Listening for client connections on 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$server_log" | sed -n '1p')
+[ -n "$control_port" ] || {
+    echo "jetstream evaluation: unable to discover plaintext control port" >&2
+    exit 2
+}
+export NATS_CONTROL_PORT=$control_port
+run_probe plaintext-control plaintext-control
+stop_pid "$server_pid" plaintext-control-server
+server_pid=
+
 write_config "$bootstrap_config" -1
 start_server "$bootstrap_config"
 port=$(sed -n 's/.*Listening for client connections on 127\.0\.0\.1:\([0-9][0-9]*\).*/\1/p' "$server_log" | sed -n '1p')
@@ -258,19 +332,20 @@ write_config "$fixed_config" "$port"
 
 export NATS_URL="tls://localhost:$port"
 export NATS_CA_FILE="$scratch/tls/ca.pem"
-export NATS_TOKEN=$token
-export NATS_C_EXPECTED_VERSION=$NATS_C_VERSION
-results="$scratch/results.tsv"
-"$scratch/probe" auth >> "$results"
-"$scratch/probe" setup >> "$results"
+export NATS_TLS_PORT=$port
+run_probe auth auth
+run_probe setup setup
 
 stop_pid "$server_pid" server
 server_pid=
 start_server "$fixed_config"
-"$scratch/probe" restart >> "$results"
+run_probe restart restart
 
 marker="$scratch/reconnect.ready"
-"$scratch/probe" reconnect "$marker" >> "$results" &
+(
+    ulimit -n 64
+    exec "$scratch/probe" reconnect "$marker"
+) >> "$results" &
 client_pid=$!
 checks=0
 while [ ! -f "$marker" ] && [ "$checks" -lt 100 ]; do
@@ -284,13 +359,18 @@ done
     echo "jetstream evaluation: reconnect client did not become ready" >&2
     exit 2
 }
+client_fds=$(lsof -a -p "$client_pid" -d 0-63 2>/dev/null | sed '1d' | wc -l | tr -d ' ')
+if [ "$client_fds" -lt 4 ] || [ "$client_fds" -gt 64 ]; then
+    echo "jetstream evaluation: live client descriptor count outside 4..64: $client_fds" >&2
+    exit 2
+fi
 stop_pid "$server_pid" server
 server_pid=
 start_server "$fixed_config"
-wait "$client_pid"
+wait_probe_pid "$client_pid" reconnect
 client_pid=
 
-"$scratch/probe" delete
+run_probe delete delete
 cmp "$here/expected.tsv" "$results"
 
 server_fds=$(lsof -a -p "$server_pid" -d 0-63 2>/dev/null | sed '1d' | wc -l | tr -d ' ')
@@ -350,10 +430,10 @@ scratch_bytes=$(du -sk "$scratch" | awk '{print $1 * 1024}')
 }
 
 cat "$results"
-printf 'resources\tplatform=%s\tserver-fds=%s/64\tstore-bytes=%s/4194304\tscratch-bytes=%s/268435456\truntime-processes=2\tbuild-jobs=2\n' \
-    "$platform" "$server_fds" "$store_bytes" "$scratch_bytes"
-printf 'packaging\tnats-c=%s-static\tnats-server=%s-official-binary\topenssl=%s-dynamic\tsbom-verified=true\n' \
-    "$NATS_C_VERSION" "$NATS_SERVER_VERSION" "$(openssl version | awk '{print $2}')"
+printf 'resources\tplatform=%s\tserver-fds=%s/64\tclient-fds=%s/64\tstore-bytes=%s/4194304\tscratch-bytes=%s/268435456\truntime-processes=2\tbuild-jobs=2\n' \
+    "$platform" "$server_fds" "$client_fds" "$store_bytes" "$scratch_bytes"
+printf 'packaging\tnats-c=%s-static\tnats-server=%s-official-binary\topenssl-pkgconfig=%s-dynamic\topenssl-pc-dir=%s\tsbom-verified=true\n' \
+    "$NATS_C_VERSION" "$NATS_SERVER_VERSION" "$openssl_version" "$openssl_pc_dir"
 scratch_path=$scratch
 cleanup
 trap - EXIT HUP INT TERM

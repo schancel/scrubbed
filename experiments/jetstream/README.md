@@ -14,11 +14,26 @@ only the exact recorded client/server PIDs and removes that directory on every
 exit path.
 
 The runtime envelope is one server plus at most one client process, 64 file
-descriptors per child, a 4 MiB server file-store limit, 512-byte stream payloads,
-one in-flight delivery, 4 stored messages, bounded 200--1500 ms operations, and
+descriptors for every server and client, a 4 MiB server file-store limit, 512-byte stream payloads,
+one in-flight delivery, 4 stored messages, bounded 200--1,000 ms operations, and
 256 MiB total scratch. Compilation uses at most two jobs. The committed TSV is
 the deterministic semantic result; observed resource counts are printed
 separately because they vary by host.
+
+The auth check first proves that a raw correct-token plaintext NATS handshake
+succeeds against a sequential non-TLS control. It then sends the same raw
+handshake to the TLS-required listener and requires rejection, independently
+of the nats.c client's automatic TLS behavior. Each client asserts its own
+effective descriptor limit, and the long-lived reconnect client is measured
+while its TLS socket is open.
+
+The delivery controls use a 10-second ack wait to prove that a flushed `Nak`
+causes generation-two delivery inside a one-second fetch, well before expiry.
+They enqueue two distinct messages, hold the first unacked, require a timed-out
+second fetch, then ack the first and require release of the second. Every 200 ms
+empty fetch is checked against a monotonic 150--1,000 ms window. Every probe has
+a 15-second self-alarm and is also tracked by exact PID under a 16-second
+harness deadline.
 
 After the semantic probes, the runner intentionally fails a nested fixture
 that starts the real server and writes throwaway content. The parent verifies

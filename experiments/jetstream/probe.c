@@ -2,17 +2,26 @@
 
 #include <nats/nats.h>
 
+#include <errno.h>
+#include <netdb.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <sys/socket.h>
+#include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 enum {
     CONNECT_TIMEOUT_MS = 300,
     FETCH_TIMEOUT_MS = 200,
     CLOSE_TIMEOUT_MS = 2000,
+    ACK_WAIT_MS = 10000,
+    RESTART_ACK_WAIT_MS = 500,
+    PROBE_DEADLINE_SECONDS = 15,
     MAX_PAYLOAD_BYTES = 512,
     MAX_STREAM_MESSAGES = 4,
 };
@@ -52,6 +61,106 @@ static void pause_ms(long milliseconds)
         .tv_nsec = (milliseconds % 1000) * 1000000L,
     };
     while (nanosleep(&delay, &delay) != 0) {}
+}
+
+static int64_t monotonic_ms(void)
+{
+    struct timespec now;
+    need(clock_gettime(CLOCK_MONOTONIC, &now) == 0,
+            "read monotonic clock");
+    return (int64_t) now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
+static void check_fd_limit(void)
+{
+    struct rlimit limit;
+    need(getrlimit(RLIMIT_NOFILE, &limit) == 0,
+            "read client descriptor limit");
+    need(limit.rlim_cur == 64, "client descriptor limit is exactly 64");
+}
+
+static int plain_socket(const char *port)
+{
+    struct addrinfo hints = {0};
+    struct addrinfo *addresses = NULL;
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    need(getaddrinfo("127.0.0.1", port, &hints, &addresses) == 0,
+            "resolve loopback plaintext listener");
+    int socket_fd = socket(addresses->ai_family, addresses->ai_socktype,
+            addresses->ai_protocol);
+    need(socket_fd >= 0, "create plaintext socket");
+    struct timeval timeout = {.tv_sec = 1, .tv_usec = 0};
+    need(setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout,
+            sizeof(timeout)) == 0, "bound plaintext receive timeout");
+    need(setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout,
+            sizeof(timeout)) == 0, "bound plaintext send timeout");
+    need(connect(socket_fd, addresses->ai_addr, addresses->ai_addrlen) == 0,
+            "connect plaintext socket to loopback listener");
+    freeaddrinfo(addresses);
+    return socket_fd;
+}
+
+static int receive_text(int socket_fd, char *buffer, size_t capacity)
+{
+    size_t used = 0;
+    while (used + 1 < capacity) {
+        ssize_t received = recv(socket_fd, buffer + used, capacity - used - 1, 0);
+        if (received > 0) {
+            used += (size_t) received;
+            buffer[used] = '\0';
+            if (strstr(buffer, "\r\n") != NULL) break;
+            continue;
+        }
+        if (received == 0) break;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+        need(false, "receive plaintext protocol bytes");
+    }
+    buffer[used] = '\0';
+    return (int) used;
+}
+
+static void send_all(int socket_fd, const char *bytes)
+{
+    size_t length = strlen(bytes);
+    size_t sent = 0;
+    while (sent < length) {
+        ssize_t count = send(socket_fd, bytes + sent, length - sent, 0);
+        if (count > 0) {
+            sent += (size_t) count;
+            continue;
+        }
+        if (count < 0 && errno == EINTR) continue;
+        need(false, "send plaintext protocol bytes");
+    }
+}
+
+static bool plaintext_token_roundtrip(const char *port, bool tls_listener)
+{
+    int socket_fd = plain_socket(port);
+    char response[8192] = {0};
+    need(receive_text(socket_fd, response, sizeof(response)) > 0 &&
+            strstr(response, "INFO ") != NULL, "listener sends NATS INFO");
+    bool advertises_tls = strstr(response, "\"tls_required\":true") != NULL;
+    need(advertises_tls == tls_listener,
+            "INFO distinguishes TLS-required and plaintext listeners");
+
+    const char *token = getenv("NATS_TOKEN");
+    char request[512];
+    int request_length = snprintf(request, sizeof(request),
+            "CONNECT {\"verbose\":false,\"pedantic\":true,"
+            "\"tls_required\":false,\"auth_token\":\"%s\"}\r\nPING\r\n",
+            token);
+    need(request_length > 0 && (size_t) request_length < sizeof(request),
+            "construct bounded plaintext CONNECT");
+    send_all(socket_fd, request);
+
+    memset(response, 0, sizeof(response));
+    receive_text(socket_fd, response, sizeof(response));
+    bool pong = strstr(response, "PONG\r\n") != NULL;
+    close(socket_fd);
+    return pong;
 }
 
 static natsOptions *options(const char *token, bool secure,
@@ -126,7 +235,7 @@ static jsCtx *jetstream(natsConnection *connection)
     return js;
 }
 
-static natsSubscription *bind(jsCtx *js)
+static natsSubscription *bind_consumer(jsCtx *js)
 {
     natsSubscription *subscription = NULL;
     jsSubOptions opts;
@@ -157,6 +266,19 @@ static natsMsg *fetch_one(natsSubscription *subscription, int64_t timeout,
     return message;
 }
 
+static void expect_fetch_timeout(natsSubscription *subscription,
+        const char *what)
+{
+    natsStatus status;
+    int64_t started = monotonic_ms();
+    natsMsg *message = fetch_one(subscription, FETCH_TIMEOUT_MS, &status);
+    int64_t elapsed = monotonic_ms() - started;
+    if (message != NULL) natsMsg_Destroy(message);
+    need(status == NATS_TIMEOUT, what);
+    need(elapsed >= 150 && elapsed <= 1000,
+            "200ms fetch timeout stays within monotonic 150..1000ms window");
+}
+
 static jsPubAck *publish(jsCtx *js, const char *payload, const char *id,
         natsStatus *result, jsErrCode *error)
 {
@@ -182,11 +304,10 @@ static void close_client(natsSubscription *subscription, jsCtx *js,
 
 static void check_auth(void)
 {
-    natsConnection *connection = NULL;
-    natsStatus plaintext = connect_with(&connection, NULL, false, NULL);
-    natsConnection_Destroy(connection);
-    need(plaintext != NATS_OK, "TLS-required server rejects plaintext client");
+    need(!plaintext_token_roundtrip(getenv("NATS_TLS_PORT"), true),
+            "TLS-required listener rejects correct-token plaintext protocol");
 
+    natsConnection *connection = NULL;
     natsStatus bad_token = connect_with(&connection, "deliberately-wrong", true, NULL);
     natsConnection_Destroy(connection);
     need(bad_token != NATS_OK, "server rejects an invalid token");
@@ -195,7 +316,14 @@ static void check_auth(void)
     natsConnection_Destroy(connection);
     natsStatus closed = nats_CloseAndWait(CLOSE_TIMEOUT_MS);
     if (closed != NATS_OK) fail("auth probe teardown", closed, 0);
-    puts("auth\ttls-required=true\ttoken-rejected=true\ttrusted-token=true\tconnect-timeout-ms=300");
+    puts("auth\tcorrect-token-plaintext-rejected=true\ttls-listener-advertised=true\ttoken-rejected=true\ttrusted-token=true\tconnect-timeout-ms=300\tclient-rlimit=64\touter-deadline-s=15");
+}
+
+static void check_plaintext_control(void)
+{
+    need(plaintext_token_roundtrip(getenv("NATS_CONTROL_PORT"), false),
+            "non-TLS control accepts correct-token plaintext protocol");
+    puts("plaintext-control\tcorrect-token-plaintext-accepted=true\ttls-listener-advertised=false\tclient-rlimit=64\touter-deadline-s=15");
 }
 
 static void check_setup(void)
@@ -235,13 +363,18 @@ static void check_setup(void)
     consumer.Durable = CONSUMER;
     consumer.DeliverPolicy = js_DeliverAll;
     consumer.AckPolicy = js_AckExplicit;
-    consumer.AckWait = 500LL * 1000 * 1000;
+    consumer.AckWait = (int64_t) ACK_WAIT_MS * 1000 * 1000;
     consumer.MaxDeliver = 3;
     consumer.MaxAckPending = 1;
     consumer.MaxRequestBatch = 1;
     consumer.MaxRequestExpires = 1000LL * 1000 * 1000;
     status = js_AddConsumer(&consumer_info, js, STREAM, &consumer, NULL, &error);
     if (status != NATS_OK) fail("add bounded durable consumer", status, error);
+    need(consumer_info->Config->AckWait ==
+            (int64_t) ACK_WAIT_MS * 1000 * 1000,
+            "server retained 10s ack wait");
+    need(consumer_info->Config->MaxAckPending == 1,
+            "server retained one-message ack-pending bound");
     jsConsumerInfo_Destroy(consumer_info);
 
     jsPubAck *first = publish(js, "job-basic", "candidate-basic", &status, &error);
@@ -262,7 +395,7 @@ static void check_setup(void)
     jsPubAck_Destroy(oversized);
     need(status != NATS_OK, "server refuses payload above stream cap");
 
-    natsSubscription *subscription = bind(js);
+    natsSubscription *subscription = bind_consumer(js);
     natsMsg *message = fetch_one(subscription, 1000, &status);
     if (status != NATS_OK) fail("claim admitted job", status, error);
     jsMsgMetaData *metadata = NULL;
@@ -274,9 +407,15 @@ static void check_setup(void)
     status = natsMsg_Nak(message, NULL);
     natsMsg_Destroy(message);
     if (status != NATS_OK) fail("nak claimed job", status, error);
+    status = natsConnection_FlushTimeout(connection, 500);
+    if (status != NATS_OK) fail("flush nak before causal fetch", status, error);
 
+    int64_t nak_fetch_started = monotonic_ms();
     message = fetch_one(subscription, 1000, &status);
+    int64_t nak_fetch_elapsed = monotonic_ms() - nak_fetch_started;
     if (status != NATS_OK) fail("fetch nak redelivery", status, error);
+    need(nak_fetch_elapsed < 2000 && nak_fetch_elapsed < ACK_WAIT_MS,
+            "nak redelivery arrives before the 10s ack expiry");
     status = natsMsg_GetMetaData(&metadata, message);
     if (status != NATS_OK) fail("read nak redelivery metadata", status, error);
     need(metadata->NumDelivered == 2, "nak increments delivery generation");
@@ -285,9 +424,43 @@ static void check_setup(void)
     natsMsg_Destroy(message);
     if (status != NATS_OK) fail("ack redelivered job", status, error);
 
-    message = fetch_one(subscription, FETCH_TIMEOUT_MS, &status);
-    if (message != NULL) natsMsg_Destroy(message);
-    need(status == NATS_TIMEOUT, "empty pull is time bounded");
+    expect_fetch_timeout(subscription, "empty pull is time bounded");
+
+    jsPubAck *held_ack = publish(js, "held-first", "candidate-held-first",
+            &status, &error);
+    if (status != NATS_OK) fail("publish held first job", status, error);
+    jsPubAck_Destroy(held_ack);
+    jsPubAck *blocked_ack = publish(js, "blocked-second", "candidate-blocked-second",
+            &status, &error);
+    if (status != NATS_OK) fail("publish blocked second job", status, error);
+    jsPubAck_Destroy(blocked_ack);
+    message = fetch_one(subscription, 1000, &status);
+    if (status != NATS_OK) fail("claim held first job", status, error);
+    need(strcmp(natsMsg_GetData(message), "held-first") == 0,
+            "first distinct job is held unacked");
+    expect_fetch_timeout(subscription,
+            "MaxAckPending blocks the second distinct job");
+    status = natsMsg_AckSync(message, NULL, &error);
+    natsMsg_Destroy(message);
+    if (status != NATS_OK) fail("ack held first job", status, error);
+    message = fetch_one(subscription, 1000, &status);
+    if (status != NATS_OK) fail("claim released second job", status, error);
+    need(strcmp(natsMsg_GetData(message), "blocked-second") == 0,
+            "acking first releases the second distinct job");
+    status = natsMsg_AckSync(message, NULL, &error);
+    natsMsg_Destroy(message);
+    if (status != NATS_OK) fail("ack released second job", status, error);
+
+    consumer.AckWait = (int64_t) RESTART_ACK_WAIT_MS * 1000 * 1000;
+    consumer_info = NULL;
+    status = js_UpdateConsumer(&consumer_info, js, STREAM, &consumer, NULL, &error);
+    if (status != NATS_OK) fail("set bounded restart ack wait", status, error);
+    need(consumer_info->Config->AckWait ==
+            (int64_t) RESTART_ACK_WAIT_MS * 1000 * 1000,
+            "server retained 500ms restart ack wait");
+    need(consumer_info->Config->MaxAckPending == 1,
+            "consumer update retained one-message ack-pending bound");
+    jsConsumerInfo_Destroy(consumer_info);
 
     const char *payloads[] = {"bounded-1", "bounded-2", "bounded-3", "survive-restart"};
     const char *ids[] = {"candidate-1", "candidate-2", "candidate-3", "candidate-restart"};
@@ -312,7 +485,7 @@ static void check_setup(void)
         natsMsg_Destroy(message);
     }
 
-    puts("setup\tadmit=true\tduplicate=true\tnak-redelivery=true\tack=true\tpayload-limit=512\tstream-limit=4\tinflight-limit=1\tpending-restart=true");
+    puts("setup\tadmit=true\tduplicate=true\tnak-redelivery-before-ack-expiry=true\tcausal-ack-wait-ms=10000\tmax-ack-pending-blocks-second=true\tack-releases-second=true\trestart-ack-wait-ms=500\tack=true\tpayload-limit=512\tstream-limit=4\tinflight-limit=1\tfetch-timeout-window-ms=150..1000\tpending-restart=true\tclient-rlimit=64\touter-deadline-s=15");
     close_client(subscription, js, connection);
 }
 
@@ -320,7 +493,7 @@ static void check_restart(void)
 {
     natsConnection *connection = connect_trusted(NULL);
     jsCtx *js = jetstream(connection);
-    natsSubscription *subscription = bind(js);
+    natsSubscription *subscription = bind_consumer(js);
     jsErrCode error = 0;
     natsStatus status;
     natsMsg *message = fetch_one(subscription, 1000, &status);
@@ -337,16 +510,15 @@ static void check_restart(void)
     natsMsg_Destroy(message);
     if (status != NATS_OK) fail("ack restart redelivery", status, error);
 
-    message = fetch_one(subscription, FETCH_TIMEOUT_MS, &status);
-    if (message != NULL) natsMsg_Destroy(message);
-    need(status == NATS_TIMEOUT, "post-restart empty pull is time bounded");
+    expect_fetch_timeout(subscription,
+            "post-restart empty pull is time bounded");
     jsStreamInfo *stream_info = NULL;
     status = js_GetStreamInfo(&stream_info, js, STREAM, NULL, &error);
     if (status != NATS_OK) fail("inspect drained stream", status, error);
     need(stream_info->State.Msgs == 0, "work queue ack drains stored work");
     jsStreamInfo_Destroy(stream_info);
 
-    puts("restart\tdurable-identity=true\tredelivery=true\tstate-survived=true\tfetch-timeout-ms=200\tdrained=true");
+    puts("restart\tdurable-identity=true\tredelivery=true\tstate-survived=true\tfetch-timeout-ms=200\tfetch-timeout-window-ms=150..1000\tdrained=true\tclient-rlimit=64\touter-deadline-s=15");
     close_client(subscription, js, connection);
 }
 
@@ -377,7 +549,7 @@ static void check_reconnect(const char *marker)
     jsPubAck *ack = publish(js, "after-reconnect", "candidate-reconnect", &status, &error);
     if (status != NATS_OK) fail("publish after automatic reconnect", status, error);
     jsPubAck_Destroy(ack);
-    natsSubscription *subscription = bind(js);
+    natsSubscription *subscription = bind_consumer(js);
     natsMsg *message = fetch_one(subscription, 1000, &status);
     if (status != NATS_OK) fail("claim after automatic reconnect", status, error);
     need(strcmp(natsMsg_GetData(message), "after-reconnect") == 0,
@@ -386,7 +558,7 @@ static void check_reconnect(const char *marker)
     natsMsg_Destroy(message);
     if (status != NATS_OK) fail("ack after automatic reconnect", status, error);
 
-    puts("reconnect\tdisconnected=true\treconnected=true\tpublish-after-reconnect=true");
+    puts("reconnect\tdisconnected=true\treconnected=true\tpublish-after-reconnect=true\tclient-rlimit=64\touter-deadline-s=15");
     close_client(subscription, js, connection);
 }
 
@@ -406,11 +578,21 @@ int main(int argc, char **argv)
     need(expected_version != NULL, "NATS_C_EXPECTED_VERSION is required");
     need(strcmp(nats_GetVersion(), expected_version) == 0,
             "loaded nats.c version matches the pinned source");
+    need(getenv("NATS_TOKEN") != NULL, "NATS_TOKEN is required");
+    alarm(PROBE_DEADLINE_SECONDS);
+    check_fd_limit();
+    need(argc >= 2, "mode is required");
+    if (strcmp(argv[1], "plaintext-control") == 0) {
+        need(getenv("NATS_CONTROL_PORT") != NULL, "NATS_CONTROL_PORT is required");
+        check_plaintext_control();
+        return 0;
+    }
     need(getenv("NATS_URL") != NULL, "NATS_URL is required");
     need(getenv("NATS_CA_FILE") != NULL, "NATS_CA_FILE is required");
-    need(getenv("NATS_TOKEN") != NULL, "NATS_TOKEN is required");
-    need(argc >= 2, "mode is required");
-    if (strcmp(argv[1], "auth") == 0) check_auth();
+    if (strcmp(argv[1], "auth") == 0) {
+        need(getenv("NATS_TLS_PORT") != NULL, "NATS_TLS_PORT is required");
+        check_auth();
+    }
     else if (strcmp(argv[1], "setup") == 0) check_setup();
     else if (strcmp(argv[1], "restart") == 0) check_restart();
     else if (strcmp(argv[1], "reconnect") == 0) {

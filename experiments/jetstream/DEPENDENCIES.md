@@ -4,7 +4,7 @@
 | --- | --- | --- | --- |
 | `nats.c` | v3.14.0, commit `6cb096a7fd24a1927037fd2a2ca2c6fbc5d64e47`, source archive SHA-256 `1f8b450bc295d0c94be201e34713ca0b515aae2c0d1b279273c3e6e0e72fe005` | Built from source as static `libnats_static.a`; TLS and JetStream enabled; shared library, legacy Streaming, sodium, examples, and experimental APIs disabled | Apache-2.0 `LICENSE`, Git blob `f49a4e16e68b128803cc2dcea614603632b04eac`; dependency manifest blob `d284d83081af397b7370ce43ad273d4de8aca0ad`; no `NOTICE` file in the tagged root |
 | `nats-server` | v2.15.0, commit `eb763679aa3c24a40dcd3012aa046ad1996d851c`; archive and corresponding SPDX SBOM hashes are in `versions.env` | Official prebuilt single-server executable, file-backed JetStream, loopback only | Apache-2.0 `LICENSE`, Git blob `261eeb9e9f8b2b4b0d119366dda99c6fd7d35c64`; dependency manifest blob `fb3717a578cb8c99a148de93735d8149adbf7825`; no `NOTICE` file in the tagged root |
-| OpenSSL | Host-provided, version printed by `openssl version`; CMake requires >=1.1.1 | Dynamic TLS dependency of the statically linked probe and build-time certificate tool | Apache-2.0 since OpenSSL 3; older host versions retain their own upstream license obligations |
+| OpenSSL | Host-provided; version, prefix, `.pc` directory, and link flags come from the exact `pkg-config openssl` module; CMake requires >=1.1.1 | Dynamic TLS dependency of the statically linked probe and build-time certificate tool | Apache-2.0 since OpenSSL 3; older host versions retain their own upstream license obligations |
 | POSIX threads and platform C runtime | Host-provided | Runtime dependencies of `nats.c` | Platform system libraries |
 
 Exact official server archive SHA-256 values:

@@ -29,6 +29,75 @@ child wall/CPU/RSS and sampled-FD observations. The first run in each series
 also enables the D runtime's GC summary as a release-active availability
 control. Scratch fixtures and raw logs remain private and are removed.
 
+## Many-small-file coordination attribution
+
+`coordination_profile.d` measures issue #182's default-off, fixed-cardinality
+coordination counters separately from uninstrumented shipping timings. It
+reuses the canonical 524,288-record logical stream as 4,096 small files and
+eight large files, runs threads 1/2/4 five times for each layout and mode, and
+requires the pinned input and exact output tree identities on every child.
+
+```sh
+dub build --compiler=ldc2 --build=release --force
+ldc2 -O3 -release benchmarks/coordination_profile.d \
+  -of=/tmp/scrubbed-coordination-profile
+/tmp/scrubbed-coordination-profile --self-test
+rm -f benchmarks/coordination-profile-evidence.json
+/tmp/scrubbed-coordination-profile ./scrubbed \
+  benchmarks/coordination-profile-evidence.json
+/tmp/scrubbed-coordination-profile --validate-report \
+  benchmarks/coordination-profile-evidence.json ./scrubbed
+```
+
+The performance series does not set the metrics environment or run stack/GC
+probes. The attribution series sets `SCRUBBED_COORDINATION_METRICS_V2`; its
+first sample per thread also attempts a D-GC availability control and a
+one-second `/usr/bin/sample` trace. A runtime that emits no D-GC summary is
+recorded as unsupported rather than treated as measured GC evidence. The
+metrics destination must be a new
+plain file outside the input, output, config, manifest, and journal routes;
+publication is create-only. Darwin `wait4` supplies direct-child CPU
+and peak RSS. FD counts are sampled with `lsof`, and exact child syscall counts
+are explicitly unsupported. OS cache state is uncontrolled and is never
+described as cold. Metrics are unavailable with manifest or error-journal
+durable routes; those combinations are rejected before output or durable state
+is created or opened. Transform nanoseconds use the executing worker's thread CPU
+clock; the remaining phase durations use a monotonic elapsed clock. The harness
+uses the v2 metrics schema because v1 recorded transform elapsed time rather
+than worker CPU. The reported worker-descriptor limit is the effective
+`min(threads, configured-worker-descriptor-cap)` processing gate. It copies
+each supplied executable into owner-only scratch,
+makes the copy read-only, verifies its digest around every invocation, and
+atomically publishes reports only after final snapshot verification.
+Every child receives a small declared environment rather than the caller's
+ambient variables. Each sample has a 900-second deadline, the whole run has a
+six-hour deadline, and sampler subprocesses have two seconds; timed-out
+process groups receive TERM, then KILL after a bounded grace period, and are
+always reaped. A hard harness watchdog covers fixture, validation, publication,
+and other non-child phases. Because that final watchdog uses `SIGKILL`, a
+standalone run can leave its owner-only temporary scratch for manual cleanup
+if a non-child phase stalls for the full six-hour deadline. The self-test
+poisons unrelated metrics variables and exercises the timeout/reap and
+hard-watchdog paths.
+
+On the recorded Apple M4/macOS 26.6.2/LDC 1.43.0 run, uninstrumented median
+wall times in seconds were many-small 18.661/18.354/11.166 and few-large
+3.905/2.137/1.324 for threads 1/2/4. The matching instrumented medians were
+17.470/17.133/10.283 and 3.894/2.150/1.463. Accepted-to-worker queue time was the
+largest aggregate waiting signal in the parallel many-small samples; ordered
+result wait was much smaller, and descriptor wait was negligible. Performance
+and attribution remain separate series because instrumentation changes the
+measured work. These are Darwin-local diagnostic observations, not Linux or
+Windows claims.
+
+The initial attribution slice included no scheduler candidate, so its report records
+`ATTRIBUTION_ONLY_NO_CANDIDATE` and `production_candidate_authorized: false`.
+The contract's four-of-five, 10% before/after gate therefore cannot authorize
+a scheduling change. Shipping order, admission, descriptor ownership,
+cancellation, error selection, publication, and resource-cap behavior are
+unchanged; when the environment variable is absent, the metrics object is not
+allocated and no instrumentation clock or mutex is touched.
+
 ## Attested full-process target
 
 `pipeline.d --attested-build` refuses a dirty checkout, builds the release

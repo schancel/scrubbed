@@ -9,7 +9,8 @@ import composition.dispatch_executor : DispatchExecutionFailureV1;
 import composition.runtime_plan : RuntimeExecutionV1, RuntimePlanV1;
 import core.sync.mutex : Mutex;
 import core.sync.condition : Condition;
-import effects.bounded_input : BoundedInput, InputLimits;
+import effects.bounded_input : BoundedInput, CoordinationMetricsV2,
+    CoordinationPhaseV2, InputLimits, beginCoordinationMetricV2;
 import effects.jsonl_stream : JsonlFailure, JsonlFailureKind, JsonlLimits;
 import effects.jsonl_job : runJsonlField;
 import effects.stdio_stream : processStandardJsonlDocuments;
@@ -382,7 +383,8 @@ int runExtract(string requestedInput, string requestedOutput,
 
 private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         string outputRoot, bool inputIsDir, ref RuntimePlanV1 job,
-        ulong reservedBytes, bool dryRun, PublicationOrder publication) {
+        ulong reservedBytes, bool dryRun, PublicationOrder publication,
+        CoordinationMetricsV2 metrics = null) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto rootDestination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
     auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
@@ -416,7 +418,7 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
                 if (execution.hasDispatch)
                     dispatchRecord = canonicalDispatchRecordV1(
                         execution.dispatch);
-            }, dryRun);
+            }, dryRun, metrics);
         // Every valid compiled job emits at least one terminal event, so entering
         // publication is part of completing a root.
         if (!entered) throw new Exception("compiled job produced no terminal decision");
@@ -595,13 +597,18 @@ private final class PublicationOrder {
     private bool[string] destinations;
     private size_t[string] ordinals;
     private size_t assigned;
+    private CoordinationMetricsV2 metrics;
 
-    this() {
+    this(CoordinationMetricsV2 metrics = null) {
+        this.metrics = metrics;
         mutex = new Mutex;
         changed = new Condition(mutex);
     }
 
     void enter(size_t ordinal) {
+        auto started = beginCoordinationMetricV2(metrics);
+        scope(exit) if (metrics !is null)
+            metrics.record(CoordinationPhaseV2.orderedResultWait, 0, started);
         mutex.lock();
         while (!stopped && ordinal != next) changed.wait();
         if (stopped) {
@@ -648,6 +655,9 @@ private final class PublicationOrder {
     /// The winning failure stops later publication; later failures and
     /// waiters become cancellation outcomes so they cannot replace its cause.
     void fail(size_t ordinal) {
+        auto started = beginCoordinationMetricV2(metrics);
+        scope(exit) if (metrics !is null)
+            metrics.record(CoordinationPhaseV2.orderedResultWait, 0, started);
         mutex.lock();
         while (!stopped && ordinal != next) changed.wait();
         if (stopped) {
@@ -669,6 +679,34 @@ private final class PublicationOrder {
 
 private final class OrderedPublicationCanceled : Exception {
     this() { super("ordered publication canceled after an earlier fatal root"); }
+}
+
+unittest {
+    import core.sync.semaphore : Semaphore;
+    import core.thread : Thread;
+    import core.time : msecs;
+    import std.exception : assertThrown;
+
+    auto order = new PublicationOrder;
+    auto laterStarted = new Semaphore(0);
+    auto laterFinished = new Semaphore(0);
+    Throwable laterError;
+    auto later = new Thread({
+        laterStarted.notify();
+        try order.fail(1);
+        catch (Throwable error) { laterError = error; }
+        laterFinished.notify();
+    });
+    later.start();
+    laterStarted.wait();
+    assert(!laterFinished.wait(50.msecs),
+        "later canonical failure did not wait for the earlier root");
+    order.enter(0);
+    order.complete();
+    assert(laterFinished.wait(500.msecs));
+    later.join();
+    assert(laterError is null);
+    assertThrown!OrderedPublicationCanceled(order.enter(2));
 }
 
 private string effectFailureDetail(EffectFailure failure) {
@@ -730,6 +768,44 @@ private void preflightManifest(string path, string inputPath, string outputPath,
                 throw new Exception("manifest companion has a hard-link alias");
         }
     }
+}
+
+private final class CoordinationMetricsPathConflict : Exception {
+    this() {
+        super("coordination metrics path conflicts with another artifact route");
+    }
+}
+
+private bool pathsOverlap(string left, string right) {
+    return pathIsWithin(left, right) || pathIsWithin(right, left);
+}
+
+private string preflightCoordinationMetrics(string path, string inputPath,
+        string outputPath, bool inputIsDir, string configPath,
+        string manifestPath, string errorJournalPath) {
+    bool link;
+    try link = isSymlink(path);
+    catch (FileException failure) { if (exists(path)) throw failure; }
+    if (link || exists(path))
+        throw new Exception("coordination metrics destination must not exist");
+    auto resolved = resolveExistingPrefix(path);
+    if ((inputIsDir && pathIsWithin(resolved, inputPath)) ||
+        (!inputIsDir && resolved == inputPath) ||
+        pathsOverlap(resolved, outputPath))
+        throw new CoordinationMetricsPathConflict;
+    foreach (protectedPath; [configPath, manifestPath, errorJournalPath])
+        if (protectedPath.length) foreach (candidate;
+                protectedPath == configPath ? [protectedPath] :
+                [protectedPath, protectedPath ~ "-wal", protectedPath ~ "-shm"])
+            if (pathsOverlap(resolved, resolveExistingPrefix(candidate)))
+                throw new CoordinationMetricsPathConflict;
+    return resolved;
+}
+
+private void publishCoordinationMetrics(string path, string text) {
+    auto destination = File(path, "wx");
+    destination.write(text);
+    destination.close();
 }
 
 private ubyte[32] runningExecutableDigest() {
@@ -1334,6 +1410,11 @@ int runApp(string[] args) {
     versionedConfig = configContents.length && hasJobVersion(configContents);
 
     const durableRoute = (manifestPath.length || errorJournalPath.length) && !dryRun;
+    auto coordinationPath =
+        environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
+    if (coordinationPath.length && durableRoute)
+        throw new Exception(
+            "coordination metrics are unavailable with durable routes");
     auto runtimePlan = selectedRuntimePlan(compositionTokens, filtersExplicit,
         filterList, configPath.length != 0, configContents, versionedConfig);
     auto canonicalSpec = runtimePlan.canonical;
@@ -1393,6 +1474,10 @@ int runApp(string[] args) {
         if (!errorJournalPath.length) writeln("valid. No files processed.");
         return 0;
     }
+    if (coordinationPath.length)
+        coordinationPath = preflightCoordinationMetrics(coordinationPath,
+            inputPath, outputPath, inputIsDir, configPath, manifestPath,
+            errorJournalPath);
     ubyte[32] executable, configHash;
     {
         auto identityStarted = beginDurableMetricV1();
@@ -1415,7 +1500,12 @@ int runApp(string[] args) {
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
     auto pending = explain ? new PendingExplanations : null;
-    auto publication = durableRoute ? null : new PublicationOrder;
+    auto coordination = coordinationPath.length ? new CoordinationMetricsV2 : null;
+    scope(exit) if (coordination !is null) {
+        coordination.finishWall();
+        publishCoordinationMetrics(coordinationPath, coordination.json() ~ "\n");
+    }
+    auto publication = durableRoute ? null : new PublicationOrder(coordination);
     auto decisionMutex = new Mutex;
     size_t terminalDecisions;
     auto scheduler = new BoundedInput(
@@ -1434,7 +1524,8 @@ int runApp(string[] args) {
                     allowVerifiedSkip);
             } else {
                 auto local = processCompiledOne(file, inputPath, outputPath,
-                    inputIsDir, runtimePlan, bytes, dryRun, publication);
+                    inputIsDir, runtimePlan, bytes, dryRun, publication,
+                    coordination);
                 decision.status = local.status;
                 decision.detail = local.firstReason;
                 decision.terminal = local.rejected != 0 || local.quarantined != 0;
@@ -1525,7 +1616,7 @@ int runApp(string[] args) {
             return cast(OrderedPublicationCanceled)error is null &&
                 (cast(DurableDocumentFailure)error is null ||
                     (cast(DurableDocumentFailure)error).fatal);
-        });
+        }, coordination);
     bool workerFatalAdmission;
     void submitPath(string file) {
         bool admissionCanceled;
@@ -1537,13 +1628,24 @@ int runApp(string[] args) {
                 if (!durableLedger.hasOutstanding(id)) return;
             }
             if (explain) pending.add(file);
-            if (!durableRoute) publication.assign(file);
+            if (!durableRoute) {
+                auto ordinalStarted = beginCoordinationMetricV2(coordination);
+                scope(exit) if (coordination !is null)
+                    coordination.record(CoordinationPhaseV2.ordinalAssignment,
+                        1, ordinalStarted);
+                publication.assign(file);
+            }
             ulong bytes;
             {
                 auto statStarted = beginDurableMetricV1();
                 scope(exit) if (durableRoute)
                     recordDurableMetricV1(DurableMetricPhaseV1.sourceStat,
                         0, statStarted);
+                auto coordinationStatStarted =
+                    beginCoordinationMetricV2(coordination);
+                scope(exit) if (coordination !is null)
+                    coordination.record(CoordinationPhaseV2.sourceStat, 1,
+                        coordinationStatStarted);
                 bytes = getSize(file);
             }
             if (!scheduler.submit(file, bytes)) {
@@ -1564,6 +1666,7 @@ int runApp(string[] args) {
         }
     }
     void walkCanonical(string directory) {
+        auto discoveryStarted = beginCoordinationMetricV2(coordination);
         auto entries = dirEntries(directory, SpanMode.shallow, false).array;
         auto orderKey = (ref typeof(entries[0]) entry) {
             auto relative = relativePath(entry.name, inputPath);
@@ -1571,6 +1674,9 @@ int runApp(string[] args) {
                 relative ~ dirSeparator : relative;
         };
         sort!((left, right) => orderKey(left) < orderKey(right))(entries);
+        if (coordination !is null)
+            coordination.record(CoordinationPhaseV2.discovery,
+                entries.length, discoveryStarted);
         foreach (entry; entries) {
             if (entry.isSymlink) {
                 auto reason = "refusing symlink in input tree: " ~ entry.name;
@@ -1640,7 +1746,7 @@ int runApp(string[] args) {
 
 unittest {
     import std.exception : assertThrown;
-    import std.file : rmdirRecurse, tempDir;
+    import std.file : read, rmdirRecurse, tempDir;
 
     auto root = buildPath(tempDir, "scrubbed-cli-" ~ randomUUID.toString);
     scope(exit) if (exists(root)) rmdirRecurse(root);
@@ -1652,6 +1758,74 @@ unittest {
     assert(runApp(["scrubbed", "--input", same, "--output", same,
         "--filters", "fix-mojibake", "--threads", "1"]) == 0);
     assert(readText(same) == "already clean");
+    {
+        auto priorMetrics =
+            environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
+        scope(exit) {
+            if (priorMetrics.length)
+                environment["SCRUBBED_COORDINATION_METRICS_V2"] = priorMetrics;
+            else environment.remove("SCRUBBED_COORDINATION_METRICS_V2");
+        }
+        auto separateOutput = buildPath(root, "metrics-collision-output.txt");
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = same;
+        assertThrown(runApp(["scrubbed", "--input", same,
+            "--output", separateOutput, "--filters", "fix-mojibake",
+            "--threads", "1"]));
+        assert(readText(same) == "already clean" && !exists(separateOutput));
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = separateOutput;
+        assertThrown(runApp(["scrubbed", "--input", same,
+            "--output", separateOutput, "--filters", "fix-mojibake",
+            "--threads", "1"]));
+        assert(readText(same) == "already clean" && !exists(separateOutput));
+        auto metricsAncestor = buildPath(root, "metrics-ancestor");
+        auto nestedOutput = buildPath(metricsAncestor, "output.txt");
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = metricsAncestor;
+        assertThrown!CoordinationMetricsPathConflict(runApp(["scrubbed",
+            "--input", same, "--output", nestedOutput, "--filters",
+            "fix-mojibake", "--threads", "1"]));
+        assert(readText(same) == "already clean" &&
+            !exists(metricsAncestor) && !exists(nestedOutput));
+        auto outputAncestor = buildPath(root, "output-ancestor.txt");
+        auto nestedMetrics = buildPath(outputAncestor, "metrics.json");
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = nestedMetrics;
+        assertThrown!CoordinationMetricsPathConflict(runApp(["scrubbed",
+            "--input", same, "--output", outputAncestor, "--filters",
+            "fix-mojibake", "--threads", "1"]));
+        assert(readText(same) == "already clean" &&
+            !exists(outputAncestor) && !exists(nestedMetrics));
+        auto durableMetrics = buildPath(root, "durable-metrics.json");
+        auto manifestOutput = buildPath(root, "metrics-manifest-output.txt");
+        auto manifestStore = buildPath(root, "metrics-manifest.db");
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = durableMetrics;
+        assertThrown(runApp(["scrubbed", "--input", same,
+            "--output", manifestOutput, "--filters", "fix-mojibake",
+            "--threads", "1", "--manifest", manifestStore]));
+        assert(!exists(durableMetrics) && !exists(manifestOutput) &&
+            !exists(manifestStore));
+        auto journalOutput = buildPath(root, "metrics-journal-output.txt");
+        auto journalStore = buildPath(root, "metrics-journal.db");
+        createJournalV3(journalStore);
+        auto journalBefore = read(journalStore);
+        assertThrown(runApp(["scrubbed", "--input", same,
+            "--output", journalOutput, "--filters", "fix-mojibake",
+            "--threads", "1", "--error-journal", journalStore]));
+        assert(!exists(durableMetrics) && !exists(journalOutput) &&
+            read(journalStore) == journalBefore &&
+            !exists(journalStore ~ "-wal") && !exists(journalStore ~ "-shm"));
+        auto metricsPath = buildPath(root, "coordination-metrics.json");
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = metricsPath;
+        assert(runApp(["scrubbed", "--input", same,
+            "--output", separateOutput, "--filters", "fix-mojibake",
+            "--threads", "1"]) == 0);
+        assert(parseJSON(readText(metricsPath))["schema"].str ==
+            "scrubbed.coordination-metrics.v2");
+        auto racedMetricsPath = buildPath(root,
+            "coordination-metrics-raced.json");
+        write(racedMetricsPath, "sentinel");
+        assertThrown(publishCoordinationMetrics(racedMetricsPath,
+            `{"schema":"must-not-replace"}`));
+        assert(readText(racedMetricsPath) == "sentinel");
+    }
 
     auto empty = buildPath(root, "empty.txt");
     auto emptyOut = buildPath(root, "empty-out.txt");

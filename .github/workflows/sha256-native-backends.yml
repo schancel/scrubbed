@@ -8,6 +8,7 @@ on:
     paths:
       - ".github/workflows/sha256-native-backends.yml"
       - "benchmarks/sha256_backend_check.d"
+      - "benchmarks/durable_skip_check.d"
       - "source/**/*.d"
       - "dub.json"
       - "dub.selections.json"
@@ -15,6 +16,7 @@ on:
     paths:
       - ".github/workflows/sha256-native-backends.yml"
       - "benchmarks/sha256_backend_check.d"
+      - "benchmarks/durable_skip_check.d"
       - "source/**/*.d"
       - "dub.json"
       - "dub.selections.json"
@@ -90,3 +92,54 @@ jobs:
         run: |
           dub test --compiler=ldc2
           dub build --compiler=ldc2 --build=release
+          ldc2 -O3 -release benchmarks/durable_skip_check.d \
+            -of=/tmp/scrubbed-durable-skip-check
+          /tmp/scrubbed-durable-skip-check --self-test-comparison
+
+  migration-comparison:
+    name: production migration comparison
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Check out candidate source and history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned LDC
+        uses: dlang-community/setup-dlang@2979e3ea011f6a234cd3a47dcbeb60f451c9635f
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Build exact base and candidate binaries
+        env:
+          BASE_SHA: cd15948466509055ae0431439f651ecba8a301f6
+        run: |
+          base_tree="$RUNNER_TEMP/scrubbed-sha-base"
+          git worktree add --detach "$base_tree" "$BASE_SHA"
+          (cd "$base_tree" && dub build --compiler=ldc2 --build=release)
+          cp "$base_tree/scrubbed" "$RUNNER_TEMP/scrubbed-sha-base-bin"
+          dub build --compiler=ldc2 --build=release
+          cp scrubbed "$RUNNER_TEMP/scrubbed-sha-candidate-bin"
+          ldc2 -O3 -release benchmarks/durable_skip_check.d \
+            -of="$RUNNER_TEMP/scrubbed-durable-skip-check"
+
+      - name: Run same-host interleaved production comparison
+        env:
+          BASE_SHA: cd15948466509055ae0431439f651ecba8a301f6
+        run: |
+          candidate_sha="$(git rev-parse HEAD)"
+          "$RUNNER_TEMP/scrubbed-durable-skip-check" --compare \
+            "$RUNNER_TEMP/scrubbed-sha-base-bin" "$BASE_SHA" \
+            "$RUNNER_TEMP/scrubbed-sha-candidate-bin" "$candidate_sha" \
+            sha256-migration-comparison.json
+
+      - name: Upload comparison evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sha256-migration-comparison
+          path: sha256-migration-comparison.json
+          if-no-files-found: error
+          retention-days: 14

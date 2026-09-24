@@ -681,21 +681,22 @@ blocker.
 samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,
 and instruction counts. The validator re-derives the host identity and
 architecture-conditioned execution statuses. These timings are descriptive:
-cache and frequency state are uncontrolled. Production callers now use the
-facade after native x86/ARM proof, exact digest and identity checks, the full
-50-module suite, and combined full-CLI/durable gates passed. On the recorded
-ARM host, all source and output hash-phase medians improved; seven of eight
-end-to-end medians improved. The one exception was a +3.9% wall result for
-full reexecution of the few-large manifest case even though its source/output
-hash phases improved 42%/66%; this non-hash/noise exception is retained rather
-than averaged away.
+cache and frequency state are uncontrolled.
 
-The combined-gate artifacts are
-`sha256-migration-base-durable-evidence.json`,
-`sha256-migration-candidate-durable-evidence.json`, and the derived
-`sha256-migration-summary.json`. Each raw report is produced by
-`durable_skip_check.d`; its `before` variant means forced reexecution and its
-`candidate` variant means verified skip. The summary renames those modes to
-avoid confusing them with the base and migrated executable roles, binds both
-raw-report and executable hashes, and records every median rather than only
-the favorable cases.
+The workflow's manual `production migration comparison` job builds exact base
+`cd15948466509055ae0431439f651ecba8a301f6` and the candidate with the same
+pinned compiler, then runs them on one macOS ARM host in alternating order.
+`durable_skip_check.d --compare` covers manifest-v2 and journal-v3, forced
+reexecution and verified skip, many-small, few-large, and one-file startup
+layouts. It records five samples per binary/case plus wall, total CPU, RSS,
+sampled file descriptors, source-hash time, output-hash time, exact output
+identities, source revisions, and binary/harness hashes.
+
+The generated `sha256-migration-comparison.json` is one source-bound artifact;
+its medians and decision are re-derived by the validator. The gate requires a
+material non-startup wall win and source/output-hash win, rejects meaningful
+wall/CPU/hash-phase/RSS regressions and any file-descriptor increase, and keeps
+the artifact on failure for diagnosis. `--self-test-comparison` proves that
+threshold, observation, source-identity, and decision mutations are rejected.
+No production-migration performance claim is retained until that hosted job
+passes for the exact candidate revision.

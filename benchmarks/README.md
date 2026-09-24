@@ -391,8 +391,8 @@ GC, syscall-byte, OS-cold, and >RAM claims.
 
 ### Bounded mojibake work attribution
 
-`mojibake_work.d` is the evidence-only follow-up to the canonical attribution
-report. It is available only in a `MojibakeWorkProbe` build; ordinary product
+`mojibake_work.d` provides release-active work evidence for the local-repair
+scanner. It is available only in a `MojibakeWorkProbe` build; ordinary product
 builds contain neither its API nor counter branches. The probe also runs the
 ordinary implementation and refuses any valid-input result that differs.
 Its fixed eight pass buckets are caller-owned, so concurrent probes do not
@@ -401,7 +401,9 @@ unbounded profile from an option value.
 
 ```sh
 ldc2 -O3 -release -preview=dip1000 -d-version=MojibakeWorkProbe \
-  -d-version=MojibakeWorkO3Release -Isource \
+  -d-version=MojibakeWorkO3Release \
+  -d-version=MojibakeBase_b51a5155d4f1edab3866c75e1ba3547a70a00848 \
+  -Isource -J. \
   benchmarks/mojibake_work.d source/filters/mojibake.d source/pipeline.d \
   -of=/tmp/scrubbed-mojibake-work
 /tmp/scrubbed-mojibake-work --self-test
@@ -414,25 +416,27 @@ also checks the exact invalid-UTF-8 exception, fixed pass capacity, and two
 concurrent caller-owned runs. The JSON output retains every entered pass and
 separate Latin-1/CP1252 counts for legacy-byte mapping, sequence scans,
 encodability, candidate decoding, plausibility, grouping and materialization.
-It hashes and validates the exact probe and harness sources, hashes every case
-input and its option-bearing identity, and records the compiler vendor/frontend
-version, exact `ldc2` 1.43.0 version line, and the required O3/release flags and
-build mode. A changed probe source, case set, input hash, build identity, or
-published count is rejected by the D harness before JSON is emitted.
+It embeds, hashes, and validates the exact probe and harness sources. A required
+build marker and a separate compile-time assertion bind the frozen source base.
+The report also hashes every case input and its option-bearing identity and
+records the compiler vendor/frontend version, exact `ldc2` 1.43.0 version line,
+and required flags and build mode. A changed runtime source, single changed base
+claim, case set, input hash, build identity, or published count is rejected
+before JSON is emitted.
 
 On the authored focused cases, whole-string one-layer and multilayer repairs
-did not call `legacySequenceEnd`; that helper was exercised by the fallback
-for unmappable surrounding Unicode. On pass 0, the local-island case made 19
-Latin-1 and 20 CP1252 sequence calls, with 38 and 58 corresponding
-`legacyByte` calls, and selected local repair; pass 1 stopped at score zero.
-On pass 0, the ambiguous-C2 preservation case made 11 sequence calls and 22
-legacy-byte calls for each encoding, selected unchanged, and did not alter the
-output. These exact counts and outcomes are release-active goldens. They
-identify bounded repeated work but do not supply a candidate or an end-to-end
-A/B win.
-The production threshold is therefore **not met**, optimization remains
-unauthorized, and the ordinary mojibake algorithm is unchanged. This is not a
-claim about every corpus, SIMD, the pipeline scheduler, or materialization.
+do not call `legacySequenceEnd`; that helper is exercised by the fallback for
+unmappable surrounding Unicode. The local scanner now bypasses ASCII bytes,
+which cannot begin a legacy representation of a multi-byte UTF-8 sequence. On
+pass 0, the local-island case skips 12 ASCII bytes and makes 7 Latin-1 plus 8
+CP1252 sequence calls, down from the frozen 19 and 20; corresponding
+`legacyByte` calls fall from 38/58 to 26/46. It selects the identical local
+repair, and pass 1 stops at score zero. The ambiguous-C2 preservation case
+skips 6 ASCII bytes and makes 5 rather than 11 sequence calls per encoding;
+legacy-byte calls fall from 22 to 16, with identical unchanged output. These
+exact counts and outcomes are release-active goldens and authorize only the
+ASCII-start bypass. They are deterministic work evidence, not a wall-time,
+whole-corpus, SIMD, scheduler, or materialization claim.
 
 `mojibake_ranges.d` compares three implementations using identical scorer
 logic and inputs:

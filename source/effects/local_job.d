@@ -38,6 +38,7 @@ struct LocalJobOutcome {
     bool changed;
     string firstReason;
     string dispatchRecord;
+    string[] sideOutputRecords;
 
     string status() const {
         if (quarantined) return "quarantined";

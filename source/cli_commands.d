@@ -63,6 +63,8 @@ mixin template ProcessingOptions() {
     bool errorRetry;
     @(NamedArgument("error-targeted").Description("Retry only exact local v3 outstanding targets"))
     bool errorTargeted;
+    @(NamedArgument("sidecar-output").Description("Generic terminal side-output file or mirrored tree root"))
+    string sidecarOutput;
     @(NamedArgument("jsonl-fields").Description("Comma-separated top-level JSON text fields for stdin/stdout JSONL"))
     string jsonlFields;
     @(NamedArgument("dataset-namespace").Description("Stable JSONL dataset namespace"))
@@ -73,6 +75,8 @@ mixin template ProcessingOptions() {
     size_t maxJsonlLineBytes;
     @(NamedArgument("max-jsonl-output-bytes").Description("Maximum JSONL output record bytes including LF"))
     size_t maxJsonlOutputBytes;
+    @(NamedArgument("max-jsonl-sidecar-bytes").Description("Maximum aggregate terminal side-output JSONL bytes"))
+    ulong maxJsonlSidecarBytes;
 }
 
 @(Command("run", "clean").Description("Run the bounded filter pipeline (also the no-verb default)."))
@@ -192,6 +196,8 @@ private int process(T)(ref T options, const string[] original) {
         forwarded ~= "--error-journal=" ~ options.errorJournal;
     if (options.errorRetry) forwarded ~= "--error-retry";
     if (options.errorTargeted) forwarded ~= "--error-targeted";
+    if (present(original, "--sidecar-output"))
+        forwarded ~= "--sidecar-output=" ~ options.sidecarOutput;
     if (present(original, "--jsonl-fields"))
         forwarded ~= "--jsonl-fields=" ~ options.jsonlFields;
     if (present(original, "--dataset-namespace"))
@@ -202,6 +208,9 @@ private int process(T)(ref T options, const string[] original) {
         forwarded ~= ["--max-jsonl-line-bytes", options.maxJsonlLineBytes.to!string];
     if (present(original, "--max-jsonl-output-bytes"))
         forwarded ~= ["--max-jsonl-output-bytes", options.maxJsonlOutputBytes.to!string];
+    if (present(original, "--max-jsonl-sidecar-bytes"))
+        forwarded ~= ["--max-jsonl-sidecar-bytes",
+            options.maxJsonlSidecarBytes.to!string];
     return runApp(forwarded);
 }
 

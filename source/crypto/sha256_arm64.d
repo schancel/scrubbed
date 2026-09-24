@@ -53,7 +53,8 @@ version (AArch64) {
     /// This function alone is compiled for SHA2. Callers must first prove the
     /// running CPU supports SHA2; the portable facade owns that decision.
     @target("sha2")
-    void compressArmSha2(ref uint[8] state, const(ubyte)* block) pure @trusted {
+    package(crypto) void compressArmSha2(ref uint[8] state,
+            const(ubyte)* block) pure @trusted {
         uint4[16] message;
         foreach (group; 0 .. 4) {
             auto at = block + group * 16;
@@ -87,7 +88,7 @@ version (AArch64) {
         }
     }
 
-    bool armSha2Available() nothrow {
+    package(crypto) bool armSha2Available() nothrow {
         version (OSX) {
             import std.string : toStringz;
             int value;
@@ -102,8 +103,8 @@ version (AArch64) {
         } else return false;
     }
 } else {
-    void compressArmSha2(ref uint[8], const(ubyte)*) pure @safe {
+    package(crypto) void compressArmSha2(ref uint[8], const(ubyte)*) pure @safe {
         assert(false, "ARM SHA2 backend is not compiled for this target");
     }
-    bool armSha2Available() nothrow { return false; }
+    package(crypto) bool armSha2Available() nothrow { return false; }
 }

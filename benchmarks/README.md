@@ -614,6 +614,10 @@ ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
 /tmp/scrubbed-sha256-backend-check --long-test
 /tmp/scrubbed-sha256-backend-check --report benchmarks/sha256-backend-evidence.json
 /tmp/scrubbed-sha256-backend-check --check-report benchmarks/sha256-backend-evidence.json
+/tmp/scrubbed-sha256-backend-check --check-native-report \
+  benchmarks/sha256-native-arm64-evidence.json
+/tmp/scrubbed-sha256-backend-check --check-native-report \
+  benchmarks/sha256-native-x86_64-evidence.json
 ```
 
 The self-test checks authoritative empty/`abc`/long-message vectors, Phobos
@@ -661,8 +665,12 @@ release-active harness on GitHub-hosted `ubuntu-24.04` x86-64 and
 `ubuntu-24.04-arm` arm64 runners. `--native-report` refuses scalar fallback:
 the x86 job must expose and select SHA-NI, while the ARM job must expose and
 select ARMv8 SHA2. Each job also runs the multi-GiB logical stream and uploads
-a sanitized, source- and binary-bound architecture report. Workflow actions
-and LDC 1.43.0 are pinned; the workflow has read-only repository permission.
+a sanitized, source- and binary-bound architecture report, then validates both
+that generated report and the corresponding committed artifact for exact
+schema, source hashes, benchmark rows, and digests. Caller-only source changes
+trigger the workflow; a macOS ARM job also tests and builds the production
+package. Workflow actions and LDC 1.43.0 are pinned; the workflow has read-only
+repository permission.
 Run `35914157081` passed both native jobs. The committed sanitized artifacts
 record `SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on
 x86-64 and `armv8-sha2` on arm64, and identical source hashes across both

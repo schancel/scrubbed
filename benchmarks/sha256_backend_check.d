@@ -65,6 +65,23 @@ private immutable string[] identityFixtures = [
     "job:v3:d901650f7a0633860298590a8b868363f1ee470f9325f046bd16a21c15593116",
 ];
 
+private immutable string[] forbiddenShaBypasses = [
+    "std.digest.sha",
+    "crypto.sha256_arm64",
+    "crypto.sha256_x86_64",
+    "compressArmSha2",
+    "armSha2Available",
+    "compressX86ShaNi",
+    "x86ShaNiAvailable",
+];
+
+private immutable string[] backendSourcePaths = [
+    "source/crypto/sha256.d",
+    "source/crypto/sha256_arm64.d",
+    "source/crypto/sha256_x86_64.d",
+    "benchmarks/sha256_backend_check.d",
+];
+
 private string hex(const ubyte[32] digest) {
     return toHexString!(LetterCase.lower)(digest).idup;
 }
@@ -137,9 +154,17 @@ private JSONValue inventoryEvidence() {
     }
     foreach (entry; dirEntries("source", "*.d", SpanMode.depth, false)) {
         auto path = entry.name;
-        if (path.indexOf("source/crypto/") == 0) continue;
         auto source = cast(string)read(path);
-        if (tokenOccurrences(source) != 0)
+        if (path != "source/crypto/sha256.d" &&
+                path != "source/crypto/sha256_arm64.d" &&
+                path != "source/crypto/sha256_x86_64.d") {
+            foreach (token; forbiddenShaBypasses)
+                enforce(source.indexOf(token) < 0,
+                    "production SHA-256 facade bypass: " ~ path ~
+                    " references " ~ token);
+        }
+        if (path.indexOf("source/crypto/") != 0 &&
+                tokenOccurrences(source) != 0)
             enforce((path in expected) !is null,
                 "new production SHA-256 caller is outside the frozen inventory: " ~ path);
     }
@@ -331,8 +356,7 @@ private void writeNativeReport(string path) {
     report["frontend"] = cast(long)__VERSION__;
     report["harness_binary_sha256"] = sourceHash(thisExePath);
     JSONValue sources;
-    foreach (source; ["source/crypto/sha256.d", "source/crypto/sha256_arm64.d",
-            "source/crypto/sha256_x86_64.d", "benchmarks/sha256_backend_check.d"])
+    foreach (source; backendSourcePaths)
         sources[source] = sourceHash(source);
     report["source_sha256"] = sources;
     immutable size_t[10] crossoverSizes =
@@ -341,13 +365,7 @@ private void writeNativeReport(string path) {
     report["microbench_claim"] =
         "descriptive crossover evidence; hosted runner frequency uncontrolled";
     write(path, report.toString(JSONOptions.doNotEscapeSlashes));
-    auto reopened = parseJSON(readText(path));
-    enforce(reopened["schema"].str == "scrubbed-sha256-native-backend-v2" &&
-        reopened["architecture"].str == architecture &&
-        reopened["selected_backend"].str == expectedBackend &&
-        reopened["short_message_microbench"].array.length ==
-            crossoverSizes.length * 5 * 2,
-        "native SHA-256 report reopen mismatch");
+    validateNativeReport(path);
     writeln("wrote native SHA-256 evidence: ", path);
 }
 
@@ -402,6 +420,79 @@ private JSONValue[] benchmarkRows(const(size_t)[] sizes) {
 private string sourceHash(string path) {
     auto digest = sha256Of(cast(ubyte[])read(path));
     return hex(digest);
+}
+
+private bool isLowerHexDigest(string value) pure nothrow {
+    if (value.length != 64) return false;
+    foreach (character; value)
+        if (!(character >= '0' && character <= '9') &&
+                !(character >= 'a' && character <= 'f')) return false;
+    return true;
+}
+
+private void validateNativeReport(string path) {
+    auto report = parseJSON(readText(path));
+    enforce(report.object.length == 12 &&
+        report["schema"].str == "scrubbed-sha256-native-backend-v2" &&
+        report["compiler"].str == expectedCompiler &&
+        report["frontend"].integer == __VERSION__ &&
+        report["hardware_execution"].str == "SUPPORTED_AND_PASSED" &&
+        report["os"].str.length != 0 && report["os_release"].str.length != 0 &&
+        report["microbench_claim"].str ==
+            "descriptive crossover evidence; hosted runner frequency uncontrolled" &&
+        isLowerHexDigest(report["harness_binary_sha256"].str),
+        "native SHA-256 report identity mismatch");
+
+    auto architecture = report["architecture"].str;
+    string expectedBackend;
+    if (architecture == "aarch64" || architecture == "arm64")
+        expectedBackend = "armv8-sha2";
+    else if (architecture == "x86_64")
+        expectedBackend = "x86-sha-ni";
+    else enforce(false, "native SHA-256 report architecture mismatch");
+    enforce(report["selected_backend"].str == expectedBackend,
+        "native SHA-256 report backend mismatch");
+
+    auto sources = report["source_sha256"].object;
+    enforce(sources.length == backendSourcePaths.length,
+        "native SHA-256 report source cardinality mismatch");
+    foreach (source; backendSourcePaths)
+        enforce(sources[source].str == sourceHash(source),
+            "native SHA-256 report source hash mismatch: " ~ source);
+
+    immutable sizes = [32, 55, 56, 63, 64, 65, 128, 256, 512, 1024];
+    auto rows = report["short_message_microbench"].array;
+    enforce(rows.length == sizes.length * 5 * 2,
+        "native SHA-256 report microbench cardinality mismatch");
+    foreach (index, row; rows) {
+        enforce(row.object.length == 7,
+            "native SHA-256 report microbench shape mismatch");
+        auto sizeIndex = index / 10;
+        auto withinSize = index % 10;
+        auto sample = withinSize / 2;
+        auto pairOrdinal = withinSize % 2;
+        auto baselineFirst = sample % 2 == 0;
+        auto expectedRole = (baselineFirst == (pairOrdinal == 0))
+            ? "baseline" : "selected";
+        auto expectedRowBackend = expectedRole == "baseline"
+            ? "scalar" : expectedBackend;
+        enforce(row["bytes"].integer == sizes[sizeIndex] &&
+            row["sample"].integer == sample &&
+            row["role"].str == expectedRole &&
+            row["backend"].str == expectedRowBackend,
+            "native SHA-256 report microbench ordering mismatch");
+        auto expectedIterations = cast(long)((32UL * 1024 * 1024) /
+            sizes[sizeIndex]);
+        enforce(row["iterations"].integer == expectedIterations,
+            "native SHA-256 report iteration mismatch");
+        auto seconds = row["seconds"].floating;
+        enforce(seconds.isFinite && seconds > 0,
+            "native SHA-256 report duration mismatch");
+        auto input = deterministicBytes(sizes[sizeIndex],
+            cast(uint)(sizes[sizeIndex] + 185));
+        enforce(row["last_digest"].str == hex(sha256Of(input)),
+            "native SHA-256 report digest mismatch");
+    }
 }
 
 private string commandValue(string[] command, string label) {
@@ -517,8 +608,7 @@ private void writeReport(string path) {
     report["multi_gib_status"] = "PASSED_AGAINST_PHOBOS";
     report["inventory"] = inventoryEvidence;
     JSONValue sources;
-    foreach (source; ["source/crypto/sha256.d", "source/crypto/sha256_arm64.d",
-            "source/crypto/sha256_x86_64.d", "benchmarks/sha256_backend_check.d"])
+    foreach (source; backendSourcePaths)
         sources[source] = sourceHash(source);
     report["source_sha256"] = sources;
     report["harness_binary_sha256"] = sourceHash(thisExePath);
@@ -570,12 +660,9 @@ private void validateReport(string path) {
         "OS cache and frequency state uncontrolled",
         "SHA-256 report claim mismatch");
     auto sources = report["source_sha256"].object;
-    immutable sourcePaths = ["source/crypto/sha256.d",
-        "source/crypto/sha256_arm64.d", "source/crypto/sha256_x86_64.d",
-        "benchmarks/sha256_backend_check.d"];
-    enforce(sources.length == sourcePaths.length,
+    enforce(sources.length == backendSourcePaths.length,
         "SHA-256 report source cardinality mismatch");
-    foreach (source; sourcePaths)
+    foreach (source; backendSourcePaths)
         enforce(sources[source].str == sourceHash(source),
             "SHA-256 report source hash mismatch: " ~ source);
     enforce(report["harness_binary_sha256"].str == sourceHash(thisExePath) &&
@@ -642,7 +729,13 @@ int main(string[] args) {
     if (args.length == 3 && args[1] == "--native-report") {
         writeNativeReport(args[2]); return 0;
     }
+    if (args.length == 3 && args[1] == "--check-native-report") {
+        validateNativeReport(args[2]);
+        writeln("native SHA-256 backend report valid");
+        return 0;
+    }
     writeln("usage: sha256_backend_check --self-test|--long-test|" ~
-        "--report PATH|--check-report PATH|--native-report PATH");
+        "--report PATH|--check-report PATH|--native-report PATH|" ~
+        "--check-native-report PATH");
     return 2;
 }

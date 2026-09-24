@@ -48,7 +48,8 @@ version (X86_64) {
     /// Scalar expansion keeps this first backend auditable; SHA-NI executes
     /// all 64 rounds. The facade checks CPUID before entering this function.
     @target("sha")
-    void compressX86ShaNi(ref uint[8] state, const(ubyte)* block) pure @trusted {
+    package(crypto) void compressX86ShaNi(ref uint[8] state,
+            const(ubyte)* block) pure @trusted {
         uint[64] words;
         foreach (i; 0 .. 16) words[i] = loadBigEndian(block + i * 4);
         foreach (i; 16 .. 64)
@@ -84,10 +85,10 @@ version (X86_64) {
         state[7] = cast(uint) state1.array[0];
     }
 
-    bool x86ShaNiAvailable() nothrow { return hasSha; }
+    package(crypto) bool x86ShaNiAvailable() nothrow { return hasSha; }
 } else {
-    void compressX86ShaNi(ref uint[8], const(ubyte)*) pure @safe {
+    package(crypto) void compressX86ShaNi(ref uint[8], const(ubyte)*) pure @safe {
         assert(false, "x86 SHA-NI backend is not compiled for this target");
     }
-    bool x86ShaNiAvailable() nothrow { return false; }
+    package(crypto) bool x86ShaNiAvailable() nothrow { return false; }
 }

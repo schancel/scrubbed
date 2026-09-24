@@ -211,6 +211,25 @@ and emits the same 512 chunks with the same SHA-256 while retaining the same
 8,192-byte buffer bound. This is deterministic work accounting, not a
 wall-time or throughput claim on the loaded development host.
 
+### Exact-size content materialization work
+
+`content_materialize_work.d` compares the prior executor materialization path
+(checked `Content.stream` copy into its bounded buffer, followed by append into
+the result) with the exact-size `Content.copy` path used by the executor. The
+probe verifies identical bytes and post-owner-close lifetime, and accounts for
+the two former payload copies versus one exact-size payload copy and allocation.
+It deliberately makes no loaded-host timing claim.
+
+```sh
+ldc2 -i -O3 -release -preview=dip1000 \
+  -d-version=MaterializationWorkProbe \
+  -d-version=ContentStreamWorkProbe -Isource -J. \
+  benchmarks/content_materialize_work.d \
+  -of=/tmp/scrubbed-content-materialize-work
+/tmp/scrubbed-content-materialize-work --self-test
+/tmp/scrubbed-content-materialize-work
+```
+
 ## Fused scalar-filter microbenchmark
 
 `fused_filters.d` compares the former separately materialized

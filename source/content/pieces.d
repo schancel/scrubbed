@@ -140,6 +140,17 @@ version (MaterializationWorkProbe) {
         ulong logicalCopiedBytes;
         ulong gcAllocatedBytes;
     }
+
+    /// Caller-owned work accounting for exact-size Content materialization.
+    /// The production and measured APIs share the same implementation; only
+    /// these fixed-size counters are compiled out of ordinary builds.
+    struct ContentCopyWorkV1 {
+        ulong pieceChecks;
+        ulong bulkCopyCalls;
+        ulong copiedBytes;
+        ulong allocations;
+        ulong allocatedBytes;
+    }
 }
 
 version (ContentStreamWorkProbe) {
@@ -205,6 +216,48 @@ final class Content {
         }
         return total;
     }
+
+    /// Materialize the checked pieces into one independently owned array.
+    /// The result is allocated at its exact final length and each payload byte
+    /// is copied once; empty borrowed pieces are still lifetime-checked.
+    ubyte[] copy() const pure {
+        return copyImpl!void(null);
+    }
+
+    version (MaterializationWorkProbe) {
+        ubyte[] copyMeasured(ref ContentCopyWorkV1 work) const pure {
+            return copyImpl!ContentCopyWorkV1(&work);
+        }
+    }
+
+private:
+    ubyte[] copyImpl(Work)(Work* work) const pure {
+        auto total = size;
+        ubyte[] result;
+        if (total != 0) {
+            result = new ubyte[total];
+            static if (!is(Work == void)) {
+                ++work.allocations;
+                work.allocatedBytes += total;
+            }
+        }
+        size_t offset;
+        foreach (piece; sequence) {
+            auto count = piece.size;
+            static if (!is(Work == void)) ++work.pieceChecks;
+            if (count != 0) {
+                piece.copyTo(0, result[offset .. offset + count]);
+                static if (!is(Work == void)) {
+                    ++work.bulkCopyCalls;
+                    work.copiedBytes += count;
+                }
+            }
+            offset += count;
+        }
+        return result;
+    }
+
+public:
 
     /// The callback sees each piece's output offset and checked value copy.
     int opApply(scope int delegate(size_t, ContentPiece) visit) {
@@ -373,6 +426,9 @@ unittest {
     import domain.document : DocumentViewOwner;
     import std.exception : assertThrown;
 
+    auto emptyCopy = (new Content).copy;
+    assert(emptyCopy.length == 0 && emptyCopy.ptr is null);
+
     ubyte[] input = [cast(ubyte) 'a', 'b', 'c', 'd', 'e', 'f'];
     auto owner = new DocumentViewOwner(input);
     auto borrowed = ContentPiece.borrow(owner.view(0, input.length));
@@ -444,6 +500,7 @@ unittest {
     ubyte[] result;
     content.stream((const(ubyte)[] chunk) { result ~= chunk; }, 2);
     assert(result == cast(const(ubyte)[]) "!aBXYf");
+    assert(content.copy == result);
     size_t[] offsets;
     size_t[] lengths;
     foreach (offset, piece; content) {
@@ -461,6 +518,7 @@ unittest {
     assertThrown(borrowed.at(0));
     assertThrown(borrowed.size);
     assertThrown(content.size);
+    assertThrown(content.copy);
     assertThrown(content.stream((const(ubyte)[] chunk) {}));
 }
 

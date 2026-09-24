@@ -41,9 +41,11 @@ consecutive transducers are composed at runtime into one function-local
 Voldemort InputRange. Its fixed-capacity stage array, state, and pending scalar
 queues live in the returned value on the caller side, with no per-group stage
 heap allocation. The source remains borrowed and must outlive consumption;
-the current `Pipeline.run` still materializes the fused result as one output
-string. Runs longer than 16 transducers split at a materialization boundary to
-bound recursive pull depth. Canonical compiled v3 and v4 common plans invoke
+`Pipeline.run` returns the borrowed input when it is the complete fused result,
+and otherwise materializes once from the first differing byte. Runs longer
+than 16 transducers split at another fused-run boundary to bound recursive
+pull depth; that boundary materializes only when its result differs. Canonical
+compiled v3 and v4 common plans invoke
 this filter machinery at explicit `Content` materialization barriers rather
 than through a second orchestration path.
 

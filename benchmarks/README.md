@@ -58,7 +58,9 @@ are explicitly unsupported. OS cache state is uncontrolled and is never
 described as cold. Transform nanoseconds use the executing worker's thread CPU
 clock; the remaining phase durations use a monotonic elapsed clock. The harness
 uses the v2 metrics schema because v1 recorded transform elapsed time rather
-than worker CPU. It copies each supplied executable into owner-only scratch,
+than worker CPU. The reported worker-descriptor limit is the effective
+`min(threads, configured-worker-descriptor-cap)` processing gate. It copies
+each supplied executable into owner-only scratch,
 makes the copy read-only, verifies its digest around every invocation, and
 atomically publishes reports only after final snapshot verification.
 Every child receives a small declared environment rather than the caller's
@@ -211,7 +213,9 @@ also pins and re-verifies the ambient
 executables, the selected final linker, and the `cmake` and `make` executables
 used by the hashed pre-build recipe. CMake's support tree is copied under
 explicit file, byte, depth, and time bounds. Attested builds refuse privileged
-invocation and reject native paths writable outside root. Per-executable archive versions are never
+invocation before repository commands and reject native paths writable outside
+root. The current closure deliberately pins the supported Homebrew LDC layout
+and rejects loader-graph drift beyond LLVM, z3, and zstd. Per-executable archive versions are never
 borrowed from another binary: unavailable `ar` versions are explicit, with
 separately hash-bound archive-suite evidence.
 `pipeline_attestation_check.d` is the D-only changed-executable control: two

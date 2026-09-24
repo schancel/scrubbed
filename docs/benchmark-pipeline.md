@@ -173,6 +173,10 @@ configuration/import and loader paths, and re-verifies the closure after the
 build. The CMake support snapshot uses the same bounded, no-link tree rules.
 Attested builds refuse privileged invocation; all remaining system-selected
 native paths must be root-owned and non-writable by group or other.
+The v6 compiler closure intentionally pins the supported Homebrew LDC layout
+and the LDC-to-LLVM-to-z3/zstd loader graph; unexpected layouts, additional
+non-system transitive libraries, or multiple compiler-runtime archives fail
+closed instead of silently broadening the attestation.
 The argparse input digest is likewise verified after compilation. The supported DUB
 1.42.0 target path is derived from the described root `targetPath` plus
 `targetFileName`, required to remain the private relative path `scrubbed`, and

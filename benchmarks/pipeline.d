@@ -48,6 +48,13 @@ private struct AttestedExecutable {
     string[string] buildEnvironment;
     NativeTool[] nativeTools;
     string pinnedToolDirectory;
+    string compilerSupportRoot;
+    string compilerSupportSha256;
+    size_t compilerSupportFiles;
+    ulong compilerSupportBytes;
+    string compilerLoaderDirectory;
+    string compilerLoaderSha256;
+    size_t compilerLoaderFiles;
 }
 
 private struct ControlVariant {
@@ -482,6 +489,10 @@ private void copyBoundedFile(string source, string target,
     require(input.rawRead(extra[]).length == 0 &&
         getSize(source) == expectedBytes,
         "support file grew while being copied");
+    input.close();
+    output.close();
+    require(chmod(target.toStringz, S_IRUSR) == 0,
+        "cannot make support snapshot read-only");
 }
 
 private TreeIdentity treeDigest(string root, TreeBounds bounds) {
@@ -572,6 +583,11 @@ private void requireSystemProtectedPath(string path) {
     }
 }
 
+private void requireUnprivilegedInvocation() {
+    require(geteuid() != 0,
+        "attested builds refuse a privileged invoking account");
+}
+
 private string[] dynamicLibraryDependencies(string executable) {
     requireSystemProtectedPath("/usr/bin/otool");
     auto result = checkedSystem(["/usr/bin/otool", "-L", executable]);
@@ -623,14 +639,34 @@ private bool traceContainsPath(string trace, string path) {
 
 private string findCompilerRuntime(string llvmLibrary) {
     auto clangRoot = buildPath(dirName(llvmLibrary), "clang");
+    require(isDir(clangRoot) && !isSymlink(clangRoot),
+        "compiler runtime root must be a plain directory");
+    auto deadline = MonoTime.currTime +
+        dur!"seconds"(compilerTreeBounds.maxSeconds);
+    size_t entries;
+    ulong bytes;
     string result;
-    foreach (entry; dirEntries(clangRoot, "libclang_rt.osx.a",
-            SpanMode.depth, false)) {
-        require(!isSymlink(entry.name) && entry.isFile,
-            "compiler runtime selection is not a regular file");
-        require(result.length == 0,
-            "compiler runtime selection is ambiguous");
-        result = entry.name;
+    foreach (entry; dirEntries(clangRoot, SpanMode.depth, false)) {
+        require(MonoTime.currTime < deadline &&
+            entries < compilerTreeBounds.maxFiles &&
+            relativeDepth(relativePath(entry.name, clangRoot)) <=
+                compilerTreeBounds.maxDepth,
+            "compiler runtime discovery exceeds its bounds");
+        ++entries;
+        require(!isSymlink(entry.name),
+            "compiler runtime tree contains a symbolic link");
+        if (entry.isDir) continue;
+        require(entry.isFile,
+            "compiler runtime tree contains a special file");
+        auto fileBytes = getSize(entry.name);
+        require(fileBytes <= compilerTreeBounds.maxBytes - bytes,
+            "compiler runtime discovery exceeds its byte bound");
+        bytes += fileBytes;
+        if (baseName(entry.name) == "libclang_rt.osx.a") {
+            require(result.length == 0,
+                "compiler runtime selection is ambiguous");
+            result = entry.name;
+        }
     }
     require(result.length != 0, "compiler runtime archive is missing");
     return result;
@@ -669,10 +705,13 @@ private void snapshotCompilerClosure(ref PreparedAttestedBuild result,
         transitive[0].canFind("libz3") &&
         transitive[1].canFind("libzstd"),
         "LLVM dynamic loader closure differs");
-    foreach (library; transitive)
+    foreach (library; transitive) {
+        require(dynamicLibraryDependencies(library).length == 0,
+            "compiler loader dependency closure has an unbound transitive library");
         snapshotRegularFile(library,
             buildPath(loaderDirectory, baseName(library)),
             128UL * 1024 * 1024);
+    }
     auto compilerRuntime = findCompilerRuntime(llvmLibrary);
     snapshotRegularFile(compilerRuntime,
         buildPath(closure, "lib", "compiler-rt", baseName(compilerRuntime)),
@@ -709,6 +748,20 @@ private void verifyCompilerClosure(const ref PreparedAttestedBuild result) {
         closure.files == result.compilerSupportFiles &&
         closure.bytes == result.compilerSupportBytes &&
         hashFile(result.compiler) == result.compilerHash,
+        "private compiler closure changed");
+}
+
+private void verifyCompilerClosure(const ref AttestedExecutable result) {
+    auto loader = treeDigest(result.compilerLoaderDirectory,
+        compilerTreeBounds);
+    auto closure = treeDigest(result.compilerSupportRoot,
+        compilerTreeBounds);
+    require(loader.sha256 == result.compilerLoaderSha256 &&
+        loader.files == result.compilerLoaderFiles &&
+        closure.sha256 == result.compilerSupportSha256 &&
+        closure.files == result.compilerSupportFiles &&
+        closure.bytes == result.compilerSupportBytes &&
+        hashFile(result.compiler.path) == result.compiler.sha256,
         "private compiler closure changed");
 }
 
@@ -886,6 +939,7 @@ private void pinNativeTools(ref PreparedAttestedBuild result,
 
 private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
                                                     string scratchRoot) {
+    requireUnprivilegedInvocation();
     requireCleanStatus(checkedSystem(["/usr/bin/git", "-C", sourceRoot, "status", "--porcelain",
         "--untracked-files=all"]));
     PreparedAttestedBuild result;
@@ -1233,7 +1287,10 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     return AttestedExecutable(snapshot, attestation,
         ExecutableSnapshot(prepared.compiler, prepared.compilerHash),
         prepared.privateSource, prepared.environment, prepared.nativeTools,
-        prepared.pinnedToolDirectory);
+        prepared.pinnedToolDirectory, prepared.compilerSupportRoot,
+        prepared.compilerSupportSha256, prepared.compilerSupportFiles,
+        prepared.compilerSupportBytes, prepared.compilerLoaderDirectory,
+        prepared.compilerLoaderSha256, prepared.compilerLoaderFiles);
 }
 
 private void validateBuildProvenance(JSONValue report, bool comparator,
@@ -1877,6 +1934,13 @@ private void selfTest() {
     try treeDigest(oversizedSource, smallBounds);
     catch (Exception) bytesRejected = true;
     require(bytesRejected, "support-tree byte bound was not enforced");
+    auto deepSource = buildPath(supportRoot, "deep-source");
+    mkdirRecurse(buildPath(deepSource, "one", "two"));
+    write(buildPath(deepSource, "one", "two", "three"), "x");
+    bool depthRejected;
+    try treeDigest(deepSource, smallBounds);
+    catch (Exception) depthRejected = true;
+    require(depthRejected, "support-tree depth bound was not enforced");
     JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v3"),
         "source_sha": JSONValue("0".replicate(40)),
         "binary_sha256": JSONValue("0".replicate(64)),
@@ -2592,6 +2656,16 @@ private void selfTestNativePath(string sourceRoot, string poisonPath,
     validateAttestation(built.attestation, built.snapshot.sha256);
     verifySnapshot(built.snapshot);
     write(reportPath, built.attestation.toString ~ "\n");
+    auto compilerConfig = buildPath(built.compilerSupportRoot, "etc",
+        "ldc2.conf", "50-scrubbed-attested.conf");
+    require(chmod(compilerConfig.toStringz, S_IRUSR | S_IWUSR) == 0,
+        "cannot prepare retained compiler-closure mutation negative");
+    write(compilerConfig, readText(compilerConfig) ~ "\n");
+    bool retainedClosureRejected;
+    try verifyCompilerClosure(built);
+    catch (Exception) retainedClosureRejected = true;
+    require(retainedClosureRejected,
+        "changed retained compiler closure was accepted");
     require(!exists(buildPath(root, "must-not-exist.metrics")),
         "attested build inherited an unrelated scrubbed runtime variable");
     writeln("native PATH swap remained pinned: ", built.snapshot.sha256);
@@ -3112,6 +3186,7 @@ private JSONValue coordinationMeasurementFixture() {
 int main(string[] args) {
     try {
         if (args.length == 7 && args[1] == "--attested-coordination") {
+            requireUnprivilegedInvocation();
             require(!exists(args[6]),
                 "coordination report already exists");
             require(digestField(args[3], 40) && digestField(args[5], 40) &&
@@ -3160,6 +3235,7 @@ int main(string[] args) {
                 "coordination harness source snapshot differs");
             auto harnessTarget = buildPath(root, "coordination-profile-built");
             verifySnapshot(candidate.compiler);
+            verifyCompilerClosure(candidate);
             verifyNativeTools(candidate.nativeTools);
             verifyPinnedNativeTools(candidate.nativeTools,
                 candidate.pinnedToolDirectory);
@@ -3173,6 +3249,7 @@ int main(string[] args) {
                 "coordination harness build did not select attested linker binding");
             verifySnapshot(harnessSourceSnapshot);
             verifySnapshot(candidate.compiler);
+            verifyCompilerClosure(candidate);
             verifyNativeTools(candidate.nativeTools);
             verifyPinnedNativeTools(candidate.nativeTools,
                 candidate.pinnedToolDirectory);
@@ -3236,6 +3313,7 @@ int main(string[] args) {
             return 0;
         }
         if (args.length == 7 && args[1] == "--attested-attribution") {
+            requireUnprivilegedInvocation();
             auto expectedSource = checkedSystem(["/usr/bin/git", "-C", args[2],
                 "rev-parse", "HEAD"]);
             auto historicalMergeBase = executeSystem(["/usr/bin/git", "-C",

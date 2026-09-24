@@ -268,17 +268,22 @@ private void terminateGroupAndReap(int pid, out int status,
         out rusage usage) {
     // The launcher creates the group before publishing its readiness file.
     if (posixKill(-pid, SIGTERM) != 0) posixKill(pid, SIGTERM);
-    if (reapUntil(pid, MonoTime.currTime + seconds(1), status, usage)) return;
-    if (posixKill(-pid, SIGKILL) != 0) posixKill(pid, SIGKILL);
-    reapBlocking(pid, status, usage);
+    auto graceDeadline = MonoTime.currTime + seconds(1);
+    auto leaderReaped = reapUntil(pid, graceDeadline, status, usage);
+    if (leaderReaped)
+        while (MonoTime.currTime < graceDeadline && posixKill(-pid, 0) == 0)
+            Thread.sleep(10.msecs);
+    posixKill(-pid, SIGKILL);
+    if (!leaderReaped) reapBlocking(pid, status, usage);
 }
 
 private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         File stdoutFile, File stderrFile,
-        const string[string] environment_) {
+        const string[string] environment_, MonoTime deadline) {
     auto child = spawnProcess([launcherPath, "--exec-child", readyPath] ~
         command, stdinFile, stdoutFile, stderrFile, environment_, Config.newEnv);
     auto readyDeadline = MonoTime.currTime + seconds(2);
+    if (deadline < readyDeadline) readyDeadline = deadline;
     while (!exists(readyPath) && MonoTime.currTime < readyDeadline)
         Thread.sleep(1.msecs);
     if (!exists(readyPath)) {
@@ -291,21 +296,30 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
 }
 
 private string boundedCommandOutput(string[] command, string root,
-        string label) {
+        string label, MonoTime outerDeadline) {
+    if (MonoTime.currTime >= outerDeadline) return null;
     auto stdoutPath = buildPath(root, label ~ "-" ~ randomUUID.toString ~
         ".bounded.out");
     auto stderrPath = stdoutPath ~ ".err";
     auto readyPath = stdoutPath ~ ".ready";
+    scope(exit) {
+        if (exists(stdoutPath)) remove(stdoutPath);
+        if (exists(stderrPath)) remove(stderrPath);
+        if (exists(readyPath)) remove(readyPath);
+    }
     auto stdinFile = File("/dev/null", "rb");
     auto stdoutFile = File(stdoutPath, "wb");
     auto stderrFile = File(stderrPath, "wb");
-    auto child = spawnGrouped(command, readyPath, stdinFile, stdoutFile,
-        stderrFile, childEnvironment(false));
+    auto commandDeadline = MonoTime.currTime +
+        seconds(samplerTimeoutSeconds);
+    if (outerDeadline < commandDeadline) commandDeadline = outerDeadline;
+    Pid child;
+    try child = spawnGrouped(command, readyPath, stdinFile, stdoutFile,
+        stderrFile, childEnvironment(false), commandDeadline);
+    catch (Exception) return null;
     stdinFile.close(); stdoutFile.close(); stderrFile.close();
     int status; rusage usage;
-    if (!reapUntil(child.processID,
-            MonoTime.currTime + seconds(samplerTimeoutSeconds),
-            status, usage)) {
+    if (!reapUntil(child.processID, commandDeadline, status, usage)) {
         terminateGroupAndReap(child.processID, status, usage);
         return null;
     }
@@ -322,6 +336,8 @@ private JSONValue invoke(string binary, string input, string output,
         "whole-run deadline expired before a sample started");
     need(fileDigest(binary) == expectedBinaryDigest,
         "executable snapshot changed before invocation");
+    auto sampleDeadline = MonoTime.currTime + seconds(timeoutSeconds);
+    if (wholeRunDeadline < sampleDeadline) sampleDeadline = wholeRunDeadline;
     auto label = (instrumented ? "attribution-" : "performance-") ~
         threads.to!string ~ "-" ~ ordinal.to!string ~ "-" ~
         randomUUID.toString;
@@ -338,7 +354,8 @@ private JSONValue invoke(string binary, string input, string output,
     auto timer = StopWatch(AutoStart.yes);
     auto readyPath = buildPath(root, label ~ ".ready");
     auto child = spawnGrouped(command, readyPath, stdinFile, stdoutFile,
-        stderrFile, childEnvironment(instrumented, metricsPath));
+        stderrFile, childEnvironment(instrumented, metricsPath),
+        sampleDeadline);
     stdinFile.close(); stdoutFile.close(); stderrFile.close();
     bool childReaped;
     scope(failure) if (!childReaped) {
@@ -348,9 +365,10 @@ private JSONValue invoke(string binary, string input, string output,
     shared bool stopped;
     shared size_t peakFd;
     auto sampler = new Thread({
-        while (!atomicLoad(stopped)) {
+        while (!atomicLoad(stopped) && MonoTime.currTime < sampleDeadline) {
             auto seen = boundedCommandOutput(["/usr/sbin/lsof", "-p",
-                child.processID.to!string], root, label ~ "-lsof");
+                child.processID.to!string], root, label ~ "-lsof",
+                sampleDeadline);
             if (seen.length) {
                 auto count = seen.splitLines.length;
                 if (count) --count;
@@ -372,7 +390,7 @@ private JSONValue invoke(string binary, string input, string output,
         auto stackPath = buildPath(root, label ~ ".sample.txt");
         auto sampled = boundedCommandOutput(["/usr/bin/sample",
             child.processID.to!string, "1", "10", "-file", stackPath],
-            root, label ~ "-sample");
+            root, label ~ "-sample", sampleDeadline);
         if (sampled.length && exists(stackPath)) {
             auto body = cast(const(ubyte)[])read(stackPath);
             stackStatus = body.length ? "supported" : "unsupported-empty";
@@ -380,8 +398,6 @@ private JSONValue invoke(string binary, string input, string output,
         } else stackStatus = "unsupported-sample-failed";
     }
     int status; rusage usage;
-    auto sampleDeadline = MonoTime.currTime + seconds(timeoutSeconds);
-    if (wholeRunDeadline < sampleDeadline) sampleDeadline = wholeRunDeadline;
     childReaped = reapUntil(child.processID, sampleDeadline, status, usage);
     bool timedOut = !childReaped;
     if (timedOut) {
@@ -579,15 +595,34 @@ private void runSelfTest(string harnessPath) {
     invoke(environmentProbe, root, root, root, 1, 1, root, false,
         fileDigest(environmentProbe));
     auto hangingProbe = buildPath(root, "hanging-probe");
-    write(hangingProbe, "#!/bin/sh\nsleep 30\n");
+    auto descendantPidPath = buildPath(root, "hanging-descendant.pid");
+    write(hangingProbe, "#!/bin/sh\n" ~
+        "trap 'exit 0' TERM\n" ~
+        "sh -c 'trap \"\" TERM; while :; do sleep 1; done' &\n" ~
+        "echo $! > '" ~ descendantPidPath ~ "'\n" ~
+        "wait\n");
     need(chmod(hangingProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
         "cannot make hanging probe executable");
     bool deadlineObserved;
+    string deadlineError;
     try invoke(hangingProbe, root, root, root, 1, 2, root, false,
         fileDigest(hangingProbe), false, 1);
-    catch (Exception error)
-        deadlineObserved = error.msg == "coordination evidence: child exceeded the per-sample deadline";
-    need(deadlineObserved, "hung child did not reach the bounded deadline");
+    catch (Exception error) {
+        deadlineError = error.msg;
+        deadlineObserved = error.msg.canFind(
+            "child exceeded the per-sample deadline");
+    }
+    need(deadlineObserved, "hung child did not reach the bounded deadline: " ~
+        deadlineError);
+    need(exists(descendantPidPath),
+        "hanging probe did not record its descendant");
+    auto descendantPid = readText(descendantPidPath).strip.to!int;
+    auto descendantDeadline = MonoTime.currTime + seconds(1);
+    while (posixKill(descendantPid, 0) == 0 &&
+            MonoTime.currTime < descendantDeadline)
+        Thread.sleep(10.msecs);
+    need(posixKill(descendantPid, 0) != 0,
+        "timed-out process group left a descendant running");
 
     enum validMetrics = `{"user_us":1000,"system_us":1000,"metrics":{` ~
         `"schema":"scrubbed.coordination-metrics.v2","version":2,` ~

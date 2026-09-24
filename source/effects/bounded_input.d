@@ -228,7 +228,8 @@ final class BoundedInput {
         this.reportFailure = reportFailure;
         this.isFatal = isFatal;
         this.metrics = metrics;
-        if (metrics !is null) metrics.setLimits(limits);
+        if (metrics !is null) metrics.setLimits(InputLimits(
+            limits.queuedDocuments, limits.reservedBytes, processingLimit));
         mutex = new Mutex;
         changed = new Condition(mutex);
         // Workers that have dequeued a task release its queue slot before
@@ -491,12 +492,14 @@ unittest {
 
     auto entered = new Semaphore(0);
     auto unblock = new Semaphore(0);
+    auto capMetrics = new CoordinationMetricsV2;
     auto threadCap = new BoundedInput(InputLimits(3, 3, 3), 2,
         (string path, ulong bytes) {
             entered.notify();
             unblock.wait();
         },
-        (string path, Throwable error) { assert(0, error.msg); });
+        (string path, Throwable error) { assert(0, error.msg); },
+        null, capMetrics);
     foreach (i; 0 .. 3) assert(threadCap.submit(i.to!string, 1));
     InputCounts joined;
     auto joiner = new Thread({ joined = threadCap.finish(); });
@@ -509,6 +512,9 @@ unittest {
     joiner.join();
     assert(joined.succeeded == 3 && joined.workerDescriptors == 0 &&
         joined.reservedBytes == 0);
+    capMetrics.finishWall();
+    assert(parseJSON(capMetrics.json())["limits"]
+        ["worker_descriptors"].integer == 2);
 
     auto producerEntered = new Semaphore(0);
     auto producerRelease = new Semaphore(0);

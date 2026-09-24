@@ -706,15 +706,32 @@ private void requireUnprivilegedInvocation() {
         "attested builds refuse a privileged invoking account");
 }
 
-private string[] dynamicLibraryDependencies(string executable) {
+private string dynamicLibraryInstallName(string library) {
+    requireSystemProtectedPath("/usr/bin/otool");
+    auto lines = checkedSystem(["/usr/bin/otool", "-D", library]).splitLines;
+    require(lines.length == 2 && lines[0].endsWith(":") &&
+        lines[1].strip.length != 0,
+        "dynamic library install name is missing or ambiguous");
+    return lines[1].strip;
+}
+
+private string[] dynamicLibraryDependencies(string executable,
+        string installName = "") {
     requireSystemProtectedPath("/usr/bin/otool");
     auto result = checkedSystem(["/usr/bin/otool", "-L", executable]);
     string[] libraries;
+    bool sawInstallName;
     foreach (index, line; result.splitLines) {
         if (index == 0) continue;
         auto fields = line.strip.split(" ");
         if (!fields.length || !fields[0].length) continue;
         auto path = fields[0];
+        if (installName.length && sameDarwinPath(path, installName)) {
+            require(!sawInstallName,
+                "dynamic library install name appears more than once");
+            sawInstallName = true;
+            continue;
+        }
         if (path.startsWith("/usr/lib/") ||
             path.startsWith("/System/Library/")) continue;
         if (resolveToolPath(path) == resolveToolPath(executable)) continue;
@@ -722,6 +739,8 @@ private string[] dynamicLibraryDependencies(string executable) {
             "compiler has an unresolved dynamic library dependency");
         libraries ~= path;
     }
+    require(installName.length == 0 || sawInstallName,
+        "dynamic library install name was not present in its dependency table");
     return libraries;
 }
 
@@ -875,7 +894,11 @@ private void snapshotCompilerClosure(ref PreparedAttestedBuild result,
         baseName(compilerLibraries[0]));
     snapshotRegularFile(llvmLibrary, llvmSnapshot,
         256UL * 1024 * 1024);
-    auto transitive = dynamicLibraryDependencies(llvmSnapshot);
+    auto llvmInstallName = dynamicLibraryInstallName(llvmSnapshot);
+    require(sameDarwinPath(llvmInstallName, compilerLibraries[0]),
+        "LLVM install name differs from the compiler dependency");
+    auto transitive = dynamicLibraryDependencies(llvmSnapshot,
+        llvmInstallName);
     transitive.sort();
     require(transitive.length == 2 &&
         transitive[0].canFind("libz3") &&
@@ -884,7 +907,10 @@ private void snapshotCompilerClosure(ref PreparedAttestedBuild result,
     foreach (library; transitive) {
         auto snapshot = buildPath(loaderDirectory, baseName(library));
         snapshotRegularFile(library, snapshot, 128UL * 1024 * 1024);
-        require(dynamicLibraryDependencies(snapshot).length == 0,
+        auto installName = dynamicLibraryInstallName(snapshot);
+        require(sameDarwinPath(installName, library),
+            "transitive compiler library install name differs");
+        require(dynamicLibraryDependencies(snapshot, installName).length == 0,
             "private compiler loader snapshot has an unbound transitive library");
     }
     auto compilerRuntime = findCompilerRuntime(llvmLibrary);
@@ -3754,6 +3780,7 @@ int main(string[] args) {
             "or pipeline --attested-coordination CLEAN_BASE_SOURCE EXPECTED_BASE_SHA CLEAN_CANDIDATE_SOURCE EXPECTED_CANDIDATE_SHA REPORT_JSON; " ~
             "or pipeline --attested-profile CLEAN_SOURCE PROFILE_HARNESS REPORT_JSON TIME_BUDGET_SECONDS; " ~
             "or pipeline --attested-attribution CLEAN_SOURCE ATTRIBUTION_HARNESS CANONICAL_PROFILE REPORT_JSON TIME_BUDGET_SECONDS");
+        if (attestedMode) requireUnprivilegedInvocation();
         auto inputTarget = attestedMode ? args[2] : args[1];
         auto reportPath = attestedMode ?
             (args.length >= 4 ? args[3] : "") :

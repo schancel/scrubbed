@@ -32,8 +32,8 @@ private string canonicalDispatchRecord(ref DispatchExecutionEventV1 event,
     output.put(`,"job_identity":`); putQuoted(output, event.jobIdentity);
     output.put(`,"document_id":`); putQuoted(output, event.source.document.id.text);
     output.put(`,"unit_id":`);
-    putQuoted(output, dispatchUnitId(event.source.document.id, domain,
-        selectedOrdinal));
+    putQuotedDispatchUnitId(output, event.source.document.id, domain,
+        selectedOrdinal);
     output.put(`,"status":`); putQuoted(output, statusName(event.kind));
     output.put(`,"outcome":`); putQuoted(output, outcomeName(event.detection.outcome));
     output.put(`,"action":`); putQuoted(output, actionName(event.action.kind));
@@ -59,7 +59,7 @@ private string canonicalDispatchRecord(ref DispatchExecutionEventV1 event,
     }
     if (event.reason.length) {
         output.put(`,"reason_hash":`);
-        putQuoted(output, reasonHash(event.reason));
+        putQuotedReasonHash(output, event.reason);
     }
     if (event.hasProvenance) {
         auto provenance = event.provenance;
@@ -134,14 +134,14 @@ private string canonicalDispatchProblemRecordV1(string jobIdentity,
     output.put(`,"job_identity":`); putQuoted(output, jobIdentity);
     output.put(`,"document_id":`); putQuoted(output, document.text);
     output.put(`,"unit_id":`);
-    putQuoted(output, dispatchUnitId(document, domain, selectedOrdinal));
+    putQuotedDispatchUnitId(output, document, domain, selectedOrdinal);
     output.put(`,"status":`); putQuoted(output, status);
     output.put(`,"outcome":`);
     putQuoted(output, outcomeName(outcome));
     output.put(`,"action":"failure","detector_version":"unknown","warning_codes":[]`);
     output.put(`,"phase":`); putQuoted(output, phase);
     output.put(`,"code":`); putQuoted(output, code);
-    output.put(`,"reason_hash":`); putQuoted(output, reasonHash(reason));
+    output.put(`,"reason_hash":`); putQuotedReasonHash(output, reason);
     output.put(`,"accounting":{"available_bytes":0,"bytes_inspected":0,"inspection_limit":0}}`);
     auto record = output.data;
     if (record.length > maxDispatchRecordBytesV1)
@@ -162,13 +162,16 @@ private void putUnsigned(ref Appender!string output, ulong value) {
     } while (value);
     output.put(digits[start .. $]);
 }
-private string reasonHash(string reason) {
-    return toHexString!(LetterCase.lower)(
-        sha256Of(cast(const(ubyte)[])reason)).idup;
+private void putQuotedReasonHash(ref Appender!string output, string reason) {
+    auto hex = toHexString!(LetterCase.lower)(
+        sha256Of(cast(const(ubyte)[])reason));
+    output.put('"');
+    output.put(hex[]);
+    output.put('"');
 }
 
-private string dispatchUnitId(DocumentId document, DispatchUnitDomainV1 domain,
-        size_t selectedOrdinal) {
+private void putQuotedDispatchUnitId(ref Appender!string output,
+        DocumentId document, DispatchUnitDomainV1 domain, size_t selectedOrdinal) {
     auto digest = Sha256.create;
     digest.put(cast(const(ubyte)[]) "scrubbed.dispatch.unit.v1\0");
     digest.put(cast(const(ubyte)[]) document.text);
@@ -192,7 +195,10 @@ private string dispatchUnitId(DocumentId document, DispatchUnitDomainV1 domain,
         digest.put(cast(const(ubyte)[]) "jsonl-record:v1");
         break;
     }
-    return "unit:v1:" ~ toHexString!(LetterCase.lower)(digest.finish()).idup;
+    auto hex = toHexString!(LetterCase.lower)(digest.finish());
+    output.put(`"unit:v1:`);
+    output.put(hex[]);
+    output.put('"');
 }
 
 private string statusName(DispatchEventKindV1 kind) pure {
@@ -259,10 +265,15 @@ unittest {
 
     auto zeroDocument = DocumentId.fromCanonicalText(
         "doc:v1:0000000000000000000000000000000000000000000000000000000000000000");
-    assert(dispatchUnitId(zeroDocument, DispatchUnitDomainV1.jsonlField, 0) ==
-        "unit:v1:ed8fb95f539587adfb60e7993d44816ae817b1f4d4798eab4c4d1bee2c849835");
-    assert(dispatchUnitId(zeroDocument, DispatchUnitDomainV1.jsonlField, 10) ==
-        "unit:v1:89b3cad270d332c436ff2adf92d96f80a784ec1e4bf6a251135fc00197d85f79");
+    auto unitIds = appender!string;
+    putQuotedDispatchUnitId(unitIds, zeroDocument,
+        DispatchUnitDomainV1.jsonlField, 0);
+    unitIds.put(',');
+    putQuotedDispatchUnitId(unitIds, zeroDocument,
+        DispatchUnitDomainV1.jsonlField, 10);
+    assert(unitIds.data ==
+        `"unit:v1:ed8fb95f539587adfb60e7993d44816ae817b1f4d4798eab4c4d1bee2c849835",` ~
+        `"unit:v1:89b3cad270d332c436ff2adf92d96f80a784ec1e4bf6a251135fc00197d85f79"`);
 
     auto failure = canonicalDispatchFailureRecordV1(
         "job:v4:0000000000000000000000000000000000000000000000000000000000000000",

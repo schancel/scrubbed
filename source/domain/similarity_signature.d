@@ -78,7 +78,7 @@ private SimilaritySignature signature(DocumentId id, size_t ordinal, bool segmen
     foreach (offset; 0 .. bytes.length - 4) {
         auto shingle = bytes[offset .. offset + 5];
         foreach (lane; 0 .. similarityLanes) {
-            auto hash = shingleHash(shingle, lane);
+            auto hash = shingleHash(shingle, laneInitialHashes[lane]);
             if (hash < result.lanes[lane]) result.lanes[lane] = hash;
         }
     }
@@ -105,8 +105,20 @@ private ulong laneSeed(size_t lane) {
     return value ^ (value >> 31);
 }
 
-private ulong shingleHash(const(ubyte)[] shingle, size_t lane) {
-    ulong hash = 0xcbf29ce484222325UL ^ laneSeed(lane);
+private ulong[similarityLanes] buildLaneInitialHashes() {
+    ulong[similarityLanes] result;
+    foreach (lane; 0 .. similarityLanes)
+        result[lane] = 0xcbf29ce484222325UL ^ laneSeed(lane);
+    return result;
+}
+
+// Preserve the frozen SplitMix64 schedule while keeping its arithmetic out of
+// every lane of every shingle at runtime.
+private immutable ulong[similarityLanes] laneInitialHashes =
+    buildLaneInitialHashes();
+
+private ulong shingleHash(const(ubyte)[] shingle, ulong initialHash) {
+    ulong hash = initialHash;
     foreach (value; shingle) hash = (hash ^ value) * 0x100000001b3UL;
     return hash;
 }

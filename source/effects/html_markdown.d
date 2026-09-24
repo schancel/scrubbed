@@ -8,6 +8,7 @@ import std.uni : isControl, isFormat, isSpace;
 import std.utf : UTFException, encode;
 
 enum size_t maxMarkdownBytes = 4 * 1024 * 1024;
+private enum string maxListIndent = "                     "; // 19 digits plus ". "
 
 class HtmlMarkdownOutputLimit : Exception {
     this() pure { super("Markdown output exceeds 4 MiB"); }
@@ -308,16 +309,25 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             Writer item;
             renderChildren(tree, child, item, depth + 1);
             item.trim();
-            auto prefix = name == "ul" ? "- " : to!string(ordinal) ~ ". ";
-            if (ordinal < long.max) ++ordinal;
-            writer.put(prefix);
-            auto itemValue = item.finish();
-            foreach (char c; itemValue) {
-                writer.put(cast(string)(&c)[0 .. 1]);
-                if (c == '\n') {
-                    foreach (_; 0 .. prefix.length) writer.put(" ");
-                }
+            size_t prefixLength = 2;
+            if (name == "ul") writer.put("- ");
+            else {
+                auto ordinalText = to!string(ordinal);
+                prefixLength += ordinalText.length;
+                writer.put(ordinalText);
+                writer.put(". ");
             }
+            if (ordinal < long.max) ++ordinal;
+            auto itemValue = item.finish();
+            size_t lineStart;
+            foreach (i, c; itemValue) {
+                if (c != '\n') continue;
+                writer.put(itemValue[lineStart .. i + 1]);
+                assert(prefixLength <= maxListIndent.length);
+                writer.put(maxListIndent[0 .. prefixLength]);
+                lineStart = i + 1;
+            }
+            writer.put(itemValue[lineStart .. $]);
         }
         writer.block();
         return;

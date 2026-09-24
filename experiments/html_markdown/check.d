@@ -110,6 +110,11 @@ void main(string[] args) {
         "<li>Next</li></ol>",
         "100. Outer\n     \n     - Inner\n101. Next\n",
         "multi-digit ordered nested list");
+    golden("<ol start='9223372036854775807'><li>A<br>B</li>" ~
+        "<li>C<br>D</li></ol>",
+        "9223372036854775807. A  \n                     B\n" ~
+        "9223372036854775807. C  \n                     D\n",
+        "maximum ordered marker saturates and indents");
     golden("<ul><li><p>First</p><p>Second</p></li></ul>",
         "- First\n  \n  Second\n", "two paragraphs in list item");
     golden("<p>Before <strong> bold </strong> and <em> word </em> after</p>",

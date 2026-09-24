@@ -153,9 +153,9 @@
             "uuid_bytes_hex": "000102030405060708090a0b0c0d0e0f"
         },
         "schema": "scrubbed-pii-reproducible-build-v1",
-        "source_archive_sha256": "f8c3323e62f3d0f8f893d7c6055dec46409d1e35dd7ae2cbae20b866344f6edc",
-        "source_revision": "6f8299cd4ebc5da7a7fc7db60bd93bd78cdc941a",
-        "source_tree_git_oid": "0c20685c2d68d39a39006c0532f1d61f8de4b328"
+        "source_archive_sha256": "8f7809bc10f9abc2236a82ddf38d0e7fb31ead3f5db12d91a278e247998349f3",
+        "source_revision": "3cf22eee97f50e3e09ea9fe66229c8a1ca4fc47a",
+        "source_tree_git_oid": "34fb99b98221e26879521c7ee5263df9c19298f6"
     },
     "compiler": {
         "executable": "\/opt\/homebrew\/bin\/ldc2",
@@ -223,11 +223,11 @@
         "clean_fixture_sha256": "49d781bc517615840093f41a40cee04d87fabe9a270d85b80431d58203e460e7",
         "disabled_config_sha256": "1cab25cfe73f9ae4ab991c999925ab0ef7ede7ea6f6920f79902c4362b05181a",
         "finding_fixture_sha256": "d851a509327fee2ba1b0c45294c0f211e6160dbfd4e83150d3833af993a2dd83",
-        "harness_source_sha256": "44cf1f963392caa3ec0587b8882e6ca2c95cfe7d845a56606d2d533b40624023",
+        "harness_source_sha256": "98e1d923334b3800d6c0bc9eaf8879eb6e5e0b4f950e56b88858d1f14ff3c57e",
         "mask_config_sha256": "d1bb7d98367bbe1461657f36b465c6711e7f64fdef005b11fe4c00f730ed3d63",
         "redact_config_sha256": "b13adf961c2f056bd6f882a455a452d26933f223aff63af0be7f952a905dc497",
         "report_config_sha256": "ad784d4c2e965843392c109e3081a26a03f31e23a0a519bb4fc9567ac62b96ad",
-        "source_tree_git_oid": "0c20685c2d68d39a39006c0532f1d61f8de4b328",
+        "source_tree_git_oid": "34fb99b98221e26879521c7ee5263df9c19298f6",
         "stage_source_sha256": "4303183b4a57549f7fbee9ef2c2574679d04428b89e89511942e5cc85d222c2e",
         "target_binary_sha256": "81b2c147c691535ff10bde941a943fb38e012e92e8451838ba5cc778af2d8ac2"
     },
@@ -246,9 +246,9 @@
             "peak_rss_bytes": 11190272,
             "policy": "disabled",
             "policy_sha256": "b7b9356f39da5055f2be84b07bad19fc8c6a3716da5fb25f722535b172fd78bb",
-            "system_seconds": 0.00998199999999999955,
-            "user_seconds": 0.0444649999999999976,
-            "wall_seconds": 0.770019000000000009
+            "system_seconds": 0.00819899999999999969,
+            "user_seconds": 0.0404440000000000008,
+            "wall_seconds": 0.841416999999999971
         },
         {
             "analyzer_sha256": "8511067492bf07e746ec093c97fc90b2b40c27863822e26a6e9c33cd8ad85bb6",
@@ -264,9 +264,9 @@
             "peak_rss_bytes": 13533184,
             "policy": "report",
             "policy_sha256": "bee41ca36adbcaac14f2c02ee816a1ee231efdbd6e5652d10375055ecff110de",
-            "system_seconds": 0.00782300000000000009,
-            "user_seconds": 0.0537040000000000017,
-            "wall_seconds": 0.0645799999999999985
+            "system_seconds": 0.00583299999999999964,
+            "user_seconds": 0.0457899999999999974,
+            "wall_seconds": 0.0536529999999999993
         },
         {
             "analyzer_sha256": "8511067492bf07e746ec093c97fc90b2b40c27863822e26a6e9c33cd8ad85bb6",
@@ -282,9 +282,9 @@
             "peak_rss_bytes": 14598144,
             "policy": "mask",
             "policy_sha256": "03c2171c3e93636f7650492fbb554ee17232d6d8f0ba706c2f1535c3dba00052",
-            "system_seconds": 0.00842700000000000046,
-            "user_seconds": 0.0542730000000000018,
-            "wall_seconds": 0.0685329999999999967
+            "system_seconds": 0.00635900000000000007,
+            "user_seconds": 0.0506390000000000035,
+            "wall_seconds": 0.0590489999999999973
         },
         {
             "analyzer_sha256": "8511067492bf07e746ec093c97fc90b2b40c27863822e26a6e9c33cd8ad85bb6",
@@ -297,12 +297,12 @@
             "input_sha256": "49d781bc517615840093f41a40cee04d87fabe9a270d85b80431d58203e460e7",
             "output_bytes": 1048576,
             "output_sha256": "49d781bc517615840093f41a40cee04d87fabe9a270d85b80431d58203e460e7",
-            "peak_rss_bytes": 14614528,
+            "peak_rss_bytes": 14598144,
             "policy": "redact",
             "policy_sha256": "b31462074e8b43c6fbe715abf334dd765e1c67bd7cec41b85377c1e29e0bff57",
-            "system_seconds": 0.00932700000000000022,
-            "user_seconds": 0.0539159999999999986,
-            "wall_seconds": 0.0775079999999999936
+            "system_seconds": 0.00605800000000000002,
+            "user_seconds": 0.0503279999999999977,
+            "wall_seconds": 0.0585750000000000021
         },
         {
             "analyzer_sha256": "b7b9356f39da5055f2be84b07bad19fc8c6a3716da5fb25f722535b172fd78bb",
@@ -315,12 +315,12 @@
             "input_sha256": "d851a509327fee2ba1b0c45294c0f211e6160dbfd4e83150d3833af993a2dd83",
             "output_bytes": 1048576,
             "output_sha256": "d851a509327fee2ba1b0c45294c0f211e6160dbfd4e83150d3833af993a2dd83",
-            "peak_rss_bytes": 11173888,
+            "peak_rss_bytes": 11190272,
             "policy": "disabled",
             "policy_sha256": "b7b9356f39da5055f2be84b07bad19fc8c6a3716da5fb25f722535b172fd78bb",
-            "system_seconds": 0.00641400000000000043,
-            "user_seconds": 0.0436240000000000031,
-            "wall_seconds": 0.0532180000000000014
+            "system_seconds": 0.00771599999999999977,
+            "user_seconds": 0.0449869999999999992,
+            "wall_seconds": 0.0557329999999999978
         },
         {
             "analyzer_sha256": "8511067492bf07e746ec093c97fc90b2b40c27863822e26a6e9c33cd8ad85bb6",
@@ -333,12 +333,12 @@
             "input_sha256": "d851a509327fee2ba1b0c45294c0f211e6160dbfd4e83150d3833af993a2dd83",
             "output_bytes": 1048576,
             "output_sha256": "d851a509327fee2ba1b0c45294c0f211e6160dbfd4e83150d3833af993a2dd83",
-            "peak_rss_bytes": 24903680,
+            "peak_rss_bytes": 24870912,
             "policy": "report",
             "policy_sha256": "bee41ca36adbcaac14f2c02ee816a1ee231efdbd6e5652d10375055ecff110de",
-            "system_seconds": 0.0128000000000000006,
-            "user_seconds": 0.0689860000000000056,
-            "wall_seconds": 0.0888990000000000058
+            "system_seconds": 0.00886400000000000035,
+            "user_seconds": 0.0669069999999999943,
+            "wall_seconds": 0.0803539999999999949
         },
         {
             "analyzer_sha256": "8511067492bf07e746ec093c97fc90b2b40c27863822e26a6e9c33cd8ad85bb6",
@@ -351,12 +351,12 @@
             "input_sha256": "d851a509327fee2ba1b0c45294c0f211e6160dbfd4e83150d3833af993a2dd83",
             "output_bytes": 1048576,
             "output_sha256": "592041b13484e91057a6b8181fb841445fb557ebd245a291921e98f8a886850c",
-            "peak_rss_bytes": 27131904,
+            "peak_rss_bytes": 27115520,
             "policy": "mask",
             "policy_sha256": "03c2171c3e93636f7650492fbb554ee17232d6d8f0ba706c2f1535c3dba00052",
-            "system_seconds": 0.0121399999999999997,
-            "user_seconds": 0.068346000000000004,
-            "wall_seconds": 0.0903090000000000004
+            "system_seconds": 0.00915400000000000068,
+            "user_seconds": 0.0661709999999999937,
+            "wall_seconds": 0.076997999999999997
         },
         {
             "analyzer_sha256": "8511067492bf07e746ec093c97fc90b2b40c27863822e26a6e9c33cd8ad85bb6",
@@ -372,9 +372,9 @@
             "peak_rss_bytes": 25853952,
             "policy": "redact",
             "policy_sha256": "b31462074e8b43c6fbe715abf334dd765e1c67bd7cec41b85377c1e29e0bff57",
-            "system_seconds": 0.0172740000000000012,
-            "user_seconds": 0.0720689999999999942,
-            "wall_seconds": 0.100203
+            "system_seconds": 0.00970700000000000035,
+            "user_seconds": 0.0631189999999999946,
+            "wall_seconds": 0.0777250000000000024
         }
     ],
     "nonclaims": [
@@ -383,7 +383,7 @@
         "no speed, streaming, or detector-fusion claim"
     ],
     "schema": "scrubbed-pii-pipeline-evidence-v1",
-    "source_revision": "6f8299cd4ebc5da7a7fc7db60bd93bd78cdc941a",
+    "source_revision": "3cf22eee97f50e3e09ea9fe66229c8a1ca4fc47a",
     "unsupported": [
         "total-process allocations: unsupported; D-GC is not a substitute",
         "cross-platform performance: unsupported; one local observation only"

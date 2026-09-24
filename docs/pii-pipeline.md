@@ -23,19 +23,21 @@ peak RSS, exact input/output/audit bytes and SHA-256 identities, compiler and
 flags, source and binary identities, and D-runtime GC-only allocation and
 collection evidence. Unsupported total-process allocation and cross-platform
 performance metrics are explicit rather than represented as zero. The
-lowercase 40-hex `source_revision` identifies the production source used for
-the target and is resolved and bound to the recorded stage/audit sources; the
-evidence-only harness has its own SHA-256 identity.
+lowercase 40-hex `source_revision` identifies the evidence source used for the
+target and checker. It is resolved and bound to its immutable Git tree plus
+the exact harness, stage, and audit sources.
 
 The same actual release binary proves CLI/JSON configuration equivalence,
 `--validate`, `--dry-run`, `--explain`, local-tree and selected-field JSONL
 routes, exact one/four-thread results, durable stale-sidecar refusal and retry,
 and content canaries across output, audit, and diagnostic channels. The strict
-checker reruns the exact 2-by-4 deterministic byte/hash matrix with the named
-binary, requires complete sorted four-file primary and sidecar manifests for
-one and four threads, then mutates every binding named by the evidence
-contract, including revision, fixture/policy uniqueness, bytes, output,
-configuration, document, analyzer, policy, contributor ordering and
+checker reruns the exact 2-by-4 deterministic byte/hash matrix and the complete
+bounded actual-binary route matrix in fresh owned scratch with the named
+binary. It requires complete sorted four-file primary and sidecar manifests
+for one and four threads, applies every privacy canary separately to dry,
+explain, and stale-durable diagnostics, then mutates every binding named by the
+evidence contract, including revision/tree, fixture/policy uniqueness, bytes,
+output, configuration, document, analyzer, policy, contributor ordering and
 cardinality, privacy, malformed/oversize audit, and stale-sidecar status.
 
 ```sh

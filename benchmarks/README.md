@@ -686,7 +686,8 @@ cache and frequency state are uncontrolled. Its v3 schema deliberately makes
 no production-migration decision; the comparison artifact below is the sole
 owner of that decision.
 
-The workflow's manual `production migration comparison` job builds exact base
+The workflow's hosted `production migration comparison` job runs on dedicated
+feature-branch pushes and manual dispatch. It builds exact base
 `cd15948466509055ae0431439f651ecba8a301f6` and the candidate with the same
 pinned compiler, then runs them on one macOS ARM host in alternating order.
 `durable_skip_check.d --compare` covers manifest-v2 and journal-v3, forced

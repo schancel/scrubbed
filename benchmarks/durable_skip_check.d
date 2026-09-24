@@ -531,6 +531,21 @@ private string[] comparisonRoleOrder(size_t ordinal) {
         : ["candidate", "base"];
 }
 
+private void comparisonScheduleSelfTest() {
+    need(comparisonRuns == 5 &&
+        comparisonModeOrder(0) == ["reexecute", "verified-skip"] &&
+        comparisonModeOrder(1) == ["verified-skip", "reexecute"] &&
+        comparisonModeOrder(2) == ["reexecute", "verified-skip"] &&
+        comparisonModeOrder(3) == ["verified-skip", "reexecute"] &&
+        comparisonModeOrder(4) == ["reexecute", "verified-skip"] &&
+        comparisonRoleOrder(0) == ["base", "candidate"] &&
+        comparisonRoleOrder(1) == ["candidate", "base"] &&
+        comparisonRoleOrder(2) == ["base", "candidate"] &&
+        comparisonRoleOrder(3) == ["candidate", "base"] &&
+        comparisonRoleOrder(4) == ["base", "candidate"],
+        "comparison acquisition schedule mismatch");
+}
+
 private ulong[] scalarSamples(ref JSONValue layout, string route, string mode,
         string role, string field) {
     ulong[] values;
@@ -1043,6 +1058,7 @@ private void comparisonDecisionSelfTest(ref const JSONValue good) {
 }
 
 private void comparisonValidatorSelfTest(string harnessBinary) {
+    comparisonScheduleSelfTest();
     auto root = buildPath(tempDir, "scrubbed-sha-comparison-selftest-" ~
         randomUUID.toString);
     mkdirRecurse(root);

@@ -94,10 +94,18 @@ private void requirementsArePreMutation(QueueFactory factory) {
         "minor refusal creates no queue");
     auto durable = FrontierRequirements(frontierContractName,
         currentFrontierContractVersion, true);
-    auto unsupported = factory(FrontierLimits(), durable);
-    need(unsupported.code == QueueOpenCode.unsupportedProcessDurability &&
-        unsupported.queue is null && !unsupported.backend.processDurable,
-        "durability refusal creates no queue");
+    auto bounded = limits();
+    auto durability = factory(bounded, durable);
+    if (durability.backend.processDurable) {
+        need(durability.code == QueueOpenCode.opened && durability.queue !is null &&
+            durability.queue.descriptor == durability.backend &&
+            durability.queue.limits == bounded,
+            "durable backend opens when durability is required");
+    } else {
+        need(durability.code == QueueOpenCode.unsupportedProcessDurability &&
+            durability.queue is null,
+            "non-durable backend refuses before allocation");
+    }
 }
 
 private void admissionLimits(QueueFactory factory) {

@@ -651,8 +651,8 @@ any cross-tool comparison. No HTML extractor or trafilatura parity is claimed.
 ## SHA-256 backend-only evidence
 
 `sha256_backend_check.d` exercises the private incremental facade introduced
-for #185. The migration inventory is fixed at 77 `Sha256`/`sha256Of`
-occurrences in the same 21 production modules recorded at base
+for #185. The migration inventory is fixed at 79 `Sha256`/`sha256Of`
+occurrences in 22 production modules, including the additive URL seam, from base
 `cd15948466509055ae0431439f651ecba8a301f6`. The generated backend evidence
 records each module's source hash and preserves representative document,
 child, and v3 job identity fixtures.
@@ -706,8 +706,8 @@ forceable, and digest state belongs to each facade instance.
 
 The evidence binds a sanitized host identity: Darwin release, architecture,
 and CPU brand, with no serial number or other private identifier. On the
-recorded hosted `Apple M1 (Virtual)` AArch64 host, ARM execution and
-disassembly prove
+recorded local `Apple M4` / Darwin 25.6.0 AArch64 host, the documented harness
+used `/opt/homebrew/bin/ldc2` 1.43.0. ARM execution and disassembly prove
 `sha256h`, `sha256h2`, `sha256su0`, and `sha256su1`. The D source also
 cross-compiles to x86-64 Mach-O and Linux objects whose disassembly contains
 32 `sha256rnds2` instructions. Because this process is AArch64, x86 execution
@@ -727,12 +727,16 @@ schema, source hashes, benchmark rows, and digests. Caller-only source changes
 trigger the workflow; a macOS ARM job also tests and builds the production
 package. Workflow actions and LDC 1.43.0 are pinned; the workflow has read-only
 repository permission.
-Run `35955574514` at source head
-`9857764f3185e57a23d4df37caccb4e182152199` generated the committed backend
-and native artifacts. Both native generation/self-validation steps and the
-hosted backend report step passed; the overall bootstrap run later failed on
-the deliberately stale committed-native checks and the comparison-validator
-defect corrected in the following candidate. The native artifacts record
+Run `36035753344` at source head
+`b21f8acb90d63b50d8ac8ddd6ca3d23d8dbb5d85` generated and self-validated the
+committed native artifacts: arm64 artifact `10824821195` and x86-64 artifact
+`10824626173`. Both record checker source hash
+`0fdaa0c3d6e7a30993b7a47777914fda199bfb3880fb90c070e7d08916beec38`;
+the later evidence-only candidate did not change that source. Run
+`36039308448` validated both installed artifacts on their respective native
+architectures. The canonical backend report was generated separately by the
+documented local Apple M4 harness and is not attributed to either CI run. The
+native artifacts record
 `SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on x86-64 and
 `armv8-sha2` on arm64, and identical source hashes across both architectures.
 Native x86 execution is therefore no longer an external blocker.

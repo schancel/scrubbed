@@ -140,15 +140,18 @@ immutable(ubyte)[] encodePiiAuditV1(DocumentId documentId,
         enforce(span.contributors.length != 0 &&
             outcomeName(span.outcome) == expectedOutcome,
             "pii audit: invalid union metadata");
-        size_t contributorEnd;
+        size_t coverageEnd;
         foreach (index; 0 .. span.contributors.length) {
             enforce(validContributor(span, index, options.locale),
                 "pii audit: invalid contributor");
-            if (span.contributors[index].end > contributorEnd)
-                contributorEnd = span.contributors[index].end;
+            auto contributor = span.contributors[index];
+            enforce(index == 0 || contributor.start < coverageEnd,
+                "pii audit: contributors do not form one overlap union");
+            if (contributor.end > coverageEnd)
+                coverageEnd = contributor.end;
         }
         enforce(span.contributors[0].start == span.start &&
-            contributorEnd == span.end, "pii audit: union is not maximal");
+            coverageEnd == span.end, "pii audit: union is not maximal");
         enforce(span.contributors.length <= size_t.max - contributorCount,
             "pii audit: contributor count overflow");
         contributorCount += span.contributors.length;

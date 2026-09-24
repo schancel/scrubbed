@@ -9,7 +9,11 @@ import content.pieces : Content, ContentPiece;
 import core.thread : Thread;
 import crypto.sha256 : sha256Of;
 import domain.document : Document, DocumentViewOwner, OutputName, SourceLocator;
-import effects.pii_audit : piiAuditSchemaV1;
+import domain.pii_patterns : PiiCategory, PiiConfidence;
+import domain.pii_policy : PiiAuditContributor, PiiAuditSpan, PiiLocale,
+    PiiOutcome, PiiRule;
+import effects.pii_audit : PiiAuditOptionsV1, encodePiiAuditV1,
+    piiAuditSchemaV1, piiAuditSinkV1;
 import extraction.registry : coreExtractorRegistryV1;
 import job.dispatch_spec : DispatchActionKindV1, DispatchActionSpecV1,
     DispatchContainerSpecV1, DispatchDetectorSpecV1, DispatchJobSpecV1,
@@ -134,6 +138,39 @@ private void provePoliciesAndAudit() {
         "negative");
     enforce(auditText(falsePositive).canFind(`"unions":[]`),
         "false-positive controls emitted findings");
+}
+
+private void proveEncoderUnionValidation() {
+    auto bytes = cast(const(ubyte)[]) "abcdefghij";
+    auto documentId = input(bytes, "encoder-unions").document.id;
+    auto options = PiiAuditOptionsV1("US", "report", "email,ip", "high",
+        1024 * 1024, 4096, piiAuditSinkV1, false);
+    auto first = PiiAuditContributor(0, 4, PiiCategory.email,
+        PiiRule.emailAsciiDomain, PiiLocale.us, PiiConfidence.high);
+    auto middle = PiiAuditContributor(3, 7, PiiCategory.ip,
+        PiiRule.ipv4, PiiLocale.us, PiiConfidence.high);
+    auto last = PiiAuditContributor(6, 10, PiiCategory.email,
+        PiiRule.emailAsciiDomain, PiiLocale.us, PiiConfidence.high);
+    auto valid = PiiAuditSpan(0, 10, [first, middle, last],
+        PiiOutcome.reported);
+    enforce(parseJSON(cast(string) encodePiiAuditV1(documentId, bytes, bytes,
+        [valid], options))["unions"].array.length == 1,
+        "valid chained-overlap union was rejected");
+
+    auto shortFirst = first;
+    shortFirst.end = 2;
+    auto gappedLast = last;
+    gappedLast.start = 8;
+    enforce(rejects(() { encodePiiAuditV1(documentId, bytes, bytes,
+        [PiiAuditSpan(0, 10, [shortFirst, gappedLast],
+            PiiOutcome.reported)], options); }),
+        "gapped contributors were accepted as one overlap union");
+    auto adjacentLast = gappedLast;
+    adjacentLast.start = 2;
+    enforce(rejects(() { encodePiiAuditV1(documentId, bytes, bytes,
+        [PiiAuditSpan(0, 10, [shortFirst, adjacentLast],
+            PiiOutcome.reported)], options); }),
+        "adjacent contributors were accepted as one overlap union");
 }
 
 private void proveLocalesSelectionsAndBounds() {
@@ -266,6 +303,7 @@ private void proveV3V4CommonEquivalence() {
 
 void main() {
     provePoliciesAndAudit();
+    proveEncoderUnionValidation();
     proveLocalesSelectionsAndBounds();
     proveCallerStorageAndReuse();
     proveV3V4CommonEquivalence();

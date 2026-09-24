@@ -18,6 +18,7 @@ import std.digest.sha : SHA256, sha256Of;
 import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
     rmdirRecurse, tempDir, write;
 import std.json : JSONValue, parseJSON;
+import std.math : abs;
 import std.path : absolutePath, buildPath, relativePath;
 import std.process : execute, spawnProcess;
 import std.stdio : File, writeln;
@@ -39,6 +40,7 @@ private enum ulong maxTimeRegressionUs = 50_000;
 private enum ulong maxPhaseRegressionNs = 5_000_000;
 private enum double maxRssRegressionPercent = 10.0;
 private enum ulong maxRssRegressionBytes = 4 * 1024 * 1024;
+private enum double comparisonPercentageTolerance = 1e-12;
 private immutable string[] phaseNames = [
     "compiled_execution", "identity", "ledger_query", "ledger_transaction",
     "output_hash", "output_read", "output_safe_open", "publication",
@@ -611,6 +613,34 @@ private double percentChange(ulong before, ulong after) {
     return (cast(double)after - before) * 100.0 / before;
 }
 
+private bool sameDerivedComparison(ref JSONValue recorded,
+        ref JSONValue derived) {
+    immutable fields = ["layout", "route", "mode", "base_wall_us",
+        "candidate_wall_us", "wall_percent", "base_user_us",
+        "candidate_user_us", "base_system_us", "candidate_system_us",
+        "base_cpu_us", "candidate_cpu_us", "cpu_percent",
+        "base_peak_rss_bytes", "candidate_peak_rss_bytes", "rss_percent",
+        "base_fd_peak", "candidate_fd_peak", "base_source_hash_ns",
+        "candidate_source_hash_ns", "source_hash_percent",
+        "base_output_hash_ns", "candidate_output_hash_ns",
+        "output_hash_percent"];
+    if (!exactKeys(recorded, fields)) return false;
+    foreach (field; ["layout", "route", "mode"])
+        if (recorded[field].str != derived[field].str) return false;
+    foreach (field; ["base_wall_us", "candidate_wall_us", "base_user_us",
+            "candidate_user_us", "base_system_us", "candidate_system_us",
+            "base_cpu_us", "candidate_cpu_us", "base_peak_rss_bytes",
+            "candidate_peak_rss_bytes", "base_fd_peak", "candidate_fd_peak",
+            "base_source_hash_ns", "candidate_source_hash_ns",
+            "base_output_hash_ns", "candidate_output_hash_ns"])
+        if (recorded[field].integer != derived[field].integer) return false;
+    foreach (field; ["wall_percent", "cpu_percent", "rss_percent",
+            "source_hash_percent", "output_hash_percent"])
+        if (abs(recorded[field].floating - derived[field].floating) >
+                comparisonPercentageTolerance) return false;
+    return true;
+}
+
 private bool meaningfulRegression(ulong before, ulong after,
         double percentLimit, ulong absoluteLimit) {
     return after > before && after - before > absoluteLimit &&
@@ -896,8 +926,12 @@ private void validateComparisonReport(string path, string baseBinary,
     }
     bool passed;
     auto derived = comparisonRows(layoutRows, passed);
-    need(report["comparisons"].toString == JSONValue(derived).toString,
-        "comparison derived medians mismatch");
+    auto recorded = report["comparisons"].array;
+    need(recorded.length == derived.length,
+        "comparison derived cardinality mismatch");
+    foreach (index, ref row; recorded)
+        need(sameDerivedComparison(row, derived[index]),
+            "comparison derived medians mismatch");
     need(report["decision"].str == (passed ? "PASS" : "FAIL") && passed,
         "comparison thresholds not satisfied");
     need(report["claim"].str ==
@@ -1108,6 +1142,10 @@ private void comparisonValidatorSelfTest(string harnessBinary) {
                 row["ordinal"].integer < 3)
             row["wall_us"] = 2_000_000;
     mustReject(observation, "observation mutation accepted");
+    auto derivedPercentage = parseJSON(good.toString);
+    derivedPercentage["comparisons"][0]["wall_percent"] =
+        derivedPercentage["comparisons"][0]["wall_percent"].floating + 0.001;
+    mustReject(derivedPercentage, "derived percentage mutation accepted");
     auto source = parseJSON(good.toString);
     source["candidate_source_sha"] = "c".replicate(40);
     mustReject(source, "forged source identity accepted");

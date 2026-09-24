@@ -1,0 +1,4 @@
+auth	tls-required=true	token-rejected=true	trusted-token=true	connect-timeout-ms=300
+setup	admit=true	duplicate=true	nak-redelivery=true	ack=true	payload-limit=512	stream-limit=4	inflight-limit=1	pending-restart=true
+restart	durable-identity=true	redelivery=true	state-survived=true	fetch-timeout-ms=200	drained=true
+reconnect	disconnected=true	reconnected=true	publish-after-reconnect=true

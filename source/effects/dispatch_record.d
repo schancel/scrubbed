@@ -6,8 +6,7 @@ import composition.dispatch_executor : DispatchExecutionEventV1,
 import domain.document : DocumentId;
 import extraction.container : ZipInspectionReasonV1, ZipInspectionStatusV1;
 import extraction.contracts : DetectionOutcomeV1, RouteActionKindV1;
-import std.array : appender;
-import std.conv : to;
+import std.array : Appender, appender;
 import std.digest : LetterCase, toHexString;
 import crypto.sha256 : Sha256, sha256Of;
 import std.json : JSONValue, parseJSON;
@@ -29,65 +28,65 @@ string canonicalJsonlDispatchRecordV1(ref DispatchExecutionEventV1 event,
 private string canonicalDispatchRecord(ref DispatchExecutionEventV1 event,
         DispatchUnitDomainV1 domain, size_t selectedOrdinal) {
     auto output = appender!string;
-    output.put(`{"schema":`); output.put(quote(dispatchRecordSchemaV1));
-    output.put(`,"job_identity":`); output.put(quote(event.jobIdentity));
-    output.put(`,"document_id":`); output.put(quote(event.source.document.id.text));
+    output.put(`{"schema":`); putQuoted(output, dispatchRecordSchemaV1);
+    output.put(`,"job_identity":`); putQuoted(output, event.jobIdentity);
+    output.put(`,"document_id":`); putQuoted(output, event.source.document.id.text);
     output.put(`,"unit_id":`);
-    output.put(quote(dispatchUnitId(event.source.document.id, domain,
-        selectedOrdinal)));
-    output.put(`,"status":`); output.put(quote(statusName(event.kind)));
-    output.put(`,"outcome":`); output.put(quote(outcomeName(event.detection.outcome)));
-    output.put(`,"action":`); output.put(quote(actionName(event.action.kind)));
-    output.put(`,"detector_version":`); output.put(quote(event.detection.detectorVersion));
+    putQuoted(output, dispatchUnitId(event.source.document.id, domain,
+        selectedOrdinal));
+    output.put(`,"status":`); putQuoted(output, statusName(event.kind));
+    output.put(`,"outcome":`); putQuoted(output, outcomeName(event.detection.outcome));
+    output.put(`,"action":`); putQuoted(output, actionName(event.action.kind));
+    output.put(`,"detector_version":`); putQuoted(output, event.detection.detectorVersion);
     output.put(`,"warning_codes":[`);
     foreach (index, warning; event.warnings) {
         if (index) output.put(',');
-        output.put(quote(warning));
+        putQuoted(output, warning);
     }
     output.put(']');
     if (event.routeName.length) {
-        output.put(`,"route":`); output.put(quote(event.routeName));
-        output.put(`,"extractor":`); output.put(quote(event.extractor));
-        output.put(`,"extractor_version":`); output.put(quote(event.extractorVersion));
+        output.put(`,"route":`); putQuoted(output, event.routeName);
+        output.put(`,"extractor":`); putQuoted(output, event.extractor);
+        output.put(`,"extractor_version":`); putQuoted(output, event.extractorVersion);
     }
     if (event.hasContainer) {
         auto container = event.container;
         output.put(`,"container_status":`);
-        output.put(quote(container.status == ZipInspectionStatusV1.admitted
-            ? "admitted" : "refused"));
+        putQuoted(output, container.status == ZipInspectionStatusV1.admitted
+            ? "admitted" : "refused");
         output.put(`,"container_reason":`);
-        output.put(quote(containerReason(container.reason)));
+        putQuoted(output, containerReason(container.reason));
     }
     if (event.reason.length) {
         output.put(`,"reason_hash":`);
-        output.put(quote(reasonHash(event.reason)));
+        putQuoted(output, reasonHash(event.reason));
     }
     if (event.hasProvenance) {
         auto provenance = event.provenance;
         output.put(`,"provenance":{"route":`);
-        output.put(quote(provenance.routeName));
-        output.put(`,"source_bytes":`); output.put(provenance.sourceBytes.to!string);
+        putQuoted(output, provenance.routeName);
+        output.put(`,"source_bytes":`); putUnsigned(output, provenance.sourceBytes);
         output.put('}');
     }
     auto detection = event.detection;
     output.put(`,"accounting":{"available_bytes":`);
-    output.put(detection.availableBytes.to!string);
-    output.put(`,"bytes_inspected":`); output.put(detection.bytesInspected.to!string);
-    output.put(`,"inspection_limit":`); output.put(detection.inspectionLimit.to!string);
+    putUnsigned(output, detection.availableBytes);
+    output.put(`,"bytes_inspected":`); putUnsigned(output, detection.bytesInspected);
+    output.put(`,"inspection_limit":`); putUnsigned(output, detection.inspectionLimit);
     if (event.hasContainer) {
         auto container = event.container;
         output.put(`,"container_source_bytes":`);
-        output.put(container.sourceBytes.to!string);
+        putUnsigned(output, container.sourceBytes);
         output.put(`,"container_bytes_examined":`);
-        output.put(container.bytesExamined.to!string);
+        putUnsigned(output, container.bytesExamined);
         output.put(`,"container_compressed_bytes":`);
-        output.put(container.cumulativeCompressedBytes.to!string);
+        putUnsigned(output, container.cumulativeCompressedBytes);
         output.put(`,"container_expanded_bytes":`);
-        output.put(container.cumulativeExpandedBytes.to!string);
+        putUnsigned(output, container.cumulativeExpandedBytes);
         output.put(`,"container_entries":`);
-        output.put(container.entryCount.to!string);
+        putUnsigned(output, container.entryCount);
         output.put(`,"container_max_depth":`);
-        output.put(container.maxDepth.to!string);
+        putUnsigned(output, container.maxDepth);
     }
     output.put(`}}`);
     auto record = output.data;
@@ -131,18 +130,18 @@ private string canonicalDispatchProblemRecordV1(string jobIdentity,
         string phase, string code, string reason, DispatchUnitDomainV1 domain,
         size_t selectedOrdinal) {
     auto output = appender!string;
-    output.put(`{"schema":`); output.put(quote(dispatchRecordSchemaV1));
-    output.put(`,"job_identity":`); output.put(quote(jobIdentity));
-    output.put(`,"document_id":`); output.put(quote(document.text));
+    output.put(`{"schema":`); putQuoted(output, dispatchRecordSchemaV1);
+    output.put(`,"job_identity":`); putQuoted(output, jobIdentity);
+    output.put(`,"document_id":`); putQuoted(output, document.text);
     output.put(`,"unit_id":`);
-    output.put(quote(dispatchUnitId(document, domain, selectedOrdinal)));
-    output.put(`,"status":`); output.put(quote(status));
+    putQuoted(output, dispatchUnitId(document, domain, selectedOrdinal));
+    output.put(`,"status":`); putQuoted(output, status);
     output.put(`,"outcome":`);
-    output.put(quote(outcomeName(outcome)));
+    putQuoted(output, outcomeName(outcome));
     output.put(`,"action":"failure","detector_version":"unknown","warning_codes":[]`);
-    output.put(`,"phase":`); output.put(quote(phase));
-    output.put(`,"code":`); output.put(quote(code));
-    output.put(`,"reason_hash":`); output.put(quote(reasonHash(reason)));
+    output.put(`,"phase":`); putQuoted(output, phase);
+    output.put(`,"code":`); putQuoted(output, code);
+    output.put(`,"reason_hash":`); putQuoted(output, reasonHash(reason));
     output.put(`,"accounting":{"available_bytes":0,"bytes_inspected":0,"inspection_limit":0}}`);
     auto record = output.data;
     if (record.length > maxDispatchRecordBytesV1)
@@ -150,7 +149,19 @@ private string canonicalDispatchProblemRecordV1(string jobIdentity,
     return record;
 }
 
-private string quote(string value) { return JSONValue(value).toString; }
+private void putQuoted(ref Appender!string output, string value) {
+    JSONValue(value).toString(output);
+}
+
+private void putUnsigned(ref Appender!string output, ulong value) {
+    char[20] digits;
+    size_t start = digits.length;
+    do {
+        digits[--start] = cast(char) ('0' + value % 10);
+        value /= 10;
+    } while (value);
+    output.put(digits[start .. $]);
+}
 private string reasonHash(string reason) {
     return toHexString!(LetterCase.lower)(
         sha256Of(cast(const(ubyte)[])reason)).idup;
@@ -168,7 +179,14 @@ private string dispatchUnitId(DocumentId document, DispatchUnitDomainV1 domain,
         break;
     case DispatchUnitDomainV1.jsonlField:
         digest.put(cast(const(ubyte)[]) "jsonl-field:v1:");
-        digest.put(cast(const(ubyte)[]) selectedOrdinal.to!string);
+        char[20] digits;
+        size_t start = digits.length;
+        auto value = cast(ulong) selectedOrdinal;
+        do {
+            digits[--start] = cast(char) ('0' + value % 10);
+            value /= 10;
+        } while (value);
+        digest.put(cast(const(ubyte)[]) digits[start .. $]);
         break;
     case DispatchUnitDomainV1.jsonlRecord:
         digest.put(cast(const(ubyte)[]) "jsonl-record:v1");
@@ -227,6 +245,25 @@ private string containerReason(ZipInspectionReasonV1 reason) pure {
 }
 
 unittest {
+    auto quoted = appender!string;
+    enum escaped = "quote:\" slash:\\ controls:\b\f\n\r\t\x01 utf8:\xc3\xa9";
+    putQuoted(quoted, escaped);
+    assert(quoted.data == JSONValue(escaped).toString);
+
+    auto unsigned = appender!string;
+    foreach (index, value; [0UL, 9, 10, 99, 100, ulong.max]) {
+        if (index) unsigned.put(',');
+        putUnsigned(unsigned, value);
+    }
+    assert(unsigned.data == "0,9,10,99,100,18446744073709551615");
+
+    auto zeroDocument = DocumentId.fromCanonicalText(
+        "doc:v1:0000000000000000000000000000000000000000000000000000000000000000");
+    assert(dispatchUnitId(zeroDocument, DispatchUnitDomainV1.jsonlField, 0) ==
+        "unit:v1:ed8fb95f539587adfb60e7993d44816ae817b1f4d4798eab4c4d1bee2c849835");
+    assert(dispatchUnitId(zeroDocument, DispatchUnitDomainV1.jsonlField, 10) ==
+        "unit:v1:89b3cad270d332c436ff2adf92d96f80a784ec1e4bf6a251135fc00197d85f79");
+
     auto failure = canonicalDispatchFailureRecordV1(
         "job:v4:0000000000000000000000000000000000000000000000000000000000000000",
         DocumentId.fromCanonicalText(

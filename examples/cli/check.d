@@ -419,15 +419,22 @@ int main(string[] args) {
         !exists(extractOutput), "extract argument golden");
 
     auto executable = buildNormalizedPath(absolutePath(exe));
-    auto bashCommand = "eval " ~ posixQuoted(posixQuoted(executable) ~
-        " completion complete --bash --") ~ " \"$COMP_LINE\" ---";
+    auto bashCommand = posixQuoted(executable) ~
+        " completion complete --bash -- \"${COMP_WORDS[@]}\" ---";
     auto bashSetup =
         "# Add this source command into .bashrc:\n" ~
         "#       source <(" ~ posixQuoted(executable) ~
             " completion init --bash)\n" ~
-        "complete -C " ~ posixQuoted(bashCommand) ~ " scrubbed\n";
-    auto zshCommand = "eval " ~ posixQuoted(posixQuoted(executable) ~
-        " completion complete --zsh --") ~ " \"$COMP_LINE\" ---";
+        "_scrubbed_completion() {\n" ~
+        "    local candidate\n" ~
+        "    COMPREPLY=()\n" ~
+        "    while IFS= read -r candidate; do\n" ~
+        "        COMPREPLY+=(\"$candidate\")\n" ~
+        "    done < <(" ~ bashCommand ~ ")\n" ~
+        "}\n" ~
+        "complete -F _scrubbed_completion scrubbed\n";
+    auto zshCommand = posixQuoted(executable) ~
+        " completion complete --zsh -- \"${COMP_WORDS[@]}\" ---";
     auto zshSetup =
         "# Ensure that you called compinit and bashcompinit like below in your .zshrc:\n" ~
         "#       autoload -Uz compinit && compinit\n" ~
@@ -435,7 +442,14 @@ int main(string[] args) {
         "# And then add this source command after them into your .zshrc:\n" ~
         "#       source <(" ~ posixQuoted(executable) ~
             " completion init --zsh)\n" ~
-        "complete -C " ~ posixQuoted(zshCommand) ~ " scrubbed\n";
+        "_scrubbed_completion() {\n" ~
+        "    local candidate\n" ~
+        "    COMPREPLY=()\n" ~
+        "    while IFS= read -r candidate; do\n" ~
+        "        COMPREPLY+=(\"$candidate\")\n" ~
+        "    done < <(" ~ zshCommand ~ ")\n" ~
+        "}\n" ~
+        "complete -F _scrubbed_completion scrubbed\n";
     auto fishCommand = "(COMMAND_LINE=(commandline -p) " ~
         fishQuoted(executable) ~
         " completion complete --fish -- (commandline -op))";
@@ -452,7 +466,8 @@ int main(string[] args) {
         check(setup.status == 0 && setup.output == setupGoldens[index],
             shell ~ " exact setup golden");
         check(!setup.output.canFind(executable ~ " init") &&
-            !setup.output.canFind(executable ~ " --"),
+            !setup.output.canFind(executable ~ " --") &&
+            !setup.output.canFind("eval"),
             shell ~ " setup contains only nested self-invocations");
     }
     auto commands = execute([exe, "completion", "complete", "--fish", "--", "re"]);
@@ -491,18 +506,24 @@ int main(string[] args) {
     auto quotedExe = buildPath(quotedDirectory, "scrubbed");
     copy(exe, quotedExe);
     setAttributes(quotedExe, getAttributes(exe));
+    auto marker = buildPath(root, "completion-metacharacter-marker");
     auto bashQuoted = execute(["bash", "-c", q"BASH
 set -e
 setup=$("$1" completion init --bash)
-eval "$setup"
+source /dev/stdin <<< "$setup"
 complete -p scrubbed >/dev/null
-line=${setup##*$'\n'}
-eval "set -- ${line#complete }"
-[ "$1" = -C ]
-[ "$3" = scrubbed ]
+marker=$2
+COMP_WORDS=(scrubbed repair "--th;touch $marker")
+COMP_LINE="scrubbed repair --th;touch $marker"
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 0 ]
+[ ! -e "$marker" ]
+COMP_WORDS=(scrubbed repair --th)
 COMP_LINE='scrubbed repair --th'
-eval "$2"
-BASH", "completion-path-check", quotedExe]);
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 1 ]
+printf '%s\n' "${COMPREPLY[0]}"
+BASH", "completion-path-check", quotedExe, marker]);
     check(bashQuoted.status == 0 && bashQuoted.output == "--threads\n",
         "bash quoted executable setup and registered invocation: status=" ~
             bashQuoted.status.to!string ~ "; stdout=" ~ bashQuoted.output ~
@@ -512,24 +533,30 @@ set -e
 autoload -Uz compinit && compinit
 autoload -Uz bashcompinit && bashcompinit
 setup=$("$1" completion init --zsh)
-eval "$setup"
+source /dev/stdin <<< "$setup"
 complete -p scrubbed >/dev/null
-line=${setup##*$'\n'}
-eval "set -- ${line#complete }"
-[ "$1" = -C ]
-[ "$3" = scrubbed ]
+marker=$2
+COMP_WORDS=(scrubbed repair "--th;touch $marker")
+COMP_LINE="scrubbed repair --th;touch $marker"
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 0 ]
+[ ! -e "$marker" ]
+COMP_WORDS=(scrubbed repair --th)
 COMP_LINE='scrubbed repair --th'
-eval "$2"
-ZSH", "completion-path-check", quotedExe]);
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 1 ]
+printf '%s\n' "${COMPREPLY[1]}"
+ZSH", "completion-path-check", quotedExe, marker]);
     check(zshQuoted.status == 0 && zshQuoted.output == "--threads\n",
         "zsh quoted executable setup and registered invocation");
     auto fishAvailable = execute(["sh", "-c", "command -v fish >/dev/null 2>&1"]);
     if (fishAvailable.status == 0) {
         auto fishQuoted = execute(["fish", "-c", q"FISH
-set setup ("$argv[1]" completion init --fish | string collect)
-eval $setup
+"$argv[1]" completion init --fish | source
+complete -C "scrubbed repair '--th;touch $argv[2]'" >/dev/null
+test ! -e "$argv[2]"
 complete -C 'scrubbed repair --th'
-FISH", "completion-path-check", quotedExe]);
+FISH", "completion-path-check", quotedExe, marker]);
         check(fishQuoted.status == 0 && fishQuoted.output == "--threads\n",
             "fish quoted executable setup and registered invocation");
     }

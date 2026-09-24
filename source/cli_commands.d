@@ -248,26 +248,36 @@ private string fishShellLiteral(string value) {
 private int printCompletionSetup(string shell) {
     auto executable = thisExePath();
     if (shell == "--bash") {
-        auto prefix = posixShellLiteral(executable) ~
-            " completion complete --bash --";
-        auto command = "eval " ~ posixShellLiteral(prefix) ~
-            " \"$COMP_LINE\" ---";
+        auto command = posixShellLiteral(executable) ~
+            " completion complete --bash -- \"${COMP_WORDS[@]}\" ---";
         writeln("# Add this source command into .bashrc:");
         writeln("#       source <(", posixShellLiteral(executable),
             " completion init --bash)");
-        writeln("complete -C ", posixShellLiteral(command), " scrubbed");
+        writeln("_scrubbed_completion() {");
+        writeln("    local candidate");
+        writeln("    COMPREPLY=()");
+        writeln("    while IFS= read -r candidate; do");
+        writeln("        COMPREPLY+=(\"$candidate\")");
+        writeln("    done < <(", command, ")");
+        writeln("}");
+        writeln("complete -F _scrubbed_completion scrubbed");
     } else if (shell == "--zsh") {
-        auto prefix = posixShellLiteral(executable) ~
-            " completion complete --zsh --";
-        auto command = "eval " ~ posixShellLiteral(prefix) ~
-            " \"$COMP_LINE\" ---";
+        auto command = posixShellLiteral(executable) ~
+            " completion complete --zsh -- \"${COMP_WORDS[@]}\" ---";
         writeln("# Ensure that you called compinit and bashcompinit like below in your .zshrc:");
         writeln("#       autoload -Uz compinit && compinit");
         writeln("#       autoload -Uz bashcompinit && bashcompinit");
         writeln("# And then add this source command after them into your .zshrc:");
         writeln("#       source <(", posixShellLiteral(executable),
             " completion init --zsh)");
-        writeln("complete -C ", posixShellLiteral(command), " scrubbed");
+        writeln("_scrubbed_completion() {");
+        writeln("    local candidate");
+        writeln("    COMPREPLY=()");
+        writeln("    while IFS= read -r candidate; do");
+        writeln("        COMPREPLY+=(\"$candidate\")");
+        writeln("    done < <(", command, ")");
+        writeln("}");
+        writeln("complete -F _scrubbed_completion scrubbed");
     } else {
         auto command = "(COMMAND_LINE=(commandline -p) " ~
             fishShellLiteral(executable) ~

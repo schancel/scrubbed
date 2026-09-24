@@ -9,7 +9,7 @@ import extraction.contracts : DetectionOutcomeV1, RouteActionKindV1;
 import std.array : appender;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
-import std.digest.sha : SHA256, sha256Of;
+import crypto.sha256 : Sha256, sha256Of;
 import std.json : JSONValue, parseJSON;
 import std.string : indexOf;
 
@@ -158,7 +158,7 @@ private string reasonHash(string reason) {
 
 private string dispatchUnitId(DocumentId document, DispatchUnitDomainV1 domain,
         size_t selectedOrdinal) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     digest.put(cast(const(ubyte)[]) "scrubbed.dispatch.unit.v1\0");
     digest.put(cast(const(ubyte)[]) document.text);
     digest.put([cast(ubyte) 0]);

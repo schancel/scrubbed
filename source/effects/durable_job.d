@@ -15,7 +15,7 @@ import effects.local_manifest : hashFile, nowUtcMs, resolvedName,
 import effects.sqlite_ffi;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
-import std.digest.sha : SHA256, sha256Of;
+import crypto.sha256 : Sha256, sha256Of;
 import std.file : exists, isFile, isSymlink, remove;
 import std.path : absolutePath, buildNormalizedPath;
 import std.string : fromStringz, indexOf, toStringz;
@@ -357,7 +357,7 @@ private ubyte[32] columnDigest(sqlite3_stmt* s, int at) {
     result[] = (cast(const(ubyte)*)sqlite3_column_blob(s, at))[0 .. 32];
     return result;
 }
-private void appendField(ref SHA256 digest, string value) {
+private void appendField(ref Sha256 digest, string value) {
     ulong length = value.length;
     ubyte[8] width;
     foreach_reverse (index, shift; [0, 8, 16, 24, 32, 40, 48, 56])
@@ -365,7 +365,7 @@ private void appendField(ref SHA256 digest, string value) {
     digest.put(width[]);
     digest.put(cast(const(ubyte)[])value);
 }
-private void appendDigest(ref SHA256 digest, ref const(ubyte[32]) value) {
+private void appendDigest(ref Sha256 digest, ref const(ubyte[32]) value) {
     digest.put(value[]);
 }
 
@@ -376,7 +376,7 @@ ubyte[32] deriveDurableIdentity(string canonicalJobJson, string jobIdentity,
         (jobIdentity[0 .. 7] == "job:v3:" || jobIdentity[0 .. 7] == "job:v4:"),
         "invalid-job-identity");
     need(mode == "file" || mode == "tree", "invalid-route-mode");
-    SHA256 digest;
+    auto digest = Sha256.create;
     digest.put(cast(const(ubyte)[])"scrubbed:durable-compiled-job:v1\0");
     appendField(digest, canonicalJobJson);
     appendField(digest, jobIdentity);
@@ -388,14 +388,14 @@ ubyte[32] deriveDurableIdentity(string canonicalJobJson, string jobIdentity,
 }
 
 ubyte[32] reasonDigest(string reason) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     digest.put(cast(const(ubyte)[])"scrubbed:final-reason:v1\0");
     appendField(digest, reason);
     return digest.finish();
 }
 
 string derivedSink(string kind, DocumentId document, size_t ordinal) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     digest.put(cast(const(ubyte)[])"scrubbed:compiled-final-sink:v1\0");
     appendField(digest, kind);
     appendField(digest, document.text);
@@ -406,7 +406,7 @@ string derivedSink(string kind, DocumentId document, size_t ordinal) {
 
 ubyte[32] eventSetDigest(const(DurableEventPlan)[] events) {
     need(events.length != 0, "empty-event-set");
-    SHA256 digest;
+    auto digest = Sha256.create;
     digest.put(cast(const(ubyte)[])"scrubbed:compiled-final-events:v1\0");
     foreach (ordinal, ref event; events) {
         need(event.ordinal == ordinal, "noncanonical-event-ordinal");

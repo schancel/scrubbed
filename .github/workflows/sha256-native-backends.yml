@@ -1,0 +1,209 @@
+name: SHA-256 native backends
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - issue-185-sha256-backends
+    paths:
+      - ".github/workflows/sha256-native-backends.yml"
+      - "benchmarks/sha256_backend_check.d"
+      - "benchmarks/durable_skip_check.d"
+      - "benchmarks/sha256-native-*-evidence.json"
+      - "benchmarks/sha256-backend-evidence.json"
+      - "benchmarks/sha256-migration-comparison.json"
+      - "source/**/*.d"
+      - "third_party/**"
+      - "dub.json"
+      - "dub.selections.json"
+  pull_request:
+    paths:
+      - ".github/workflows/sha256-native-backends.yml"
+      - "benchmarks/sha256_backend_check.d"
+      - "benchmarks/durable_skip_check.d"
+      - "benchmarks/sha256-native-*-evidence.json"
+      - "benchmarks/sha256-backend-evidence.json"
+      - "benchmarks/sha256-migration-comparison.json"
+      - "source/**/*.d"
+      - "third_party/**"
+      - "dub.json"
+      - "dub.selections.json"
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: ${{ matrix.architecture }} native instructions
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x86_64
+            runner: ubuntu-24.04
+          - architecture: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned LDC
+        uses: dlang-community/setup-dlang@2979e3ea011f6a234cd3a47dcbeb60f451c9635f
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Build release-active backend harness
+        run: |
+          ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
+            benchmarks/sha256_backend_check.d source/crypto/sha256.d \
+            source/crypto/sha256_arm64.d source/crypto/sha256_x86_64.d \
+            -of=/tmp/scrubbed-sha256-backend-check
+
+      - name: Execute native backend proof
+        run: |
+          /tmp/scrubbed-sha256-backend-check \
+            --native-report "sha256-native-${{ matrix.architecture }}.json"
+          /tmp/scrubbed-sha256-backend-check \
+            --check-native-report "sha256-native-${{ matrix.architecture }}.json"
+          jq '.harness_binary_sha256 = ("0" * 64)' \
+            "sha256-native-${{ matrix.architecture }}.json" \
+            > /tmp/sha256-native-wrong-binary.json
+          if /tmp/scrubbed-sha256-backend-check --check-native-report \
+              /tmp/sha256-native-wrong-binary.json; then
+            echo "native validator accepted a forged harness identity" >&2
+            exit 1
+          fi
+          if [[ "${{ matrix.architecture }}" == "arm64" ]]; then
+            opposite_architecture=x86_64
+            opposite_backend=x86-sha-ni
+          else
+            opposite_architecture=aarch64
+            opposite_backend=armv8-sha2
+          fi
+          jq --arg architecture "$opposite_architecture" \
+            --arg backend "$opposite_backend" \
+            '.architecture = $architecture | .selected_backend = $backend |
+             .short_message_microbench |= map(
+               if .role == "selected" then .backend = $backend else . end)' \
+            "sha256-native-${{ matrix.architecture }}.json" \
+            > /tmp/sha256-native-wrong-architecture.json
+          if /tmp/scrubbed-sha256-backend-check --check-native-report \
+              /tmp/sha256-native-wrong-architecture.json; then
+            echo "native validator accepted the opposite architecture" >&2
+            exit 1
+          fi
+          /tmp/scrubbed-sha256-backend-check --long-test
+
+      - name: Validate committed architecture evidence
+        run: |
+          /tmp/scrubbed-sha256-backend-check --check-native-report \
+            "benchmarks/sha256-native-${{ matrix.architecture }}-evidence.json"
+
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sha256-native-${{ matrix.architecture }}
+          path: sha256-native-${{ matrix.architecture }}.json
+          if-no-files-found: error
+          retention-days: 14
+
+  package:
+    name: production package and tests
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned LDC
+        uses: dlang-community/setup-dlang@2979e3ea011f6a234cd3a47dcbeb60f451c9635f
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Test and build production package
+        run: |
+          dub test --compiler=ldc2
+          dub build --compiler=ldc2 --build=release
+          ldc2 -O3 -release benchmarks/durable_skip_check.d \
+            -of=/tmp/scrubbed-durable-skip-check
+          /tmp/scrubbed-durable-skip-check --self-test-comparison
+
+  migration-comparison:
+    name: production migration comparison
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/issue-185-sha256-backends')
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Check out candidate source and history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned LDC
+        uses: dlang-community/setup-dlang@2979e3ea011f6a234cd3a47dcbeb60f451c9635f
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Build exact base and candidate binaries
+        env:
+          BASE_SHA: cd15948466509055ae0431439f651ecba8a301f6
+        run: |
+          base_tree="$RUNNER_TEMP/scrubbed-sha-base"
+          git worktree add --detach "$base_tree" "$BASE_SHA"
+          (cd "$base_tree" && dub build --compiler=ldc2 --build=release)
+          cp "$base_tree/scrubbed" "$RUNNER_TEMP/scrubbed-sha-base-bin"
+          dub build --compiler=ldc2 --build=release
+          cp scrubbed "$RUNNER_TEMP/scrubbed-sha-candidate-bin"
+          ldc2 -O3 -release benchmarks/durable_skip_check.d \
+            -of="$RUNNER_TEMP/scrubbed-durable-skip-check"
+          ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
+            benchmarks/sha256_backend_check.d source/crypto/sha256.d \
+            source/crypto/sha256_arm64.d source/crypto/sha256_x86_64.d \
+            -of=/tmp/scrubbed-sha256-backend-check
+
+      - name: Record backend, disassembly, and large-buffer evidence
+        run: |
+          /tmp/scrubbed-sha256-backend-check \
+            --report sha256-backend-evidence.json
+
+      - name: Run same-host interleaved production comparison
+        env:
+          BASE_SHA: cd15948466509055ae0431439f651ecba8a301f6
+        run: |
+          candidate_sha="$(git rev-parse HEAD)"
+          "$RUNNER_TEMP/scrubbed-durable-skip-check" --self-test-upgrade \
+            "$RUNNER_TEMP/scrubbed-sha-base-bin" \
+            "$RUNNER_TEMP/scrubbed-sha-candidate-bin"
+          "$RUNNER_TEMP/scrubbed-durable-skip-check" --compare \
+            "$RUNNER_TEMP/scrubbed-sha-base-bin" "$BASE_SHA" \
+            "$RUNNER_TEMP/scrubbed-sha-candidate-bin" "$candidate_sha" \
+            sha256-migration-comparison.json
+          "$RUNNER_TEMP/scrubbed-durable-skip-check" --check-compare \
+            sha256-migration-comparison.json \
+            "$RUNNER_TEMP/scrubbed-sha-base-bin" "$BASE_SHA" \
+            "$RUNNER_TEMP/scrubbed-sha-candidate-bin" "$candidate_sha"
+
+      - name: Upload comparison evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sha256-migration-comparison
+          path: sha256-migration-comparison.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload backend evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sha256-backend-evidence
+          path: sha256-backend-evidence.json
+          if-no-files-found: error
+          retention-days: 14

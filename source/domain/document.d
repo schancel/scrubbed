@@ -1,7 +1,7 @@
 module domain.document;
 
 import std.array : Appender, appender;
-import std.digest.sha : sha256Of;
+import crypto.sha256 : sha256Of;
 import std.digest : LetterCase, toHexString;
 import std.exception : enforce;
 import std.conv : to;

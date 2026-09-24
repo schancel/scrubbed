@@ -593,3 +593,141 @@ field as incorrect. Malformed saved HTML is reported in a separate invalid
 bucket and excluded from quality denominators, with failure rate reported;
 zero denominators yield `null`, never 100%. Pin the dataset and policy before
 any cross-tool comparison. No HTML extractor or trafilatura parity is claimed.
+
+## SHA-256 backend-only evidence
+
+`sha256_backend_check.d` exercises the private incremental facade introduced
+for #185. The migration inventory is fixed at 77 `Sha256`/`sha256Of`
+occurrences in the same 21 production modules recorded at base
+`cd15948466509055ae0431439f651ecba8a301f6`. The generated backend evidence
+records each module's source hash and preserves representative document,
+child, and v3 job identity fixtures.
+
+Build and run the release-active checks from the repository root:
+
+```sh
+ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
+  benchmarks/sha256_backend_check.d source/crypto/sha256.d \
+  source/crypto/sha256_arm64.d source/crypto/sha256_x86_64.d \
+  -of=/tmp/scrubbed-sha256-backend-check
+/tmp/scrubbed-sha256-backend-check --self-test
+/tmp/scrubbed-sha256-backend-check --long-test
+/tmp/scrubbed-sha256-backend-check --report benchmarks/sha256-backend-evidence.json
+/tmp/scrubbed-sha256-backend-check --check-report benchmarks/sha256-backend-evidence.json
+/tmp/scrubbed-sha256-backend-check --check-native-report \
+  benchmarks/sha256-native-arm64-evidence.json
+/tmp/scrubbed-sha256-backend-check --check-native-report \
+  benchmarks/sha256-native-x86_64-evidence.json
+```
+
+The self-test checks authoritative empty/`abc`/long-message vectors, Phobos
+equivalence, every alignment 0..31, boundary and one-byte chunking, repeatable
+`start`, refusal after `finish`, forced-unavailable refusal, eight concurrent
+instances, the frozen caller inventory, compile-time rejection of external raw
+backend imports, and `/usr/bin/shasum` as a separate system oracle. The long
+test streams 4,296,015,890 logical bytes through both
+the selected facade and Phobos without allocating that logical input.
+
+The native report also records five interleaved scalar/hardware samples for
+32, 55, 56, 63, 64, 65, 128, 256, 512, and 1,024-byte one-shot messages. This
+is descriptive crossover evidence from hosted runners, not a frequency-
+controlled throughput claim; it exists to prevent a large-buffer win from
+silently regressing the short identity hashes used by production callers.
+Run `35917242376` found no portable short-message cutoff: hosted ARM64 was
+70--78% faster with hardware and hosted x86-64 was 46--55% faster across the
+entire 32--1,024-byte range even though the harness uses the more conservative
+forced selected-backend constructor. Production's automatic constructor skips
+that forced-selection validation after process startup. An unreproducible
+local Apple M4 follow-up that compared those distinct constructor paths has
+been removed rather than retained as quantitative evidence. No size cutoff is
+introduced: the production policy remains automatic hardware selection at
+every input size.
+
+The ARM compression function alone has LDC `@target("sha2")`; runtime Darwin
+`sysctl` or Linux `getauxval` detection happens once before automatic
+selection. The x86 function alone has `@target("sha")`; normal x86 builds use
+`core.cpuid.hasSha` before selection. Unsupported forced backends fail before
+their compression function is called. Scalar is always compiled and
+forceable, and digest state belongs to each facade instance.
+
+The evidence binds a sanitized host identity: Darwin release, architecture,
+and CPU brand, with no serial number or other private identifier. On the
+recorded hosted `Apple M1 (Virtual)` AArch64 host, ARM execution and
+disassembly prove
+`sha256h`, `sha256h2`, `sha256su0`, and `sha256su1`. The D source also
+cross-compiles to x86-64 Mach-O and Linux objects whose disassembly contains
+32 `sha256rnds2` instructions. Because this process is AArch64, x86 execution
+is `BLOCKED_EXTERNAL_ARCHITECTURE_MISMATCH_CPUID_UNKNOWN`: no x86 CPUID query
+was made, and no x86 result was substituted. On native x86-64, the report
+instead distinguishes CPUID without SHA-NI from executed-and-passed SHA-NI. A
+capable native x86-64 host must run the same KAT/chunk/alignment suite.
+
+The `SHA-256 native backends` GitHub Actions workflow runs the same
+release-active harness on GitHub-hosted `ubuntu-24.04` x86-64 and
+`ubuntu-24.04-arm` arm64 runners. `--native-report` refuses scalar fallback:
+the x86 job must expose and select SHA-NI, while the ARM job must expose and
+select ARMv8 SHA2. Each job also runs the multi-GiB logical stream and uploads
+a sanitized, source- and binary-bound architecture report, then validates both
+that generated report and the corresponding committed artifact for exact
+schema, source hashes, benchmark rows, and digests. Caller-only source changes
+trigger the workflow; a macOS ARM job also tests and builds the production
+package. Workflow actions and LDC 1.43.0 are pinned; the workflow has read-only
+repository permission.
+Run `35955574514` at source head
+`9857764f3185e57a23d4df37caccb4e182152199` generated the committed backend
+and native artifacts. Both native generation/self-validation steps and the
+hosted backend report step passed; the overall bootstrap run later failed on
+the deliberately stale committed-native checks and the comparison-validator
+defect corrected in the following candidate. The native artifacts record
+`SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on x86-64 and
+`armv8-sha2` on arm64, and identical source hashes across both architectures.
+Native x86 execution is therefore no longer an external blocker.
+
+`sha256-backend-evidence.json` contains five interleaved scalar/selected
+samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,
+and instruction counts. The validator re-derives the host identity and
+architecture-conditioned execution statuses. These timings are descriptive:
+cache and frequency state are uncontrolled. Its v3 schema deliberately makes
+no production-migration decision; the comparison artifact below is the sole
+owner of that decision.
+
+The workflow's hosted `production migration comparison` job runs on dedicated
+feature-branch pushes and manual dispatch. It builds exact base
+`cd15948466509055ae0431439f651ecba8a301f6` and the candidate with the same
+pinned compiler, then runs them on one macOS ARM host in alternating order.
+`durable_skip_check.d --compare` covers manifest-v2 and journal-v3, forced
+reexecution and verified skip, many-small, few-large, and one-file startup
+layouts. It records five samples per binary/case plus wall, total CPU, RSS,
+Darwin `proc_pidinfo` sampled file-descriptor lower bounds, source-hash time,
+output-hash time, exact output identities, caller-expected source revisions,
+and binary/harness hashes. Startup wall stops when the child is reaped rather
+than after sampler teardown; the zero-tolerance descriptor gate applies only
+to the longer non-startup layouts with at least one successful sample.
+Private durable phase metrics are enabled for this evidence and remain off by
+default in production.
+
+Before timing, each layout and route also proves a real binary upgrade: the
+base creates the durable store and output, the candidate opens those exact
+paths under explicit retry, and a subsequent candidate replay verified-skips
+with no execution or publication. `--self-test-upgrade` runs the same
+base-to-candidate contract on the small startup fixture.
+
+The generated `sha256-migration-comparison.json` is one source-bound artifact;
+its medians and decision are re-derived by the validator. The gate requires a
+material non-startup wall win and source/output-hash win, rejects meaningful
+wall/paired-total-CPU/hash-phase/RSS regressions and any measured non-startup
+file-descriptor increase. A complete artifact is retained when threshold
+validation fails. `--self-test-comparison` proves the decision's missing-win
+and regression cases and rejects threshold, observation, source-identity,
+fixture-identity, and decision mutations.
+Run `35957903665` passed all four workflow jobs at exact source head
+`758d894eee744baf386ae0c9a8ab1771fbc84327`; its full comparison report is
+retained as `sha256-migration-comparison.json`. The report's re-derived
+decision is `PASS`. Across the non-startup medians, many-small wall time fell
+24.0--40.0% and few-large wall time fell 31.1--71.1%; source hashing fell
+63.4--66.6% and 66.4--67.7%, respectively, while output hashing fell
+58.7--70.2% and 77.3--81.9%. Paired total CPU tracked those wall-time wins,
+RSS stayed within the configured bound, and sampled file-descriptor peaks
+were unchanged or lower. These are same-host, interleaved hosted-run results,
+not claims about every machine; cache and frequency state remained
+uncontrolled.

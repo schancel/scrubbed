@@ -6,7 +6,7 @@ import core.sys.posix.fcntl : open, O_CREAT, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRO
 import core.sys.posix.sys.stat : fstat, lstat, stat_t, S_ISREG;
 import core.sys.posix.unistd : close, fsync, link, read, unlink, write;
 import domain.shard_format;
-import std.digest.sha : SHA256, sha256Of;
+import crypto.sha256 : Sha256, sha256Of;
 import std.exception : enforce;
 import std.file : isDir, isSymlink, rename;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath, dirName;
@@ -73,7 +73,7 @@ private bool readFrame(int fd, uint limit, out ubyte[] payload, size_t chunkSize
 private ubyte[32] digestDescriptor(int fd) {
     stat_t info;
     require(fstat(fd, &info) == 0 && S_ISREG(info.st_mode), "shard is not regular");
-    SHA256 digest;
+    auto digest = Sha256.create;
     ubyte[64 * 1024] buffer;
     while (true) {
         auto size = readSome(fd, buffer[]);

@@ -11,7 +11,7 @@ import effects.atomic_piece_sink : OutputPolicyViolation, writeAtomicPieces;
 import effects.local_manifest : Inspection, LocalManifest, SinkKey, SinkState;
 import effects.runner : Sink;
 import stages.contract : EventKind, StageEvent;
-import std.digest.sha : SHA256;
+import crypto.sha256 : Sha256;
 import std.exception : enforce;
 import std.file : exists;
 import std.path : absolutePath, buildPath;
@@ -103,7 +103,7 @@ private bool sameInode(string left, string right) {
 }
 
 private ubyte[32] digestContent(Content content) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     content.stream((const(ubyte)[] chunk) { digest.put(chunk); });
     return digest.finish();
 }

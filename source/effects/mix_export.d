@@ -19,7 +19,7 @@ import effects.quality_overlay : decisionAnalyzerVersion, decisionValueSchema;
 import std.base64 : Base64;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
-import std.digest.sha : SHA256, sha256Of;
+import crypto.sha256 : Sha256, sha256Of;
 import std.exception : enforce;
 import std.file : dirEntries, SpanMode;
 import std.json : JSONType, JSONValue, parseJSON;
@@ -210,12 +210,13 @@ private string rowBytes(const ref MixExportRow row, string generation,
 private final class PrivateWriter {
     string path;
     private int fd = -1;
-    private SHA256 digest;
+    private Sha256 digest;
     ulong size;
     string sha256;
 
     this(string path) {
         this.path = path;
+        digest = Sha256.create;
         fd = open(path.toStringz, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW,
             S_IRUSR);
         require(fd >= 0, "cannot create immutable generation file");
@@ -336,7 +337,7 @@ private string manifestBytes(string generation, string decisionFile,
 }
 
 private string fileSha256(int fd) {
-    SHA256 digest;
+    auto digest = Sha256.create;
     ubyte[64 * 1024] buffer;
     while (true) {
         auto amount = read(fd, buffer.ptr, buffer.length);

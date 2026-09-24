@@ -8,7 +8,7 @@ import effects.local_manifest : resolvedName, safeRegularOrAbsent, sameInode;
 import std.conv : to;
 import std.algorithm.searching : canFind;
 import std.digest : LetterCase, toHexString;
-import std.digest.sha : SHA256;
+import crypto.sha256 : Sha256;
 import std.file : exists, remove;
 import std.json : parseJSON;
 import std.string : fromStringz, toStringz;
@@ -191,7 +191,7 @@ private string sidecar(string kind, string sha, long bytes, string id) {
         `","sha256":"` ~ sha ~ `","bytes":` ~ to!string(bytes) ~
         `,"snapshot_id":"` ~ id ~ `"}` ~ "\n";
 }
-private string digest(SHA256* hash) {
+private string digest(Sha256* hash) {
     return toHexString!(LetterCase.lower)(hash.finish()).idup;
 }
 private void fault(string dbPath, string point) {
@@ -236,7 +236,7 @@ private void stageRows(sqlite3* db, ref Stage stage, string id, string dbPath) {
     auto fd = open(stage.temporary.toStringz, O_WRONLY | O_CREAT | O_EXCL, 384);
     need(fd >= 0, "stage-create-failed");
     scope(exit) close(fd);
-    SHA256 hash;
+    auto hash = Sha256.create;
     long bytes, rows;
     int rc;
     while ((rc = sqlite3_step(cursor)) == SQLITE_ROW) {
@@ -341,7 +341,7 @@ private string verifyOne(string path, string kind) {
     } catch (Exception) { throw new Exception("error export: invalid-sidecar"); }
     need(hex64(sha) && uuid4(id) && count >= 0 && count <= byteLimit &&
         raw == sidecar(kind, sha, count, id), "invalid-sidecar");
-    SHA256 hash;
+    auto hash = Sha256.create;
     ubyte[65536] buffer;
     long total;
     while (true) {

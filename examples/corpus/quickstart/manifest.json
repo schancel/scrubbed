@@ -66,7 +66,7 @@
       "mediaType": "application/x-ndjson; charset=utf-8",
       "provenance": "Authored for scrubbed issue #259 by Shammah Chancellor.",
       "license": "MIT",
-      "sha256": "3cd26a315294fe292a668f5a627aca60fb0607471aaa8120c82053940d09ce66",
+      "sha256": "7a8a3e00ce4f38d461d9c485998648d34102eff4a2b145fe2536ba365048e401",
       "intendedPipeline": "selected-field-jsonl",
       "expectedOutcome": "Only top-level text and title strings are selected for repair; other values remain semantically unchanged."
     },
@@ -111,7 +111,7 @@
       "mediaType": "application/x-ndjson; charset=utf-8",
       "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "882122d91f593c7ce57352a69330c32809820205bdc7f1e821de542ab3c3d185",
+      "sha256": "ee11f6ee85a44811a4065a1886b20c66ca022d1c3e42d6f29a6f650b4bdc158b",
       "intendedPipeline": "selected-field-jsonl",
       "expectedOutcome": "Exact canonical JSONL output bytes for selected-field repair."
     }

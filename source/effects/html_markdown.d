@@ -197,11 +197,21 @@ unittest {
 
 private string markdownTarget(string target) pure {
     Writer writer;
-    foreach (char c; target) {
-        if (c == '&') writer.put("&amp;");
-        else writer.put(cast(string)(&c)[0 .. 1]);
+    size_t runStart;
+    foreach (i, c; target) {
+        if (c != '&') continue;
+        if (runStart < i) writer.put(target[runStart .. i]);
+        writer.put("&amp;");
+        runStart = i + 1;
     }
+    if (runStart < target.length) writer.put(target[runStart .. $]);
     return writer.finish();
+}
+
+unittest {
+    assert(markdownTarget("") is null);
+    assert(markdownTarget("plain/é") == "plain/é");
+    assert(markdownTarget("&a&&b&") == "&amp;a&amp;&amp;b&amp;");
 }
 
 private size_t endOf(const ref HtmlTree tree, size_t index) pure {

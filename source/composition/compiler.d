@@ -153,6 +153,12 @@ CompiledJob compileJob(const ref JobSpec spec,
         if (registration.sideOutputCapability == SideOutputCapability.terminal) {
             enforce(registration.cardinality == StageCardinality.oneToOne,
                 "side-output stage must be non-splitting: " ~ stage.id);
+            foreach (prior; spec.stages[0 .. ordinal]) {
+                auto priorRegistration = stageRegistry.find(prior.implementation);
+                enforce(priorRegistration.cardinality == StageCardinality.oneToOne,
+                    "stage before side-output producer must be non-splitting: " ~
+                        prior.id);
+            }
             enforce(ordinal + 1 == spec.stages.length,
                 "side-output stage must be terminal: " ~ stage.id);
             enforce(registration.filterPlacement != FilterPlacement.after ||

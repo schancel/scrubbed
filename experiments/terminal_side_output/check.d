@@ -155,6 +155,9 @@ private void proveValueBoundsAndOwnership() {
     auto duplicate = outputFor(0);
     enforce(throws(() { StageDecision.map(inputFor(0),
         [duplicate, duplicate]); }), "duplicate side-output key/suffix was accepted");
+    enforce(throws(() { StageDecision.map(inputFor(0),
+        [TerminalSideOutput.init]); }),
+        "default-initialized side output was accepted");
 }
 
 private void proveCompilerEnforcement() {
@@ -175,6 +178,17 @@ private void proveCompilerEnforcement() {
         FilterPlacement.none, StageCardinality.maySplit));
     enforce(throws(() { planFor("producer", &splitting, &filters); }),
         "splitting side-output producer compiled");
+
+    StageRegistry upstreamSplit;
+    upstreamSplit.add(StageRegistration(StageDeclaration("split",
+        PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
+        &plainFactory, FilterPlacement.none, StageCardinality.maySplit));
+    upstreamSplit.add(terminal("producer", &mapFactory));
+    auto upstreamSplitSpec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"split","implementation":"split"},` ~
+        `{"id":"producer","implementation":"producer"}]}`);
+    enforce(throws(() { compileJob(upstreamSplitSpec, &upstreamSplit,
+        &filters); }), "upstream split before side-output producer compiled");
 
     StageRegistry after;
     after.add(terminal("producer", &mapFactory, FilterPlacement.after));

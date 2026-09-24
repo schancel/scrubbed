@@ -69,6 +69,7 @@ struct TerminalSideOutput {
     enum size_t maxPayloadBytes = 1024 * 1024;
 
 private:
+    bool initialized;
     string keyValue;
     string schemaValue;
     string suffixValue;
@@ -101,6 +102,10 @@ private:
             enforce(value[0] != '.', label ~ " must not be path-like");
     }
 
+    void requireInitialized() const pure {
+        enforce(initialized, "side output is not initialized");
+    }
+
 public:
     this(string key, string schema, string suffix,
             const(ubyte)[] bytes) pure {
@@ -115,13 +120,14 @@ public:
         suffixValue = suffix.idup;
         bytesValue = bytes.idup;
         digestValue = sha256Of(bytesValue);
+        initialized = true;
     }
 
-    string key() const pure { return keyValue; }
-    string schema() const pure { return schemaValue; }
-    string suffix() const pure { return suffixValue; }
-    immutable(ubyte)[] bytes() const pure { return bytesValue; }
-    ubyte[32] digest() const pure { return digestValue; }
+    string key() const pure { requireInitialized; return keyValue; }
+    string schema() const pure { requireInitialized; return schemaValue; }
+    string suffix() const pure { requireInitialized; return suffixValue; }
+    immutable(ubyte)[] bytes() const pure { requireInitialized; return bytesValue; }
+    ubyte[32] digest() const pure { requireInitialized; return digestValue; }
 }
 
 /// One complete decision for one input. Empty splits are invalid: discarding
@@ -138,6 +144,7 @@ struct StageDecision {
         // checking: no second value, duplicate or otherwise, is admitted.
         enforce(outputs.length <= 1,
             "a stage decision may emit at most one side output");
+        foreach (output; outputs) output.requireInitialized;
         return outputs.dup;
     }
 

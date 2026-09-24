@@ -599,9 +599,9 @@ any cross-tool comparison. No HTML extractor or trafilatura parity is claimed.
 `sha256_backend_check.d` exercises the private incremental facade introduced
 for #185. The migration inventory is fixed at 77 `Sha256`/`sha256Of`
 occurrences in the same 21 production modules recorded at base
-`cd15948466509055ae0431439f651ecba8a301f6`. The committed evidence records
-each module's source hash and preserves representative document, child, and
-v3 job identity fixtures.
+`cd15948466509055ae0431439f651ecba8a301f6`. The generated backend evidence
+records each module's source hash and preserves representative document,
+child, and v3 job identity fixtures.
 
 Build and run the release-active checks from the repository root:
 

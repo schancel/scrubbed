@@ -134,7 +134,10 @@ jobs:
 
   migration-comparison:
     name: production migration comparison
-    if: github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' &&
+       github.ref == 'refs/heads/issue-185-sha256-backends')
     runs-on: macos-15
     timeout-minutes: 90
     steps:
@@ -163,11 +166,11 @@ jobs:
           ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
             benchmarks/sha256_backend_check.d source/crypto/sha256.d \
             source/crypto/sha256_arm64.d source/crypto/sha256_x86_64.d \
-            -of="$RUNNER_TEMP/scrubbed-sha256-backend-check"
+            -of=/tmp/scrubbed-sha256-backend-check
 
       - name: Record backend, disassembly, and large-buffer evidence
         run: |
-          "$RUNNER_TEMP/scrubbed-sha256-backend-check" \
+          /tmp/scrubbed-sha256-backend-check \
             --report sha256-backend-evidence.json
 
       - name: Run same-host interleaved production comparison

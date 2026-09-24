@@ -481,14 +481,8 @@ private JSONValue comparisonLayoutEvidence(ComparisonTarget[] targets,
         }
 
         foreach (ordinal; 0 .. comparisonRuns) {
-            auto modeOrder = ordinal % 2 == 0
-                ? ["reexecute", "verified-skip"]
-                : ["verified-skip", "reexecute"];
-            foreach (modeIndex, mode; modeOrder) {
-                auto baseFirst = (ordinal + modeIndex) % 2 == 0;
-                auto roleOrder = baseFirst
-                    ? ["base", "candidate"] : ["candidate", "base"];
-                foreach (role; roleOrder) {
+            foreach (mode; comparisonModeOrder(ordinal)) {
+                foreach (role; comparisonRoleOrder(ordinal)) {
                     auto target = role == "base" ? targets[0] : targets[1];
                     auto state = states[stateKey(role, mode)];
                     string[] sampleArgs = [target.binary, "run", "--input", input,
@@ -523,6 +517,18 @@ private JSONValue comparisonLayoutEvidence(ComparisonTarget[] targets,
     }
     result["runs"] = rows;
     return result;
+}
+
+private string[] comparisonModeOrder(size_t ordinal) {
+    return ordinal % 2 == 0
+        ? ["reexecute", "verified-skip"]
+        : ["verified-skip", "reexecute"];
+}
+
+private string[] comparisonRoleOrder(size_t ordinal) {
+    return ordinal % 2 == 0
+        ? ["base", "candidate"]
+        : ["candidate", "base"];
 }
 
 private ulong[] scalarSamples(ref JSONValue layout, string route, string mode,
@@ -796,8 +802,23 @@ private void validateComparisonReport(string path, string baseBinary,
                 proof["candidate_replay_publication_calls"].integer == 0,
                 "comparison upgrade proof mismatch");
         }
+        auto runs = layout["runs"].array;
+        size_t sequenceIndex;
+        foreach (route; ["manifest-v2", "journal-v3"])
+            foreach (ordinal; 0 .. comparisonRuns)
+                foreach (mode; comparisonModeOrder(ordinal))
+                    foreach (role; comparisonRoleOrder(ordinal)) {
+                        auto row = runs[sequenceIndex++];
+                        need(row["route"].str == route &&
+                            row["variant"].str == mode &&
+                            row["ordinal"].integer == ordinal &&
+                            row["binary_role"].str == role,
+                            "comparison acquisition order mismatch");
+                    }
+        need(sequenceIndex == runs.length,
+            "comparison acquisition order cardinality mismatch");
         string outputTree, outputConcatenated;
-        foreach (row; layout["runs"].array) {
+        foreach (row; runs) {
             auto tree = row["output_tree_sha256"].str;
             auto concatenated = row["output_concatenated_sha256"].str;
             auto mode = row["variant"].str;
@@ -897,9 +918,9 @@ private JSONValue syntheticComparisonReport(string baseBinary,
         layoutRow["upgrade_proofs"] = proofs;
         JSONValue[] rows;
         foreach (route; ["manifest-v2", "journal-v3"])
-            foreach (mode; ["reexecute", "verified-skip"])
-                foreach (ordinal; 0 .. comparisonRuns)
-                    foreach (role; ["base", "candidate"]) {
+            foreach (ordinal; 0 .. comparisonRuns)
+                foreach (mode; comparisonModeOrder(ordinal))
+                    foreach (role; comparisonRoleOrder(ordinal)) {
                         auto candidate = role == "candidate";
                         JSONValue row;
                         row["route"] = route;
@@ -1057,9 +1078,19 @@ private void comparisonValidatorSelfTest(string harnessBinary) {
     auto nestedShape = parseJSON(good.toString);
     nestedShape["method"]["unexpected"] = true;
     mustReject(nestedShape, "nested schema extension accepted");
+    auto acquisitionOrder = parseJSON(good.toString);
+    auto first = acquisitionOrder["layouts"][0]["runs"][0];
+    acquisitionOrder["layouts"][0]["runs"][0] =
+        acquisitionOrder["layouts"][0]["runs"][1];
+    acquisitionOrder["layouts"][0]["runs"][1] = first;
+    mustReject(acquisitionOrder, "acquisition order mutation accepted");
     auto observation = parseJSON(good.toString);
-    foreach (index; [0, 2, 4])
-        observation["layouts"][0]["runs"][index]["wall_us"] = 2_000_000;
+    foreach (ref row; observation["layouts"][0]["runs"].array)
+        if (row["route"].str == "manifest-v2" &&
+                row["variant"].str == "reexecute" &&
+                row["binary_role"].str == "candidate" &&
+                row["ordinal"].integer < 3)
+            row["wall_us"] = 2_000_000;
     mustReject(observation, "observation mutation accepted");
     auto source = parseJSON(good.toString);
     source["candidate_source_sha"] = "c".replicate(40);

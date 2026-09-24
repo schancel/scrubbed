@@ -112,6 +112,14 @@ private string attestedBuildCommand() {
 
 private string nativeEnvironmentTemplate() {
     return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
+        "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
+        "RANLIB=<system-protected-ranlib>; " ~
+        "COMPILER_PATH=<private-pinned-tools>; SDKROOT=<xcrun-selected-sdk>; " ~
+        "parent environment excluded";
+}
+
+private string legacyNativeEnvironmentTemplate() {
+    return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
         "CC=<attested-selected-clang>; AR=<attested-ar>; " ~
         "RANLIB=<attested-ranlib>; COMPILER_PATH=<private-pinned-tools>; " ~
         "SDKROOT=<xcrun-selected-sdk>";
@@ -781,7 +789,8 @@ private JSONValue probes(string binary, string input, string output,
 }
 
 private void validateAttestation(JSONValue attestation, string binaryHash) {
-    need(attestation["schema"].str == "scrubbed-build-attestation-v4",
+    auto v5 = attestation["schema"].str == "scrubbed-build-attestation-v5";
+    need(v5 || attestation["schema"].str == "scrubbed-build-attestation-v4",
         "build attestation schema");
     foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
             "dub_recipe_sha256", "dependency_lock_sha256",
@@ -808,13 +817,17 @@ private void validateAttestation(JSONValue attestation, string binaryHash) {
         attestation["argparse_version"].str == "2.0.2" &&
         attestation["argparse_input_files"].integer > 1 &&
         attestation["native_prebuild_command_count"].integer == 5 &&
-        attestation["native_environment_template"].str == nativeEnvironmentTemplate() &&
+        attestation["native_environment_template"].str == (v5 ?
+            nativeEnvironmentTemplate() : legacyNativeEnvironmentTemplate()) &&
+        (!v5 || (digestLength(attestation["cmake_support_sha256"].str, 64) &&
+            attestation["cmake_support_files"].integer > 0)) &&
         attestation["sdk_version"].str.length &&
         attestation["sdk_build_version"].str.length &&
         !attestation["sdk_version"].str.canFind('/') &&
         !attestation["sdk_build_version"].str.canFind('/') &&
-        attestation["native_tool_policy"].str ==
-            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified" &&
+        attestation["native_tool_policy"].str == (v5 ?
+            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" :
+            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified") &&
         attestation["linker_selection"].str ==
             "COMPILER_PATH private ld selected by attested compiler -### trace" &&
         attestation["target_relative_path"].str == "scrubbed" &&
@@ -1320,7 +1333,7 @@ private JSONValue syntheticAttestation(string hash) {
         "role": JSONValue(roles[i]), "sha256": JSONValue(hash),
         "version": JSONValue(i == 0 || i == 2 || i == 3 || i == 4 ?
             unavailableToolVersion : "tool version")]);
-    return JSONValue(["schema": JSONValue("scrubbed-build-attestation-v4"),
+    return JSONValue(["schema": JSONValue("scrubbed-build-attestation-v5"),
         "source_sha": JSONValue("A".replicate(40)),
         "source_tree_id": JSONValue("A".replicate(40)),
         "source_archive_sha256": JSONValue(hash), "dub_recipe_sha256": JSONValue(hash),
@@ -1336,7 +1349,9 @@ private JSONValue syntheticAttestation(string hash) {
         "argparse_input_files": JSONValue(2L), "native_prebuild_commands_sha256": JSONValue(hash),
         "native_prebuild_command_count": JSONValue(5L),
         "native_environment_template": JSONValue(nativeEnvironmentTemplate()),
-        "native_tool_policy": JSONValue("exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified"),
+        "cmake_support_sha256": JSONValue(hash),
+        "cmake_support_files": JSONValue(1L),
+        "native_tool_policy": JSONValue("mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
         "native_tools": JSONValue(tools),
         "archive_suite_evidence": JSONValue(["schema": JSONValue("scrubbed-archive-suite-evidence-v1"),
             "evidence_tool_name": JSONValue("ranlib-writer"), "evidence_tool_sha256": JSONValue(hash),

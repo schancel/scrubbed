@@ -108,6 +108,13 @@ private string attestedBuildCommand() {
 }
 private string nativeEnvironmentTemplate() {
     return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
+        "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
+        "RANLIB=<system-protected-ranlib>; " ~
+        "COMPILER_PATH=<private-pinned-tools>; SDKROOT=<xcrun-selected-sdk>; " ~
+        "parent environment excluded";
+}
+private string legacyNativeEnvironmentTemplate() {
+    return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
         "CC=<attested-selected-clang>; AR=<attested-ar>; " ~
         "RANLIB=<attested-ranlib>; COMPILER_PATH=<private-pinned-tools>; " ~
         "SDKROOT=<xcrun-selected-sdk>";
@@ -679,7 +686,8 @@ private JSONValue gcRun(string[] command, string binaryHash, string sourceSha,
 }
 
 private void validateAttestation(JSONValue value, string binaryHash) {
-    need(value["schema"].str == "scrubbed-build-attestation-v4",
+    auto v5 = value["schema"].str == "scrubbed-build-attestation-v5";
+    need(v5 || value["schema"].str == "scrubbed-build-attestation-v4",
         "build attestation schema");
     foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
             "dub_recipe_sha256", "dependency_lock_sha256",
@@ -707,12 +715,16 @@ private void validateAttestation(JSONValue value, string binaryHash) {
         value["argparse_version"].str == "2.0.2" &&
         value["argparse_input_files"].integer > 1 &&
         value["native_prebuild_command_count"].integer == 5 &&
-        value["native_environment_template"].str == nativeEnvironmentTemplate() &&
+        value["native_environment_template"].str == (v5 ?
+            nativeEnvironmentTemplate() : legacyNativeEnvironmentTemplate()) &&
+        (!v5 || (digestLength(value["cmake_support_sha256"].str, 64) &&
+            value["cmake_support_files"].integer > 0)) &&
         value["sdk_version"].str.length && value["sdk_build_version"].str.length &&
         !value["sdk_version"].str.canFind('/') &&
         !value["sdk_build_version"].str.canFind('/') &&
-        value["native_tool_policy"].str ==
-            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified" &&
+        value["native_tool_policy"].str == (v5 ?
+            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" :
+            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified") &&
         value["linker_selection"].str ==
             "COMPILER_PATH private ld selected by attested compiler -### trace" &&
         value["target_relative_path"].str == "scrubbed" &&

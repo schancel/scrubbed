@@ -770,6 +770,37 @@ private void preflightManifest(string path, string inputPath, string outputPath,
     }
 }
 
+private string preflightCoordinationMetrics(string path, string inputPath,
+        string outputPath, bool inputIsDir, string configPath,
+        string manifestPath, string errorJournalPath) {
+    bool link;
+    try link = isSymlink(path);
+    catch (FileException failure) { if (exists(path)) throw failure; }
+    if (link || exists(path))
+        throw new Exception("coordination metrics destination must not exist");
+    auto resolved = resolveExistingPrefix(path);
+    if ((inputIsDir && pathIsWithin(resolved, inputPath)) ||
+        (!inputIsDir && resolved == inputPath) ||
+        (inputIsDir && pathIsWithin(resolved, outputPath)) ||
+        (!inputIsDir && resolved == outputPath))
+        throw new Exception(
+            "coordination metrics must be outside input and output");
+    foreach (protectedPath; [configPath, manifestPath, errorJournalPath])
+        if (protectedPath.length) foreach (candidate;
+                protectedPath == configPath ? [protectedPath] :
+                [protectedPath, protectedPath ~ "-wal", protectedPath ~ "-shm"])
+            if (resolved == resolveExistingPrefix(candidate))
+                throw new Exception(
+                    "coordination metrics collide with a protected path");
+    return resolved;
+}
+
+private void publishCoordinationMetrics(string path, string text) {
+    auto destination = File(path, "wx");
+    destination.write(text);
+    destination.close();
+}
+
 private ubyte[32] runningExecutableDigest() {
     auto path = thisExePath();
     if (!path.length || isSymlink(path))
@@ -1431,6 +1462,12 @@ int runApp(string[] args) {
         if (!errorJournalPath.length) writeln("valid. No files processed.");
         return 0;
     }
+    auto coordinationPath =
+        environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
+    if (coordinationPath.length)
+        coordinationPath = preflightCoordinationMetrics(coordinationPath,
+            inputPath, outputPath, inputIsDir, configPath, manifestPath,
+            errorJournalPath);
     ubyte[32] executable, configHash;
     {
         auto identityStarted = beginDurableMetricV1();
@@ -1453,12 +1490,10 @@ int runApp(string[] args) {
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
     auto pending = explain ? new PendingExplanations : null;
-    auto coordinationPath =
-        environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
     auto coordination = coordinationPath.length ? new CoordinationMetricsV2 : null;
     scope(exit) if (coordination !is null) {
         coordination.finishWall();
-        write(coordinationPath, coordination.json() ~ "\n");
+        publishCoordinationMetrics(coordinationPath, coordination.json() ~ "\n");
     }
     auto publication = durableRoute ? null : new PublicationOrder(coordination);
     auto decisionMutex = new Mutex;
@@ -1713,6 +1748,33 @@ unittest {
     assert(runApp(["scrubbed", "--input", same, "--output", same,
         "--filters", "fix-mojibake", "--threads", "1"]) == 0);
     assert(readText(same) == "already clean");
+    {
+        auto priorMetrics =
+            environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
+        scope(exit) {
+            if (priorMetrics.length)
+                environment["SCRUBBED_COORDINATION_METRICS_V2"] = priorMetrics;
+            else environment.remove("SCRUBBED_COORDINATION_METRICS_V2");
+        }
+        auto separateOutput = buildPath(root, "metrics-collision-output.txt");
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = same;
+        assertThrown(runApp(["scrubbed", "--input", same,
+            "--output", separateOutput, "--filters", "fix-mojibake",
+            "--threads", "1"]));
+        assert(readText(same) == "already clean" && !exists(separateOutput));
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = separateOutput;
+        assertThrown(runApp(["scrubbed", "--input", same,
+            "--output", separateOutput, "--filters", "fix-mojibake",
+            "--threads", "1"]));
+        assert(readText(same) == "already clean" && !exists(separateOutput));
+        auto metricsPath = buildPath(root, "coordination-metrics.json");
+        environment["SCRUBBED_COORDINATION_METRICS_V2"] = metricsPath;
+        assert(runApp(["scrubbed", "--input", same,
+            "--output", separateOutput, "--filters", "fix-mojibake",
+            "--threads", "1"]) == 0);
+        assert(parseJSON(readText(metricsPath))["schema"].str ==
+            "scrubbed.coordination-metrics.v2");
+    }
 
     auto empty = buildPath(root, "empty.txt");
     auto emptyOut = buildPath(root, "empty-out.txt");

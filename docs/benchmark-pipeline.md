@@ -280,7 +280,7 @@ though its executed snapshot hash is retained.
 `scrubbed-cli-profile-v1` is an additive evidence artifact, not a production
 optimization or a speedup claim. `pipeline.d --attested-profile` creates the
 shipping release executable through the existing private
-`scrubbed-build-attestation-v4` closure, snapshots that executable and the
+`scrubbed-build-attestation-v5` closure, snapshots that executable and the
 D-only `pipeline_profile_check.d` harness, and lets the snapshot run the fixed
 matrix. The report can be deleted with its harness/docs to roll this slice
 back; no production format or behavior depends on it.
@@ -377,7 +377,11 @@ interleaved before/after evidence.
 `scrubbed-cli-attribution-v1` is an additive companion to the frozen canonical
 profile. It literal-pins that report and its historical target hash, while each
 new trace binds to the current-base target produced through the same complete
-`scrubbed-build-attestation-v4` closure. This distinction is explicit because
+`scrubbed-build-attestation-v5` closure. V5 isolates the recorded build
+environment, privately snapshots the user-writable CMake executable and its
+support tree, and requires every remaining native tool path to be root-owned
+and non-writable by the invoking account. V4 reports remain readable as
+historical evidence. This distinction is explicit because
 later additive production modules changed the shipping Mach-O without changing
 the frozen workload or expected output. The companion independently pins the existing
 record table, 524,288 × 256-byte corpus, layouts, scalar/mixed configs, and

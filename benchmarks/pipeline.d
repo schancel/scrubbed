@@ -2,7 +2,8 @@
 module pipeline;
 
 import core.sys.posix.signal : kill, SIGKILL;
-import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IXUSR, S_IRWXU;
+import core.sys.posix.sys.stat : chmod, mkdir, stat, stat_t, S_IRUSR, S_IWGRP,
+    S_IWOTH, S_IXUSR, S_IRWXU;
 import core.sys.posix.unistd : link;
 import core.thread : Thread;
 import std.algorithm.searching : canFind, endsWith, startsWith;
@@ -17,9 +18,9 @@ import std.file : SpanMode, copy, dirEntries, exists, getSize, mkdirRecurse,
     isSymlink, read, readLink, readText, remove, rename, rmdirRecurse, symlink,
     tempDir, write;
 import std.json : JSONType, JSONValue, parseJSON;
-import std.path : baseName, buildNormalizedPath, buildPath, isAbsolute,
+import std.path : baseName, buildNormalizedPath, buildPath, dirName, isAbsolute,
     relativePath;
-import std.process : environment, execute, spawnProcess, wait;
+import std.process : Config, environment, execute, spawnProcess, wait;
 import std.stdio : File, stderr, writeln;
 import std.string : indexOf, replace, split, splitLines, strip, toStringz;
 import std.uuid : randomUUID;
@@ -235,19 +236,42 @@ private string nativeCommandsHash(string[] commands) {
 
 private string nativeEnvironmentTemplate() {
     return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
-        "CC=<attested-selected-clang>; AR=<attested-ar>; " ~
-        "RANLIB=<attested-ranlib>; COMPILER_PATH=<private-pinned-tools>; " ~
-        "SDKROOT=<xcrun-selected-sdk>";
+        "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
+        "RANLIB=<system-protected-ranlib>; " ~
+        "COMPILER_PATH=<private-pinned-tools>; SDKROOT=<xcrun-selected-sdk>; " ~
+        "parent environment excluded";
 }
 
 private void requireCleanStatus(string status) {
     require(status.length == 0, "attested source checkout is not clean");
 }
 
+private auto executeIsolated(string[] args,
+        const string[string] environment) {
+    return execute(args, environment, Config.newEnv);
+}
+
+private string[string] systemCommandEnvironment() {
+    return ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"];
+}
+
 private string checkedEnv(string[] args, const string[string] environment) {
-    auto result = execute(args, environment);
+    auto result = executeIsolated(args, environment);
     require(result.status == 0, args[0] ~ " failed: " ~ result.output);
     return result.output.strip;
+}
+
+private string checkedSystem(string[] args) {
+    return checkedEnv(args, systemCommandEnvironment());
+}
+
+private auto executeSystem(string[] args) {
+    return executeIsolated(args, systemCommandEnvironment());
+}
+
+private string selectedCommand(string name) {
+    return checkedEnv(["/usr/bin/which", name], [
+        "PATH": environment.get("PATH", ""), "LC_ALL": "C"]);
 }
 
 private JSONValue describedPackage(JSONValue description, string name) {
@@ -353,6 +377,8 @@ private struct PreparedAttestedBuild {
     string dubVersion;
     NativeTool[] nativeTools;
     string nativeCommandsSha256;
+    string cmakeSupportSha256;
+    size_t cmakeSupportFiles;
     string pinnedToolDirectory;
     string sdkRoot;
     string sdkVersion;
@@ -371,6 +397,60 @@ private struct NativeTool {
     string role;
 }
 
+private string resolveToolPath(string path) {
+    auto result = path;
+    foreach (_; 0 .. 32) {
+        if (!isSymlink(result)) return result;
+        auto target = readLink(result);
+        result = isAbsolute(target) ? target :
+            buildNormalizedPath(dirName(result), target);
+    }
+    throw new Exception("native tool symlink chain is too deep");
+}
+
+private string treeDigest(string root, out size_t fileCount) {
+    string[] relatives;
+    foreach (entry; dirEntries(root, SpanMode.depth))
+        if (entry.isFile)
+            relatives ~= relativePath(entry.name, root);
+    relatives.sort();
+    SHA256 digest;
+    digestPart(digest, "scrubbed:attested-support-tree:v1");
+    foreach (relative; relatives) {
+        digestPart(digest, relative);
+        auto bytes = read(buildPath(root, relative));
+        digestPart(digest, bytes.length.to!string);
+        digest.put(cast(const(ubyte)[])bytes);
+    }
+    fileCount = relatives.length;
+    return toHexString(digest.finish()).to!string;
+}
+
+private void copyRegularTree(string source, string target) {
+    mkdirRecurse(target);
+    foreach (entry; dirEntries(source, SpanMode.depth)) {
+        auto destination = buildPath(target, relativePath(entry.name, source));
+        if (entry.isDir) mkdirRecurse(destination);
+        else if (entry.isFile) {
+            mkdirRecurse(dirName(destination));
+            copy(entry.name, destination);
+        } else throw new Exception("CMake support tree contains a special file");
+    }
+}
+
+private void requireSystemProtectedPath(string path) {
+    auto cursor = resolveToolPath(path);
+    while (true) {
+        stat_t info;
+        require(stat(cursor.toStringz, &info) == 0 && info.st_uid == 0 &&
+            (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+            "native tool path is mutable by the invoking account");
+        auto parent = dirName(cursor);
+        if (parent == cursor) break;
+        cursor = parent;
+    }
+}
+
 private enum unavailableToolVersion = "UNAVAILABLE";
 
 private string toolVersion(string name, string path) {
@@ -378,19 +458,19 @@ private string toolVersion(string name, string path) {
         return unavailableToolVersion;
     auto command = name.startsWith("ranlib-") ? [path, "-V"] :
         name == "linker" ? [path, "-v"] : [path, "--version"];
-    auto versionLine = checked(command).splitLines[0];
+    auto versionLine = checkedSystem(command).splitLines[0];
     require(versionLine.length != 0 && !versionLine.canFind('/') &&
         !versionLine.canFind('\\'), "unsafe or empty native tool version");
     return versionLine;
 }
 
 private NativeTool[] resolveNativeTools() {
-    auto ranlibDriver = checked(["which", "ranlib"]);
-    auto ranlibWriter = checked(["/usr/bin/xcrun", "--find", "ranlib"]);
+    auto ranlibDriver = selectedCommand("ranlib");
+    auto ranlibWriter = checkedSystem(["/usr/bin/xcrun", "--find", "ranlib"]);
     NativeTool[] result;
-    auto ccDriver = checked(["which", "cc"]);
-    auto ccCompiler = checked(["/usr/bin/xcrun", "--find", "clang"]);
-    require(checked([ccDriver, "--version"]).splitLines[0] ==
+    auto ccDriver = selectedCommand("cc");
+    auto ccCompiler = checkedSystem(["/usr/bin/xcrun", "--find", "clang"]);
+    require(checkedSystem([ccDriver, "--version"]).splitLines[0] ==
         toolVersion("cc-compiler", ccCompiler),
         "cc driver did not select the attested Clang compiler");
     result ~= NativeTool("cc-driver", ccDriver, hashFile(ccDriver),
@@ -399,8 +479,8 @@ private NativeTool[] resolveNativeTools() {
     result ~= NativeTool("cc-compiler", ccCompiler, hashFile(ccCompiler),
         toolVersion("cc-compiler", ccCompiler),
         "selected C compiler for SQLite, Lexbor, and zstd");
-    auto arDriver = checked(["which", "ar"]);
-    auto arWriter = checked(["/usr/bin/xcrun", "--find", "ar"]);
+    auto arDriver = selectedCommand("ar");
+    auto arWriter = checkedSystem(["/usr/bin/xcrun", "--find", "ar"]);
     auto archiveNames = ["ar-driver", "ar-writer", "ranlib-driver",
         "ranlib-writer"];
     auto archivePaths = [arDriver, arWriter, ranlibDriver, ranlibWriter];
@@ -412,7 +492,7 @@ private NativeTool[] resolveNativeTools() {
             hashFile(archivePaths[index]),
             toolVersion(name, archivePaths[index]),
             archiveRoles[index]);
-    auto linker = checked(["/usr/bin/xcrun", "--find", "ld"]);
+    auto linker = checkedSystem(["/usr/bin/xcrun", "--find", "ld"]);
     result ~= NativeTool("linker", linker, hashFile(linker),
         toolVersion("linker", linker),
         "selected final executable linker");
@@ -421,8 +501,8 @@ private NativeTool[] resolveNativeTools() {
         "Lexbor build generator", "Lexbor and zstd build executor"];
     foreach (index, name; names) {
         auto path = name == "make" ?
-            checked(["/usr/bin/xcrun", "--find", "make"]) :
-            checked(["which", name]);
+            checkedSystem(["/usr/bin/xcrun", "--find", "make"]) :
+            selectedCommand(name);
         require(baseName(path) == name, "native tool basename mismatch");
         result ~= NativeTool(name, path, hashFile(path),
             toolVersion(name, path), roles[index]);
@@ -477,6 +557,15 @@ private void verifyPinnedNativeTools(const(NativeTool)[] tools,
     }
 }
 
+private void verifyCmakeSupport(string pinnedDirectory, string expectedHash,
+        size_t expectedFiles) {
+    size_t files;
+    auto actual = treeDigest(buildPath(pinnedDirectory, "snapshots",
+        "cmake-root", "share", "cmake"), files);
+    require(files == expectedFiles && actual == expectedHash,
+        "private CMake support snapshot changed");
+}
+
 private void pinNativeTools(ref PreparedAttestedBuild result,
                             string scratchRoot) {
     result.nativeTools = resolveNativeTools();
@@ -485,32 +574,79 @@ private void pinNativeTools(ref PreparedAttestedBuild result,
     mkdirRecurse(result.pinnedToolDirectory);
     require(chmod(result.pinnedToolDirectory.toStringz, S_IRWXU) == 0,
         "cannot restrict pinned native tool directory");
-    foreach (tool; result.nativeTools) {
+    auto snapshots = buildPath(result.pinnedToolDirectory, "snapshots");
+    mkdirRecurse(snapshots);
+    foreach (ref tool; result.nativeTools) {
         auto pinnedName = tool.name == "cc-compiler" ? "cc" :
             tool.name == "ar-writer" ? "ar" :
             tool.name == "ranlib-writer" ? "ranlib" :
             tool.name == "linker" ? "ld" : tool.name;
-        if (!tool.name.endsWith("-driver"))
-            symlink(tool.path, buildPath(result.pinnedToolDirectory, pinnedName));
+        if (tool.name.endsWith("-driver")) continue;
+        auto originalPath = tool.path;
+        auto originalHash = tool.sha256;
+        if (tool.name != "cmake") {
+            requireSystemProtectedPath(originalPath);
+            symlink(originalPath,
+                buildPath(result.pinnedToolDirectory, pinnedName));
+            continue;
+        }
+        string snapshotPath;
+        auto resolved = resolveToolPath(originalPath);
+        auto prefix = dirName(dirName(resolved));
+        auto supportSource = buildPath(prefix, "share", "cmake");
+        auto supportTarget = buildPath(snapshots, "cmake-root", "share",
+            "cmake");
+        size_t sourceFilesBefore, sourceFilesAfter, snapshotFiles;
+        auto supportHashBefore = treeDigest(supportSource,
+            sourceFilesBefore);
+        mkdirRecurse(dirName(supportTarget));
+        copyRegularTree(supportSource, supportTarget);
+        result.cmakeSupportSha256 = treeDigest(supportTarget,
+            snapshotFiles);
+        auto supportHashAfter = treeDigest(supportSource,
+            sourceFilesAfter);
+        require(sourceFilesBefore == sourceFilesAfter &&
+            sourceFilesBefore == snapshotFiles &&
+            supportHashBefore == supportHashAfter &&
+            supportHashBefore == result.cmakeSupportSha256,
+            "CMake support tree changed while being snapshotted");
+        result.cmakeSupportFiles = snapshotFiles;
+        snapshotPath = buildPath(snapshots, "cmake-root", "bin", "cmake");
+        mkdirRecurse(dirName(snapshotPath));
+        copy(resolved, snapshotPath);
+        require(chmod(snapshotPath.toStringz, S_IRUSR | S_IXUSR) == 0 &&
+            hashFile(snapshotPath) == originalHash &&
+            hashFile(originalPath) == originalHash,
+            "native tool changed while being snapshotted");
+        tool.path = snapshotPath;
+        tool.sha256 = hashFile(snapshotPath);
+        require(toolVersion(tool.name, tool.path) == tool.version_,
+            "native tool snapshot version differs");
+        symlink(tool.path, buildPath(result.pinnedToolDirectory, pinnedName));
     }
+    require(result.cmakeSupportFiles > 0 &&
+        digestField(result.cmakeSupportSha256, 64),
+        "CMake support snapshot is empty");
 }
 
 private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
                                                     string scratchRoot) {
-    requireCleanStatus(checked(["git", "-C", sourceRoot, "status", "--porcelain",
+    requireCleanStatus(checkedSystem(["/usr/bin/git", "-C", sourceRoot, "status", "--porcelain",
         "--untracked-files=all"]));
     PreparedAttestedBuild result;
-    result.sourceSha = checked(["git", "-C", sourceRoot, "rev-parse", "HEAD"]);
-    result.treeId = checked(["git", "-C", sourceRoot, "rev-parse", "HEAD^{tree}"]);
+    result.sourceSha = checkedSystem(["/usr/bin/git", "-C", sourceRoot,
+        "rev-parse", "HEAD"]);
+    result.treeId = checkedSystem(["/usr/bin/git", "-C", sourceRoot,
+        "rev-parse", "HEAD^{tree}"]);
     require(digestField(result.sourceSha, 40) && digestField(result.treeId, 40),
         "invalid source revision identity");
     auto archive = buildPath(scratchRoot, "source.tar");
-    checked(["git", "-C", sourceRoot, "archive", "--format=tar",
+    checkedSystem(["/usr/bin/git", "-C", sourceRoot, "archive", "--format=tar",
         "--output=" ~ archive, result.sourceSha]);
     result.archiveHash = hashFile(archive);
     result.privateSource = buildPath(scratchRoot, "source-" ~ randomUUID.toString);
     mkdirRecurse(result.privateSource);
-    checked(["tar", "-xf", archive, "-C", result.privateSource]);
+    checkedSystem(["/usr/bin/tar", "-xf", archive, "-C", result.privateSource]);
     result.recipeHash = hashFile(buildPath(result.privateSource, "dub.json"));
     result.lockHash = hashFile(buildPath(result.privateSource,
         "dub.selections.json"));
@@ -521,7 +657,7 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     require(describedNativeCommands == nativePrebuildCommands(),
         "native pre-build command recipe changed");
     result.nativeCommandsSha256 = nativeCommandsHash(describedNativeCommands);
-    auto compilerSource = checked(["which", "ldc2"]);
+    auto compilerSource = selectedCommand("ldc2");
     require(baseName(compilerSource) == "ldc2",
         "attested compiler must resolve to ldc2");
     auto compilerSnapshot = snapshotExecutable(compilerSource, scratchRoot,
@@ -529,7 +665,7 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     result.compiler = compilerSnapshot.path;
     result.compilerHash = compilerSnapshot.sha256;
     result.compilerVersion = checked([result.compiler, "--version"]).splitLines[0];
-    auto dubSource = checked(["which", "dub"]);
+    auto dubSource = selectedCommand("dub");
     require(baseName(dubSource) == "dub",
         "attested build tool must resolve to dub");
     auto dubSnapshot = snapshotExecutable(dubSource, scratchRoot,
@@ -540,9 +676,9 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     require(result.dubVersion.startsWith("DUB version 1.42.0,"),
         "attested build requires verified DUB 1.42.0 target discovery");
     pinNativeTools(result, scratchRoot);
-    result.sdkRoot = checked(["/usr/bin/xcrun", "--show-sdk-path"]);
-    result.sdkVersion = checked(["/usr/bin/xcrun", "--show-sdk-version"]);
-    result.sdkBuildVersion = checked(
+    result.sdkRoot = checkedSystem(["/usr/bin/xcrun", "--show-sdk-path"]);
+    result.sdkVersion = checkedSystem(["/usr/bin/xcrun", "--show-sdk-version"]);
+    result.sdkBuildVersion = checkedSystem(
         ["/usr/bin/xcrun", "--show-sdk-build-version"]);
     require(result.sdkVersion.length != 0 &&
         result.sdkBuildVersion.length != 0 &&
@@ -595,7 +731,7 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
 }
 
 private void validateAttestation(JSONValue attestation, string targetHash) {
-    require(attestation["schema"].str == "scrubbed-build-attestation-v4",
+    require(attestation["schema"].str == "scrubbed-build-attestation-v5",
         "build attestation schema");
     foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
                    "dub_recipe_sha256", "dependency_lock_sha256",
@@ -628,12 +764,14 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
         attestation["native_prebuild_command_count"].integer == 5 &&
         attestation["native_environment_template"].str ==
             nativeEnvironmentTemplate() &&
+        digestField(attestation["cmake_support_sha256"].str, 64) &&
+        attestation["cmake_support_files"].integer > 0 &&
         attestation["sdk_version"].str.length != 0 &&
         attestation["sdk_build_version"].str.length != 0 &&
         !attestation["sdk_version"].str.canFind('/') &&
         !attestation["sdk_build_version"].str.canFind('/') &&
         attestation["native_tool_policy"].str ==
-            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified" &&
+            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" &&
         attestation["linker_selection"].str ==
             "COMPILER_PATH private ld selected by attested compiler -### trace" &&
         attestation["build_command_template"].str == attestedBuildCommand() &&
@@ -699,7 +837,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     if (ambientPathSwap.length)
         environment["PATH"] = ambientPathSwap ~
             ":/usr/bin:/bin:/usr/sbin:/sbin";
-    auto buildResult = execute([prepared.dub, "build",
+    auto buildResult = executeIsolated([prepared.dub, "build",
         "--root=" ~ prepared.privateSource,
         "--build=release", "--compiler=" ~ prepared.compiler, "--force",
         "--non-interactive", "--cache=local"], prepared.environment);
@@ -709,6 +847,9 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "private compiler or DUB snapshot changed during attested build");
     verifyDependencyInputs(prepared.dependency);
     verifyNativeTools(prepared.nativeTools);
+    verifyPinnedNativeTools(prepared.nativeTools, prepared.pinnedToolDirectory);
+    verifyCmakeSupport(prepared.pinnedToolDirectory,
+        prepared.cmakeSupportSha256, prepared.cmakeSupportFiles);
     auto cmakeCache = readText(buildPath(prepared.privateSource, ".dub",
         "lexbor", "CMakeCache.txt"));
     requireCmakeSelection(cmakeCache, "CMAKE_C_COMPILER",
@@ -719,15 +860,17 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         nativeTool(prepared.nativeTools, "ranlib-writer").path);
     requireCmakeSelection(cmakeCache, "CMAKE_MAKE_PROGRAM",
         buildPath(prepared.pinnedToolDirectory, "make"));
-    requireCleanStatus(checked(["git", "-C", sourceRoot, "status", "--porcelain",
-        "--untracked-files=all"]));
-    require(checked(["git", "-C", sourceRoot, "rev-parse", "HEAD"]) ==
+    requireCleanStatus(checkedSystem(["/usr/bin/git", "-C", sourceRoot,
+        "status", "--porcelain", "--untracked-files=all"]));
+    require(checkedSystem(["/usr/bin/git", "-C", sourceRoot,
+            "rev-parse", "HEAD"]) ==
             prepared.sourceSha &&
-        checked(["git", "-C", sourceRoot, "rev-parse", "HEAD^{tree}"]) ==
+        checkedSystem(["/usr/bin/git", "-C", sourceRoot,
+            "rev-parse", "HEAD^{tree}"]) ==
             prepared.treeId,
         "source revision changed during attested build");
     auto archiveAfter = buildPath(scratchRoot, "source-after.tar");
-    checked(["git", "-C", sourceRoot, "archive", "--format=tar",
+    checkedSystem(["/usr/bin/git", "-C", sourceRoot, "archive", "--format=tar",
         "--output=" ~ archiveAfter, prepared.sourceSha]);
     require(hashFile(archiveAfter) == prepared.archiveHash &&
         hashFile(buildPath(prepared.privateSource, "dub.json")) ==
@@ -740,7 +883,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     auto snapshot = snapshotExpectedExecutable(prepared.target, scratchRoot,
         "scrubbed-attested-snapshot", targetHash);
     JSONValue attestation = JSONValue([
-        "schema": JSONValue("scrubbed-build-attestation-v4"),
+        "schema": JSONValue("scrubbed-build-attestation-v5"),
         "source_sha": JSONValue(prepared.sourceSha),
         "source_tree_id": JSONValue(prepared.treeId),
         "source_archive_sha256": JSONValue(prepared.archiveHash),
@@ -769,8 +912,10 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
             prepared.nativeCommandsSha256),
         "native_prebuild_command_count": JSONValue(5),
         "native_environment_template": JSONValue(nativeEnvironmentTemplate()),
+        "cmake_support_sha256": JSONValue(prepared.cmakeSupportSha256),
+        "cmake_support_files": JSONValue(cast(long)prepared.cmakeSupportFiles),
         "native_tool_policy": JSONValue(
-            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified"),
+            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
         "native_tools": nativeToolsJson(prepared.nativeTools),
         "archive_suite_evidence": archiveSuiteJson(prepared.nativeTools),
         "linker_selection": JSONValue(
@@ -969,7 +1114,7 @@ private void validateChangedExecutableControl(JSONValue report) {
 }
 
 private JSONValue changedExecutableControl(string source, string root, bool mac) {
-    auto compiler = checked(["which", "ldc2"]);
+    auto compiler = selectedCommand("ldc2");
     require(baseName(compiler) == "ldc2", "control compiler must resolve to ldc2");
     auto a = buildControlVariant(source, root, compiler,
         "attestation-variant-a", "AttestationVariantA");
@@ -1377,6 +1522,18 @@ private void validate(JSONValue report) {
 }
 
 private void selfTest() {
+    auto priorParentMarker = environment.get("SCRUBBED_PARENT_MARKER", "");
+    scope(exit) {
+        if (priorParentMarker.length)
+            environment["SCRUBBED_PARENT_MARKER"] = priorParentMarker;
+        else environment.remove("SCRUBBED_PARENT_MARKER");
+    }
+    environment["SCRUBBED_PARENT_MARKER"] = "must-not-inherit";
+    auto isolatedEnvironment = executeIsolated(["/usr/bin/env"], [
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]);
+    require(isolatedEnvironment.status == 0 &&
+        !isolatedEnvironment.output.canFind("SCRUBBED_PARENT_MARKER"),
+        "isolated build environment inherited a parent variable");
     JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v3"),
         "source_sha": JSONValue("0".replicate(40)),
         "binary_sha256": JSONValue("0".replicate(64)),
@@ -1422,7 +1579,7 @@ private void selfTest() {
                 unavailableToolVersion : "test " ~ name),
             "role": JSONValue(nativeRoles[index])]);
     JSONValue buildAttestation = JSONValue([
-        "schema": JSONValue("scrubbed-build-attestation-v4"),
+        "schema": JSONValue("scrubbed-build-attestation-v5"),
         "source_sha": JSONValue("0".replicate(40)),
         "source_tree_id": JSONValue("1".replicate(40)),
         "source_archive_sha256": JSONValue("2".replicate(64)),
@@ -1448,8 +1605,10 @@ private void selfTest() {
         "native_prebuild_commands_sha256": JSONValue("9".replicate(64)),
         "native_prebuild_command_count": JSONValue(5),
         "native_environment_template": JSONValue(nativeEnvironmentTemplate()),
+        "cmake_support_sha256": JSONValue("a".replicate(64)),
+        "cmake_support_files": JSONValue(1),
         "native_tool_policy": JSONValue(
-            "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified"),
+            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
         "native_tools": JSONValue(nativeToolFixtures),
         "archive_suite_evidence": JSONValue([
             "schema": JSONValue("scrubbed-archive-suite-evidence-v1"),
@@ -1824,6 +1983,10 @@ private void selfTest() {
     contradictoryControl["controls_within_five_percent"] = false;
     requireCoordinationRejected(contradictoryControl,
         "contradictory coordination control summary");
+    auto contradictoryThreshold = parseJSON(coordination.toString);
+    contradictoryThreshold["thresholds_satisfied"] = false;
+    requireCoordinationRejected(contradictoryThreshold,
+        "contradictory coordination threshold summary");
     auto wrongInput = parseJSON(coordination.toString);
     wrongInput["layouts"].array[0]["input_bytes"] = 1;
     requireCoordinationRejected(wrongInput,
@@ -1838,6 +2001,14 @@ private void selfTest() {
         ["worker_descriptors"] = 0;
     requireCoordinationRejected(wrongMetrics,
         "invalid coordination metrics envelope");
+    auto extraMeasurementField = parseJSON(coordination.toString);
+    extraMeasurementField["unexpected"] = true;
+    requireCoordinationRejected(extraMeasurementField,
+        "extended coordination measurement envelope");
+    auto wrongFixturePin = parseJSON(coordination.toString);
+    wrongFixturePin["fixture_table_sha256"] = "0".replicate(64);
+    requireCoordinationRejected(wrongFixturePin,
+        "wrong coordination fixture identity");
     auto improvementBoundary = parseJSON(coordination.toString);
     foreach (side; ["baseline_samples", "candidate_samples"])
         foreach (ref coordinationSample;
@@ -1847,6 +2018,7 @@ private void selfTest() {
                     side == "baseline_samples" ? 101 : 91;
     improvementBoundary["target_baseline_median_wall_us"] = 101;
     improvementBoundary["target_candidate_median_wall_us"] = 91;
+    improvementBoundary["thresholds_satisfied"] = false;
     require(!recomputeCoordinationThresholds(improvementBoundary),
         "sub-ten-percent coordination improvement passed");
     require(coordinationWithinFivePercent(101, 106) &&
@@ -1921,7 +2093,7 @@ private JSONValue compareDos2unix(string scrubbed, string dos2unix,
         samples[2]["tool"].str == "scrubbed" &&
         samples[3]["tool"].str == "dos2unix", "A/B/A/B order");
     JSONValue report = JSONValue(["schema": JSONValue("scrubbed-comparator-v3")]);
-    report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
+    report["source_sha"] = checkedSystem(["/usr/bin/git", "rev-parse", "HEAD"]);
     report["source_binary_mapping"] = "UNVERIFIED";
     report["harness_sha256"] = hashFile("benchmarks/pipeline.d");
     report["scrubbed_binary_sha256"] = scrubbedCopy.sha256;
@@ -2067,6 +2239,21 @@ private enum coordinationInputBytes = 134_217_728L;
 private enum coordinationOutputBytes = 132_579_328L;
 private enum coordinationOutputConcatenated =
     "870D401642B372263AED96C938DE8B2E1E1A466DDCEFA193085889435665A069";
+private enum coordinationFixtureTable =
+    "34B08DAEE0547466C0EEF809A0A1BEDBDC4FEE26BEABE23F4478BBDAFFF0727E";
+private enum coordinationConfig =
+    "FC1829939C5EC9347EFBD576978F3EBE017F069C525157FDCC626E8842EBD7FB";
+
+private string[] coordinationMeasurementKeys() {
+    return ["schema", "version", "host_os", "host_architecture", "host_cpu",
+        "baseline_binary_sha256", "candidate_binary_sha256", "harness_sha256",
+        "fixture_table_sha256", "config_sha256", "cache_semantics",
+        "control_method", "target_wins", "target_baseline_median_wall_us",
+        "target_candidate_median_wall_us", "target_baseline_median_queue_ns",
+        "target_candidate_median_queue_ns", "controls_within_five_percent",
+        "thresholds_satisfied", "production_candidate_authorized", "decision",
+        "baseline_attribution", "candidate_attribution", "layouts"];
+}
 
 private void coordinationRequireKeys(ref JSONValue value, string[] expected,
         string label) {
@@ -2099,8 +2286,8 @@ private void validateCoordinationMetrics(ref JSONValue sample) {
     auto byteLimit = coordinationNonnegative(limits, "reserved_bytes", "limits");
     auto descriptorLimit = coordinationNonnegative(limits,
         "worker_descriptors", "limits");
-    require(queuedLimit > 0 && byteLimit > 0 && descriptorLimit > 0,
-        "coordination metrics limits are empty");
+    require(queuedLimit == 64 && byteLimit == 268_435_456 &&
+        descriptorLimit == 4, "coordination metrics limits differ");
     auto counts = metrics["counts"];
     coordinationRequireKeys(counts, ["queued_documents", "reserved_bytes",
         "worker_descriptors", "peak_queued_documents", "peak_reserved_bytes",
@@ -2254,6 +2441,27 @@ private long coordinationQueueValue(JSONValue[] samples, long ordinal) {
 }
 
 private bool recomputeCoordinationThresholds(ref JSONValue report) {
+    coordinationRequireKeys(report, coordinationMeasurementKeys(),
+        "coordination measurement");
+    require(report["schema"].str ==
+            "scrubbed.coordination-scheduler-measurement.v2" &&
+        report["version"].integer == 2 &&
+        report["host_os"].str.length > 0 &&
+        report["host_architecture"].str.length > 0 &&
+        report["host_cpu"].str.length > 0 &&
+        digestField(report["baseline_binary_sha256"].str, 64) &&
+        digestField(report["candidate_binary_sha256"].str, 64) &&
+        digestField(report["harness_sha256"].str, 64) &&
+        report["fixture_table_sha256"].str == coordinationFixtureTable &&
+        report["config_sha256"].str == coordinationConfig &&
+        report["cache_semantics"].str ==
+            "application-cold; OS cache uncontrolled" &&
+        report["control_method"].str ==
+            "at least three of five exact paired candidate values <= 105% of baseline" &&
+        !report["production_candidate_authorized"].boolean &&
+        report["decision"].str ==
+            "MEASUREMENT_ONLY_REQUIRES_PIPELINE_ATTESTATION",
+        "coordination measurement envelope differs");
     auto layouts = report["layouts"].array;
     require(layouts.length == 2, "coordination layout cardinality differs");
     JSONValue[] manyBaseline, manyCandidate;
@@ -2334,10 +2542,13 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
         "coordination derived summary differs from raw samples");
     auto requiredImprovement = baselineWall / 10 +
         (baselineWall % 10 != 0 ? 1 : 0);
-    return targetWins >= 4 && baselineWall > 0 && candidateWall >= 0 &&
+    auto accepted = targetWins >= 4 && baselineWall > 0 && candidateWall >= 0 &&
         candidateWall < baselineWall &&
         baselineWall - candidateWall >= requiredImprovement &&
         candidateQueueMedian < baselineQueueMedian && controlsPass;
+    require(report["thresholds_satisfied"].boolean == accepted,
+        "coordination threshold summary differs from raw samples");
+    return accepted;
 }
 
 private void requireCoordinationRejected(JSONValue report, string label) {
@@ -2465,6 +2676,21 @@ private JSONValue coordinationMeasurementFixture() {
         candidateAttribution ~= attribution(90);
     }
     return JSONValue([
+        "schema": JSONValue(
+            "scrubbed.coordination-scheduler-measurement.v2"),
+        "version": JSONValue(2),
+        "host_os": JSONValue("test-os"),
+        "host_architecture": JSONValue("test-architecture"),
+        "host_cpu": JSONValue("test-cpu"),
+        "baseline_binary_sha256": JSONValue("1".replicate(64)),
+        "candidate_binary_sha256": JSONValue("2".replicate(64)),
+        "harness_sha256": JSONValue("3".replicate(64)),
+        "fixture_table_sha256": JSONValue(coordinationFixtureTable),
+        "config_sha256": JSONValue(coordinationConfig),
+        "cache_semantics": JSONValue(
+            "application-cold; OS cache uncontrolled"),
+        "control_method": JSONValue(
+            "at least three of five exact paired candidate values <= 105% of baseline"),
         "layouts": JSONValue(layouts),
         "baseline_attribution": JSONValue(baselineAttribution),
         "candidate_attribution": JSONValue(candidateAttribution),
@@ -2473,7 +2699,11 @@ private JSONValue coordinationMeasurementFixture() {
         "target_candidate_median_wall_us": JSONValue(90),
         "target_baseline_median_queue_ns": JSONValue(100),
         "target_candidate_median_queue_ns": JSONValue(90),
-        "controls_within_five_percent": JSONValue(true)]);
+        "controls_within_five_percent": JSONValue(true),
+        "thresholds_satisfied": JSONValue(true),
+        "production_candidate_authorized": JSONValue(false),
+        "decision": JSONValue(
+            "MEASUREMENT_ONLY_REQUIRES_PIPELINE_ATTESTATION")]);
 }
 
 int main(string[] args) {
@@ -2484,13 +2714,13 @@ int main(string[] args) {
             require(digestField(args[3], 40) && digestField(args[5], 40) &&
                 args[3] != args[5],
                 "coordination source revisions must be distinct full commits");
-            auto baselineHead = checked(
-                ["git", "-C", args[2], "rev-parse", "HEAD^{commit}"]);
-            auto candidateHead = checked(
-                ["git", "-C", args[4], "rev-parse", "HEAD^{commit}"]);
+            auto baselineHead = checkedSystem(
+                ["/usr/bin/git", "-C", args[2], "rev-parse", "HEAD^{commit}"]);
+            auto candidateHead = checkedSystem(
+                ["/usr/bin/git", "-C", args[4], "rev-parse", "HEAD^{commit}"]);
             require(baselineHead == args[3] && candidateHead == args[5],
                 "coordination source root differs from expected revision");
-            require(execute(["git", "-C", args[4], "merge-base",
+            require(executeSystem(["/usr/bin/git", "-C", args[4], "merge-base",
                 "--is-ancestor", args[3], args[5]]).status == 0,
                 "coordination baseline is not an ancestor of candidate");
             auto expectedHarnessSource = buildPath(args[4], "benchmarks",
@@ -2530,7 +2760,7 @@ int main(string[] args) {
             verifyNativeTools(candidate.nativeTools);
             verifyPinnedNativeTools(candidate.nativeTools,
                 candidate.pinnedToolDirectory);
-            auto harnessBuild = execute([candidate.compiler.path, "-O3", "-release",
+            auto harnessBuild = executeIsolated([candidate.compiler.path, "-O3", "-release",
                 "-Xcc=-v", harnessSourceSnapshot.path, "-of=" ~ harnessTarget],
                 candidate.buildEnvironment);
             require(harnessBuild.status == 0,
@@ -2588,6 +2818,13 @@ int main(string[] args) {
             report["decision"] = recomputedThresholds ?
                 "AUTHORIZED_BOUNDED_WORKER_AVAILABILITY" :
                 "REJECTED_THRESHOLD_NOT_MET";
+            coordinationRequireKeys(report, coordinationMeasurementKeys() ~ [
+                "measurement_schema", "source_binary_mapping",
+                "expected_baseline_source_sha", "expected_candidate_source_sha",
+                "baseline_build_attestation", "candidate_build_attestation",
+                "measurement_harness_source_sha256",
+                "measurement_harness_compiler_sha256"],
+                "coordination comparison");
             auto finalText = report.toString ~ "\n";
             parseJSON(finalText);
             publishExclusive(args[6], finalText);
@@ -2595,13 +2832,15 @@ int main(string[] args) {
             return 0;
         }
         if (args.length == 7 && args[1] == "--attested-attribution") {
-            auto expectedSource = checked(["git", "-C", args[2], "rev-parse", "HEAD"]);
-            auto historicalMergeBase = execute(["git", "-C", args[2], "merge-base",
+            auto expectedSource = checkedSystem(["/usr/bin/git", "-C", args[2],
+                "rev-parse", "HEAD"]);
+            auto historicalMergeBase = executeSystem(["/usr/bin/git", "-C",
+                args[2], "merge-base",
                 "61e8ff9c70ff51842c1dd0063dc253fccc29f1dd", expectedSource]);
             require(historicalMergeBase.status == 0 &&
                 historicalMergeBase.output.strip ==
                     "65789b90b294b9d0edfe4270d8654e120e7c4928" &&
-                execute(["git", "-C", args[2], "merge-base", "--is-ancestor",
+                executeSystem(["/usr/bin/git", "-C", args[2], "merge-base", "--is-ancestor",
                     "0fe58a0955e1afe16894c91acfdb7bf59077eee5", expectedSource]).status == 0,
                 "canonical profile/current attribution source ancestry differs");
             auto root = privateScratch("scrubbed-canonical-attribution-build-");
@@ -2749,7 +2988,8 @@ int main(string[] args) {
             report["large_preflight"] = preflight;
         }
         report["source_sha"] = attestedMode ?
-            built.attestation["source_sha"].str : checked(["git", "rev-parse", "HEAD"]);
+            built.attestation["source_sha"].str :
+            checkedSystem(["/usr/bin/git", "rev-parse", "HEAD"]);
         report["binary_sha256"] = binaryCopy.sha256;
         report["binary_identity_policy"] = identityPolicy();
         report["source_binary_mapping"] = attestedMode ? "ATTESTED" : "UNVERIFIED";

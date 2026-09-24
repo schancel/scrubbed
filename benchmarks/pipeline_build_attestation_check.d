@@ -90,8 +90,10 @@ int main(string[] args) {
             "native PATH swap control failed: " ~ pathSwap.output);
         auto nativeAttestation = parseJSON(readText(nativePathReport));
         require(nativeAttestation["schema"].str ==
-                "scrubbed-build-attestation-v4" &&
+                "scrubbed-build-attestation-v5" &&
             nativeAttestation["native_tools"].array.length == 9 &&
+            digest(nativeAttestation["cmake_support_sha256"].str) &&
+            nativeAttestation["cmake_support_files"].integer > 0 &&
             nativeAttestation["primary_tool_policy"].str ==
                 "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
             nativeAttestation["linker_selection"].str ==
@@ -143,7 +145,7 @@ int main(string[] args) {
         auto attestation = report["build_attestation"];
         require(report["schema"].str == "scrubbed-pipeline-v5" &&
             report["source_binary_mapping"].str == "ATTESTED" &&
-            attestation["schema"].str == "scrubbed-build-attestation-v4" &&
+            attestation["schema"].str == "scrubbed-build-attestation-v5" &&
             attestation["source_sha"].str ==
                 checked(["git", "-C", source, "rev-parse", "HEAD"]) &&
             attestation["source_materialization"].str ==
@@ -157,6 +159,8 @@ int main(string[] args) {
             digest(attestation["argparse_inputs_sha256"].str) &&
             digest(attestation["native_prebuild_commands_sha256"].str) &&
             attestation["native_prebuild_command_count"].integer == 5 &&
+            digest(attestation["cmake_support_sha256"].str) &&
+            attestation["cmake_support_files"].integer > 0 &&
             attestation["native_tools"].array.length == 9 &&
             attestation["sdk_version"].str.length != 0 &&
             attestation["sdk_build_version"].str.length != 0 &&

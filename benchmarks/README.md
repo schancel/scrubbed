@@ -50,7 +50,9 @@ rm -f benchmarks/coordination-profile-evidence.json
 The performance series does not set the metrics environment or run stack/GC
 probes. The attribution series sets `SCRUBBED_COORDINATION_METRICS_V2`; its
 first sample per thread also records a D-GC availability control and attempts
-a one-second `/usr/bin/sample` trace. Darwin `wait4` supplies direct-child CPU
+a one-second `/usr/bin/sample` trace. The metrics destination must be a new
+plain file outside the input, output, config, manifest, and journal routes;
+publication is create-only. Darwin `wait4` supplies direct-child CPU
 and peak RSS. FD counts are sampled with `lsof`, and exact child syscall counts
 are explicitly unsupported. OS cache state is uncontrolled and is never
 described as cold. Transform nanoseconds use the executing worker's thread CPU
@@ -103,7 +105,7 @@ private attested-build closure, requires the exact distinct commits and
 base-to-candidate ancestry, and compiles the measurement harness from the
 attested candidate source with the snapshotted compiler. The measurement
 harness can only write a non-authoritative report inside pipeline-private
-scratch. The pipeline re-derives the gate, embeds both complete v4 build
+scratch. The pipeline re-derives the gate, embeds both complete v5 build
 attestations, and exclusively publishes the final v2 report. It alternates
 base/candidate order for
 five pairs at threads 1/2/4

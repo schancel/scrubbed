@@ -6,7 +6,6 @@ import domain.structured_chunks : ChunkId, ChunkMetadata, StructuredChunk,
     chunkId, chunkSchema, maxChunkBytes, maxMetadataBytes,
     maxStructuredTextBytes;
 import std.array : Appender, appender;
-import std.conv : to;
 import std.exception : enforce;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.utf : validate;
@@ -17,11 +16,21 @@ private void putQuoted(ref Appender!string output, string value) {
     JSONValue(value).toString(output);
 }
 
+private void putUnsigned(ref Appender!string output, ulong value) {
+    char[20] digits;
+    size_t start = digits.length;
+    do {
+        digits[--start] = cast(char)('0' + value % 10);
+        value /= 10;
+    } while (value);
+    output.put(digits[start .. $]);
+}
+
 private void putNumbers(ref Appender!string output, const(uint)[] values) {
     output.put("[");
     foreach (i, value; values) {
         if (i) output.put(",");
-        output.put(value.to!string);
+        putUnsigned(output, value);
     }
     output.put("]");
 }
@@ -86,7 +95,7 @@ string encodeChunkJsonl(const ref StructuredChunk chunk) {
         chunk.metadata.title.length + chunk.metadata.sourceLabel.length +
         chunk.text.length + 256);
     row.put("{\"schema\":\"structured-chunk:v1\",\"version\":");
-    row.put(chunkSchema.to!string);
+    putUnsigned(row, chunkSchema);
     row.put(",\"document_id\":");
     putQuoted(row, chunk.documentId.text);
     row.put(",\"content_revision\":");
@@ -94,9 +103,9 @@ string encodeChunkJsonl(const ref StructuredChunk chunk) {
     row.put(",\"chunk_id\":");
     putQuoted(row, chunk.id.text);
     row.put(",\"start\":");
-    row.put(chunk.start.to!string);
+    putUnsigned(row, chunk.start);
     row.put(",\"end\":");
-    row.put(chunk.end.to!string);
+    putUnsigned(row, chunk.end);
     row.put(",\"path\":");
     putNumbers(row, chunk.path);
     row.put(",\"section_paths\":");

@@ -11,7 +11,7 @@ import std.conv : to;
 import std.file : thisExePath;
 import std.process : execute;
 import std.stdio : writeln;
-import std.string : replace, split, strip;
+import std.string : indexOf, replace, split, strip;
 
 private enum ulong structuredRssCeiling = 256UL * 1024 * 1024;
 
@@ -171,6 +171,12 @@ void main(string[] args) {
         "\"metadata\":{\"language\":\"en\",\"title\":\"Paragraph\"," ~
         "\"source_label\":\"page 1\"},\"text\":\"A\xc3\xa9\\n\"}\n";
     check(row == expected, "canonical JSONL golden");
+    auto maximumOrdinal = chunkStructured(id, "rev-max", "x",
+        [StructuredSpan(SpanKind.paragraph, 0, 1, [uint.max])]);
+    check(maximumOrdinal.length == 1 &&
+        encodeChunkJsonl(maximumOrdinal[0]).indexOf(
+            `"path":[4294967295,0]`) >= 0,
+        "maximum unsigned path ordinal");
     auto decoded = decodeChunkJsonl(row);
     check(encodeChunkJsonl(decoded) == row && decoded.id == chunks[0].id &&
         decoded.metadata.title == "Paragraph", "JSONL round trip");

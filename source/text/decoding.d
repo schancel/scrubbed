@@ -1,7 +1,6 @@
 /// Strict raw-byte to Unicode boundary. No charset guessing or replacement decoding.
 module text.decoding;
 
-import std.ascii : toLower;
 import std.exception : enforce;
 
 enum TextEncoding { utf8, utf16le, utf16be }
@@ -57,28 +56,77 @@ struct DecodeOutcome {
 
 private enum Charset { absent, utf8, utf16le, utf16be, ambiguous, unsupported }
 
-private bool asciiSpace(char c) pure {
+private bool asciiSpace(char c) pure nothrow @nogc {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
-private Charset parseCharset(string label) pure {
+private bool asciiEqualIgnoreCase(string value, string expected) pure nothrow @nogc {
+    if (value.length != expected.length) return false;
+    foreach (i, c; value) {
+        ubyte folded = cast(ubyte) c;
+        if (folded >= 'A' && folded <= 'Z') folded += 'a' - 'A';
+        if (folded != cast(ubyte) expected[i]) return false;
+    }
+    return true;
+}
+
+private Charset parseCharset(string label) pure nothrow @nogc {
     if (label is null) return Charset.absent;
     size_t start;
     size_t end = label.length;
     while (start < end && asciiSpace(label[start])) ++start;
     while (end > start && asciiSpace(label[end - 1])) --end;
-    auto normalized = label[start .. end].dup;
-    foreach (ref c; normalized) {
-        if (cast(ubyte) c > 0x7f) return Charset.unsupported;
-        c = toLower(c);
+    const normalized = label[start .. end];
+    switch (normalized.length) {
+        case 4:
+            if (asciiEqualIgnoreCase(normalized, "utf8")) return Charset.utf8;
+            break;
+        case 5:
+            if (asciiEqualIgnoreCase(normalized, "utf-8")) return Charset.utf8;
+            if (asciiEqualIgnoreCase(normalized, "utf16")) return Charset.ambiguous;
+            break;
+        case 6:
+            if (asciiEqualIgnoreCase(normalized, "utf-16")) return Charset.ambiguous;
+            break;
+        case 7:
+            if (asciiEqualIgnoreCase(normalized, "utf16le")) return Charset.utf16le;
+            if (asciiEqualIgnoreCase(normalized, "utf16be")) return Charset.utf16be;
+            break;
+        case 8:
+            if (asciiEqualIgnoreCase(normalized, "utf-16le")) return Charset.utf16le;
+            if (asciiEqualIgnoreCase(normalized, "utf-16be")) return Charset.utf16be;
+            break;
+        default: break;
     }
-    switch (normalized) {
-        case "utf-8": case "utf8": return Charset.utf8;
-        case "utf-16le": case "utf16le": return Charset.utf16le;
-        case "utf-16be": case "utf16be": return Charset.utf16be;
-        case "utf-16": case "utf16": return Charset.ambiguous;
-        default: return Charset.unsupported;
+    return Charset.unsupported;
+}
+
+unittest {
+    void checkCaseVariants(string spelling, Charset expected) {
+        foreach (mask; 0 .. 1 << spelling.length) {
+            auto variant = spelling.dup;
+            foreach (i, ref c; variant) {
+                if ((mask & (1 << i)) && c >= 'a' && c <= 'z') c -= 'a' - 'A';
+            }
+            assert(parseCharset(cast(string) variant) == expected);
+            auto padded = "\t" ~ variant ~ "\r";
+            assert(parseCharset(cast(string) padded) == expected);
+        }
     }
+
+    checkCaseVariants("utf8", Charset.utf8);
+    checkCaseVariants("utf-8", Charset.utf8);
+    checkCaseVariants("utf16le", Charset.utf16le);
+    checkCaseVariants("utf-16le", Charset.utf16le);
+    checkCaseVariants("utf16be", Charset.utf16be);
+    checkCaseVariants("utf-16be", Charset.utf16be);
+    checkCaseVariants("utf16", Charset.ambiguous);
+    checkCaseVariants("utf-16", Charset.ambiguous);
+    assert(parseCharset(null) == Charset.absent);
+    assert(parseCharset("") == Charset.unsupported);
+    assert(parseCharset("utf_8") == Charset.unsupported);
+    assert(parseCharset("utf-16xx") == Charset.unsupported);
+    assert(parseCharset("utf-\u00e9") == Charset.unsupported);
 }
 
 private bool matches(Charset label, TextEncoding encoding) pure {

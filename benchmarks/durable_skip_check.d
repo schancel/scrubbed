@@ -193,11 +193,12 @@ private Observation invoke(string[] args, string root, string label,
     shared bool stopped;
     shared size_t peak, fdSamples, fdErrors;
     auto sampler = new Thread({
+        ubyte[64 * 1024] fdBuffer;
         while (!atomicLoad(stopped)) {
             version(OSX) {
                 auto bytes = proc_pidinfo(child.processID, procPidListFds,
-                    0, null, 0);
-                if (bytes >= 0) {
+                    0, fdBuffer.ptr, cast(int)fdBuffer.length);
+                if (bytes > 0) {
                     auto count = cast(size_t)bytes / 8;
                     atomicStore(fdSamples, atomicLoad(fdSamples) + 1);
                     if (count > atomicLoad(peak)) atomicStore(peak, count);
@@ -389,7 +390,9 @@ private JSONValue upgradeProof(ComparisonTarget[] targets, string root,
         retryOutput.concatenated == expected.concatenated,
         stem ~ " candidate retry changed output");
     need(retry.metrics["phases"]["compiled_execution"]["calls"].integer ==
-        layout.files, stem ~ " candidate retry execution mismatch");
+            layout.files &&
+        retry.metrics["phases"]["publication"]["calls"].integer == layout.files,
+        stem ~ " candidate retry execution/publication mismatch");
 
     string[] replayArgs = [targets[1].binary, "run", "--input", input,
         "--output", output, "--threads", "1", "--explain"];
@@ -734,7 +737,8 @@ private void validateComparisonReport(string path, string baseBinary,
         method["ordering"].str ==
             "paired alternating base/candidate and mode order" &&
         method["runs_per_case"].integer == comparisonRuns &&
-        method["instrumentation"].str == "default-off",
+        method["instrumentation"].str ==
+            "durable-phase-metrics-enabled; production-default-off",
         "comparison method mismatch");
     auto thresholds = report["thresholds"];
     need(exactKeys(thresholds, ["material_improvement_percent",
@@ -786,8 +790,7 @@ private void validateComparisonReport(string path, string baseBinary,
                 proof["base_execution_calls"].integer == expected.files &&
                 proof["candidate_retry_execution_calls"].integer ==
                     expected.files &&
-                proof["candidate_retry_publication_calls"].integer >= 0 &&
-                proof["candidate_retry_publication_calls"].integer <=
+                proof["candidate_retry_publication_calls"].integer ==
                     expected.files &&
                 proof["candidate_replay_execution_calls"].integer == 0 &&
                 proof["candidate_replay_publication_calls"].integer == 0,
@@ -820,7 +823,8 @@ private void validateComparisonReport(string path, string baseBinary,
                 row["fd_poll_samples"].integer >= 0 &&
                 row["fd_poll_errors"].integer >= 0 &&
                 (expected.name == "startup" ||
-                    row["fd_poll_samples"].integer > 0) &&
+                    (row["fd_poll_samples"].integer > 0 &&
+                        row["sampled_fd_peak"].integer > 0)) &&
                 row["stack_status"].str == "not-attempted" &&
                 row["stack_sha256"].str.length == 0 &&
                 row["d_gc_status"].str == "not-attempted" &&
@@ -951,7 +955,8 @@ private JSONValue syntheticComparisonReport(string baseBinary,
     report["method"] = JSONValue([
         "ordering": JSONValue("paired alternating base/candidate and mode order"),
         "runs_per_case": JSONValue(comparisonRuns),
-        "instrumentation": JSONValue("default-off")]);
+        "instrumentation": JSONValue(
+            "durable-phase-metrics-enabled; production-default-off")]);
     report["thresholds"] = comparisonThresholds();
     report["layouts"] = layoutRows;
     report["comparisons"] = comparisons;
@@ -1049,6 +1054,9 @@ private void comparisonValidatorSelfTest(string harnessBinary) {
     auto threshold = parseJSON(good.toString);
     threshold["thresholds"]["max_time_regression_percent"] = 50.0;
     mustReject(threshold, "threshold mutation accepted");
+    auto nestedShape = parseJSON(good.toString);
+    nestedShape["method"]["unexpected"] = true;
+    mustReject(nestedShape, "nested schema extension accepted");
     auto observation = parseJSON(good.toString);
     foreach (index; [0, 2, 4])
         observation["layouts"][0]["runs"][index]["wall_us"] = 2_000_000;
@@ -1059,6 +1067,9 @@ private void comparisonValidatorSelfTest(string harnessBinary) {
     auto fixture = parseJSON(good.toString);
     fixture["layouts"][0]["input_tree_sha256"] = "6".replicate(64);
     mustReject(fixture, "fixture identity mutation accepted");
+    auto fdSampling = parseJSON(good.toString);
+    fdSampling["layouts"][0]["runs"][0]["sampled_fd_peak"] = 0;
+    mustReject(fdSampling, "zero non-startup FD sample accepted");
     auto decision = parseJSON(good.toString);
     decision["decision"] = "FAIL";
     mustReject(decision, "decision mutation accepted");
@@ -1119,7 +1130,8 @@ private void writeComparisonReport(string baseBinary, string baseSource,
     JSONValue method;
     method["ordering"] = "paired alternating base/candidate and mode order";
     method["runs_per_case"] = comparisonRuns;
-    method["instrumentation"] = "default-off";
+    method["instrumentation"] =
+        "durable-phase-metrics-enabled; production-default-off";
     report["method"] = method;
     report["thresholds"] = comparisonThresholds();
     report["layouts"] = layoutRows;

@@ -186,15 +186,20 @@ private void checkBackendVisibility() {
         randomUUID.toString);
     mkdirRecurse(root);
     scope(exit) if (exists(root)) rmdirRecurse(root);
-    auto probe = buildPath(root, "probe.d");
-    write(probe,
-        "module external_sha256_probe;\n" ~
-        "import crypto.sha256_arm64 : compressArmSha2, armSha2Available;\n" ~
-        "import crypto.sha256_x86_64 : compressX86ShaNi, x86ShaNiAvailable;\n");
-    auto result = execute(["ldc2", "-c", "-Isource", probe,
-        "-of=" ~ buildPath(root, "probe.o")]);
-    enforce(result.status != 0 && result.output.indexOf("not visible") >= 0,
-        "raw SHA-256 backend symbols escaped the crypto package boundary");
+    foreach (index, symbol; ["crypto.sha256_arm64:compressArmSha2",
+            "crypto.sha256_arm64:armSha2Available",
+            "crypto.sha256_x86_64:compressX86ShaNi",
+            "crypto.sha256_x86_64:x86ShaNiAvailable"]) {
+        auto fields = symbol.split(":");
+        auto probe = buildPath(root, "probe-" ~ index.to!string ~ ".d");
+        write(probe, "module external_sha256_probe_" ~ index.to!string ~
+            ";\nimport " ~ fields[0] ~ " : " ~ fields[1] ~ ";\n");
+        auto result = execute(["ldc2", "-c", "-Isource", probe,
+            "-of=" ~ buildPath(root, "probe-" ~ index.to!string ~ ".o")]);
+        enforce(result.status != 0 && result.output.indexOf("not visible") >= 0,
+            "raw SHA-256 backend symbol escaped the crypto package boundary: " ~
+                fields[1]);
+    }
 }
 
 private void checkKat(string input, string expected) {
@@ -569,7 +574,21 @@ private string x86ExecutionStatus(const JSONValue host) {
         : "BLOCKED_EXTERNAL_NATIVE_X86_CPUID_HAS_NO_SHA";
 }
 
-private JSONValue disassemblyEvidence(const JSONValue host) {
+private string llvmObjdumpPath() {
+    auto resolved = execute(["/usr/bin/which", "llvm-objdump"]);
+    if (resolved.status == 0 && isFile(resolved.output.strip))
+        return resolved.output.strip;
+    auto xcrun = execute(["/usr/bin/xcrun", "--find", "llvm-objdump"]);
+    if (xcrun.status == 0 && isFile(xcrun.output.strip))
+        return xcrun.output.strip;
+    foreach (candidate; ["/opt/homebrew/opt/llvm/bin/llvm-objdump",
+            "/usr/local/opt/llvm/bin/llvm-objdump"])
+        if (isFile(candidate)) return candidate;
+    enforce(false, "cannot resolve llvm-objdump");
+    return null;
+}
+
+private JSONValue disassemblyEvidence(const JSONValue host, string objdump) {
     JSONValue result;
     auto root = buildPath("/tmp", "scrubbed-sha256-disassembly-" ~
         randomUUID.toString);
@@ -582,8 +601,7 @@ private JSONValue disassemblyEvidence(const JSONValue host) {
         "-mtriple=arm64-apple-darwin", "-Isource", "-c",
         "source/crypto/sha256_arm64.d", "-of=" ~ armObject]);
     enforce(armBuild.status == 0, "ARM SHA2 cross-compile failed");
-    auto arm = execute(["/opt/homebrew/opt/llvm/bin/llvm-objdump", "-d",
-        "--arch=arm64", armObject]);
+    auto arm = execute([objdump, "-d", "--arch=arm64", armObject]);
     enforce(arm.status == 0, "ARM SHA2 disassembly failed");
     foreach (instruction; ["sha256h.4s", "sha256h2.4s", "sha256su0.4s",
             "sha256su1.4s"])
@@ -600,8 +618,7 @@ private JSONValue disassemblyEvidence(const JSONValue host) {
         "-mtriple=x86_64-apple-darwin", "-Isource", "-c",
         "source/crypto/sha256_x86_64.d", "-of=" ~ object]);
     enforce(build.status == 0, "x86 SHA-NI cross-compile failed");
-    auto dump = execute(["/opt/homebrew/opt/llvm/bin/llvm-objdump", "-d",
-        "--arch=x86_64", object]);
+    auto dump = execute([objdump, "-d", "--arch=x86_64", object]);
     enforce(dump.status == 0 && dump.output.count("sha256rnds2") == 32,
         "x86 SHA-NI instruction proof missing");
     result["x86_sha256rnds2"] = cast(long)dump.output.count("sha256rnds2");
@@ -614,7 +631,7 @@ private void writeReport(string path) {
     selfTest;
     longTest;
     JSONValue report;
-    report["schema"] = "scrubbed-sha256-backend-evidence-v2";
+    report["schema"] = "scrubbed-sha256-backend-evidence-v3";
     report["base_source_sha"] = "cd15948466509055ae0431439f651ecba8a301f6";
     report["compiler"] = expectedCompiler;
     report["frontend"] = cast(long)__VERSION__;
@@ -624,8 +641,6 @@ private void writeReport(string path) {
     report["host_identity"] = host;
     report["arm_sha2_execution"] = armExecutionStatus(host);
     report["x86_sha_ni_execution"] = x86ExecutionStatus(host);
-    report["production_migration"] =
-        "MIGRATED_AFTER_NATIVE_AND_COMBINED_GATES";
     report["multi_gib_logical_bytes"] = 4_296_015_890L;
     report["multi_gib_status"] = "PASSED_AGAINST_PHOBOS";
     report["inventory"] = inventoryEvidence;
@@ -641,9 +656,10 @@ private void writeReport(string path) {
     report["compiler_executable"] = compilerPath.output.strip;
     report["compiler_executable_sha256"] =
         sourceHash(compilerPath.output.strip);
-    report["llvm_objdump_sha256"] =
-        sourceHash("/opt/homebrew/opt/llvm/bin/llvm-objdump");
-    report["disassembly"] = disassemblyEvidence(host);
+    auto objdump = llvmObjdumpPath;
+    report["llvm_objdump"] = objdump;
+    report["llvm_objdump_sha256"] = sourceHash(objdump);
+    report["disassembly"] = disassemblyEvidence(host, objdump);
     immutable size_t[4] sizes = [64, 1024, 8192, 1024 * 1024];
     report["microbench"] = benchmarkRows(sizes[]);
     report["claims"] = [JSONValue("digest bytes only; no production speed claim"),
@@ -655,7 +671,8 @@ private void writeReport(string path) {
 
 private void validateReport(string path) {
     auto report = parseJSON(readText(path));
-    enforce(report["schema"].str == "scrubbed-sha256-backend-evidence-v2" &&
+    enforce(report.object.length == 23 &&
+        report["schema"].str == "scrubbed-sha256-backend-evidence-v3" &&
         report["base_source_sha"].str ==
             "cd15948466509055ae0431439f651ecba8a301f6" &&
         report["compiler"].str == expectedCompiler &&
@@ -669,8 +686,6 @@ private void validateReport(string path) {
         sha256BackendName(selectedSha256Backend) &&
         report["arm_sha2_execution"].str == armExecutionStatus(host) &&
         report["x86_sha_ni_execution"].str == x86ExecutionStatus(host) &&
-        report["production_migration"].str ==
-            "MIGRATED_AFTER_NATIVE_AND_COMBINED_GATES" &&
         report["multi_gib_logical_bytes"].integer == 4_296_015_890L &&
         report["multi_gib_status"].str == "PASSED_AGAINST_PHOBOS",
         "SHA-256 report status mismatch");
@@ -688,13 +703,16 @@ private void validateReport(string path) {
         enforce(sources[source].str == sourceHash(source),
             "SHA-256 report source hash mismatch: " ~ source);
     enforce(report["harness_binary_sha256"].str == sourceHash(thisExePath) &&
+        report["system_oracle"].str == "/usr/bin/shasum -a 256" &&
         report["system_oracle_sha256"].str == sourceHash("/usr/bin/shasum") &&
         report["compiler_executable_sha256"].str ==
             sourceHash(report["compiler_executable"].str) &&
         report["llvm_objdump_sha256"].str ==
-            sourceHash("/opt/homebrew/opt/llvm/bin/llvm-objdump"),
+            sourceHash(report["llvm_objdump"].str) &&
+        report["llvm_objdump"].str == llvmObjdumpPath,
         "SHA-256 report tool/binary hash mismatch");
-    enforce(report["disassembly"].toString == disassemblyEvidence(host).toString,
+    enforce(report["disassembly"].toString ==
+        disassemblyEvidence(host, report["llvm_objdump"].str).toString,
         "SHA-256 report disassembly mismatch");
 
     immutable sizes = [64, 1024, 8192, 1024 * 1024];

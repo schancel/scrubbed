@@ -682,7 +682,9 @@ blocker.
 samples at 64 B, 1 KiB, 8 KiB, and 1 MiB, exact source/tool/binary identities,
 and instruction counts. The validator re-derives the host identity and
 architecture-conditioned execution statuses. These timings are descriptive:
-cache and frequency state are uncontrolled.
+cache and frequency state are uncontrolled. Its v3 schema deliberately makes
+no production-migration decision; the comparison artifact below is the sole
+owner of that decision.
 
 The workflow's manual `production migration comparison` job builds exact base
 `cd15948466509055ae0431439f651ecba8a301f6` and the candidate with the same
@@ -695,6 +697,8 @@ output-hash time, exact output identities, caller-expected source revisions,
 and binary/harness hashes. Startup wall stops when the child is reaped rather
 than after sampler teardown; the zero-tolerance descriptor gate applies only
 to the longer non-startup layouts with at least one successful sample.
+Private durable phase metrics are enabled for this evidence and remain off by
+default in production.
 
 Before timing, each layout and route also proves a real binary upgrade: the
 base creates the durable store and output, the candidate opens those exact

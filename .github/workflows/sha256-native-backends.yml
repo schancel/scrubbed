@@ -11,6 +11,7 @@ on:
       - "benchmarks/sha256_backend_check.d"
       - "benchmarks/durable_skip_check.d"
       - "benchmarks/sha256-native-*-evidence.json"
+      - "benchmarks/sha256-backend-evidence.json"
       - "benchmarks/sha256-migration-comparison.json"
       - "source/**/*.d"
       - "third_party/**"
@@ -22,6 +23,7 @@ on:
       - "benchmarks/sha256_backend_check.d"
       - "benchmarks/durable_skip_check.d"
       - "benchmarks/sha256-native-*-evidence.json"
+      - "benchmarks/sha256-backend-evidence.json"
       - "benchmarks/sha256-migration-comparison.json"
       - "source/**/*.d"
       - "third_party/**"
@@ -66,6 +68,33 @@ jobs:
             --native-report "sha256-native-${{ matrix.architecture }}.json"
           /tmp/scrubbed-sha256-backend-check \
             --check-native-report "sha256-native-${{ matrix.architecture }}.json"
+          jq '.harness_binary_sha256 = ("0" * 64)' \
+            "sha256-native-${{ matrix.architecture }}.json" \
+            > /tmp/sha256-native-wrong-binary.json
+          if /tmp/scrubbed-sha256-backend-check --check-native-report \
+              /tmp/sha256-native-wrong-binary.json; then
+            echo "native validator accepted a forged harness identity" >&2
+            exit 1
+          fi
+          if [[ "${{ matrix.architecture }}" == "arm64" ]]; then
+            opposite_architecture=x86_64
+            opposite_backend=x86-sha-ni
+          else
+            opposite_architecture=aarch64
+            opposite_backend=armv8-sha2
+          fi
+          jq --arg architecture "$opposite_architecture" \
+            --arg backend "$opposite_backend" \
+            '.architecture = $architecture | .selected_backend = $backend |
+             .short_message_microbench |= map(
+               if .role == "selected" then .backend = $backend else . end)' \
+            "sha256-native-${{ matrix.architecture }}.json" \
+            > /tmp/sha256-native-wrong-architecture.json
+          if /tmp/scrubbed-sha256-backend-check --check-native-report \
+              /tmp/sha256-native-wrong-architecture.json; then
+            echo "native validator accepted the opposite architecture" >&2
+            exit 1
+          fi
           /tmp/scrubbed-sha256-backend-check --long-test
 
       - name: Validate committed architecture evidence
@@ -131,6 +160,15 @@ jobs:
           cp scrubbed "$RUNNER_TEMP/scrubbed-sha-candidate-bin"
           ldc2 -O3 -release benchmarks/durable_skip_check.d \
             -of="$RUNNER_TEMP/scrubbed-durable-skip-check"
+          ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
+            benchmarks/sha256_backend_check.d source/crypto/sha256.d \
+            source/crypto/sha256_arm64.d source/crypto/sha256_x86_64.d \
+            -of="$RUNNER_TEMP/scrubbed-sha256-backend-check"
+
+      - name: Record backend, disassembly, and large-buffer evidence
+        run: |
+          "$RUNNER_TEMP/scrubbed-sha256-backend-check" \
+            --report sha256-backend-evidence.json
 
       - name: Run same-host interleaved production comparison
         env:
@@ -155,5 +193,14 @@ jobs:
         with:
           name: sha256-migration-comparison
           path: sha256-migration-comparison.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload backend evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sha256-backend-evidence
+          path: sha256-backend-evidence.json
           if-no-files-found: error
           retention-days: 14

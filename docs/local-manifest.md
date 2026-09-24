@@ -146,7 +146,7 @@ ldc2 -O3 -release -Isource experiments/manifest_cli/check.d \
   source/effects/atomic_piece_sink.d source/effects/sqlite_ffi.d \
   source/effects/local_manifest.d third_party/sqlite/sqlite3.o \
   -of=/tmp/scrubbed-manifest-cli-check
-ldc2 -i -O3 -release -d-version=ManifestCliHarness -Isource \
+ldc2 -i -O3 -release -preview=dip1000 -d-version=ManifestCliHarness -Isource \
   -I"$ARGPARSE_SOURCE" \
   source/app.d third_party/sqlite/sqlite3.o \
   .dub/lexbor/liblexbor_static.a .dub/zstd/libzstd_decompress.a \

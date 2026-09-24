@@ -61,6 +61,10 @@ public:
         requireCompiled;
         return filterPipeline.names;
     }
+    bool filterResultsAreRetentionSafe() const {
+        requireCompiled;
+        return filterPipeline.resultsAreRetentionSafe;
+    }
 }
 
 struct CompiledJob {
@@ -206,7 +210,7 @@ version (unittest) {
     }
 
     private string applyCompilerFilterTest(string text,
-            immutable(FilterConfiguration) raw) pure {
+            immutable(FilterConfiguration) raw) pure @safe {
         auto configured = cast(immutable(CompilerFilterTestConfiguration)) raw;
         return text ~ configured.label ~ configured.count.to!string ~
             (configured.enabled ? "T" : "F");
@@ -214,7 +218,7 @@ version (unittest) {
 
     private ConfiguredFilter compilerFilterTestFactory(
             const ref TypedFilterOptions options) {
-        return ConfiguredFilter(&applyCompilerFilterTest,
+        return ConfiguredFilter.retaining(&applyCompilerFilterTest,
             new immutable CompilerFilterTestConfiguration(
                 options["label"].asText, options["count"].asInteger,
                 options["enabled"].asBoolean));

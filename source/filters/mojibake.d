@@ -910,8 +910,10 @@ version (MojibakeWorkProbe) {
     }
 }
 
+// repairMojibake returns its immutable input or GC-owned materialization; this
+// wrapper is the explicit lifetime assertion required by the filter ABI.
 private string applyConfiguredMojibake(string text,
-        immutable(FilterConfiguration) raw) pure {
+        immutable(FilterConfiguration) raw) pure @trusted {
     auto configured = cast(immutable(MojibakeConfiguration)) raw;
     enforce(configured !is null, "invalid fix-mojibake configuration");
     auto options = MojibakeOptions(configured.maxPasses,
@@ -920,7 +922,7 @@ private string applyConfiguredMojibake(string text,
 }
 
 private ConfiguredFilter configuredMojibake(MojibakeOptions options) {
-    return ConfiguredFilter(&applyConfiguredMojibake,
+    return ConfiguredFilter.retaining(&applyConfiguredMojibake,
         new immutable MojibakeConfiguration(options));
 }
 

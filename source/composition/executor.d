@@ -23,12 +23,19 @@ private Content ownedText(string text) pure {
     return new Content([ContentPiece.own(cast(const(ubyte)[]) text)]);
 }
 
+private Content retainedText(string text, bool retentionSafe) pure {
+    if (!retentionSafe) return ownedText(text);
+    validate(text);
+    return new Content([ContentPiece.retainImmutable(
+        cast(immutable(ubyte)[])text)]);
+}
+
 private Content applyFilters(Content input, const ref CompiledStage stage) {
     enforce(input !is null, "stage content is required");
     if (stage.filterNames.length == 0) return input;
     auto text = materializeUtf8(input);
     auto filtered = stage.runFilters(text);
-    return ownedText(filtered);
+    return retainedText(filtered, stage.filterResultsAreRetentionSafe);
 }
 
 private StageDeclaration instanceDeclaration(const ref CompiledStage stage) {
@@ -144,14 +151,19 @@ version (MaterializationWorkProbe) {
         work.filterExecution.gcAllocatedBytes += afterFilter - beforeFilter;
         recordOutputRelation(work.filterExecution, text, filtered);
 
+        auto copyRequired = !stage.filterResultsAreRetentionSafe ||
+            ContentPiece.retentionCopiesPayload(
+                cast(immutable(ubyte)[])filtered);
         auto beforeOwn = GC.allocatedInCurrentThread;
-        auto result = ownedText(filtered);
+        auto result = retainedText(filtered,
+            stage.filterResultsAreRetentionSafe);
         auto afterOwn = GC.allocatedInCurrentThread;
         enforce(afterOwn >= beforeOwn, "executor GC counter moved backwards");
         ++work.filterResultToOwnedPiece.calls;
         work.filterResultToOwnedPiece.inputBytes += filtered.length;
         work.filterResultToOwnedPiece.outputBytes += result.size;
-        work.filterResultToOwnedPiece.logicalCopiedBytes += filtered.length;
+        if (copyRequired)
+            work.filterResultToOwnedPiece.logicalCopiedBytes += filtered.length;
         work.filterResultToOwnedPiece.gcAllocatedBytes += afterOwn - beforeOwn;
         return result;
     }
@@ -200,7 +212,7 @@ version (unittest) {
     private class ObservingFilterCalled : Exception {
         this() pure { super("observing filter called"); }
     }
-    private string observingFilter(string text) pure {
+    private string observingFilter(string text) pure @trusted {
         throw new ObservingFilterCalled;
     }
 
@@ -258,17 +270,19 @@ version (unittest) {
 }
 
 unittest {
+    import core.memory : GC;
     import domain.document : Document, DocumentViewOwner, OutputName,
         SourceLocator;
     import job.json : parseJobJson;
-    import pipeline : Filter, FilterRegistry;
+    import pipeline : Filter, FilterRegistry, SafeFilter;
     import stages.contract : DecisionKind, PassMode, StageDecision,
         StageTransform;
     import stages.registry : StageOptions, StageRegistration, StageRegistry;
     import std.exception : assertThrown;
 
     FilterRegistry filters;
-    filters.addFilter("suffix-f", cast(Filter) ((string text) => text ~ "F"));
+    filters.addSafeFilter("suffix-f",
+        cast(SafeFilter) ((string text) => text ~ "F"));
     filters.addFilter("observing", &observingFilter);
     StageRegistry stages;
     stages.add(StageRegistration(StageDeclaration("before-stage",
@@ -350,6 +364,7 @@ unittest {
     auto retained = runCompiledStage([StageDocument(document, filteredBorrow)],
         beforePlan.stages[0]);
     filteredOwner.close();
+    GC.collect();
     assert(materializeUtf8(retained.events[0].payload.content) == "qFS");
 
     auto invalidOwner = new DocumentViewOwner([cast(ubyte) 0xff]);

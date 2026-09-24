@@ -139,19 +139,23 @@ to the historical canonical timing samples.
 
 ## Materialization-boundary work evidence
 
-`materialization_work.d` is the evidence-only first landing for #183. Its
+`materialization_work.d` supplies deterministic evidence for #183. Its
 fixed-size counters are caller-owned and exist only in a
 `MaterializationWorkProbe` build; the ordinary executable contains neither the
 probe APIs nor counter/GC branches. The JSON identifies the executable and
 embeds and hashes each instrumented source plus its harness; execution refuses
 a checkout that differs from those compiled-in texts. It also embeds and
 hashes the frozen #59 canonical profile and attribution inputs without editing
-or reinterpreting them. It deliberately reports
-that no representation change is authorized: there is no boundary-removal
-candidate or five-pair full-process threshold comparison in this landing.
+or reinterpreting them. The current candidate changes only the filter-result
+ownership boundary. Exact byte accounting, allocation bounds,
+ordinary/measured equivalence, and post-collection lifetime checks authorize
+it. It does not authorize a
+wall-time performance claim: this host was loaded during development and no
+controlled five-pair comparison was used.
 
 ```sh
-ldc2 -i -O3 -release -d-version=MaterializationWorkProbe -Isource -J. \
+ldc2 -i -O3 -release -preview=dip1000 \
+  -d-version=MaterializationWorkProbe -Isource -J. \
   benchmarks/materialization_work.d -of=/tmp/scrubbed-materialization-work
 /tmp/scrubbed-materialization-work --self-test
 /tmp/scrubbed-materialization-work
@@ -169,19 +173,21 @@ allocation.
 | Boundary | Current ownership/lifetime rule | Payload work and status |
 |---|---|---|
 | mapped view -> borrowed `ContentPiece` | Descriptor retains a checked `DocumentViewOwner`; even an empty borrow fails after close. | No payload copy; mandatory zero-copy admission seam. |
-| `Content` descriptor snapshot/edit/split | Descriptor arrays may be copied, but every borrow still requires its live owner; split children may share immutable input. | No payload copy. Sharing is mandatory for current split/lineage semantics. |
+| `Content` descriptor snapshot/edit/split | Descriptor arrays may be copied, every borrow still requires its live owner, and split children may share immutable input. An owned fragment is compacted only when its backing allocation would exceed the same 2× plus 64 KiB retention bound. | Borrowed payloads are never copied. Allocation-sized owned fragments share storage; pathological shrinking edits copy only the surviving fragment. |
 | `Content` -> UTF-8 string | `composition.executor` appends pieces into a growing GC-owned byte array, validates it, and exposes the resulting owning string before the public filter ABI. | One logical payload copy; mandatory while filters accept `string`; allocation can exceed final payload bytes while the array grows. |
 | fused scalar run | Up to 16 consecutive caller-owned transducers borrow the input string and materialize one owning result. | One result materialization per fused run; longer runs intentionally form another bounded barrier. |
 | whole-text filter | The pure public filter may return the identical input, a borrowed prefix/suffix/interior/empty subslice, a partially overlapping slice, or distinct GC-owned storage. The probe uses integer byte intervals rather than ordering unrelated pointers and records borrowed/overlap/distinct calls and bytes without retaining mutable state. | Borrowed subslices are not materializations; partial overlaps are never reported as distinct. Distinct algorithm-owned work is not removable by orchestration evidence alone. |
-| filter result -> owned `ContentPiece` | `ContentPiece.own` duplicates the result so no caller/appender/scratch slice escapes and output survives source-owner close. | A second logical payload copy and the leading future candidate, but not authorized here. |
-| final-event split/map descriptors | Events retain `Content` references synchronously; after-filters independently own each emitted result. | Unfiltered sharing is payload-copy-free; filtered siblings currently repeat the explicit barriers. |
+| filter result -> owned `ContentPiece` | The source-compatible public filter ABI still copies results. Built-ins may opt into a DIP1000-checked safe registration seam; `composition.executor` retains those immutable GC results only when the backing allocation is bounded. Unknown provenance, unsafe `NO_INTERIOR` subslices, empty interior slices, and GC backing larger than twice the logical length plus 64 KiB are copied. `ContentPiece` applies the same rule again when edits form owned subpieces. | Zero logical payload copies for allocation-sized results from the safe seam. For a 2 MiB result the release probe observed 224 bookkeeping bytes rather than the 2,101,472-byte baseline allocation; two 2 MiB results observed 448 bytes rather than 4,202,944. Legacy/custom callbacks keep copy isolation, and pathological shrinking slices retain at most 2× their logical size plus 64 KiB of backing. These are deterministic allocation observations, not wall-time claims. |
+| final-event split/map descriptors | Events retain `Content` references synchronously; after-filters independently retain each immutable emitted result. | Unfiltered sharing is payload-copy-free; filtered siblings still repeat filter materialization, but no longer add a second payload copy when retaining each result. |
 | atomic piece sink | A 64 KiB caller-local buffer is consumed synchronously, fsynced, and renamed; no chunk escapes and no full-output join occurs. | One logical stream copy into bounded syscall storage; required by the current atomic sink. |
 
 The frozen #59 scalar/mixed many-small and few-large reports remain the
 full-process timing/RSS/D-GC baseline and are not edited or reinterpreted here.
-Any later single-boundary candidate must run the accepted interleaved five-pair
-gate against those exact hashes and meet the #183 improvement/regression
-thresholds before production authorization.
+The exact accounting and lifetime controls authorize this single-boundary
+representation change. A wall-time or throughput claim still requires the
+accepted interleaved five-pair gate against those exact hashes and must meet
+the #183 improvement/regression thresholds on a controlled runner or through
+the planned continuous benchmark history.
 
 ## Fused scalar-filter microbenchmark
 
@@ -192,7 +198,7 @@ range. It generates 131,072 identical mixed CRLF/control/curly-quote rows
 two implementations, and reports five rounds per sample.
 
 ```sh
-ldc2 -i -O3 -release -Isource benchmarks/fused_filters.d \
+ldc2 -i -O3 -release -preview=dip1000 -Isource benchmarks/fused_filters.d \
   -of=/tmp/scrubbed-fused-filters
 /tmp/scrubbed-fused-filters
 ```
@@ -353,7 +359,7 @@ share counters and a requested ninth pass is rejected instead of allocating an
 unbounded profile from an option value.
 
 ```sh
-ldc2 -O3 -release -d-version=MojibakeWorkProbe \
+ldc2 -O3 -release -preview=dip1000 -d-version=MojibakeWorkProbe \
   -d-version=MojibakeWorkO3Release -Isource \
   benchmarks/mojibake_work.d source/filters/mojibake.d source/pipeline.d \
   -of=/tmp/scrubbed-mojibake-work
@@ -398,7 +404,7 @@ logic and inputs:
 Build and run it from the repository root:
 
 ```sh
-ldc2 -O3 -release -enable-inlining -Isource \
+ldc2 -O3 -release -preview=dip1000 -enable-inlining -Isource \
   benchmarks/mojibake_ranges.d source/filters/mojibake.d source/pipeline.d \
   -of=/tmp/scrubbed-mojibake-benchmark
 /tmp/scrubbed-mojibake-benchmark
@@ -442,7 +448,7 @@ separately identified held-out cases if a filter changes.
 Build and run from the repository root:
 
 ```sh
-ldc2 -O -release -Isource benchmarks/text_fixes.d \
+ldc2 -O -release -preview=dip1000 -Isource benchmarks/text_fixes.d \
   source/filters/mojibake.d source/filters/entities.d \
   source/filters/entities_data.d source/filters/punctuation.d \
   source/filters/normalize.d source/pipeline.d \
@@ -513,7 +519,7 @@ From a clean checkout, run these exact commands from the repository root:
 ```sh
 git clone https://github.com/rspeer/python-ftfy.git /tmp/python-ftfy
 git -C /tmp/python-ftfy checkout --detach 74dd0452b48286a3770013b3a02755313bd5575e
-ldc2 -O -release -Isource benchmarks/ftfy_corpus.d \
+ldc2 -O -release -preview=dip1000 -Isource benchmarks/ftfy_corpus.d \
   source/filters/mojibake.d source/pipeline.d \
   -of=/tmp/scrubbed-ftfy-corpus
 /tmp/scrubbed-ftfy-corpus \

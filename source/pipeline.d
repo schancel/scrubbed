@@ -17,14 +17,33 @@ import std.string : indexOf;
 import std.typecons : No;
 import std.utf : byUTF, validate;
 
-/// Plain filter contract; purity prevents retained callbacks from sharing state.
+/// Source-compatible plain filter contract. Results from this legacy seam are
+/// copied before retention because it makes no lifetime guarantee.
 alias Filter = string function(string) pure;
+
+/// Lifetime-checked filter contract for results eligible for immutable
+/// retention. The build enables DIP1000 escape checking for this seam.
+alias SafeFilter = string function(string) pure @safe;
 
 /// Type-erased, transitively immutable configuration parsed by a filter factory.
 class FilterConfiguration {}
 
 alias ConfiguredFilterApply = string function(string,
     immutable(FilterConfiguration)) pure;
+alias SafeConfiguredFilterApply = string function(string,
+    immutable(FilterConfiguration)) pure @safe;
+
+private struct LifetimeEscapeProbe { string value; }
+
+private LifetimeEscapeProbe retainProbeParameter(string value) pure @safe {
+    return LifetimeEscapeProbe(value);
+}
+
+static assert(!__traits(compiles,
+    cast(SafeFilter)((string input) pure @safe {
+        immutable char[4] local = "oops";
+        return retainProbeParameter(local[]).value;
+    })), "safe filter retention requires DIP1000 escape checking");
 
 /// Reentrant configured execution: code has no delegate context and all
 /// retained configuration is transitively immutable.
@@ -32,6 +51,7 @@ struct ConfiguredFilter {
 private:
     ConfiguredFilterApply filterApply;
     immutable(FilterConfiguration) filterConfiguration;
+    bool retentionSafe;
 
 public:
     this(ConfiguredFilterApply apply,
@@ -41,7 +61,22 @@ public:
         filterConfiguration = configuration;
     }
 
+    private this(ConfiguredFilterApply apply,
+            immutable(FilterConfiguration) configuration,
+            bool safeRetention) {
+        enforce(apply !is null, "configured filter implementation is required");
+        filterApply = apply;
+        filterConfiguration = configuration;
+        retentionSafe = safeRetention;
+    }
+
+    static ConfiguredFilter retaining(SafeConfiguredFilterApply apply,
+            immutable(FilterConfiguration) configuration = null) {
+        return ConfiguredFilter(apply, configuration, true);
+    }
+
     bool isValid() const { return filterApply !is null; }
+    bool resultIsRetentionSafe() const { return retentionSafe; }
 
     string opCall(string input) const {
         enforce(isValid, "configured filter is not initialized");
@@ -132,6 +167,7 @@ struct TypedFilterSpec {
 
 private struct FilterRegistration {
     Filter plain;
+    bool plainRetentionSafe;
     TypedFilterFactory typedFactory;
     FilterOptionDeclaration[] optionDeclarations;
     StreamingFilter streaming;
@@ -166,7 +202,17 @@ struct FilterRegistry {
 
     void addFilter(string name, Filter filter) {
         enforce(filter !is null, "filter implementation is required");
-        add(name, FilterRegistration(filter));
+        FilterRegistration registration;
+        registration.plain = filter;
+        add(name, registration);
+    }
+
+    void addSafeFilter(string name, SafeFilter filter) {
+        enforce(filter !is null, "filter implementation is required");
+        FilterRegistration registration;
+        registration.plain = filter;
+        registration.plainRetentionSafe = true;
+        add(name, registration);
     }
 
     void addTypedFilterFactory(string name,
@@ -200,6 +246,11 @@ void registerFilter(string name, Filter f) {
     registeredFilters.addFilter(name, f);
 }
 
+/// Register a filter whose result may cross the immutable retention boundary.
+void registerSafeFilter(string name, SafeFilter f) {
+    registeredFilters.addSafeFilter(name, f);
+}
+
 /// Register a typed v3 factory with its exact option declarations.
 void registerTypedFilterFactory(string name,
         FilterOptionDeclaration[] declarations,
@@ -229,9 +280,11 @@ struct Pipeline {
         Filter plain;
         ConfiguredFilter configured;
         StreamingFilter streaming;
+        bool retentionSafe;
     }
     private Stage[] stages;
     private string[] stageNames;
+    private bool hasRetentionUnsafeStage;
 
     /// Resolve typed v3 values without string inference or coercion.
     static Pipeline buildTyped(TypedFilterSpec[] specs,
@@ -262,17 +315,21 @@ struct Pipeline {
                 auto configured = registration.typedFactory(spec.options);
                 enforce(configured.isValid,
                     "typed filter factory returned no implementation");
-                p.stages ~= Stage(Filter.init, configured);
+                p.stages ~= Stage(Filter.init, configured,
+                    StreamingFilter.init, configured.resultIsRetentionSafe);
             } else {
                 enforce(spec.options.length == 0,
                     "filter '" ~ spec.name ~ "' accepts no typed options");
                 if (registration.streaming.push !is null)
                     p.stages ~= Stage(Filter.init, ConfiguredFilter.init,
-                        registration.streaming);
+                        registration.streaming, true);
                 else
                     p.stages ~= Stage(registration.plain,
-                        ConfiguredFilter.init);
+                        ConfiguredFilter.init, StreamingFilter.init,
+                        registration.plainRetentionSafe);
             }
+            if (!p.stages[$ - 1].retentionSafe)
+                p.hasRetentionUnsafeStage = true;
             p.stageNames ~= spec.name;
         }
         return p;
@@ -360,6 +417,10 @@ struct Pipeline {
 
     const(string)[] names() const {
         return stageNames;
+    }
+
+    bool resultsAreRetentionSafe() const {
+        return !hasRetentionUnsafeStage;
     }
 }
 
@@ -543,7 +604,25 @@ static assert(isInputRange!(typeof(fusedStreamingRange("x", [StreamingFilter(
         return cast(size_t) 1;
     }, null)]))));
 
-private string legacyFilterTest(string text) pure { return text ~ "!"; }
+private string legacyFilterTest(string text) pure @safe { return text ~ "!"; }
+
+private string systemFilterTest(string text) pure {
+    return (cast(immutable(char)*)1)[0 .. 1];
+}
+
+private string safeIdentityFilterTest(string text) pure @safe {
+    return text;
+}
+
+private string systemConfiguredFilterTest(string text,
+        immutable(FilterConfiguration)) pure {
+    return (cast(immutable(char)*)1)[0 .. 1];
+}
+
+private string safeConfiguredFilterTest(string text,
+        immutable(FilterConfiguration)) pure @safe {
+    return text;
+}
 
 private size_t duplicateStreamingTest(ref StreamingState, dchar input,
         dchar[maxStreamingExpansion]* output) pure {
@@ -590,7 +669,7 @@ private class TypedFilterTestConfiguration : FilterConfiguration {
 }
 
 private string applyTypedFilterTest(string text,
-        immutable(FilterConfiguration) raw) pure {
+        immutable(FilterConfiguration) raw) pure @safe {
     auto configured = cast(immutable(TypedFilterTestConfiguration)) raw;
     return configured.enabled
         ? text ~ configured.label ~ configured.count.to!string : text;
@@ -600,11 +679,21 @@ private ConfiguredFilter typedFactoryTest(const ref TypedFilterOptions options) 
     auto configured = new immutable TypedFilterTestConfiguration(
         options["count"].asInteger, options["enabled"].asBoolean,
         options["label"].asText);
-    return ConfiguredFilter(&applyTypedFilterTest, configured);
+    return ConfiguredFilter.retaining(&applyTypedFilterTest, configured);
 }
 
 unittest {
     import std.exception : assertThrown;
+
+    static assert(is(typeof(&systemFilterTest) : Filter));
+    static assert(!is(typeof(&systemFilterTest) : SafeFilter));
+    static assert(is(typeof(&safeIdentityFilterTest) : SafeFilter));
+    static assert(is(typeof(&systemConfiguredFilterTest) :
+        ConfiguredFilterApply));
+    static assert(!is(typeof(&systemConfiguredFilterTest) :
+        SafeConfiguredFilterApply));
+    static assert(is(typeof(&safeConfiguredFilterTest) :
+        SafeConfiguredFilterApply));
 
     size_t mutableState;
     auto captured = (string input, immutable(FilterConfiguration)) {
@@ -617,8 +706,10 @@ unittest {
     Filter typedLegacy = &legacyFilterTest;
     auto registrar = &registerFilter;
     registrar("__legacy-filter-test", typedLegacy);
-    assert(Pipeline.buildTyped([TypedFilterSpec("__legacy-filter-test")])
-        .run("ok") == "ok!");
+    auto legacyPipeline = Pipeline.buildTyped([
+        TypedFilterSpec("__legacy-filter-test")]);
+    assert(legacyPipeline.run("ok") == "ok!" &&
+        !legacyPipeline.resultsAreRetentionSafe);
     assert(Pipeline.buildTyped([]).names.length == 0);
     assert(Pipeline.buildTyped(null).names.length == 0);
 
@@ -649,15 +740,19 @@ unittest {
         FilterOptionDeclaration("count", FilterOptionType.integer, true),
         FilterOptionDeclaration("enabled", FilterOptionType.boolean, true)
     ], &typedFactoryTest);
-    assert(Pipeline.buildTyped([TypedFilterSpec("plain")], &isolated)
-        .run("ok") == "ok!");
+    auto isolatedPlain = Pipeline.buildTyped([TypedFilterSpec("plain")],
+        &isolated);
+    assert(isolatedPlain.run("ok") == "ok!" &&
+        !isolatedPlain.resultsAreRetentionSafe);
     TypedFilterOptions typedOptions = [
         "label": FilterOption.text("x"),
         "count": FilterOption.integer(2),
         "enabled": FilterOption.boolean(true)
     ];
-    assert(Pipeline.buildTyped([TypedFilterSpec("typed", typedOptions)],
-        &isolated).run("a") == "ax2");
+    auto configuredPipeline = Pipeline.buildTyped([
+        TypedFilterSpec("typed", typedOptions)], &isolated);
+    assert(configuredPipeline.run("a") == "ax2" &&
+        configuredPipeline.resultsAreRetentionSafe);
     assertThrown(Pipeline.buildTyped([TypedFilterSpec("typed")], &isolated));
     assertThrown(Pipeline.buildTyped([TypedFilterSpec("__legacy-filter-test")],
         &isolated));

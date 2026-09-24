@@ -1,5 +1,5 @@
 /// Release-active standalone adapter checks.
-/// Run: ldc2 -O -release -enable-inlining -i -I=source experiments/jsonl_stream/check.d -of=/tmp/issue16-check && /tmp/issue16-check
+/// Run: ldc2 -O -release -preview=dip1000 -enable-inlining -i -I=source experiments/jsonl_stream/check.d -of=/tmp/issue16-check && /tmp/issue16-check
 module experiments.jsonl_stream.check;
 
 import domain.document : DocumentId, SourceLocator;

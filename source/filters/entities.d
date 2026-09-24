@@ -4,7 +4,7 @@ module filters.entities;
 
 import filters.entities_data : findNamedEntity;
 import filters.mojibake : cp1252ToUnicode;
-import pipeline : registerFilter;
+import pipeline : registerSafeFilter;
 import std.array : appender;
 import std.utf : encode;
 
@@ -113,11 +113,15 @@ string decodeHtmlEntities(string text, EntityContext context = EntityContext.tex
     return output.data;
 }
 
-private string decodeHtmlEntitiesFilter(string text) pure {
+// The implementation uses only checked slices and GC-owned appenders; this
+// wrapper is the explicit lifetime assertion required by the filter ABI.
+private string decodeHtmlEntitiesFilter(string text) pure @trusted {
     return decodeHtmlEntities(text);
 }
 
-static this() { registerFilter("decode-html-entities", &decodeHtmlEntitiesFilter); }
+static this() {
+    registerSafeFilter("decode-html-entities", &decodeHtmlEntitiesFilter);
+}
 
 unittest {
     // Differential cases pinned to the WHATWG entities.json digest recorded in

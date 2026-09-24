@@ -56,7 +56,7 @@ parents, pre-existing and provider-created aliases, and owner lifetime.
 After `dub test --compiler=ldc2` builds the project SQLite object, run:
 
 ```sh
-ldc2 -O3 -release -d-version=IndependentSinksHarness -Isource \
+ldc2 -i -O3 -release -preview=dip1000 -d-version=IndependentSinksHarness -Isource \
   source/effects/independent_sinks.d source/effects/atomic_piece_sink.d \
   source/effects/local_manifest.d source/effects/sqlite_ffi.d \
   source/effects/runner.d source/stages/contract.d source/content/pieces.d \

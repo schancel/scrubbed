@@ -17,10 +17,15 @@ For another plain filter, follow the same seam:
 module filters.my_filter;
 import pipeline : registerFilter;
 
-string myFilter(string text) { /* transform text */ return text; }
+string myFilter(string text) pure { /* transform text */ return text; }
 static this() { registerFilter("my-filter", &myFilter); }
 unittest { assert(myFilter("example") == "example"); }
 ```
+
+`registerFilter` remains the source-compatible extension seam and its result is
+copied before long-lived retention. Repository-owned filters whose `pure @safe`
+implementation is compiled with DIP1000 may use `registerSafeFilter`; that is
+an explicit lifetime contract, not a required migration for external filters.
 
 Place the implementation and meaningful input/output tests in its own
 `source/filters/my_filter.d`, then add `import filters.my_filter;` alongside

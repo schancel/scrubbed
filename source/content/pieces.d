@@ -1,7 +1,10 @@
 module content.pieces;
 
+import core.memory : GC;
 import domain.document : DocumentView;
 import std.exception : enforce;
+
+private enum retainedAllocationSlack = 64 * 1024;
 
 /// One checked source range or one independently retained replacement range.
 /// A default-initialized piece is invalid and cannot enter Content.
@@ -9,7 +12,7 @@ struct ContentPiece {
     private enum Kind : ubyte { invalid, borrowed, owned }
     private Kind kind;
     private DocumentView source;
-    private ubyte[] replacement;
+    private immutable(ubyte)[] replacement;
     private size_t offset;
     private size_t count;
 
@@ -22,15 +25,49 @@ struct ContentPiece {
     }
 
     /// Retain a replacement independently of the caller's mutable array.
-    static ContentPiece own(const(ubyte)[] bytes) pure {
+    static ContentPiece own(const(ubyte)[] bytes) pure @safe {
         ContentPiece piece;
         piece.kind = Kind.owned;
-        piece.replacement = bytes.dup;
+        piece.replacement = bytes.idup;
+        piece.count = bytes.length;
+        return piece;
+    }
+
+    private static bool immutableRetentionCopiesPayload(
+            immutable(ubyte)[] bytes) pure nothrow @trusted {
+        if (bytes.length == 0) return bytes.ptr !is null;
+        auto block = GC.query(cast(void*)bytes.ptr);
+        if (block.base is null) return true;
+        auto blockBytes = block.size;
+        if (blockBytes == 0) return true;
+        if ((block.attr & GC.BlkAttr.NO_INTERIOR) != 0 &&
+                cast(void*)bytes.ptr != block.base)
+            return true;
+        if (bytes.length > (size_t.max - retainedAllocationSlack) / 2)
+            return false;
+        return blockBytes > bytes.length * 2 + retainedAllocationSlack;
+    }
+
+    /// Retain immutable GC storage without copying when its backing allocation
+    /// is bounded by the visible bytes. Unknown provenance, unsafe interior
+    /// pointers, empty interior slices, and disproportionately large backing
+    /// allocations are copied.
+    /// Mutable caller buffers must use `own`.
+    static ContentPiece retainImmutable(immutable(ubyte)[] bytes) pure @safe {
+        if (immutableRetentionCopiesPayload(bytes)) return own(bytes);
+        ContentPiece piece;
+        piece.kind = Kind.owned;
+        piece.replacement = bytes;
         piece.count = bytes.length;
         return piece;
     }
 
     version (MaterializationWorkProbe) {
+        static bool retentionCopiesPayload(immutable(ubyte)[] bytes)
+                pure nothrow @trusted {
+            return immutableRetentionCopiesPayload(bytes);
+        }
+
         /// Caller-owned evidence for the retained replacement boundary. This
         /// API and its accounting branch do not exist in ordinary builds.
         static ContentPiece ownMeasured(const(ubyte)[] bytes,
@@ -71,6 +108,10 @@ struct ContentPiece {
 
     private ContentPiece subpiece(size_t start, size_t length) {
         enforce(start <= size && length <= count - start, "content split outside piece");
+        if (start == 0 && length == count) return this;
+        if (kind == Kind.owned)
+            return retainImmutable(replacement[
+                offset + start .. offset + start + length]);
         auto part = this;
         part.offset += start;
         part.count = length;
@@ -89,8 +130,9 @@ version (MaterializationWorkProbe) {
     }
 }
 
-/// Ordered pieces with byte offsets. Editing only copies piece descriptors;
-/// borrowed source bytes are never flattened or copied.
+/// Ordered pieces with byte offsets. Editing borrowed ranges only copies
+/// descriptors. Owned subpieces are compacted when retaining their backing
+/// allocation would violate the bounded-retention rule.
 final class Content {
     private ContentPiece[] sequence;
 
@@ -121,6 +163,15 @@ final class Content {
 
     PieceRange pieces() pure { return PieceRange(sequence); }
 
+    version (MaterializationWorkProbe) {
+        bool retainsImmutableStorage(immutable(ubyte)[] bytes) const pure {
+            return sequence.length == 1 &&
+                sequence[0].kind == ContentPiece.Kind.owned &&
+                sequence[0].offset == 0 && sequence[0].count == bytes.length &&
+                sequence[0].replacement.ptr == bytes.ptr;
+        }
+    }
+
     size_t size() const pure {
         size_t total;
         foreach (piece; sequence) {
@@ -147,7 +198,7 @@ final class Content {
     /// A zero-length range inserts; an empty replacement deletes. Empty
     /// descriptors at the start boundary stay before inserted pieces; those
     /// at the end boundary stay after them. Only empties strictly inside a
-    /// removed range are removed.
+    /// removed range are removed. Surviving owned fragments may be compacted.
     void replace(size_t start, size_t length, ContentPiece[] inserted = null) {
         auto total = size;
         enforce(start <= total && length <= total - start, "content edit outside range");
@@ -270,8 +321,62 @@ unittest {
     assert(borrowed.at(1) == 'B');
     ubyte[] replacement = [cast(ubyte) 'X', 'Y'];
     auto owned = ContentPiece.own(replacement);
+    static assert(!__traits(compiles,
+        ContentPiece.retainImmutable(replacement)));
     replacement[0] = 'z';
     assert(owned.isOwned && !owned.isBorrowed && owned.at(0) == 'X');
+    auto immutableBytes = cast(immutable(ubyte)[])"retained";
+    auto retained = ContentPiece.retainImmutable(immutableBytes[1 .. $ - 1]);
+    assert(retained.isOwned && retained.size == 6 &&
+        retained.at(0) == 'e' && retained.at(5) == 'e' &&
+        retained.replacement.ptr != immutableBytes[1 .. $ - 1].ptr);
+
+    auto full = retained.subpiece(0, retained.size);
+    assert(full.replacement.ptr == retained.replacement.ptr &&
+        full.offset == retained.offset && full.count == retained.count);
+
+    enum noInteriorBytes = 128 * 1024;
+    auto noInteriorMutable = (cast(ubyte*)GC.malloc(noInteriorBytes,
+        GC.BlkAttr.NO_INTERIOR | GC.BlkAttr.NO_SCAN))[0 .. noInteriorBytes];
+    noInteriorMutable[] = 'n';
+    auto noInterior = cast(immutable(ubyte)[])noInteriorMutable;
+    auto retainedBase = ContentPiece.retainImmutable(noInterior);
+    assert(retainedBase.replacement.ptr == noInterior.ptr);
+    auto retainedInterior = retainedBase.subpiece(1, retainedBase.size - 1);
+    assert(retainedInterior.replacement.ptr != noInterior.ptr + 1 &&
+        retainedInterior.at(0) == 'n');
+
+    auto boundedBacking = new ubyte[512 * 1024];
+    boundedBacking[] = 'r';
+    auto immutableBacking = cast(immutable(ubyte)[])boundedBacking;
+    auto block = GC.addrOf(cast(void*)immutableBacking.ptr);
+    auto blockBytes = GC.sizeOf(block);
+    assert(block !is null && blockBytes > retainedAllocationSlack + 2);
+    auto retainLength = (blockBytes - retainedAllocationSlack + 1) / 2;
+    auto copyLength = retainLength - 1;
+    assert(retainLength <= immutableBacking.length);
+    auto thresholdCopy = ContentPiece.retainImmutable(
+        immutableBacking[0 .. copyLength]);
+    auto thresholdRetain = ContentPiece.retainImmutable(
+        immutableBacking[0 .. retainLength]);
+    assert(thresholdCopy.replacement.ptr != immutableBacking.ptr);
+    assert(thresholdRetain.replacement.ptr == immutableBacking.ptr);
+    auto normalizedEmpty = ContentPiece.retainImmutable(
+        immutableBacking[1 .. 1]);
+    assert(normalizedEmpty.replacement.ptr is null);
+
+    auto shrink = new Content([
+        ContentPiece.retainImmutable(immutableBacking)
+    ]);
+    shrink.replace(1, immutableBacking.length - 1);
+    auto shrunken = shrink.pieces.front;
+    assert(shrunken.size == 1 && shrunken.at(0) == 'r' &&
+        shrunken.replacement.ptr != immutableBacking.ptr);
+    auto shrunkenBlock = GC.addrOf(cast(void*)shrunken.replacement.ptr);
+    assert(shrunkenBlock !is null &&
+        GC.sizeOf(shrunkenBlock) <= shrunken.size * 2 +
+            retainedAllocationSlack);
+
     content.replace(2, 2, [owned]);
     content.replace(0, 0, [ContentPiece.own(cast(const(ubyte)[]) "!")]);
     content.replace(5, 1); // remove e

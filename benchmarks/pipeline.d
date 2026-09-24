@@ -610,15 +610,18 @@ private string[] dynamicLibraryDependencies(string executable) {
 private void snapshotRegularFile(string source, string target,
         ulong maxBytes, bool executable = false) {
     auto resolved = resolveToolPath(source);
-    require(isFile(resolved) && !isSymlink(resolved) &&
-        getSize(resolved) <= maxBytes,
+    require(isFile(resolved) && !isSymlink(resolved),
+        "compiler support file is not bounded and regular");
+    auto bytes = getSize(resolved);
+    require(bytes <= maxBytes,
         "compiler support file is not bounded and regular");
     mkdirRecurse(dirName(target));
-    copy(resolved, target);
+    copyBoundedFile(resolved, target, bytes,
+        MonoTime.currTime + dur!"seconds"(compilerTreeBounds.maxSeconds));
     require(chmod(target.toStringz,
         executable ? S_IRUSR | S_IXUSR : S_IRUSR) == 0 &&
         isFile(target) && !isSymlink(target) &&
-        getSize(target) == getSize(resolved),
+        getSize(target) == bytes && getSize(resolved) == bytes,
         "compiler support snapshot differs");
 }
 
@@ -2920,7 +2923,7 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
         report["sampler_timeout_seconds"].integer ==
             coordinationSamplerTimeoutSeconds &&
         report["termination_policy"].str ==
-            "TERM process group; one-second grace; KILL process group; reap" &&
+            "sample TERM process group; one-second grace; KILL process group; reap; hard SIGKILL harness watchdog at whole-run deadline" &&
         report["runtime_environment_policy"].str ==
             "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only" &&
         report["control_method"].str ==
@@ -3163,7 +3166,7 @@ private JSONValue coordinationMeasurementFixture() {
         "sampler_timeout_seconds": JSONValue(
             coordinationSamplerTimeoutSeconds),
         "termination_policy": JSONValue(
-            "TERM process group; one-second grace; KILL process group; reap"),
+            "sample TERM process group; one-second grace; KILL process group; reap; hard SIGKILL harness watchdog at whole-run deadline"),
         "runtime_environment_policy": JSONValue(
             "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only"),
         "control_method": JSONValue(

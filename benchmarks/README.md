@@ -67,8 +67,10 @@ Every child receives a small declared environment rather than the caller's
 ambient variables. Each sample has a 900-second deadline, the whole run has a
 six-hour deadline, and sampler subprocesses have two seconds; timed-out
 process groups receive TERM, then KILL after a bounded grace period, and are
-always reaped. The self-test poisons unrelated metrics variables and exercises
-the timeout/reap path.
+always reaped. A hard harness watchdog covers fixture, validation, publication,
+and other non-child phases; in attested mode the parent pipeline owns and
+cleans its scratch if that watchdog fires. The self-test poisons unrelated
+metrics variables and exercises the timeout/reap and hard-watchdog paths.
 
 On the recorded Apple M4/macOS 26.6.2/LDC 1.43.0 run, uninstrumented median
 wall times in seconds were many-small 8.091/8.115/3.590 and few-large

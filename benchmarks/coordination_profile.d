@@ -7,8 +7,9 @@ import core.sys.posix.signal : posixKill = kill, SIGKILL, SIGTERM;
 import core.sys.posix.sys.resource : rusage;
 import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IWUSR, S_IXUSR,
     S_IRWXU;
-import core.sys.posix.unistd : execv, link, setpgid;
-import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WNOHANG;
+import core.sys.posix.unistd : execv, getpid, link, setpgid;
+import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WIFSIGNALED, WNOHANG,
+    WTERMSIG;
 import core.thread : Thread;
 import core.time : msecs, seconds;
 import std.algorithm.sorting : sort;
@@ -70,6 +71,15 @@ private immutable string[string] outputTreePins = [
 
 private void need(bool value, string message) {
     if (!value) throw new Exception("coordination evidence: " ~ message);
+}
+
+private void armWholeRunWatchdog(MonoTime deadline) {
+    auto watchdog = new Thread({
+        while (MonoTime.currTime < deadline) Thread.sleep(10.msecs);
+        posixKill(getpid(), SIGKILL);
+    });
+    watchdog.isDaemon = true;
+    watchdog.start();
 }
 
 private string hexDigest(const(ubyte)[] value) {
@@ -277,6 +287,12 @@ private void terminateGroupAndReap(int pid, out int status,
     if (!leaderReaped) reapBlocking(pid, status, usage);
 }
 
+private bool processDisappeared(int pid, MonoTime deadline) {
+    while (posixKill(pid, 0) == 0 && MonoTime.currTime < deadline)
+        Thread.sleep(10.msecs);
+    return posixKill(pid, 0) != 0;
+}
+
 private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         File stdoutFile, File stderrFile,
         const string[string] environment_, MonoTime deadline) {
@@ -383,8 +399,14 @@ private JSONValue invoke(string binary, string input, string output,
         atomicStore(stopped, true);
         sampler.join();
     }
-    if (injectProbeFailure)
+    if (injectProbeFailure) {
+        auto injectionDeadline = MonoTime.currTime + seconds(1);
+        while (!exists(config) && MonoTime.currTime < injectionDeadline)
+            Thread.sleep(1.msecs);
+        need(exists(config),
+            "post-spawn cleanup probe did not become ready");
         throw new Exception("injected post-spawn probe failure");
+    }
     string stackStatus = "not-attempted", stackHash;
     if (instrumented && ordinal == 0) {
         auto stackPath = buildPath(root, label ~ ".sample.txt");
@@ -557,15 +579,6 @@ private void runSelfTest(string harnessPath) {
     catch (Exception) { changedSnapshotRejected = true; }
     need(changedSnapshotRejected, "changed executable snapshot was accepted");
 
-    bool cleanupFailureObserved;
-    auto trueDigest = fileDigest("/usr/bin/true");
-    try invoke("/usr/bin/true", root, root, root, 1, 0, root, false,
-        trueDigest, true);
-    catch (Exception error) {
-        cleanupFailureObserved = error.msg == "injected post-spawn probe failure";
-    }
-    need(cleanupFailureObserved, "post-spawn cleanup injection differed");
-
     auto environmentProbe = buildPath(root, "environment-probe");
     write(environmentProbe,
         "#!/bin/sh\n" ~
@@ -603,6 +616,19 @@ private void runSelfTest(string harnessPath) {
         "wait\n");
     need(chmod(hangingProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
         "cannot make hanging probe executable");
+    bool cleanupFailureObserved;
+    try invoke(hangingProbe, root, root, descendantPidPath, 1, 0, root, false,
+        fileDigest(hangingProbe), true, 5);
+    catch (Exception error) {
+        cleanupFailureObserved = error.msg == "injected post-spawn probe failure";
+    }
+    need(cleanupFailureObserved && exists(descendantPidPath),
+        "post-spawn cleanup injection differed");
+    auto cleanupDescendantPid = readText(descendantPidPath).strip.to!int;
+    need(processDisappeared(cleanupDescendantPid,
+            MonoTime.currTime + seconds(1)),
+        "post-spawn cleanup left a descendant running");
+    remove(descendantPidPath);
     bool deadlineObserved;
     string deadlineError;
     try invoke(hangingProbe, root, root, root, 1, 2, root, false,
@@ -617,12 +643,30 @@ private void runSelfTest(string harnessPath) {
     need(exists(descendantPidPath),
         "hanging probe did not record its descendant");
     auto descendantPid = readText(descendantPidPath).strip.to!int;
-    auto descendantDeadline = MonoTime.currTime + seconds(1);
-    while (posixKill(descendantPid, 0) == 0 &&
-            MonoTime.currTime < descendantDeadline)
-        Thread.sleep(10.msecs);
-    need(posixKill(descendantPid, 0) != 0,
+    need(processDisappeared(descendantPid, MonoTime.currTime + seconds(1)),
         "timed-out process group left a descendant running");
+
+    auto watchdogOut = buildPath(root, "whole-watchdog.out");
+    auto watchdogErr = buildPath(root, "whole-watchdog.err");
+    auto watchdogReady = buildPath(root, "whole-watchdog.ready");
+    auto watchdogInput = File("/dev/null", "rb");
+    auto watchdogOutput = File(watchdogOut, "wb");
+    auto watchdogError = File(watchdogErr, "wb");
+    auto watchdogDeadline = MonoTime.currTime + seconds(3);
+    auto watchdogChild = spawnGrouped(
+        [harnessPath, "--self-test-whole-timeout-probe"], watchdogReady,
+        watchdogInput, watchdogOutput, watchdogError, childEnvironment(false),
+        watchdogDeadline);
+    watchdogInput.close(); watchdogOutput.close(); watchdogError.close();
+    int watchdogStatus; rusage watchdogUsage;
+    auto watchdogReaped = reapUntil(watchdogChild.processID,
+        watchdogDeadline, watchdogStatus, watchdogUsage);
+    if (!watchdogReaped)
+        terminateGroupAndReap(watchdogChild.processID, watchdogStatus,
+            watchdogUsage);
+    need(watchdogReaped && WIFSIGNALED(watchdogStatus) &&
+        WTERMSIG(watchdogStatus) == SIGKILL,
+        "whole-run watchdog did not terminate a stalled non-child phase");
 
     enum validMetrics = `{"user_us":1000,"system_us":1000,"metrics":{` ~
         `"schema":"scrubbed.coordination-metrics.v2","version":2,` ~
@@ -889,7 +933,7 @@ private void runComparison(string[] args) {
         "whole_run_timeout_seconds": JSONValue(wholeRunTimeoutSeconds),
         "sampler_timeout_seconds": JSONValue(samplerTimeoutSeconds),
         "termination_policy": JSONValue(
-            "TERM process group; one-second grace; KILL process group; reap"),
+            "sample TERM process group; one-second grace; KILL process group; reap; hard SIGKILL harness watchdog at whole-run deadline"),
         "runtime_environment_policy": JSONValue(
             "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only"),
         "control_method": JSONValue(
@@ -1155,7 +1199,14 @@ void main(string[] args) {
         execv(childArguments[0], childArguments.ptr);
         need(false, "child exec failed");
     }
+    if (args.length == 2 && args[1] == "--self-test-whole-timeout-probe") {
+        wholeRunDeadline = MonoTime.currTime + seconds(1);
+        armWholeRunWatchdog(wholeRunDeadline);
+        Thread.sleep(seconds(30));
+        need(false, "whole-run watchdog probe survived");
+    }
     wholeRunDeadline = MonoTime.currTime + seconds(wholeRunTimeoutSeconds);
+    armWholeRunWatchdog(wholeRunDeadline);
     need(args.length == 2 || args.length == 3 || args.length == 4 ||
         args.length == 5,
         "usage: coordination_profile <release-binary> <report> | " ~

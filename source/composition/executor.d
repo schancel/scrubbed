@@ -5,7 +5,8 @@ import composition.compiler : CompiledStage, compileJob;
 import content.pieces : Content, ContentPiece;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, StageResult, StageTransform, runStage;
-import stages.registry : FilterPlacement;
+import stages.registry : FilterPlacement, SideOutputCapability,
+    StageCardinality;
 import std.exception : enforce;
 import std.utf : validate;
 
@@ -45,6 +46,24 @@ private StageDeclaration instanceDeclaration(const ref CompiledStage stage) {
             registered.resources.exclusiveNames.dup));
 }
 
+private void validateCapabilities(const ref StageResult result,
+        const ref CompiledStage stage) {
+    if (stage.cardinality == StageCardinality.oneToOne) {
+        enforce(result.events.length == result.processed,
+            "one-to-one stage changed event cardinality");
+        foreach (event; result.events)
+            enforce(!event.isChild, "one-to-one stage split an input");
+    }
+    foreach (event; result.events) {
+        if (stage.sideOutputCapability == SideOutputCapability.none)
+            enforce(event.sideOutputs.length == 0,
+                "stage emitted undeclared side output");
+        else
+            enforce(event.sideOutputs.length == 1,
+                "side-output stage must emit exactly one side output");
+    }
+}
+
 /// Execute one resolved stage over an ordered batch. A nonempty filter chain
 /// is an explicit whole-text barrier; an empty chain retains Content identity.
 StageResult runCompiledStage(StageDocument[] inputs,
@@ -64,6 +83,7 @@ StageResult runCompiledStage(StageDocument[] inputs,
     }
 
     auto result = runStage(inputs, instanceDeclaration(stage), transform);
+    validateCapabilities(result, stage);
     if (placement == FilterPlacement.after && names.length)
         foreach (ref event; result.events)
             if (event.kind == EventKind.emitted)
@@ -187,6 +207,7 @@ version (MaterializationWorkProbe) {
         }
 
         auto result = runStage(inputs, instanceDeclaration(stage), transform);
+        validateCapabilities(result, stage);
         if (placement == FilterPlacement.after && names.length) {
             foreach (ref event; result.events) {
                 if (event.kind == EventKind.emitted) {

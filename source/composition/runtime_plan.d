@@ -6,6 +6,7 @@ import composition.dispatch_compiler : CompiledDispatchJobV1;
 import composition.dispatch_executor : DispatchExecutionEventV1,
     DispatchEventKindV1, runDispatchJobV1;
 import composition.job_executor : runCompiledJob;
+import domain.document : DocumentId;
 import stages.contract : EventKind, StageDocument, StageEvent;
 import std.exception : enforce;
 
@@ -88,15 +89,19 @@ RuntimeExecutionV1 runRuntimePlanV1(StageDocument input,
     final switch (event.kind) {
     case DispatchEventKindV1.emitted:
     case DispatchEventKindV1.passed:
-        result.events = [StageEvent(EventKind.emitted, event.output)];
+        result.events = [StageEvent(EventKind.emitted, event.output, null,
+            DocumentId.init, 0, false,
+            event.sideOutputs.dup)];
         break;
     case DispatchEventKindV1.rejected:
         result.events = [StageEvent(EventKind.rejected, event.source,
-            event.reason)];
+            event.reason, DocumentId.init, 0, false,
+            event.sideOutputs.dup)];
         break;
     case DispatchEventKindV1.quarantined:
         result.events = [StageEvent(EventKind.quarantined, event.source,
-            event.reason)];
+            event.reason, DocumentId.init, 0, false,
+            event.sideOutputs.dup)];
         break;
     }
     enforce(result.events.length == 1 && !result.events[0].isChild,

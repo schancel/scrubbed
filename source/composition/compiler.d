@@ -6,8 +6,9 @@ import job.spec : JobOption, JobOptionType, JobOptions, JobSpec, validateJobSpec
 import pipeline : FilterOption, FilterRegistry, Pipeline, TypedFilterOptions,
     TypedFilterSpec, availableFilterRegistry;
 import stages.contract : ResourceDeclaration, StageDeclaration;
-import stages.registry : ConfiguredStageTransform, FilterPlacement, StageOption,
-    StageOptions, StageRegistry, availableStages;
+import stages.registry : ConfiguredStageTransform, FilterPlacement,
+    SideOutputCapability, StageCardinality, StageOption, StageOptions,
+    StageRegistry, availableStages;
 import std.exception : enforce;
 
 struct CompiledStage {
@@ -17,13 +18,17 @@ private:
     StageDeclaration stageDeclaration;
     ConfiguredStageTransform stageTransform;
     FilterPlacement placement;
+    StageCardinality cardinalityValue;
+    SideOutputCapability sideOutputCapabilityValue;
     Pipeline filterPipeline;
 
     @disable this();
 
     this(string id, StageDeclaration declaration,
             ConfiguredStageTransform transform,
-            FilterPlacement filterPlacement, Pipeline filters) {
+            FilterPlacement filterPlacement, Pipeline filters,
+            StageCardinality cardinality = StageCardinality.maySplit,
+            SideOutputCapability sideOutputCapability = SideOutputCapability.none) {
         enforce(id.length != 0, "compiled stage ID is required");
         enforce(transform.isValid, "compiled stage transform is required");
         enforce(filterPlacement == FilterPlacement.none ||
@@ -35,6 +40,8 @@ private:
         stageDeclaration = declaration;
         stageTransform = transform;
         placement = filterPlacement;
+        cardinalityValue = cardinality;
+        sideOutputCapabilityValue = sideOutputCapability;
         filterPipeline = filters;
     }
 
@@ -64,6 +71,14 @@ public:
     bool filterResultsAreRetentionSafe() const {
         requireCompiled;
         return filterPipeline.resultsAreRetentionSafe;
+    }
+    StageCardinality cardinality() const {
+        requireCompiled;
+        return cardinalityValue;
+    }
+    SideOutputCapability sideOutputCapability() const {
+        requireCompiled;
+        return sideOutputCapabilityValue;
     }
 }
 
@@ -130,6 +145,23 @@ CompiledJob compileJob(const ref JobSpec spec,
     if (stageRegistry is null) stageRegistry = availableStages();
     if (filterRegistry is null) filterRegistry = availableFilterRegistry();
 
+    // Capability checks precede factory execution. A terminal side output
+    // must bind the final content revision and exactly one root event.
+    foreach (ordinal, stage; spec.stages) {
+        auto registration = stageRegistry.find(stage.implementation);
+        enforce(registration !is null, "unknown stage: " ~ stage.implementation);
+        if (registration.sideOutputCapability == SideOutputCapability.terminal) {
+            enforce(registration.cardinality == StageCardinality.oneToOne,
+                "side-output stage must be non-splitting: " ~ stage.id);
+            enforce(ordinal + 1 == spec.stages.length,
+                "side-output stage must be terminal: " ~ stage.id);
+            enforce(registration.filterPlacement != FilterPlacement.after ||
+                stage.filters.length == 0,
+                "side-output stage cannot transform content after emission: " ~
+                    stage.id);
+        }
+    }
+
     auto identity = jobIdentity(spec);
     CompiledStage[] compiledStages;
     string[] implementationOrder;
@@ -152,7 +184,8 @@ CompiledJob compileJob(const ref JobSpec spec,
                 registration.declaration.resources.exclusiveNames.dup));
         compiledStages ~= CompiledStage(stage.id.idup,
             declaration, transform, registration.filterPlacement,
-            compiledFilters);
+            compiledFilters, registration.cardinality,
+            registration.sideOutputCapability);
         implementationOrder ~= stage.implementation;
     }
     stageRegistry.validateOrder(implementationOrder);

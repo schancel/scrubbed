@@ -11,8 +11,7 @@ import std.utf : validate;
 
 private string materializeUtf8(Content input) pure {
     enforce(input !is null, "stage content is required");
-    ubyte[] bytes;
-    input.stream((const(ubyte)[] chunk) { bytes ~= chunk; });
+    auto bytes = input.copy;
     auto text = cast(string) bytes;
     validate(text);
     return text;

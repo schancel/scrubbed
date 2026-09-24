@@ -1219,16 +1219,18 @@ private void concurrentStrictCheck(string self, string report, string binary) {
         randomUUID.toString);
     mkdirRecurse(root);
     scope (exit) if (exists(root)) rmdirRecurse(root);
-    auto input = File("/dev/null", "rb");
+    auto input1 = File("/dev/null", "rb");
+    auto input2 = File("/dev/null", "rb");
     auto out1 = File(buildPath(root, "one.stdout"), "wb");
     auto err1 = File(buildPath(root, "one.stderr"), "wb");
     auto out2 = File(buildPath(root, "two.stdout"), "wb");
     auto err2 = File(buildPath(root, "two.stderr"), "wb");
-    auto first = spawnProcess([self, "--check-one", report, binary], input,
+    auto first = spawnProcess([self, "--check-one", report, binary], input1,
         out1, err1);
-    auto second = spawnProcess([self, "--check-one", report, binary], input,
+    auto second = spawnProcess([self, "--check-one", report, binary], input2,
         out2, err2);
-    input.close(); out1.close(); err1.close(); out2.close(); err2.close();
+    input1.close(); input2.close(); out1.close(); err1.close(); out2.close();
+    err2.close();
     int rawFirst, rawSecond; rusage usage;
     need(wait4(first.processID, &rawFirst, 0, &usage) == first.processID &&
         wait4(second.processID, &rawSecond, 0, &usage) == second.processID &&

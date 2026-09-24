@@ -86,9 +86,18 @@ public:
         enforce(chunkSize > 0, "extractor stream chunk size must be positive");
         auto buffer = new ubyte[chunkSize];
         size_t filled;
-        foreach (piece; descriptors) foreach (index; 0 .. piece.size) {
-            buffer[filled++] = piece.at(index);
-            if (filled == chunkSize) { sink(buffer[]); filled = 0; }
+        foreach (piece; descriptors) {
+            auto pieceSize = piece.size;
+            size_t copied;
+            while (copied < pieceSize) {
+                auto available = chunkSize - filled;
+                auto remaining = pieceSize - copied;
+                auto count = available < remaining ? available : remaining;
+                piece.copyTo(copied, buffer[filled .. filled + count]);
+                copied += count;
+                filled += count;
+                if (filled == chunkSize) { sink(buffer[]); filled = 0; }
+            }
         }
         if (filled) sink(buffer[0 .. filled]);
     }

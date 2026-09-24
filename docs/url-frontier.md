@@ -25,7 +25,9 @@ The frontier owns these transitions:
   aggregate input-byte caps are checked before any lease or frontier mutation;
   exceeding either rejects the whole transition and leaves the lease live.
 - Reclaim invalidates the old generation before rescheduling the item. Stale,
-  unknown, reused, and double-completed leases do not mutate state.
+  unknown, reused, and double-completed leases do not mutate state. An exhausted
+  generation is reported before FIFO removal, leaving the item truthfully queued
+  and preventing false completion.
 - Cancellation stops new leases but preserves every admitted item and live
   lease. Resuming permits work to continue. Sealing rejects all later seeds and
   discoveries while already admitted work remains leaseable.

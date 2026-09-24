@@ -26,7 +26,13 @@ enum AdmissionCode : ubyte {
     refusedStoredByteLimit,
 }
 
-enum LeaseUnavailable : ubyte { none, canceled, activeLimit, noQueuedWork }
+enum LeaseUnavailable : ubyte {
+    none,
+    canceled,
+    activeLimit,
+    noQueuedWork,
+    generationExhausted,
+}
 enum LeaseOutcome : ubyte { completed, retryableFailure, permanentFailure }
 enum FinishCode : ubyte {
     applied,
@@ -132,6 +138,11 @@ private:
     public:
         @property size_t length() const { return count; }
 
+        size_t front() const {
+            require(count != 0, "empty pending queue");
+            return slots[head];
+        }
+
         void put(size_t value, size_t maximum, ref size_t resizeMoves) {
             require(count < maximum, "pending queue exceeds limit");
             if (count == slots.length) {
@@ -223,12 +234,16 @@ public:
             return result;
         }
 
-        auto index = ready.take();
+        auto index = ready.front();
         auto record = &records[index];
         require(record.state == CandidateState.queued ||
             record.state == CandidateState.retryableFailed,
             "invalid ready state");
-        require(record.generation != ulong.max, "lease generation exhausted");
+        if (record.generation == ulong.max) {
+            result.unavailable = LeaseUnavailable.generationExhausted;
+            return result;
+        }
+        ready.take();
         ++record.generation;
         record.state = CandidateState.leased;
         ++active_;
@@ -472,4 +487,22 @@ unittest {
         ++completed;
     }
     assert(scale.queueResizeMoves_ < pages * 2);
+
+    auto exhaustion = new UrlFrontier(FrontierLimits(2, 2, 1, 1, 1,
+        128, 16, 2, 64));
+    assert(exhaustion.admitSeed(CandidateInput("canonical:v1", "opaque://edge",
+        "example", 0, "seed")).code == AdmissionCode.admittedQueued);
+    auto exhaustedLease = exhaustion.takeLease();
+    exhaustion.records[0].generation = ulong.max - 1;
+    exhaustedLease.lease.generation = ulong.max - 1;
+    assert(exhaustion.reclaim(exhaustedLease.lease) == ReclaimCode.reclaimed);
+    exhaustion.seal();
+    auto beforeExhaustedTake = exhaustion.snapshot;
+    auto beforeExhaustedCounts = exhaustion.counts;
+    auto unavailable = exhaustion.takeLease();
+    assert(!unavailable.available && unavailable.unavailable ==
+        LeaseUnavailable.generationExhausted);
+    assert(exhaustion.snapshot == beforeExhaustedTake);
+    assert(exhaustion.counts == beforeExhaustedCounts);
+    assert(exhaustion.counts.queued == 1 && !exhaustion.isComplete);
 }

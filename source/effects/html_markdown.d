@@ -2,7 +2,6 @@
 module effects.html_markdown;
 
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
-import std.ascii : toLower;
 import std.conv : to;
 import std.uni : isControl, isFormat, isSpace;
 import std.utf : UTFException, encode;
@@ -102,6 +101,25 @@ private string attribute(const ref HtmlNode node, string name) pure {
     return null;
 }
 
+private bool asciiEqualIgnoreCase(string value, string expected) pure nothrow @nogc {
+    if (value.length != expected.length) return false;
+    foreach (i, c; value) {
+        ubyte folded = cast(ubyte) c;
+        if (folded >= 'A' && folded <= 'Z') folded += 'a' - 'A';
+        if (folded != cast(ubyte) expected[i]) return false;
+    }
+    return true;
+}
+
+private bool safeScheme(string scheme) pure nothrow @nogc {
+    switch (scheme.length) {
+        case 4: return asciiEqualIgnoreCase(scheme, "http");
+        case 5: return asciiEqualIgnoreCase(scheme, "https");
+        case 6: return asciiEqualIgnoreCase(scheme, "mailto");
+        default: return false;
+    }
+}
+
 private bool safeTarget(string target) pure {
     if (!target.length || target.length > 4096 || target.length >= 2 &&
         (target[0 .. 2] == "//" || target[0 .. 2] == "\\\\")) return false;
@@ -114,15 +132,29 @@ private bool safeTarget(string target) pure {
     size_t colon;
     while (colon < target.length && target[colon] != ':' &&
         target[colon] != '/' && target[colon] != '?' && target[colon] != '#') ++colon;
-    if (colon < target.length && target[colon] == ':') {
-        auto scheme = target[0 .. colon];
-        foreach (char c; scheme)
-            if ((c < 'A' || c > 'Z') && (c < 'a' || c > 'z')) return false;
-        char[] lowered;
-        foreach (char c; scheme) lowered ~= toLower(c);
-        return lowered == "http" || lowered == "https" || lowered == "mailto";
-    }
+    if (colon < target.length && target[colon] == ':')
+        return safeScheme(target[0 .. colon]);
     return true;
+}
+
+unittest {
+    void checkSchemeCaseVariants(string spelling) {
+        foreach (mask; 0 .. 1 << spelling.length) {
+            auto variant = spelling.dup;
+            foreach (i, ref c; variant)
+                if (mask & (1 << i)) c -= 'a' - 'A';
+            auto target = variant ~ ":x";
+            assert(safeTarget(cast(string) target));
+        }
+    }
+
+    checkSchemeCaseVariants("http");
+    checkSchemeCaseVariants("https");
+    checkSchemeCaseVariants("mailto");
+    assert(!safeTarget("httq:x"));
+    assert(!safeTarget("httpss:x"));
+    assert(!safeTarget("http1:x"));
+    assert(!safeTarget("h\u00e9tp:x"));
 }
 
 private string markdownTarget(string target) pure {
@@ -315,9 +347,10 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     }
     if (name == "a") {
         auto href = attribute(node, "href");
-        if (safeTarget(href)) writer.put("[");
+        const safe = safeTarget(href);
+        if (safe) writer.put("[");
         renderChildren(tree, index, writer, depth + 1);
-        if (safeTarget(href)) writer.put("](<" ~ markdownTarget(href) ~ ">)");
+        if (safe) writer.put("](<" ~ markdownTarget(href) ~ ">)");
     } else renderChildren(tree, index, writer, depth + 1);
     if (block) writer.block();
 }

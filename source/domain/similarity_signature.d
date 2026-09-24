@@ -27,6 +27,33 @@ struct SimilaritySignatures {
     SimilaritySignature[] segments;
 }
 
+private ubyte[] normalize(const(ubyte)[] content) {
+    ubyte[] normalized;
+    normalized.reserve(content.length);
+    bool pendingSpace;
+    size_t runStart;
+    foreach (i, value; content) {
+        if (value == ' ' || (value >= '\t' && value <= '\r')) {
+            if (!pendingSpace && runStart < i) normalized ~= content[runStart .. i];
+            pendingSpace = true;
+            continue;
+        }
+        if (pendingSpace) {
+            normalized ~= cast(ubyte) ' ';
+            pendingSpace = false;
+            runStart = i;
+        }
+        if (value >= 'A' && value <= 'Z') {
+            if (runStart < i) normalized ~= content[runStart .. i];
+            normalized ~= cast(ubyte)(value + ('a' - 'A'));
+            runStart = i + 1;
+        }
+    }
+    if (pendingSpace) normalized ~= cast(ubyte) ' ';
+    else if (runStart < content.length) normalized ~= content[runStart .. $];
+    return normalized;
+}
+
 /// Rejects malformed UTF-8 before normalization. The input is never mutated.
 SimilaritySignatures similaritySignatures(DocumentId id, const(ubyte)[] content) {
     enforce(id.text.length != 0, "similarity signature: document ID is not initialized");
@@ -36,22 +63,7 @@ SimilaritySignatures similaritySignatures(DocumentId id, const(ubyte)[] content)
     catch (Exception) throw new Exception("similarity signature: invalid UTF-8");
 
     // ASCII folding never increases length; one document is the memory bound.
-    ubyte[] normalized;
-    normalized.reserve(content.length);
-    bool pendingSpace;
-    foreach (value; content) {
-        if (value == ' ' || (value >= '\t' && value <= '\r')) {
-            pendingSpace = true;
-            continue;
-        }
-        if (pendingSpace) {
-            normalized ~= cast(ubyte) ' ';
-            pendingSpace = false;
-        }
-        normalized ~= value >= 'A' && value <= 'Z' ?
-            cast(ubyte)(value + ('a' - 'A')) : value;
-    }
-    if (pendingSpace) normalized ~= cast(ubyte) ' ';
+    auto normalized = normalize(content);
 
     SimilaritySignatures result;
     result.document = signature(id, 0, false, normalized);
@@ -138,4 +150,9 @@ unittest {
     assert(folded.document.lanes == canonical.document.lanes);
     assertThrown!Exception(similaritySignatures(id, [cast(ubyte) 0xff]));
     assertThrown!Exception(similaritySignatures(id, new ubyte[maxSimilarityInputBytes + 1]));
+
+    assert(normalize(cast(const(ubyte)[]) "") is null);
+    assert(normalize(cast(const(ubyte)[]) " \t\r\n\f") == cast(const(ubyte)[]) " ");
+    assert(normalize(cast(const(ubyte)[]) "  Alpha\tBETA\né  ") ==
+        cast(const(ubyte)[]) " alpha beta é ");
 }

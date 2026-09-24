@@ -213,8 +213,8 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
         throw new JsonlFailure(JsonlFailureKind.outputLimit, ordinal, id,
             completed, false, "serialized JSONL record exceeds output cap: " ~ error.msg);
     }
-    auto output = encoded.data ~ "\n";
-    try write(cast(const(ubyte)[]) output);
+    encoded.put("\n");
+    try write(cast(const(ubyte)[]) encoded.data);
     catch (Exception error) {
         throw new JsonlFailure(JsonlFailureKind.writer, ordinal, id,
             completed, true, "JSONL writer failed; current record may be partial: " ~ error.msg);

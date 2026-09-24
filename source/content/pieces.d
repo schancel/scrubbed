@@ -106,6 +106,18 @@ struct ContentPiece {
         return kind == Kind.borrowed ? source.at(offset + index) : replacement[offset + index];
     }
 
+    private void copyTo(size_t start, ubyte[] destination) const pure {
+        auto checkedSize = size;
+        enforce(start <= checkedSize &&
+            destination.length <= checkedSize - start,
+            "content piece copy outside range");
+        if (kind == Kind.borrowed)
+            source.copyTo(offset + start, destination);
+        else
+            destination[] = replacement[
+                offset + start .. offset + start + destination.length];
+    }
+
     private ContentPiece subpiece(size_t start, size_t length) {
         enforce(start <= size && length <= count - start, "content split outside piece");
         if (start == 0 && length == count) return this;
@@ -127,6 +139,18 @@ version (MaterializationWorkProbe) {
         ulong retainedBytes;
         ulong logicalCopiedBytes;
         ulong gcAllocatedBytes;
+    }
+}
+
+version (ContentStreamWorkProbe) {
+    /// Caller-owned work accounting; absent from ordinary builds.
+    struct ContentStreamWorkV1 {
+        ulong pieceChecks;
+        ulong bulkCopyCalls;
+        ulong copiedBytes;
+        ulong emittedChunks;
+        ulong emittedBytes;
+        size_t bufferBytes;
     }
 }
 
@@ -256,19 +280,56 @@ final class Content {
     /// At most chunkSize bytes are buffered, including for mapped input.
     void stream(scope void delegate(const(ubyte)[]) pure sink,
             size_t chunkSize = 8192) const pure {
+        streamImpl!void(sink, chunkSize, null);
+    }
+
+    version (ContentStreamWorkProbe) {
+        void streamMeasured(scope void delegate(const(ubyte)[]) pure sink,
+                ref ContentStreamWorkV1 work,
+                size_t chunkSize = 8192) const pure {
+            streamImpl!ContentStreamWorkV1(sink, chunkSize, &work);
+        }
+    }
+
+private:
+    void streamImpl(Work)(scope void delegate(const(ubyte)[]) pure sink,
+            size_t chunkSize, Work* work) const pure {
         enforce(chunkSize != 0, "stream chunk size must be positive");
         auto buffer = new ubyte[chunkSize];
+        static if (!is(Work == void)) work.bufferBytes = chunkSize;
         size_t filled;
         foreach (piece; sequence) {
-            foreach (index; 0 .. piece.size) {
-                buffer[filled++] = piece.at(index);
+            auto pieceSize = piece.size;
+            static if (!is(Work == void)) ++work.pieceChecks;
+            size_t copied;
+            while (copied < pieceSize) {
+                auto available = chunkSize - filled;
+                auto remaining = pieceSize - copied;
+                auto count = available < remaining ? available : remaining;
+                piece.copyTo(copied, buffer[filled .. filled + count]);
+                static if (!is(Work == void)) {
+                    ++work.bulkCopyCalls;
+                    work.copiedBytes += count;
+                }
+                copied += count;
+                filled += count;
                 if (filled == chunkSize) {
                     sink(buffer[]);
+                    static if (!is(Work == void)) {
+                        ++work.emittedChunks;
+                        work.emittedBytes += filled;
+                    }
                     filled = 0;
                 }
             }
         }
-        if (filled) sink(buffer[0 .. filled]);
+        if (filled) {
+            sink(buffer[0 .. filled]);
+            static if (!is(Work == void)) {
+                ++work.emittedChunks;
+                work.emittedBytes += filled;
+            }
+        }
     }
 }
 

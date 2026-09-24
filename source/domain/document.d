@@ -196,6 +196,16 @@ struct DocumentView {
         return owner.bytes[start + index];
     }
 
+    /// Copy a checked subrange without exposing the borrowed backing slice.
+    void copyTo(size_t sourceOffset, ubyte[] destination) const pure {
+        auto checkedSize = size;
+        enforce(sourceOffset <= checkedSize &&
+            destination.length <= checkedSize - sourceOffset,
+            "document view copy outside range");
+        destination[] = owner.bytes[
+            start + sourceOffset .. start + sourceOffset + destination.length];
+    }
+
     int opApply(scope int delegate(ubyte) visit) const {
         foreach (index; 0 .. size) {
             auto result = visit(at(index));
@@ -334,6 +344,10 @@ unittest {
     foreach (value; view) iterated ~= value;
     assert(iterated == [cast(ubyte) 5, 3]);
     auto retained = view.copy();
+    ubyte[2] copied;
+    view.copyTo(0, copied[]);
+    assert(copied[] == [cast(ubyte) 5, 3]);
+    assertThrown(view.copyTo(1, copied[]));
     backing[1] = 2;
     assert(retained == [cast(ubyte) 5, 3]);
     retained[0] = 9;
@@ -342,6 +356,7 @@ unittest {
     assert(retained == [cast(ubyte) 9, 3]);
     assertThrown(view.at(0));
     assertThrown(view.copy());
+    assertThrown(view.copyTo(0, copied[]));
     assertThrown(owner.view(0, 1));
     assertThrown((new DocumentViewOwner(backing)).view(4, 1));
 

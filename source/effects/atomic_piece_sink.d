@@ -131,8 +131,15 @@ void writeAtomicPieces(string destination, Content.PieceRange pieces,
     }
     while (!pieces.empty) {
         auto piece = pieces.front; // Checks even a zero-length borrowed piece.
-        foreach (index; 0 .. piece.size) {
-            buffer[filled++] = piece.at(index);
+        auto pieceSize = piece.size;
+        size_t copied;
+        while (copied < pieceSize) {
+            auto available = chunkSize - filled;
+            auto remaining = pieceSize - copied;
+            auto count = available < remaining ? available : remaining;
+            piece.copyTo(copied, buffer[filled .. filled + count]);
+            copied += count;
+            filled += count;
             if (filled == chunkSize) drain();
         }
         pieces.popFront();

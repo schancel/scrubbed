@@ -52,15 +52,17 @@ DetectionResultV1 detectMediaV1(Content content, string declaredMediaType = null
     auto totalBytes = content.size;
     auto inspected = totalBytes < limits.prefixBytes ? totalBytes : limits.prefixBytes;
     ubyte[] prefix;
-    prefix.reserve(inspected);
+    if (inspected) prefix = new ubyte[inspected];
+    size_t filled;
     foreach (offset, piece; content) {
-        foreach (index; 0 .. piece.size) {
-            if (prefix.length == inspected) break;
-            prefix ~= piece.at(index);
-        }
-        if (prefix.length == inspected) break;
+        if (filled == inspected) break;
+        auto available = inspected - filled;
+        auto pieceSize = piece.size;
+        auto count = pieceSize < available ? pieceSize : available;
+        if (count) piece.copyTo(0, prefix[filled .. filled + count]);
+        filled += count;
     }
-    enforce(prefix.length == inspected,
+    enforce(filled == inspected,
         "bounded detector must inspect the complete declared prefix");
 
     MediaEvidenceV1[] evidence;

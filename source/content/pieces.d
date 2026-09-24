@@ -106,7 +106,9 @@ struct ContentPiece {
         return kind == Kind.borrowed ? source.at(offset + index) : replacement[offset + index];
     }
 
-    private void copyTo(size_t start, ubyte[] destination) const pure {
+    /// Copy a checked subrange into caller-owned storage without exposing a
+    /// borrowed backing slice.
+    void copyTo(size_t start, ubyte[] destination) const pure {
         auto checkedSize = size;
         enforce(start <= checkedSize &&
             destination.length <= checkedSize - start,
@@ -436,6 +438,10 @@ unittest {
     assert(borrowed.isBorrowed && !borrowed.isOwned);
     input[1] = 'B';
     assert(borrowed.at(1) == 'B');
+    ubyte[3] bulk;
+    borrowed.copyTo(1, bulk[]);
+    assert(bulk[] == cast(const(ubyte)[]) "Bcd");
+    assertThrown(borrowed.copyTo(input.length, bulk[]));
     ubyte[] replacement = [cast(ubyte) 'X', 'Y'];
     auto owned = ContentPiece.own(replacement);
     static assert(!__traits(compiles,
@@ -511,6 +517,7 @@ unittest {
     assert(lengths == [cast(size_t) 1, 2, 2, 1]);
     owner.close();
     assert(owned.at(0) == 'X');
+    assertThrown(borrowed.copyTo(0, bulk[]));
     auto ownedOnly = new Content([owned]);
     ubyte[] retainedOutput;
     ownedOnly.stream((const(ubyte)[] chunk) { retainedOutput ~= chunk; });

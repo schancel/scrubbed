@@ -1,6 +1,7 @@
 module domain.document;
 
 import std.array : Appender, appender;
+import std.algorithm.mutation : copyBytes = copy;
 import crypto.sha256 : sha256Of;
 import std.digest : LetterCase, toHexString;
 import std.exception : enforce;
@@ -202,8 +203,9 @@ struct DocumentView {
         enforce(sourceOffset <= checkedSize &&
             destination.length <= checkedSize - sourceOffset,
             "document view copy outside range");
-        destination[] = owner.bytes[
-            start + sourceOffset .. start + sourceOffset + destination.length];
+        copyBytes(owner.bytes[
+            start + sourceOffset .. start + sourceOffset + destination.length],
+            destination);
     }
 
     int opApply(scope int delegate(ubyte) visit) const {
@@ -348,6 +350,16 @@ unittest {
     view.copyTo(0, copied[]);
     assert(copied[] == [cast(ubyte) 5, 3]);
     assertThrown(view.copyTo(1, copied[]));
+    ubyte[] forward = [cast(ubyte) 'a', 'b', 'c', 'd', 'e', 'f'];
+    auto forwardOwner = new DocumentViewOwner(forward);
+    forwardOwner.view(0, 4).copyTo(0, forward[1 .. 5]);
+    assert(forward == cast(const(ubyte)[]) "aabcdf");
+    forwardOwner.close();
+    ubyte[] backward = [cast(ubyte) 'a', 'b', 'c', 'd', 'e', 'f'];
+    auto backwardOwner = new DocumentViewOwner(backward);
+    backwardOwner.view(1, 4).copyTo(0, backward[0 .. 4]);
+    assert(backward == cast(const(ubyte)[]) "bcdeef");
+    backwardOwner.close();
     backing[1] = 2;
     assert(retained == [cast(ubyte) 5, 3]);
     retained[0] = 9;

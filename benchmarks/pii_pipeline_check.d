@@ -12,11 +12,11 @@ import std.datetime.stopwatch : AutoStart, StopWatch;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : sha256Of;
 import std.exception : enforce;
-import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
-    rmdirRecurse, tempDir, write;
+import std.file : SpanMode, copy, dirEntries, exists, getAttributes,
+    mkdirRecurse, read, readText, rmdirRecurse, setAttributes, tempDir, write;
 import std.json : JSONType, JSONValue, parseJSON;
-import std.path : absolutePath, buildPath, relativePath;
-import std.process : execute, spawnProcess;
+import std.path : absolutePath, buildPath, dirName, relativePath;
+import std.process : Config, execute, spawnProcess;
 import std.stdio : File, writeln;
 import std.string : indexOf, split, splitLines, startsWith, strip;
 import std.uuid : randomUUID;
@@ -36,6 +36,7 @@ private enum handoffStdout =
     `{"text":"Contact ******************* from **********.\n"}` ~ "\n";
 private enum analyzerIdentity = "pii.four-class/four-class:v1";
 private enum policyIdentity = "pii-policy:v1";
+private enum buildSchema = "scrubbed-pii-reproducible-build-v1";
 private enum olderResolvableRevision =
     "3075fdf6ab7627f3ca411438de1e113b2d2fa75b";
 
@@ -69,6 +70,133 @@ private bool revisionDigest(string value) {
         if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')))
             return false;
     return true;
+}
+
+private string commandVersion(string executable) {
+    auto result = execute([executable, "--version"]);
+    need(result.status == 0 && result.output.splitLines.length != 0,
+        executable ~ " --version failed");
+    return result.output.splitLines[0].strip;
+}
+
+private JSONValue stringArray(string[] values) {
+    JSONValue[] result;
+    foreach (value; values) result ~= JSONValue(value);
+    return JSONValue(result);
+}
+
+private uint little32(const(ubyte)[] bytes, size_t offset) {
+    return cast(uint) bytes[offset] | cast(uint) bytes[offset + 1] << 8 |
+        cast(uint) bytes[offset + 2] << 16 | cast(uint) bytes[offset + 3] << 24;
+}
+
+private void normalizeMachOUuid(string path) {
+    auto bytes = cast(ubyte[]) read(path);
+    need(bytes.length >= 32 && little32(bytes, 0) == 0xfeedfacf,
+        "normalization requires a 64-bit little-endian Mach-O");
+    auto commands = little32(bytes, 16);
+    size_t offset = 32;
+    bool found;
+    foreach (_; 0 .. commands) {
+        need(offset + 8 <= bytes.length, "truncated Mach-O load command");
+        auto command = little32(bytes, offset);
+        auto size = little32(bytes, offset + 4);
+        need(size >= 8 && offset + size <= bytes.length,
+            "invalid Mach-O load command size");
+        if (command == 0x1b) {
+            need(size == 24 && !found, "invalid or duplicate Mach-O UUID");
+            foreach (i; 0 .. 16) bytes[offset + 8 + i] = cast(ubyte) i;
+            found = true;
+        }
+        offset += size;
+    }
+    need(found, "Mach-O UUID load command is missing");
+    write(path, bytes);
+}
+
+private struct BuiltArtifact { string path; JSONValue receipt; }
+
+private BuiltArtifact buildArtifact(string revision, string destination) {
+    need(revisionDigest(revision), "build revision is not lowercase 40-hex");
+    auto root = buildPath(tempDir, "scrubbed-pii-build-" ~ randomUUID.toString);
+    mkdirRecurse(root);
+    scope (exit) if (exists(root)) rmdirRecurse(root);
+    auto archive = buildPath(root, "source.tar");
+    auto source = buildPath(root, "source");
+    mkdirRecurse(source);
+    auto archived = execute(["git", "archive", "--format=tar",
+        "--output=" ~ archive, revision]);
+    need(archived.status == 0, "git archive failed: " ~ archived.output);
+    auto archiveHash = hashFile(archive);
+    auto extracted = execute(["tar", "-xf", archive, "-C", source]);
+    need(extracted.status == 0, "source archive extraction failed");
+    auto tree = execute(["git", "rev-parse", revision ~ "^{tree}"]);
+    auto compilerPath = execute(["which", "ldc2"]);
+    auto dubPath = execute(["which", "dub"]);
+    need(tree.status == 0 && compilerPath.status == 0 && dubPath.status == 0,
+        "build identity probe failed");
+    auto compiler = absolutePath(compilerPath.output.strip);
+    auto dub = absolutePath(dubPath.output.strip);
+    auto buildCommand = [dub, "build", "--compiler=" ~ compiler,
+        "--build=release", "--force", "--non-interactive"];
+    auto environment = ["DFLAGS": flags];
+    auto built = execute(buildCommand, environment, Config.none, size_t.max,
+        source);
+    need(built.status == 0, "private archived-source build failed: " ~
+        built.output);
+    auto privateBinary = buildPath(source, "scrubbed");
+    need(exists(privateBinary), "private build did not produce scrubbed");
+    auto codesign = "/usr/bin/codesign";
+    auto stripTool = "/usr/bin/strip";
+    auto unsignedResult = execute([codesign, "--remove-signature",
+        privateBinary]);
+    need(unsignedResult.status == 0,
+        "signature normalization failed: " ~ unsignedResult.output);
+    auto stripped = execute([stripTool, "-S", privateBinary]);
+    need(stripped.status == 0, "debug normalization failed: " ~
+        stripped.output);
+    normalizeMachOUuid(privateBinary);
+    auto resigned = execute([codesign, "--force", "-s", "-", privateBinary]);
+    need(resigned.status == 0, "deterministic ad-hoc signing failed: " ~
+        resigned.output);
+    auto afterArchive = buildPath(root, "source-after.tar");
+    auto rearchived = execute(["git", "archive", "--format=tar",
+        "--output=" ~ afterArchive, revision]);
+    need(rearchived.status == 0 && hashFile(afterArchive) == archiveHash,
+        "source archive changed during build");
+    need(!exists(destination), "artifact destination already exists");
+    mkdirRecurse(dirName(destination));
+    copy(privateBinary, destination);
+    setAttributes(destination, getAttributes(privateBinary));
+    auto receipt = JSONValue([
+        "schema": JSONValue(buildSchema),
+        "source_revision": JSONValue(revision),
+        "source_tree_git_oid": JSONValue(tree.output.strip),
+        "source_archive_sha256": JSONValue(archiveHash),
+        "dub_recipe_sha256": JSONValue(hashFile(buildPath(source, "dub.json"))),
+        "dub_lock_sha256": JSONValue(hashFile(buildPath(source,
+            "dub.selections.json"))),
+        "build_argv": stringArray(buildCommand),
+        "build_working_tree": JSONValue("exact-git-archive"),
+        "dflags": JSONValue(environment["DFLAGS"]),
+        "compiler": JSONValue(["executable": JSONValue(compiler),
+            "sha256": JSONValue(hashFile(compiler)),
+            "version": JSONValue(commandVersion(compiler))]),
+        "dub": JSONValue(["executable": JSONValue(dub),
+            "sha256": JSONValue(hashFile(dub)),
+            "version": JSONValue(commandVersion(dub))]),
+        "normalization": JSONValue([
+            "codesign_argv": stringArray([codesign, "--remove-signature",
+                "<PRIVATE_BUILD>/scrubbed"]),
+            "codesign_sha256": JSONValue(hashFile(codesign)),
+            "strip_argv": stringArray([stripTool, "-S",
+                "<PRIVATE_BUILD>/scrubbed"]),
+            "strip_sha256": JSONValue(hashFile(stripTool)),
+            "uuid_bytes_hex": JSONValue("000102030405060708090a0b0c0d0e0f"),
+            "resign_argv": stringArray([codesign, "--force", "-s", "-",
+                "<PRIVATE_BUILD>/scrubbed"])]),
+        "artifact_sha256": JSONValue(hashFile(destination))]);
+    return BuiltArtifact(destination, receipt);
 }
 
 private void contentPrivate(string label, string[] channels) {
@@ -142,14 +270,15 @@ private struct ChildResult {
 }
 
 private ChildResult invoke(string[] command, string root, string label,
-        File input = File.init) {
+        File input = File.init, string workDir = null) {
     auto stdoutPath = buildPath(root, label ~ ".stdout");
     auto stderrPath = buildPath(root, label ~ ".stderr");
     auto source = input.isOpen ? input : File("/dev/null", "rb");
     auto output = File(stdoutPath, "wb");
     auto errors = File(stderrPath, "wb");
     auto timer = StopWatch(AutoStart.yes);
-    auto child = spawnProcess(command, source, output, errors);
+    auto child = spawnProcess(command, source, output, errors, null,
+        Config.none, workDir);
     if (!input.isOpen) source.close();
     output.close();
     errors.close();
@@ -180,18 +309,29 @@ private string[] stageArgs(string policy) {
 
 private JSONValue metric(string binary, string root, string fixture,
         string policy, string inputPath) {
-    auto output = buildPath(root, fixture ~ "-" ~ policy ~ ".out");
-    auto audit = buildPath(root, fixture ~ "-" ~ policy ~ ".audit");
-    auto config = buildPath(root, policy ~ ".json");
-    auto command = [binary, "run", "--input", inputPath, "--output", output,
-        "--threads", "1"];
-    if (policy == "disabled") command ~= ["--config", config];
-    else command ~= ["--sidecar-output", audit] ~ stageArgs(policy);
-    auto result = invoke(command, root, "metric-" ~ fixture ~ "-" ~ policy);
+    auto auditName = fixture ~ "-" ~ policy ~ ".audit";
+    auto configName = policy ~ ".json";
+    auto audit = buildPath(root, auditName);
+    auto config = buildPath(root, configName);
+    auto jsonInput = buildPath(root, fixture ~ "-transport.jsonl");
+    write(jsonInput, JSONValue(["text": JSONValue(readText(inputPath))]).toString ~
+        "\n");
+    auto command = [binary, "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace",
+        "pii-metric-synthetic-v1", "--source-key", fixture,
+        "--max-jsonl-line-bytes", "1050000", "--max-jsonl-output-bytes",
+        "1050000"];
+    if (policy == "disabled") command ~= ["--config", configName];
+    else command ~= ["--sidecar-output", auditName] ~ stageArgs(policy);
+    auto metricInput = File(jsonInput, "rb");
+    auto result = invoke(command, root, "metric-" ~ fixture ~ "-" ~ policy,
+        metricInput, root);
+    metricInput.close();
     need(result.status == 0, fixture ~ "/" ~ policy ~ " failed: " ~
         result.stderrText);
     auto inputBytes = cast(const(ubyte)[]) read(inputPath);
-    auto outputBytes = cast(const(ubyte)[]) read(output);
+    auto outputBytes = cast(const(ubyte)[])
+        parseJSON(result.stdoutText)["text"].str;
     const hasAudit = policy != "disabled";
     auto auditBytes = hasAudit ? cast(const(ubyte)[]) read(audit) : null;
     if (hasAudit) {
@@ -204,7 +344,7 @@ private JSONValue metric(string binary, string root, string fixture,
             "fixture finding cardinality mismatch");
         contentPrivate("metric audit", [cast(string) auditBytes]);
     }
-    contentPrivate("metric diagnostics", [result.stdoutText, result.stderrText]);
+    contentPrivate("metric diagnostics", [result.stderrText]);
     if (policy == "disabled" || policy == "report")
         need(outputBytes == inputBytes, "preserving policy changed bytes");
     else contentPrivate("metric transformed output", [cast(string) outputBytes]);
@@ -233,8 +373,8 @@ private JSONValue metric(string binary, string root, string fixture,
 }
 
 private JSONValue[] deterministicMetrics(string binary) {
-    enum root = ".dub/pii-pipeline-evidence-v1";
-    if (exists(root)) rmdirRecurse(root);
+    auto root = buildPath(tempDir, "scrubbed-pii-metrics-" ~
+        randomUUID.toString);
     mkdirRecurse(root);
     scope (exit) if (exists(root)) rmdirRecurse(root);
     auto cleanPath = buildPath(root, "clean.txt");
@@ -285,7 +425,16 @@ private JSONValue gcEvidence(string binary, string root, string inputPath) {
         "collections": JSONValue(collections)]);
 }
 
-private JSONValue fileManifest(string root) {
+private JSONValue deterministicGc(string binary) {
+    auto root = buildPath(tempDir, "scrubbed-pii-gc-" ~ randomUUID.toString);
+    mkdirRecurse(root);
+    scope (exit) if (exists(root)) rmdirRecurse(root);
+    auto input = buildPath(root, "finding-heavy.txt");
+    write(input, heavyFixture());
+    return gcEvidence(binary, root, input);
+}
+
+private JSONValue fileManifest(string root, bool canonicalAudit = false) {
     auto canonicalRoot = absolutePath(root);
     string[] paths;
     foreach (entry; dirEntries(canonicalRoot, SpanMode.depth, false))
@@ -294,9 +443,15 @@ private JSONValue fileManifest(string root) {
     JSONValue[] result;
     foreach (path; paths) {
         auto bytes = cast(const(ubyte)[]) read(buildPath(canonicalRoot, path));
+        auto digestBytes = bytes;
+        if (canonicalAudit) {
+            auto audit = parseJSON(cast(string) bytes);
+            audit["document_id"] = JSONValue("doc:v1:" ~ "0".replicate(64));
+            digestBytes = cast(const(ubyte)[]) audit.toString;
+        }
         result ~= JSONValue(["path": JSONValue(path),
             "bytes": JSONValue(cast(long) bytes.length),
-            "sha256": JSONValue(hashBytes(bytes))]);
+            "sha256": JSONValue(hashBytes(digestBytes))]);
     }
     return JSONValue(result);
 }
@@ -325,7 +480,7 @@ private JSONValue runMatrix(string binary, string root) {
                 i.to!string ~ ".txt.pii-audit.json"))]);
         }
         auto outManifest = fileManifest(output);
-        auto sideManifest = fileManifest(side);
+        auto sideManifest = fileManifest(side, true);
         need(outManifest.array.length == 4 && sideManifest.array.length == 4,
             "tree manifest cardinality mismatch");
         if (threads == 1) {
@@ -460,8 +615,8 @@ private JSONValue runMatrix(string binary, string root) {
 }
 
 private JSONValue deterministicMatrix(string binary) {
-    enum root = ".dub/pii-pipeline-matrix-v1";
-    if (exists(root)) rmdirRecurse(root);
+    auto root = buildPath(tempDir, "scrubbed-pii-matrix-" ~
+        randomUUID.toString);
     mkdirRecurse(root);
     scope (exit) if (exists(root)) rmdirRecurse(root);
     write(buildPath(root, "mask.json"), piiConfig("mask"));
@@ -547,6 +702,23 @@ private void exactMetricRows(JSONValue[] recorded, JSONValue[] rerun) {
                 "analyzer_sha256", "policy_sha256"])
             need(recorded[i][key] == rerun[i][key],
                 "rerun metric binding mismatch: " ~ key);
+    foreach (i; 0 .. recorded.length) {
+        foreach (key; ["wall_seconds", "user_seconds", "system_seconds"]) {
+            auto observed = recorded[i][key].floating;
+            auto fresh = rerun[i][key].floating;
+            need(observed >= 0 && observed <= 300 && fresh >= 0 &&
+                fresh <= 300 && observed <= fresh * 20 + 1 &&
+                fresh <= observed * 20 + 1,
+                "resource metric outside bounded rerun envelope: " ~ key);
+        }
+        auto observedRss = recorded[i]["peak_rss_bytes"].integer;
+        auto freshRss = rerun[i]["peak_rss_bytes"].integer;
+        need(observedRss > 0 && observedRss <= 8L * 1024 * 1024 * 1024 &&
+            freshRss > 0 && freshRss <= 8L * 1024 * 1024 * 1024 &&
+            observedRss <= freshRss * 4 + 256L * 1024 * 1024 &&
+            freshRss <= observedRss * 4 + 256L * 1024 * 1024,
+            "peak RSS outside bounded rerun envelope");
+    }
 }
 
 private void validateManifest(JSONValue manifest, bool sidecar) {
@@ -571,13 +743,48 @@ private void validate(JSONValue report, string binary = null) {
     need(revisionDigest(revision) &&
         execute(["git", "cat-file", "-e", revision ~ "^{commit}"]).status == 0,
         "source revision is not lowercase 40-hex and resolvable");
-    need(report["compiler"]["flags"].str == flags &&
+    auto recordedCompilerVersion = execute([
+        report["compiler"]["executable"].str, "--version"]);
+    need(recordedCompilerVersion.status == 0 &&
+        recordedCompilerVersion.output.splitLines.length != 0 &&
+        recordedCompilerVersion.output.splitLines[0].strip ==
+            report["compiler"]["version"].str &&
+        report["compiler"]["flags"].str == flags &&
         report["compiler"]["executable"].str.length != 0 &&
         digest(report["compiler"]["executable_sha256"].str) &&
         report["compiler"]["version"].str.length != 0 &&
         hashFile(report["compiler"]["executable"].str) ==
             report["compiler"]["executable_sha256"].str,
         "compiler/flags identity mismatch");
+    auto build = report["build"];
+    need(build["schema"].str == buildSchema &&
+        build["source_revision"].str == revision &&
+        build["source_tree_git_oid"].str ==
+            report["identities"]["source_tree_git_oid"].str &&
+        build["artifact_sha256"].str ==
+            report["identities"]["target_binary_sha256"].str &&
+        digest(build["source_archive_sha256"].str) &&
+        digest(build["dub_recipe_sha256"].str) &&
+        digest(build["dub_lock_sha256"].str) &&
+        build["build_working_tree"].str == "exact-git-archive" &&
+        build["dflags"].str == flags &&
+        build["normalization"]["uuid_bytes_hex"].str ==
+            "000102030405060708090a0b0c0d0e0f" &&
+        build["compiler"]["executable"].str ==
+            report["compiler"]["executable"].str &&
+        build["compiler"]["sha256"].str ==
+            report["compiler"]["executable_sha256"].str &&
+        build["compiler"]["version"].str ==
+            report["compiler"]["version"].str &&
+        hashFile(build["dub"]["executable"].str) ==
+            build["dub"]["sha256"].str &&
+        commandVersion(build["dub"]["executable"].str) ==
+            build["dub"]["version"].str &&
+        hashFile("/usr/bin/codesign") ==
+            build["normalization"]["codesign_sha256"].str &&
+        hashFile("/usr/bin/strip") ==
+            build["normalization"]["strip_sha256"].str,
+        "build receipt is not bound to source/tools/artifact");
     auto identities = report["identities"];
     foreach (key; ["target_binary_sha256", "harness_source_sha256",
             "stage_source_sha256", "audit_source_sha256", "clean_fixture_sha256",
@@ -632,9 +839,13 @@ private void validate(JSONValue report, string binary = null) {
         need(entry["input_bytes"].integer == inputCap &&
             entry["output_bytes"].integer >= 0 && entry["audit_bytes"].integer >= 0 &&
             entry["wall_seconds"].floating >= 0 &&
+            entry["wall_seconds"].floating <= 300 &&
             entry["user_seconds"].floating >= 0 &&
+            entry["user_seconds"].floating <= 300 &&
             entry["system_seconds"].floating >= 0 &&
-            entry["peak_rss_bytes"].integer > 0,
+            entry["system_seconds"].floating <= 300 &&
+            entry["peak_rss_bytes"].integer > 0 &&
+            entry["peak_rss_bytes"].integer <= 8L * 1024 * 1024 * 1024,
             "invalid metric domain");
         foreach (key; ["input_sha256", "output_sha256", "audit_sha256",
                 "config_sha256", "analyzer_sha256", "policy_sha256"])
@@ -684,11 +895,16 @@ private void validate(JSONValue report, string binary = null) {
     auto gc = report["gc"];
     if (gc["status"].str == "SUPPORTED")
         need(gc["allocated_bytes"].integer >= 0 &&
+            gc["allocated_bytes"].integer <= 8L * 1024 * 1024 * 1024 &&
             gc["collections"].integer >= 0 &&
+            gc["collections"].integer <= 1_000_000 &&
             gc["semantics"].str.canFind("D-runtime GC-only"),
             "invalid D-GC measurement");
     else need(gc["status"].str == "UNSUPPORTED" &&
         gc["reason"].str.length != 0, "unsupported D-GC metric lacks reason");
+    if (binary.length)
+        need(gc == deterministicGc(binary),
+            "D-GC evidence differs from fresh bounded rerun");
     auto handoff = report["handoff"];
     need(handoff["license"].str == "CC0-1.0" &&
         handoff["provenance"].object.length == 5 &&
@@ -751,11 +967,12 @@ private void validate(JSONValue report, string binary = null) {
 }
 
 private void mustReject(JSONValue good, string binary,
-        void delegate(ref JSONValue) mutate, string message) {
+        void delegate(ref JSONValue) mutate, string message,
+        bool needsRerun = false) {
     auto changed = parseJSON(good.toString);
     mutate(changed);
     bool rejected;
-    try validate(changed, binary);
+    try validate(changed, needsRerun ? binary : null);
     catch (Exception) rejected = true;
     need(rejected, "mutation accepted: " ~ message);
 }
@@ -764,6 +981,15 @@ private void mutationControls(JSONValue good, string binary) {
     mustReject(good, binary, (ref JSONValue r) {
         r["source_revision"] = JSONValue(olderResolvableRevision);
     }, "older resolvable source revision");
+    mustReject(good, binary, (ref JSONValue r) {
+        r["compiler"]["version"] = JSONValue("forged compiler version");
+    }, "compiler version execution binding");
+    mustReject(good, binary, (ref JSONValue r) {
+        r["build"]["source_revision"] = JSONValue(olderResolvableRevision);
+    }, "build receipt source revision");
+    mustReject(good, binary, (ref JSONValue r) {
+        r["build"]["artifact_sha256"] = JSONValue(hashText("arbitrary"));
+    }, "build receipt arbitrary binary");
     mustReject(good, binary, (ref JSONValue r) {
         r["identities"]["source_tree_git_oid"] =
             JSONValue("0".replicate(40));
@@ -830,11 +1056,11 @@ private void mutationControls(JSONValue good, string binary) {
         mustReject(good, binary, (ref JSONValue r) {
             r["metrics"][1][field] = JSONValue(
                 r["metrics"][1][field].integer + 1);
-        }, "wrong metric " ~ field);
+        }, "wrong metric " ~ field, true);
     foreach (field; ["input_sha256", "output_sha256", "audit_sha256"])
         mustReject(good, binary, (ref JSONValue r) {
             r["metrics"][1][field] = JSONValue(hashText("wrong-" ~ field));
-        }, "wrong metric " ~ field);
+        }, "wrong metric " ~ field, true);
     mustReject(good, binary, (ref JSONValue r) {
         r["metrics"][1]["fixture"] = JSONValue("finding-heavy");
     }, "wrong metric fixture");
@@ -856,7 +1082,7 @@ private void mutationControls(JSONValue good, string binary) {
             foreach (ref item; r["actual_binary"]["thread_manifests"]
                     [threads]["primary"].array)
                 item["sha256"] = JSONValue("0".replicate(64));
-    }, "paired same-value thread manifest rebinding");
+    }, "paired same-value thread manifest rebinding", true);
     mustReject(good, binary, (ref JSONValue r) {
         r["actual_binary"]["thread_manifests"]["threads_4"]["sidecar"]
             .array.length = 3;
@@ -890,9 +1116,24 @@ private void mutationControls(JSONValue good, string binary) {
     mustReject(good, binary, (ref JSONValue r) {
         r["actual_binary"]["privacy_canaries"] = JSONValue(false);
     }, "privacy proof status");
+    foreach (field; ["wall_seconds", "user_seconds", "system_seconds"])
+        mustReject(good, binary, (ref JSONValue r) {
+            r["metrics"][0][field] = JSONValue(1_000_000_000.5);
+        }, "extreme resource metric " ~ field);
+    mustReject(good, binary, (ref JSONValue r) {
+        r["metrics"][0]["peak_rss_bytes"] = JSONValue(9_000_000_000_000_000L);
+    }, "extreme peak RSS");
+    mustReject(good, binary, (ref JSONValue r) {
+        r["gc"] = JSONValue(["status": JSONValue("SUPPORTED"),
+            "semantics": JSONValue("D-runtime GC-only; excludes native allocations"),
+            "allocated_bytes": JSONValue(9_000_000_000_000_000L),
+            "allocated_bytes_semantics": JSONValue("forged"),
+            "collections": JSONValue(9_000_000_000_000_000L)]);
+    }, "extreme D-GC evidence");
 }
 
-private JSONValue generate(string binary, string reportPath) {
+private JSONValue generate(string binary, JSONValue buildReceipt,
+        string reportPath) {
     need(exists(binary), "target binary does not exist");
     auto root = buildPath(tempDir, "scrubbed-pii-evidence-" ~ randomUUID.toString);
     mkdirRecurse(root);
@@ -917,6 +1158,7 @@ private JSONValue generate(string binary, string reportPath) {
     auto report = JSONValue([
         "schema": JSONValue(schema),
         "source_revision": JSONValue(revision.output.strip),
+        "build": buildReceipt,
         "compiler": JSONValue(["executable": JSONValue(resolvedCompiler),
             "executable_sha256": JSONValue(hashFile(resolvedCompiler)),
             "version": JSONValue(compiler.output.splitLines[0]),
@@ -953,21 +1195,68 @@ private JSONValue generate(string binary, string reportPath) {
     return report;
 }
 
-int main(string[] args) {
-    if (args.length == 4 && args[1] == "--check") {
-        auto report = parseJSON(readText(args[2]));
-        auto binary = absolutePath(args[3]);
+private void checkOnce(string reportPath, string binaryPath) {
+        auto report = parseJSON(readText(reportPath));
+        auto binary = absolutePath(binaryPath);
         need(hashFile(binary) ==
             report["identities"]["target_binary_sha256"].str,
             "target binary identity mismatch");
+        auto rebuiltPath = buildPath(tempDir, "scrubbed-pii-rebuilt-" ~
+            randomUUID.toString, "scrubbed");
+        auto rebuilt = buildArtifact(report["source_revision"].str,
+            rebuiltPath);
+        scope (exit) if (exists(dirName(rebuiltPath)))
+            rmdirRecurse(dirName(rebuiltPath));
+        need(rebuilt.receipt == report["build"] &&
+            hashFile(rebuilt.path) == hashFile(binary),
+            "fresh archived-source build differs from receipt/artifact");
         validate(report, binary);
         mutationControls(report, binary);
+}
+
+private void concurrentStrictCheck(string self, string report, string binary) {
+    auto root = buildPath(tempDir, "scrubbed-pii-concurrent-check-" ~
+        randomUUID.toString);
+    mkdirRecurse(root);
+    scope (exit) if (exists(root)) rmdirRecurse(root);
+    auto input = File("/dev/null", "rb");
+    auto out1 = File(buildPath(root, "one.stdout"), "wb");
+    auto err1 = File(buildPath(root, "one.stderr"), "wb");
+    auto out2 = File(buildPath(root, "two.stdout"), "wb");
+    auto err2 = File(buildPath(root, "two.stderr"), "wb");
+    auto first = spawnProcess([self, "--check-one", report, binary], input,
+        out1, err1);
+    auto second = spawnProcess([self, "--check-one", report, binary], input,
+        out2, err2);
+    input.close(); out1.close(); err1.close(); out2.close(); err2.close();
+    int rawFirst, rawSecond; rusage usage;
+    need(wait4(first.processID, &rawFirst, 0, &usage) == first.processID &&
+        wait4(second.processID, &rawSecond, 0, &usage) == second.processID &&
+        WIFEXITED(rawFirst) && WEXITSTATUS(rawFirst) == 0 &&
+        WIFEXITED(rawSecond) && WEXITSTATUS(rawSecond) == 0,
+        "concurrent strict checks failed: " ~
+        readText(buildPath(root, "one.stderr")) ~
+        readText(buildPath(root, "two.stderr")));
+}
+
+int main(string[] args) {
+    if (args.length == 4 && args[1] == "--check-one") {
+        checkOnce(args[2], args[3]);
+        return 0;
+    }
+    if (args.length == 4 && args[1] == "--check") {
+        concurrentStrictCheck(absolutePath(args[0]), absolutePath(args[2]),
+            absolutePath(args[3]));
         writeln("pii pipeline evidence: report and mutation controls passed");
         return 0;
     }
-    need(args.length == 3, "usage: pii-pipeline-check SCRUBBED REPORT | " ~
-        "pii-pipeline-check --check REPORT SCRUBBED");
-    generate(absolutePath(args[1]), args[2]);
-    writeln("pii pipeline evidence: wrote ", args[2]);
+    need(args.length == 4 && args[1] == "--generate",
+        "usage: pii-pipeline-check --generate REPORT ARTIFACT | " ~
+        "pii-pipeline-check --check REPORT ARTIFACT");
+    auto revision = execute(["git", "rev-parse", "HEAD"]);
+    need(revision.status == 0, "cannot resolve generation revision");
+    auto built = buildArtifact(revision.output.strip, absolutePath(args[3]));
+    generate(built.path, built.receipt, args[2]);
+    writeln("pii pipeline evidence: wrote ", args[2], " using ", built.path);
     return 0;
 }

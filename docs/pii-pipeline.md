@@ -23,34 +23,53 @@ peak RSS, exact input/output/audit bytes and SHA-256 identities, compiler and
 flags, source and binary identities, and D-runtime GC-only allocation and
 collection evidence. Unsupported total-process allocation and cross-platform
 performance metrics are explicit rather than represented as zero. The
+byte counts and content hashes are exact. Variable wall/CPU measurements must
+remain within 300 seconds and a symmetric 20x-plus-one-second fresh-rerun
+envelope; peak RSS must remain below 8 GiB and within a symmetric
+4x-plus-256-MiB fresh-rerun envelope. D-runtime GC evidence is rerun exactly.
+These deliberately broad integrity bounds reject fabricated extremes without
+presenting local resource noise as a performance guarantee. Tree sidecar
+manifest digests canonicalize only the root-derived `document_id` to zeros;
+all other audit bytes and the original byte count remain bound.
+The
 lowercase 40-hex `source_revision` identifies the evidence source used for the
-target and checker. It is resolved and bound to its immutable Git tree plus
-the exact harness, stage, and audit sources.
+target and checker. Generation builds only from its exact Git archive in
+private scratch. The receipt binds that archive and immutable tree, DUB recipe
+and lock, compiler and build-tool executables/versions, build arguments,
+normalization tools, and final artifact hash. On Darwin the build strips debug
+data, replaces the Mach-O UUID with the receipt's fixed value, and applies a
+fresh ad-hoc signature; an ordinary `dub build` is not claimed to have the
+same bytes.
 
 The same actual release binary proves CLI/JSON configuration equivalence,
 `--validate`, `--dry-run`, `--explain`, local-tree and selected-field JSONL
 routes, exact one/four-thread results, durable stale-sidecar refusal and retry,
 and content canaries across output, audit, and diagnostic channels. The strict
-checker reruns the exact 2-by-4 deterministic byte/hash matrix and the complete
-bounded actual-binary route matrix in fresh owned scratch with the named
-binary. It requires complete sorted four-file primary and sidecar manifests
+checker first repeats the archived-source build and requires its normalized
+bytes and receipt to match, then reruns the exact 2-by-4 deterministic
+byte/hash matrix and complete bounded actual-binary route matrix in fresh
+owner-only scratch with the named artifact. Two strict checks run concurrently
+as the scratch-isolation regression. It requires complete sorted four-file
+primary and sidecar manifests
 for one and four threads, applies every privacy canary separately to dry,
 explain, and stale-durable diagnostics, then mutates every binding named by the
 evidence contract, including revision/tree, fixture/policy uniqueness, bytes,
 output, configuration, document, analyzer, policy, contributor ordering and
 cardinality, privacy, malformed/oversize audit, and stale-sidecar status.
 
+Compile the checker at the frozen source commit. Generation requires a new
+artifact path and both builds and measures that exact artifact. Keep the
+generated artifact for later strict checking; it is intentionally not
+committed:
+
 ```sh
-dub build --compiler=ldc2 --build=release --force
 ldc2 -O3 -release benchmarks/pii_pipeline_check.d \
   -of=.dub/pii-pipeline-check
-.dub/pii-pipeline-check --check benchmarks/pii-pipeline.json ./scrubbed
-```
-
-Generating a replacement report runs the bounded actual-binary matrix:
-
-```sh
-.dub/pii-pipeline-check ./scrubbed benchmarks/pii-pipeline.json
+mkdir -p .dub/pii-pipeline-artifact
+.dub/pii-pipeline-check --generate benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
+.dub/pii-pipeline-check --check benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
 ```
 
 ## Exact synthetic handoff for #62

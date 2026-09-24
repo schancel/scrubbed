@@ -15,7 +15,11 @@ are documented in [`docs/pii-pipeline.md`](../docs/pii-pipeline.md).
 ```sh
 ldc2 -O3 -release benchmarks/pii_pipeline_check.d \
   -of=.dub/pii-pipeline-check
-.dub/pii-pipeline-check --check benchmarks/pii-pipeline.json ./scrubbed
+mkdir -p .dub/pii-pipeline-artifact
+.dub/pii-pipeline-check --generate benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
+.dub/pii-pipeline-check --check benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
 ```
 
 ## Exact durable verified-skip evidence

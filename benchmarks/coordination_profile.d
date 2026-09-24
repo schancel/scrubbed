@@ -321,16 +321,16 @@ private string[string] childEnvironment(bool instrumented,
     return result;
 }
 
-private bool processGroupHasDescendants(int pid) {
+private bool processGroupHasDescendants(int pid,
+        bool injectFailureForTest = false) {
+    need(!injectFailureForTest, "injected process-group membership failure");
     enum procPgrpOnly = 2U;
-    auto required = proc_listpids(procPgrpOnly, cast(uint)pid, null, 0);
-    need(required >= 0 && required <= 4 * 65_536,
-        "process-group membership could not be bounded");
-    auto slots = cast(size_t)(required / int.sizeof) + 16;
-    auto members = new int[slots];
+    int[16] members;
+    errno = 0;
     auto used = proc_listpids(procPgrpOnly, cast(uint)pid, members.ptr,
         cast(int)(members.length * int.sizeof));
-    need(used >= 0 && used <= members.length * int.sizeof,
+    need(errno == 0 && used >= int.sizeof &&
+            used <= members.length * int.sizeof,
         "process-group membership could not be read");
     foreach (member; members[0 .. cast(size_t)used / int.sizeof])
         if (member > 0 && member != pid) return true;
@@ -338,22 +338,33 @@ private bool processGroupHasDescendants(int pid) {
 }
 
 private bool tryReapExited(int pid, out int status, out rusage usage,
-        out bool groupClean) {
+        out bool groupClean, bool injectMembershipFailureForTest = false,
+        bool allowGroupGrace = false,
+        MonoTime groupGraceDeadline = MonoTime.init) {
     processGroupMutex.lock();
+    bool mutexHeld = true;
+    scope(exit) if (mutexHeld) processGroupMutex.unlock();
     siginfo_t information;
     int observed;
     do observed = waitid(idtype_t.P_PID, cast(uint)pid, &information,
         WEXITED | WNOHANG | WNOWAIT);
     while (observed < 0 && errno == EINTR);
-    if (observed < 0) {
+    if (observed < 0)
+        need(false, "child exit could not be observed for PID " ~
+            pid.to!string ~ " (errno " ~ errno.to!string ~ ")");
+    if (information.si_pid != pid) return false;
+    auto descendantsRemain = processGroupHasDescendants(pid,
+        injectMembershipFailureForTest);
+    groupClean = !descendantsRemain;
+    if (descendantsRemain && allowGroupGrace) {
         processGroupMutex.unlock();
-        need(false, "child exit could not be observed");
+        mutexHeld = false;
+        while (MonoTime.currTime < groupGraceDeadline &&
+                processGroupHasDescendants(pid))
+            Thread.sleep(10.msecs);
+        processGroupMutex.lock();
+        mutexHeld = true;
     }
-    if (information.si_pid != pid) {
-        processGroupMutex.unlock();
-        return false;
-    }
-    groupClean = !processGroupHasDescendants(pid);
     // The unreaped leader pins both numeric identities while every possible
     // descendant receives the terminal signal.
     posixKill(-pid, SIGKILL);
@@ -361,23 +372,26 @@ private bool tryReapExited(int pid, out int status, out rusage usage,
     do waited = wait4(pid, &status, WNOHANG, &usage);
     while (waited < 0 && errno == EINTR);
     if (waited == pid) removeProcessGroupLocked(pid);
-    processGroupMutex.unlock();
     need(waited == pid, "observed child could not be reaped");
     return true;
 }
 
 private bool reapUntil(int pid, MonoTime deadline, out int status,
-        out rusage usage, out bool groupClean) {
-    while (!tryReapExited(pid, status, usage, groupClean)) {
+        out rusage usage, out bool groupClean, bool allowGroupGrace = false,
+        MonoTime groupGraceDeadline = MonoTime.init) {
+    while (!tryReapExited(pid, status, usage, groupClean, false,
+            allowGroupGrace, groupGraceDeadline)) {
         if (MonoTime.currTime >= deadline) return false;
         Thread.sleep(10.msecs);
     }
     return true;
 }
 
-private bool reapBlocking(int pid, out int status, out rusage usage) {
+private bool reapBlocking(int pid, out int status, out rusage usage,
+        bool injectMembershipFailureForTest = false) {
     bool groupClean;
-    while (!tryReapExited(pid, status, usage, groupClean))
+    while (!tryReapExited(pid, status, usage, groupClean,
+            injectMembershipFailureForTest))
         Thread.sleep(10.msecs);
     return groupClean;
 }
@@ -399,7 +413,8 @@ private void terminateGroupAndReap(int pid, out int status,
     signalRegisteredProcess(pid, SIGTERM, true);
     auto graceDeadline = MonoTime.currTime + seconds(1);
     bool groupClean;
-    if (!reapUntil(pid, graceDeadline, status, usage, groupClean)) {
+    if (!reapUntil(pid, graceDeadline, status, usage, groupClean, true,
+            graceDeadline)) {
         signalRegisteredProcess(pid, SIGKILL, true);
         reapBlocking(pid, status, usage);
     }
@@ -740,6 +755,32 @@ private void runSelfTest(string harnessPath) {
     catch (Exception) { changedSnapshotRejected = true; }
     need(changedSnapshotRejected, "changed executable snapshot was accepted");
 
+    auto membershipOut = buildPath(root, "membership-failure.out");
+    auto membershipErr = buildPath(root, "membership-failure.err");
+    auto membershipReady = buildPath(root, "membership-failure.ready");
+    auto membershipInputFile = File("/dev/null", "rb");
+    auto membershipOutputFile = File(membershipOut, "wb");
+    auto membershipErrorFile = File(membershipErr, "wb");
+    auto membershipChild = spawnGrouped(["/usr/bin/true"], membershipReady,
+        membershipInputFile, membershipOutputFile, membershipErrorFile,
+        childEnvironment(false), MonoTime.currTime + seconds(5));
+    membershipInputFile.close(); membershipOutputFile.close();
+    membershipErrorFile.close();
+    int membershipStatus; rusage membershipUsage;
+    bool membershipFailureObserved;
+    try reapBlocking(membershipChild.processID, membershipStatus,
+        membershipUsage, true);
+    catch (Exception error)
+        membershipFailureObserved = error.msg ==
+            "coordination evidence: injected process-group membership failure";
+    need(membershipFailureObserved,
+        "injected membership failure did not reach the reap boundary");
+    processGroupMutex.lock();
+    processGroupMutex.unlock();
+    need(reapBlocking(membershipChild.processID, membershipStatus,
+            membershipUsage),
+        "membership failure prevented retrying registered-child cleanup");
+
     auto environmentProbe = buildPath(root, "environment-probe");
     write(environmentProbe,
         "#!/bin/sh\n" ~
@@ -823,6 +864,36 @@ private void runSelfTest(string harnessPath) {
         "wait\n");
     need(chmod(hangingProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
         "cannot make hanging probe executable");
+    auto gracefulProbe = buildPath(root, "graceful-probe");
+    auto gracefulReady = buildPath(root, "graceful-descendant.ready");
+    auto gracefulMarker = buildPath(root, "graceful-descendant.done");
+    write(gracefulProbe, "#!/bin/sh\n" ~
+        "sh -c 'trap \"echo graceful > " ~ gracefulMarker ~
+            "; exit 0\" TERM; echo ready > " ~ gracefulReady ~
+            "; while :; do :; done' &\n" ~
+        "wait\n");
+    need(chmod(gracefulProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
+        "cannot make graceful cleanup probe executable");
+    auto gracefulOut = buildPath(root, "graceful-probe.out");
+    auto gracefulErr = buildPath(root, "graceful-probe.err");
+    auto gracefulLaunchReady = buildPath(root, "graceful-probe.ready");
+    auto gracefulInputFile = File("/dev/null", "rb");
+    auto gracefulOutputFile = File(gracefulOut, "wb");
+    auto gracefulErrorFile = File(gracefulErr, "wb");
+    auto gracefulChild = spawnGrouped([gracefulProbe], gracefulLaunchReady,
+        gracefulInputFile, gracefulOutputFile, gracefulErrorFile,
+        childEnvironment(false), MonoTime.currTime + seconds(5));
+    gracefulInputFile.close(); gracefulOutputFile.close();
+    gracefulErrorFile.close();
+    auto gracefulSetupDeadline = MonoTime.currTime + seconds(1);
+    while (!exists(gracefulReady) && MonoTime.currTime < gracefulSetupDeadline)
+        Thread.sleep(1.msecs);
+    need(exists(gracefulReady), "graceful descendant did not become ready");
+    int gracefulStatus; rusage gracefulUsage;
+    terminateGroupAndReap(gracefulChild.processID, gracefulStatus,
+        gracefulUsage);
+    need(exists(gracefulMarker),
+        "TERM grace did not let a cooperative descendant finish");
     bool cleanupFailureObserved;
     try invoke(hangingProbe, root, root, descendantPidPath, 1, 0, root, false,
         fileDigest(hangingProbe), true, 5);

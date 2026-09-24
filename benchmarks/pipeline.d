@@ -755,7 +755,8 @@ private bool sameDarwinPath(string actual, string expected) {
             actual == expected[8 .. $]);
 }
 
-private void verifyLoaderTrace(string trace, string loaderDirectory) {
+private void verifyLoaderTrace(string trace, string loaderDirectory,
+        string compilerExecutable = "") {
     string[] allowed;
     foreach (entry; dirEntries(loaderDirectory, SpanMode.shallow, false)) {
         require(entry.isFile && !isSymlink(entry.name),
@@ -773,6 +774,8 @@ private void verifyLoaderTrace(string trace, string loaderDirectory) {
         auto path = record[cast(size_t)slash .. $].strip;
         if (path.startsWith("/usr/lib/") ||
                 path.startsWith("/System/Library/")) continue;
+        if (compilerExecutable.length &&
+                sameDarwinPath(path, compilerExecutable)) continue;
         bool found;
         foreach (index, expected; allowed)
             if (sameDarwinPath(path, expected)) {
@@ -1191,7 +1194,8 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     loaderProbeEnvironment["DYLD_PRINT_LIBRARIES"] = "1";
     auto loaderTrace = checkedEnv([result.compiler, "--version"],
         loaderProbeEnvironment);
-    verifyLoaderTrace(loaderTrace, result.compilerLoaderDirectory);
+    verifyLoaderTrace(loaderTrace, result.compilerLoaderDirectory,
+        result.compiler);
     auto compilerProbe = buildPath(scratchRoot, "compiler-config-probe.d");
     auto compilerProbeObject = buildPath(scratchRoot,
         "compiler-config-probe.o");
@@ -1201,7 +1205,8 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     auto compilerTrace = checkedEnv([result.compiler, "-v", "-c",
         compilerProbe, "-of=" ~ compilerProbeObject],
         compilerProbeEnvironment);
-    verifyLoaderTrace(compilerTrace, result.compilerLoaderDirectory);
+    verifyLoaderTrace(compilerTrace, result.compilerLoaderDirectory,
+        result.compiler);
     auto configuredImport = buildPath(dirName(result.compiler), "..",
         "include", "dlang", "ldc");
     require(traceContainsPath(compilerTrace,

@@ -102,24 +102,38 @@ size_t processJsonlDocuments(ReadBytes read, WriteBytes write,
                 "JSONL reader failed: " ~ error.msg);
         }
         if (n > chunk.length) throw new Exception("JSONL reader exceeded its buffer");
-        foreach (c; chunk[0 .. n]) {
-            if (c == '\n') {
-                ++lineNumber;
-                processLine(line, lineNumber, completed, write, datasetNamespace,
-                    sourceKey, fields, transform, limits, committed);
-                line.length = 0;
-                ++completed;
-            } else {
-                // One optional terminal CR is framing, not part of the JSON text.
-                // Permit that one byte beyond the raw JSON cap, but no other growth.
-                if (line.length >= limits.rawLineBytes &&
-                    !(line.length == limits.rawLineBytes && c == '\r'))
+        size_t start;
+        foreach (i, c; chunk[0 .. n]) if (c == '\n') {
+            if (start < i) {
+                auto bytes = chunk[start .. i];
+                if (bytes.length > size_t.max - line.length ||
+                    line.length + bytes.length > limits.rawLineBytes &&
+                    !(line.length + bytes.length == limits.rawLineBytes + 1 &&
+                        bytes[$ - 1] == '\r'))
                     throw new JsonlFailure(JsonlFailureKind.inputLimit, lineNumber + 1,
                         DocumentId.from(SourceLocator(datasetNamespace, sourceKey,
                             (lineNumber + 1).to!string)), completed, false,
                         "JSONL raw line exceeds byte cap");
-                line ~= c;
+                line ~= bytes;
             }
+            ++lineNumber;
+            processLine(line, lineNumber, completed, write, datasetNamespace,
+                sourceKey, fields, transform, limits, committed);
+            line.length = 0;
+            ++completed;
+            start = i + 1;
+        }
+        if (start < n) {
+            auto bytes = chunk[start .. n];
+            if (bytes.length > size_t.max - line.length ||
+                line.length + bytes.length > limits.rawLineBytes &&
+                !(line.length + bytes.length == limits.rawLineBytes + 1 &&
+                    bytes[$ - 1] == '\r'))
+                throw new JsonlFailure(JsonlFailureKind.inputLimit, lineNumber + 1,
+                    DocumentId.from(SourceLocator(datasetNamespace, sourceKey,
+                        (lineNumber + 1).to!string)), completed, false,
+                    "JSONL raw line exceeds byte cap");
+            line ~= bytes;
         }
         if (!n) break;
     }

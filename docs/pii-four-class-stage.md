@@ -47,3 +47,8 @@ ldc2 -O3 -release -preview=dip1000 -i -Isource \
   -of=.dub/pii-pipeline-check experiments/pii_pipeline/check.d
 .dub/pii-pipeline-check
 ```
+
+The separate [bounded actual-binary evidence](pii-pipeline.md) records the
+clean and finding-cap workloads, strict mutation controls, route matrix, and
+exact synthetic downstream handoff. Its timings are local observations, not a
+performance claim.

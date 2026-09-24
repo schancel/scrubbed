@@ -189,6 +189,28 @@ accepted interleaved five-pair gate against those exact hashes and must meet
 the #183 improvement/regression thresholds on a controlled runner or through
 the planned continuous benchmark history.
 
+### Bounded content-stream work
+
+`content_stream_work.d` compares the former scalar checked-read loop with the
+production bounded bulk-copy path over the same 4 MiB borrowed input. The
+release-active proof checks exact output bytes, post-owner-close lifetime,
+piece/chunk accounting, and the unchanged 8 KiB buffer cap. Build it from the
+repository root:
+
+```sh
+ldc2 -i -O3 -release -preview=dip1000 \
+  -d-version=ContentStreamWorkProbe -Isource -J. \
+  benchmarks/content_stream_work.d -of=/tmp/scrubbed-content-stream-work
+/tmp/scrubbed-content-stream-work --self-test
+/tmp/scrubbed-content-stream-work
+```
+
+For 4,194,304 input bytes, the exact reference loop performs 4,194,304
+checked scalar reads. The production path performs 512 checked bulk transfers
+and emits the same 512 chunks with the same SHA-256 while retaining the same
+8,192-byte buffer bound. This is deterministic work accounting, not a
+wall-time or throughput claim on the loaded development host.
+
 ## Fused scalar-filter microbenchmark
 
 `fused_filters.d` compares the former separately materialized

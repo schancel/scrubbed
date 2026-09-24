@@ -720,5 +720,14 @@ file-descriptor increase. A complete artifact is retained when threshold
 validation fails. `--self-test-comparison` proves the decision's missing-win
 and regression cases and rejects threshold, observation, source-identity,
 fixture-identity, and decision mutations.
-No production-migration performance claim is retained until that hosted job
-passes for the exact candidate revision.
+Run `35957903665` passed all four workflow jobs at exact source head
+`758d894eee744baf386ae0c9a8ab1771fbc84327`; its full comparison report is
+retained as `sha256-migration-comparison.json`. The report's re-derived
+decision is `PASS`. Across the non-startup medians, many-small wall time fell
+24.0--40.0% and few-large wall time fell 31.1--71.1%; source hashing fell
+63.4--66.6% and 66.4--67.7%, respectively, while output hashing fell
+58.7--70.2% and 77.3--81.9%. Paired total CPU tracked those wall-time wins,
+RSS stayed within the configured bound, and sampled file-descriptor peaks
+were unchanged or lower. These are same-host, interleaved hosted-run results,
+not claims about every machine; cache and frequency state remained
+uncontrolled.

@@ -24,6 +24,8 @@ extern(C) {
     int sqlite3_column_type(sqlite3_stmt*, int);
     int sqlite3_changes(sqlite3*);
     int sqlite3_wal_checkpoint_v2(sqlite3*, const(char)*, int, int*, int*);
+    sqlite3_stmt* sqlite3_next_stmt(sqlite3*, sqlite3_stmt*);
+    int sqlite3_get_autocommit(sqlite3*);
 }
 
 enum SQLITE_OK = 0;

@@ -9,6 +9,8 @@ import std.utf : validate;
 
 enum OptionType { text, integer, boolean }
 enum FilterPlacement { none, before, after }
+enum StageCardinality { maySplit, oneToOne }
+enum SideOutputCapability { none, terminal }
 
 /// Values have one active type; callers cannot reinterpret a parsed option.
 struct StageOption {
@@ -97,6 +99,8 @@ struct StageRegistration {
     string[] after;
     StageFactory factory;
     FilterPlacement filterPlacement;
+    StageCardinality cardinality;
+    SideOutputCapability sideOutputCapability;
 }
 
 private void validKey(string key) {
@@ -120,6 +124,12 @@ struct StageRegistry {
             registration.filterPlacement == FilterPlacement.before ||
             registration.filterPlacement == FilterPlacement.after,
             "invalid filter placement");
+        enforce(registration.cardinality == StageCardinality.maySplit ||
+            registration.cardinality == StageCardinality.oneToOne,
+            "invalid stage cardinality");
+        enforce(registration.sideOutputCapability == SideOutputCapability.none ||
+            registration.sideOutputCapability == SideOutputCapability.terminal,
+            "invalid side-output capability");
         enforce((declaration.key in registrations) is null,
             "duplicate stage: " ~ declaration.key);
         foreach (i, option; registration.options) {

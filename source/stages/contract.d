@@ -1,6 +1,7 @@
 module stages.contract;
 
 import content.pieces : Content;
+import crypto.sha256 : sha256Of;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
 import std.conv : to;
 import std.exception : enforce;
@@ -60,23 +61,109 @@ struct StageDeclaration {
 
 enum DecisionKind { map, reject, quarantine, split }
 
+/// One bounded, content-addressed terminal value owned independently of a
+/// stage's caller storage. Names are path-component-safe metadata; publication
+/// and destination policy belong to effects, not this contract.
+struct TerminalSideOutput {
+    enum size_t maxNameBytes = 96;
+    enum size_t maxPayloadBytes = 1024 * 1024;
+
+private:
+    bool initialized;
+    string keyValue;
+    string schemaValue;
+    string suffixValue;
+    immutable(ubyte)[] bytesValue;
+    ubyte[32] digestValue;
+
+    static bool isNameByte(char value) pure {
+        return value >= 'a' && value <= 'z' ||
+            value >= 'A' && value <= 'Z' ||
+            value >= '0' && value <= '9' ||
+            value == '-' || value == '_' || value == '.';
+    }
+
+    static void validateName(string value, string label,
+            bool suffix) pure {
+        enforce(value.length > 0 && value.length <= maxNameBytes,
+            label ~ " is empty or too long");
+        validate(value);
+        enforce(value != "." && value != ".." &&
+            value.indexOf("..") < 0 &&
+            value.indexOf('/') < 0 && value.indexOf('\\') < 0 &&
+            value.indexOf('\0') < 0,
+            label ~ " must not be path-like");
+        foreach (part; value)
+            enforce(isNameByte(part), label ~ " contains an invalid byte");
+        if (suffix)
+            enforce(value.length > 1 && value[0] == '.',
+                "side-output suffix must begin with a dot");
+        else
+            enforce(value[0] != '.', label ~ " must not be path-like");
+    }
+
+    void requireInitialized() const pure {
+        enforce(initialized, "side output is not initialized");
+    }
+
+public:
+    this(string key, string schema, string suffix,
+            const(ubyte)[] bytes) pure {
+        validateName(key, "side-output key", false);
+        validateName(schema, "side-output schema", false);
+        validateName(suffix, "side-output suffix", true);
+        enforce(bytes.length <= maxPayloadBytes,
+            "side-output payload exceeds its byte cap");
+        // Bounds are checked before these ownership allocations.
+        keyValue = key.idup;
+        schemaValue = schema.idup;
+        suffixValue = suffix.idup;
+        bytesValue = bytes.idup;
+        digestValue = sha256Of(bytesValue);
+        initialized = true;
+    }
+
+    string key() const pure { requireInitialized; return keyValue; }
+    string schema() const pure { requireInitialized; return schemaValue; }
+    string suffix() const pure { requireInitialized; return suffixValue; }
+    immutable(ubyte)[] bytes() const pure { requireInitialized; return bytesValue; }
+    ubyte[32] digest() const pure { requireInitialized; return digestValue; }
+}
+
 /// One complete decision for one input. Empty splits are invalid: discarding
 /// an input must be an explicit rejection or quarantine.
 struct StageDecision {
     private DecisionKind decisionKind;
     private StageDocument[] output;
     private string explanation;
+    private TerminalSideOutput[] terminalOutputs;
 
-    static StageDecision map(StageDocument output) pure {
-        return StageDecision(DecisionKind.map, [output], null);
+    private static TerminalSideOutput[] checkedOutputs(
+            TerminalSideOutput[] outputs) pure {
+        // The one-per-root bound is stricter than duplicate-key/suffix
+        // checking: no second value, duplicate or otherwise, is admitted.
+        enforce(outputs.length <= 1,
+            "a stage decision may emit at most one side output");
+        foreach (output; outputs) output.requireInitialized;
+        return outputs.dup;
     }
-    static StageDecision reject(string reason) pure {
+
+    static StageDecision map(StageDocument output,
+            TerminalSideOutput[] sideOutputs = null) pure {
+        return StageDecision(DecisionKind.map, [output], null,
+            checkedOutputs(sideOutputs));
+    }
+    static StageDecision reject(string reason,
+            TerminalSideOutput[] sideOutputs = null) pure {
         enforce(reason.length != 0, "rejection needs a reason");
-        return StageDecision(DecisionKind.reject, null, reason);
+        return StageDecision(DecisionKind.reject, null, reason,
+            checkedOutputs(sideOutputs));
     }
-    static StageDecision quarantine(string reason) pure {
+    static StageDecision quarantine(string reason,
+            TerminalSideOutput[] sideOutputs = null) pure {
         enforce(reason.length != 0, "quarantine needs a reason");
-        return StageDecision(DecisionKind.quarantine, null, reason);
+        return StageDecision(DecisionKind.quarantine, null, reason,
+            checkedOutputs(sideOutputs));
     }
     static StageDecision split(StageDocument[] children) pure {
         enforce(children.length > 0, "split needs children");
@@ -84,6 +171,7 @@ struct StageDecision {
     }
     DecisionKind kind() const { return decisionKind; }
     string reason() const { return explanation; }
+    const(TerminalSideOutput)[] sideOutputs() const { return terminalOutputs; }
     private StageDocument[] documents() { return output; }
 }
 
@@ -98,6 +186,7 @@ struct StageEvent {
     DocumentId parentId;
     size_t childOrdinal;
     bool isChild;
+    TerminalSideOutput[] sideOutputs;
 }
 
 struct StageResult {
@@ -145,17 +234,22 @@ StageResult runStage(R)(R inputs, StageDeclaration stage,
             enforce(mapped.content !is null && checkedDocument(mapped.document) == inputId,
                 "map must preserve document identity and provide content");
             mapped.content.size;
-            result.events ~= StageEvent(EventKind.emitted, mapped);
+            result.events ~= StageEvent(EventKind.emitted, mapped, null,
+                DocumentId.init, 0, false, decision.terminalOutputs.dup);
             break;
         case DecisionKind.reject:
             enforce(decision.reason.length != 0, "rejection needs a reason");
-            result.events ~= StageEvent(EventKind.rejected, input, decision.reason);
+            result.events ~= StageEvent(EventKind.rejected, input, decision.reason,
+                DocumentId.init, 0, false, decision.terminalOutputs.dup);
             break;
         case DecisionKind.quarantine:
             enforce(decision.reason.length != 0, "quarantine needs a reason");
-            result.events ~= StageEvent(EventKind.quarantined, input, decision.reason);
+            result.events ~= StageEvent(EventKind.quarantined, input, decision.reason,
+                DocumentId.init, 0, false, decision.terminalOutputs.dup);
             break;
         case DecisionKind.split:
+            enforce(decision.terminalOutputs.length == 0,
+                "split decisions cannot emit side output");
             enforce(decision.documents.length > 0, "split needs children");
             foreach (ordinal, child; decision.documents) {
                 enforce(child.content !is null, "split child content is required");

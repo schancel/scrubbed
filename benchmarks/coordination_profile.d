@@ -329,9 +329,10 @@ private bool processGroupHasDescendants(int pid,
     errno = 0;
     auto used = proc_listpids(procPgrpOnly, cast(uint)pid, members.ptr,
         cast(int)(members.length * int.sizeof));
-    need(errno == 0 && used >= int.sizeof &&
+    need(errno == 0 && used >= 0 &&
             used <= members.length * int.sizeof,
         "process-group membership could not be read");
+    if (used == 0) return false;
     foreach (member; members[0 .. cast(size_t)used / int.sizeof])
         if (member > 0 && member != pid) return true;
     return false;
@@ -430,7 +431,8 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
         File stdoutFile, File stderrFile,
         const string[string] environment_, MonoTime deadline,
         long registrationDelayMilliseconds = 0,
-        ulong fileLimitBytes = diagnosticFileMaxBytes) {
+        ulong fileLimitBytes = diagnosticFileMaxBytes,
+        long groupCreationDelayMilliseconds = 0) {
     // Spawn and register in one short critical section, before waiting for the
     // launcher to create its group. The watchdog kills both PID and -PGID, so
     // it owns the child on either side of that handshake without postponing
@@ -442,8 +444,9 @@ private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
     }
     Pid child;
     try child = spawnProcess([launcherPath, "--exec-child", readyPath,
-            fileLimitBytes.to!string] ~ command, stdinFile, stdoutFile,
-        stderrFile, environment_, Config.newEnv);
+            fileLimitBytes.to!string,
+            groupCreationDelayMilliseconds.to!string] ~ command, stdinFile,
+        stdoutFile, stderrFile, environment_, Config.newEnv);
     catch (Exception error) {
         processGroupMutex.unlock();
         throw error;
@@ -754,6 +757,24 @@ private void runSelfTest(string harnessPath) {
     try verifySnapshot(snapshot);
     catch (Exception) { changedSnapshotRejected = true; }
     need(changedSnapshotRejected, "changed executable snapshot was accepted");
+
+    auto preGroupOut = buildPath(root, "pre-group-timeout.out");
+    auto preGroupErr = buildPath(root, "pre-group-timeout.err");
+    auto preGroupReady = buildPath(root, "pre-group-timeout.ready");
+    auto preGroupInputFile = File("/dev/null", "rb");
+    auto preGroupOutputFile = File(preGroupOut, "wb");
+    auto preGroupErrorFile = File(preGroupErr, "wb");
+    bool preGroupTimeoutRejected;
+    try spawnGrouped(["/usr/bin/true"], preGroupReady, preGroupInputFile,
+        preGroupOutputFile, preGroupErrorFile, childEnvironment(false),
+        MonoTime.currTime + msecs(100), 0, diagnosticFileMaxBytes, 500);
+    catch (Exception error)
+        preGroupTimeoutRejected = error.msg ==
+            "coordination evidence: child process group did not become ready";
+    preGroupInputFile.close(); preGroupOutputFile.close();
+    preGroupErrorFile.close();
+    need(preGroupTimeoutRejected,
+        "pre-setpgid readiness timeout did not fail closed");
 
     auto membershipOut = buildPath(root, "membership-failure.out");
     auto membershipErr = buildPath(root, "membership-failure.err");
@@ -1483,7 +1504,12 @@ private void runAttribution(string[] args) {
 
 void main(string[] args) {
     launcherPath = absolutePath(args[0]);
-    if (args.length >= 5 && args[1] == "--exec-child") {
+    if (args.length >= 6 && args[1] == "--exec-child") {
+        auto groupCreationDelayMilliseconds = args[4].to!long;
+        need(groupCreationDelayMilliseconds >= 0,
+            "child process-group delay is invalid");
+        if (groupCreationDelayMilliseconds > 0)
+            Thread.sleep(msecs(groupCreationDelayMilliseconds));
         need(setpgid(0, 0) == 0, "child process group could not be created");
         auto requestedLimit = args[3].to!ulong;
         need(requestedLimit > 0 && requestedLimit <= diagnosticFileMaxBytes,
@@ -1498,7 +1524,7 @@ void main(string[] args) {
             "child file-size limit could not be installed");
         write(args[2], "ready");
         const(char)*[] childArguments;
-        foreach (argument; args[4 .. $])
+        foreach (argument; args[5 .. $])
             childArguments ~= argument.toStringz;
         childArguments ~= null;
         execv(childArguments[0], childArguments.ptr);

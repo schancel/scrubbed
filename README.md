@@ -125,6 +125,8 @@ help and command/option-name completion. `extract --format=tree-json` exports a
 bounded selected HTML parse tree; `--format=markdown` mechanically renders that
 tree without main-content selection. See the [HTML parser guide](docs/html-parser.md) and
 [command guide](docs/cli-commands.md).
+An offline [task quickstart](docs/task-examples.md) provides a licensed saved-HTML,
+text-repair, and selected-field JSONL corpus with exact expected outputs.
 The optional current-v3 `--error-journal` records sanitized local file/tree
 failures and publication intent; add `--error-retry` only when explicitly
 reprocessing unresolved output. Add `--error-targeted` with both flags to

@@ -3,19 +3,19 @@ module benchmarks.coordination_profile;
 
 import core.atomic : atomicLoad, atomicStore;
 import core.stdc.errno : EINTR, errno;
-import core.sys.posix.signal : SIGKILL;
+import core.sys.posix.signal : posixKill = kill, SIGKILL, SIGTERM;
 import core.sys.posix.sys.resource : rusage;
 import core.sys.posix.sys.stat : chmod, mkdir, S_IRUSR, S_IWUSR, S_IXUSR,
     S_IRWXU;
-import core.sys.posix.unistd : link;
-import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED;
+import core.sys.posix.unistd : execv, link, setpgid;
+import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WNOHANG;
 import core.thread : Thread;
-import core.time : msecs;
+import core.time : msecs, seconds;
 import std.algorithm.sorting : sort;
 import std.algorithm.searching : canFind;
 import std.array : appender;
 import std.conv : to;
-import std.datetime.stopwatch : AutoStart, StopWatch;
+import std.datetime.stopwatch : AutoStart, MonoTime, StopWatch;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : SHA256, sha256Of;
 import std.file : SpanMode, copy, dirEntries, exists, getAttributes, isFile,
@@ -24,7 +24,7 @@ import std.file : SpanMode, copy, dirEntries, exists, getAttributes, isFile,
 import std.format : format;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.path : absolutePath, buildPath, relativePath;
-import std.process : environment, execute, kill, spawnProcess;
+import std.process : Config, Pid, environment, execute, spawnProcess;
 import std.stdio : File, writeln;
 import std.string : splitLines, strip, toStringz;
 import std.uuid : randomUUID;
@@ -34,6 +34,11 @@ extern(C) int wait4(int pid, int* status, int options, rusage* usage);
 private enum recordBytes = 256;
 private enum recordCount = 524_288;
 private enum runs = 5;
+private enum sampleTimeoutSeconds = 900L;
+private enum wholeRunTimeoutSeconds = 21_600L;
+private enum samplerTimeoutSeconds = 2L;
+private __gshared string launcherPath;
+private MonoTime wholeRunDeadline;
 private enum fixtureTablePin =
     "34B08DAEE0547466C0EEF809A0A1BEDBDC4FEE26BEABE23F4478BBDAFFF0727E";
 private enum configPin =
@@ -119,7 +124,9 @@ private void publishReport(string reportPath, string text) {
 }
 
 private string commandOutput(string[] command) {
-    auto result = execute(command);
+    auto result = execute(command, [
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"],
+        Config.newEnv);
     need(result.status == 0, "host identity command failed");
     return result.output.strip.idup;
 }
@@ -230,10 +237,89 @@ private ulong micros(ref const typeof(rusage.init.ru_utime) value) {
     return cast(ulong)value.tv_sec * 1_000_000 + value.tv_usec;
 }
 
+private string[string] childEnvironment(bool instrumented,
+        string metricsPath = "") {
+    auto result = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL": "C"];
+    if (instrumented)
+        result["SCRUBBED_COORDINATION_METRICS_V2"] = metricsPath;
+    return result;
+}
+
+private void reapBlocking(int pid, out int status, out rusage usage) {
+    int waited;
+    do waited = wait4(pid, &status, 0, &usage);
+    while (waited < 0 && errno == EINTR);
+    need(waited == pid, "child could not be reaped");
+}
+
+private bool reapUntil(int pid, MonoTime deadline, out int status,
+        out rusage usage) {
+    while (true) {
+        auto waited = wait4(pid, &status, WNOHANG, &usage);
+        if (waited == pid) return true;
+        if (waited < 0 && errno != EINTR)
+            need(false, "wait4 failed");
+        if (MonoTime.currTime >= deadline) return false;
+        Thread.sleep(10.msecs);
+    }
+}
+
+private void terminateGroupAndReap(int pid, out int status,
+        out rusage usage) {
+    // The launcher creates the group before publishing its readiness file.
+    if (posixKill(-pid, SIGTERM) != 0) posixKill(pid, SIGTERM);
+    if (reapUntil(pid, MonoTime.currTime + seconds(1), status, usage)) return;
+    if (posixKill(-pid, SIGKILL) != 0) posixKill(pid, SIGKILL);
+    reapBlocking(pid, status, usage);
+}
+
+private Pid spawnGrouped(string[] command, string readyPath, File stdinFile,
+        File stdoutFile, File stderrFile,
+        const string[string] environment_) {
+    auto child = spawnProcess([launcherPath, "--exec-child", readyPath] ~
+        command, stdinFile, stdoutFile, stderrFile, environment_, Config.newEnv);
+    auto readyDeadline = MonoTime.currTime + seconds(2);
+    while (!exists(readyPath) && MonoTime.currTime < readyDeadline)
+        Thread.sleep(1.msecs);
+    if (!exists(readyPath)) {
+        int status; rusage usage;
+        if (posixKill(child.processID, SIGKILL) == 0)
+            reapBlocking(child.processID, status, usage);
+        need(false, "child process group did not become ready");
+    }
+    return child;
+}
+
+private string boundedCommandOutput(string[] command, string root,
+        string label) {
+    auto stdoutPath = buildPath(root, label ~ "-" ~ randomUUID.toString ~
+        ".bounded.out");
+    auto stderrPath = stdoutPath ~ ".err";
+    auto readyPath = stdoutPath ~ ".ready";
+    auto stdinFile = File("/dev/null", "rb");
+    auto stdoutFile = File(stdoutPath, "wb");
+    auto stderrFile = File(stderrPath, "wb");
+    auto child = spawnGrouped(command, readyPath, stdinFile, stdoutFile,
+        stderrFile, childEnvironment(false));
+    stdinFile.close(); stdoutFile.close(); stderrFile.close();
+    int status; rusage usage;
+    if (!reapUntil(child.processID,
+            MonoTime.currTime + seconds(samplerTimeoutSeconds),
+            status, usage)) {
+        terminateGroupAndReap(child.processID, status, usage);
+        return null;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) return null;
+    return readText(stdoutPath);
+}
+
 private JSONValue invoke(string binary, string input, string output,
         string config, size_t threads, size_t ordinal, string root,
         bool instrumented, string expectedBinaryDigest,
-        bool injectProbeFailure = false) {
+        bool injectProbeFailure = false,
+        long timeoutSeconds = sampleTimeoutSeconds) {
+    need(MonoTime.currTime < wholeRunDeadline,
+        "whole-run deadline expired before a sample started");
     need(fileDigest(binary) == expectedBinaryDigest,
         "executable snapshot changed before invocation");
     auto label = (instrumented ? "attribution-" : "performance-") ~
@@ -245,30 +331,28 @@ private JSONValue invoke(string binary, string input, string output,
     auto stdinFile = File("/dev/null", "rb");
     auto stdoutFile = File(stdoutPath, "wb");
     auto stderrFile = File(stderrPath, "wb");
-    string[] command = instrumented ? ["/usr/bin/env",
-        "SCRUBBED_COORDINATION_METRICS_V2=" ~ metricsPath, binary] :
-        ["/usr/bin/env", "-u", "SCRUBBED_COORDINATION_METRICS_V2", binary];
+    string[] command = [binary];
     if (instrumented && ordinal == 0) command ~= "--DRT-gcopt=profile:2";
     command ~= ["run", "--input", input, "--output", output, "--config", config,
         "--threads", threads.to!string, "--max-open-inputs", threads.to!string];
     auto timer = StopWatch(AutoStart.yes);
-    auto child = spawnProcess(command, stdinFile, stdoutFile, stderrFile);
+    auto readyPath = buildPath(root, label ~ ".ready");
+    auto child = spawnGrouped(command, readyPath, stdinFile, stdoutFile,
+        stderrFile, childEnvironment(instrumented, metricsPath));
     stdinFile.close(); stdoutFile.close(); stderrFile.close();
     bool childReaped;
     scope(failure) if (!childReaped) {
-        try kill(child, SIGKILL); catch (Exception) {}
-        int cleanupStatus; rusage cleanupUsage; int cleanupWaited;
-        do cleanupWaited = wait4(child.processID, &cleanupStatus, 0,
-            &cleanupUsage);
-        while (cleanupWaited < 0 && errno == EINTR);
+        int cleanupStatus; rusage cleanupUsage;
+        terminateGroupAndReap(child.processID, cleanupStatus, cleanupUsage);
     }
     shared bool stopped;
     shared size_t peakFd;
     auto sampler = new Thread({
         while (!atomicLoad(stopped)) {
-            auto seen = execute(["/usr/sbin/lsof", "-p", child.processID.to!string]);
-            if (seen.status == 0) {
-                auto count = seen.output.splitLines.length;
+            auto seen = boundedCommandOutput(["/usr/sbin/lsof", "-p",
+                child.processID.to!string], root, label ~ "-lsof");
+            if (seen.length) {
+                auto count = seen.splitLines.length;
                 if (count) --count;
                 if (count > atomicLoad(peakFd)) atomicStore(peakFd, count);
             }
@@ -286,22 +370,29 @@ private JSONValue invoke(string binary, string input, string output,
     string stackStatus = "not-attempted", stackHash;
     if (instrumented && ordinal == 0) {
         auto stackPath = buildPath(root, label ~ ".sample.txt");
-        auto sampled = execute(["/usr/bin/sample", child.processID.to!string,
-            "1", "10", "-file", stackPath]);
-        if (sampled.status == 0 && exists(stackPath)) {
+        auto sampled = boundedCommandOutput(["/usr/bin/sample",
+            child.processID.to!string, "1", "10", "-file", stackPath],
+            root, label ~ "-sample");
+        if (sampled.length && exists(stackPath)) {
             auto body = cast(const(ubyte)[])read(stackPath);
             stackStatus = body.length ? "supported" : "unsupported-empty";
             if (body.length) stackHash = hexDigest(body);
         } else stackStatus = "unsupported-sample-failed";
     }
-    int status; rusage usage; int waited;
-    do waited = wait4(child.processID, &status, 0, &usage);
-    while (waited < 0 && errno == EINTR);
-    childReaped = waited == child.processID;
+    int status; rusage usage;
+    auto sampleDeadline = MonoTime.currTime + seconds(timeoutSeconds);
+    if (wholeRunDeadline < sampleDeadline) sampleDeadline = wholeRunDeadline;
+    childReaped = reapUntil(child.processID, sampleDeadline, status, usage);
+    bool timedOut = !childReaped;
+    if (timedOut) {
+        terminateGroupAndReap(child.processID, status, usage);
+        childReaped = true;
+    }
     timer.stop();
     atomicStore(stopped, true); sampler.join();
     samplerJoined = true;
-    need(waited == child.processID && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+    need(!timedOut, "child exceeded the per-sample deadline");
+    need(WIFEXITED(status) && WEXITSTATUS(status) == 0,
         "child failed: " ~ readText(stderrPath));
     auto log = readText(stdoutPath);
     need(log.canFind("done. "), "missing completion diagnostic");
@@ -463,6 +554,7 @@ private void runSelfTest(string harnessPath) {
     write(environmentProbe,
         "#!/bin/sh\n" ~
         "test -z \"$SCRUBBED_COORDINATION_METRICS_V2\" || exit 7\n" ~
+        "test -z \"$SCRUBBED_DURABLE_METRICS_V1\" || exit 8\n" ~
         "echo 'done. environment clean'\n");
     need(chmod(environmentProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
         "cannot make environment probe executable");
@@ -475,8 +567,27 @@ private void runSelfTest(string harnessPath) {
         else environment.remove("SCRUBBED_COORDINATION_METRICS_V2");
     }
     environment["SCRUBBED_COORDINATION_METRICS_V2"] = "ambient-must-not-leak";
+    auto priorDurableEnvironment =
+        environment.get("SCRUBBED_DURABLE_METRICS_V1", "");
+    scope(exit) {
+        if (priorDurableEnvironment.length)
+            environment["SCRUBBED_DURABLE_METRICS_V1"] =
+                priorDurableEnvironment;
+        else environment.remove("SCRUBBED_DURABLE_METRICS_V1");
+    }
+    environment["SCRUBBED_DURABLE_METRICS_V1"] = "ambient-must-not-leak";
     invoke(environmentProbe, root, root, root, 1, 1, root, false,
         fileDigest(environmentProbe));
+    auto hangingProbe = buildPath(root, "hanging-probe");
+    write(hangingProbe, "#!/bin/sh\nsleep 30\n");
+    need(chmod(hangingProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
+        "cannot make hanging probe executable");
+    bool deadlineObserved;
+    try invoke(hangingProbe, root, root, root, 1, 2, root, false,
+        fileDigest(hangingProbe), false, 1);
+    catch (Exception error)
+        deadlineObserved = error.msg == "coordination evidence: child exceeded the per-sample deadline";
+    need(deadlineObserved, "hung child did not reach the bounded deadline");
 
     enum validMetrics = `{"user_us":1000,"system_us":1000,"metrics":{` ~
         `"schema":"scrubbed.coordination-metrics.v2","version":2,` ~
@@ -739,6 +850,13 @@ private void runComparison(string[] args) {
         "fixture_table_sha256": JSONValue(fixtureTablePin),
         "config_sha256": JSONValue(configPin),
         "cache_semantics": JSONValue("application-cold; OS cache uncontrolled"),
+        "sample_timeout_seconds": JSONValue(sampleTimeoutSeconds),
+        "whole_run_timeout_seconds": JSONValue(wholeRunTimeoutSeconds),
+        "sampler_timeout_seconds": JSONValue(samplerTimeoutSeconds),
+        "termination_policy": JSONValue(
+            "TERM process group; one-second grace; KILL process group; reap"),
+        "runtime_environment_policy": JSONValue(
+            "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only"),
         "control_method": JSONValue(
             "at least three of five exact paired candidate values <= 105% of baseline"),
         "target_wins": JSONValue(cast(long)targetWins),
@@ -991,6 +1109,18 @@ private void runAttribution(string[] args) {
 }
 
 void main(string[] args) {
+    launcherPath = absolutePath(args[0]);
+    if (args.length >= 4 && args[1] == "--exec-child") {
+        need(setpgid(0, 0) == 0, "child process group could not be created");
+        write(args[2], "ready");
+        const(char)*[] childArguments;
+        foreach (argument; args[3 .. $])
+            childArguments ~= argument.toStringz;
+        childArguments ~= null;
+        execv(childArguments[0], childArguments.ptr);
+        need(false, "child exec failed");
+    }
+    wholeRunDeadline = MonoTime.currTime + seconds(wholeRunTimeoutSeconds);
     need(args.length == 2 || args.length == 3 || args.length == 4 ||
         args.length == 5,
         "usage: coordination_profile <release-binary> <report> | " ~

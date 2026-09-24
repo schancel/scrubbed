@@ -62,7 +62,9 @@ int main(string[] args) {
                 (report["build_attestation"]["schema"].str !=
                     "scrubbed-build-attestation-v4" &&
                  report["build_attestation"]["schema"].str !=
-                    "scrubbed-build-attestation-v5") ||
+                    "scrubbed-build-attestation-v5" &&
+                 report["build_attestation"]["schema"].str !=
+                    "scrubbed-build-attestation-v6") ||
                 report["build_attestation"]["target_sha256"].str !=
                     report["binary_sha256"].str ||
                 !digest(report["binary_sha256"].str, 64) ||
@@ -142,10 +144,12 @@ int main(string[] args) {
             throw new Exception("not a complete v4/v6 resource report");
         if (attested &&
             (report["source_binary_mapping"].str != "ATTESTED" ||
-             (report["build_attestation"]["schema"].str !=
-                "scrubbed-build-attestation-v4" &&
-              report["build_attestation"]["schema"].str !=
-                "scrubbed-build-attestation-v5") ||
+                (report["build_attestation"]["schema"].str !=
+                    "scrubbed-build-attestation-v4" &&
+                 report["build_attestation"]["schema"].str !=
+                    "scrubbed-build-attestation-v5" &&
+                 report["build_attestation"]["schema"].str !=
+                    "scrubbed-build-attestation-v6") ||
              report["build_attestation"]["target_sha256"].str !=
                 report["binary_sha256"].str ||
              !digest(report["build_attestation"]["source_archive_sha256"].str, 64) ||

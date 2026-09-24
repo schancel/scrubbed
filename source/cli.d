@@ -1774,6 +1774,12 @@ unittest {
             "--threads", "1"]) == 0);
         assert(parseJSON(readText(metricsPath))["schema"].str ==
             "scrubbed.coordination-metrics.v2");
+        auto racedMetricsPath = buildPath(root,
+            "coordination-metrics-raced.json");
+        write(racedMetricsPath, "sentinel");
+        assertThrown(publishCoordinationMetrics(racedMetricsPath,
+            `{"schema":"must-not-replace"}`));
+        assert(readText(racedMetricsPath) == "sentinel");
     }
 
     auto empty = buildPath(root, "empty.txt");

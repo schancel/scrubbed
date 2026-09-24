@@ -46,6 +46,10 @@ private enum fdPollMilliseconds = 10L;
 private enum procPidListFds = 1;
 private enum rusageInfoV4 = 4;
 private enum harnessExecutableName = "scrubbed-pipeline-profile-check";
+private enum historicalV4ReportSha256 =
+    "00CFF582B3C93EDA270BF8FAF349AAD53F2EFBA5723112812EA34BC383B75870";
+private enum historicalV4HarnessSha256 =
+    "5338CDE056DED8380ADBBA5B8E5D871023432A254209665EAB731C02473BCD41";
 private enum unavailableToolVersion = "UNAVAILABLE";
 private enum fixtureTablePin = "34B08DAEE0547466C0EEF809A0A1BEDBDC4FEE26BEABE23F4478BBDAFFF0727E";
 private enum legacyConfigPin = "0F02941A34B68AC9CD86760C8B6F66F8EF9A4F08D16A02ABBE194EB719B7A0F4";
@@ -111,6 +115,15 @@ private string attestedBuildCommand() {
 }
 
 private string nativeEnvironmentTemplate() {
+    return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
+        "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
+        "RANLIB=<system-protected-ranlib>; " ~
+        "COMPILER_PATH=<private-pinned-tools>; SDKROOT=<xcrun-selected-sdk>; " ~
+        "DYLD_LIBRARY_PATH=<private-compiler-loader>; " ~
+        "parent environment excluded";
+}
+
+private string v5NativeEnvironmentTemplate() {
     return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
         "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
         "RANLIB=<system-protected-ranlib>; " ~
@@ -789,8 +802,9 @@ private JSONValue probes(string binary, string input, string output,
 }
 
 private void validateAttestation(JSONValue attestation, string binaryHash) {
+    auto v6 = attestation["schema"].str == "scrubbed-build-attestation-v6";
     auto v5 = attestation["schema"].str == "scrubbed-build-attestation-v5";
-    need(v5 || attestation["schema"].str == "scrubbed-build-attestation-v4",
+    need(v6 || v5 || attestation["schema"].str == "scrubbed-build-attestation-v4",
         "build attestation schema");
     foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
             "dub_recipe_sha256", "dependency_lock_sha256",
@@ -799,6 +813,10 @@ private void validateAttestation(JSONValue attestation, string binaryHash) {
             "native_prebuild_commands_sha256", "target_sha256"])
         need(digestLength(attestation[key].str,
             key == "source_sha" || key == "source_tree_id" ? 40 : 64),
+            "invalid attestation digest " ~ key);
+    if (v6) foreach (key; ["compiler_support_sha256",
+            "compiler_loader_sha256"])
+        need(digestLength(attestation[key].str, 64),
             "invalid attestation digest " ~ key);
     need(attestation["source_status"].str == "clean-before-and-after" &&
         attestation["source_materialization"].str ==
@@ -809,23 +827,33 @@ private void validateAttestation(JSONValue attestation, string binaryHash) {
         !attestation["compiler_version"].str.canFind('\\') &&
         attestation["dub_version"].str.startsWith("DUB version 1.42.0,") &&
         !attestation["dub_version"].str.canFind('/') &&
-        attestation["primary_tool_policy"].str ==
-            "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
+        attestation["primary_tool_policy"].str == (v6 ?
+            "private bounded read-only LDC executable/config/import/runtime/loader closure plus DUB snapshot invoked and hash-verified after build" :
+            "private read-only LDC/DUB snapshots invoked and hash-verified after build") &&
+        (!v6 || (attestation["compiler_support_files"].integer > 0 &&
+            attestation["compiler_support_bytes"].integer > 0 &&
+            attestation["compiler_loader_files"].integer == 3 &&
+            attestation["compiler_config_policy"].str ==
+                "private relative-path ldc2.conf selected by compile trace" &&
+            attestation["compiler_loader_policy"].str ==
+                "private hashed LLVM/Z3/zstd snapshots selected by DYLD trace")) &&
         attestation["dependency_cache_policy"].str ==
             "private DUB_HOME and --cache=local under private source" &&
         attestation["argparse_name"].str == "argparse" &&
         attestation["argparse_version"].str == "2.0.2" &&
         attestation["argparse_input_files"].integer > 1 &&
         attestation["native_prebuild_command_count"].integer == 5 &&
-        attestation["native_environment_template"].str == (v5 ?
-            nativeEnvironmentTemplate() : legacyNativeEnvironmentTemplate()) &&
-        (!v5 || (digestLength(attestation["cmake_support_sha256"].str, 64) &&
+        attestation["native_environment_template"].str == (v6 ?
+            nativeEnvironmentTemplate() : v5 ? v5NativeEnvironmentTemplate() :
+            legacyNativeEnvironmentTemplate()) &&
+        (!(v5 || v6) || (digestLength(attestation["cmake_support_sha256"].str, 64) &&
             attestation["cmake_support_files"].integer > 0)) &&
         attestation["sdk_version"].str.length &&
         attestation["sdk_build_version"].str.length &&
         !attestation["sdk_version"].str.canFind('/') &&
         !attestation["sdk_build_version"].str.canFind('/') &&
-        attestation["native_tool_policy"].str == (v5 ?
+        attestation["native_tool_policy"].str == (v6 ?
+            "non-root invocation; mutable CMake executable/support privately snapshotted with file/byte/depth/time/free-space bounds and no links; remaining tools require root-owned paths not group/other writable; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" : v5 ?
             "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" :
             "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified") &&
         attestation["linker_selection"].str ==
@@ -1299,6 +1327,18 @@ private void validateReport(JSONValue report, string expectedHarness = "",
     noLeak(report.toString);
 }
 
+private JSONValue validateCheckedReport(string text, string currentHarness) {
+    auto report = parseJSON(text);
+    if (report["build_attestation"]["schema"].str ==
+            "scrubbed-build-attestation-v4") {
+        need(hashBytes(cast(const(ubyte)[])text) == historicalV4ReportSha256 &&
+            report["harness_sha256"].str == historicalV4HarnessSha256,
+            "historical v4 profile identity differs");
+        validateReport(report, historicalV4HarnessSha256);
+    } else validateReport(report, currentHarness);
+    return report;
+}
+
 private void mustReject(JSONValue good, void delegate(ref JSONValue) mutate,
         string message) {
     auto bad = parseJSON(good.toString);
@@ -1333,7 +1373,7 @@ private JSONValue syntheticAttestation(string hash) {
         "role": JSONValue(roles[i]), "sha256": JSONValue(hash),
         "version": JSONValue(i == 0 || i == 2 || i == 3 || i == 4 ?
             unavailableToolVersion : "tool version")]);
-    return JSONValue(["schema": JSONValue("scrubbed-build-attestation-v5"),
+    return JSONValue(["schema": JSONValue("scrubbed-build-attestation-v6"),
         "source_sha": JSONValue("A".replicate(40)),
         "source_tree_id": JSONValue("A".replicate(40)),
         "source_archive_sha256": JSONValue(hash), "dub_recipe_sha256": JSONValue(hash),
@@ -1341,8 +1381,15 @@ private JSONValue syntheticAttestation(string hash) {
         "source_materialization": JSONValue("hashed Git archive extracted into private scratch"),
         "compiler_executable_name": JSONValue("ldc2"), "compiler_executable_sha256": JSONValue(hash),
         "compiler_version": JSONValue("LDC test"), "dub_executable_sha256": JSONValue(hash),
+        "compiler_support_sha256": JSONValue(hash),
+        "compiler_support_files": JSONValue(10L),
+        "compiler_support_bytes": JSONValue(1024L),
+        "compiler_loader_sha256": JSONValue(hash),
+        "compiler_loader_files": JSONValue(3L),
+        "compiler_config_policy": JSONValue("private relative-path ldc2.conf selected by compile trace"),
+        "compiler_loader_policy": JSONValue("private hashed LLVM/Z3/zstd snapshots selected by DYLD trace"),
         "dub_version": JSONValue("DUB version 1.42.0, test"),
-        "primary_tool_policy": JSONValue("private read-only LDC/DUB snapshots invoked and hash-verified after build"),
+        "primary_tool_policy": JSONValue("private bounded read-only LDC executable/config/import/runtime/loader closure plus DUB snapshot invoked and hash-verified after build"),
         "dependency_cache_policy": JSONValue("private DUB_HOME and --cache=local under private source"),
         "argparse_name": JSONValue("argparse"), "argparse_version": JSONValue("2.0.2"),
         "argparse_recipe_sha256": JSONValue(hash), "argparse_inputs_sha256": JSONValue(hash),
@@ -1351,7 +1398,7 @@ private JSONValue syntheticAttestation(string hash) {
         "native_environment_template": JSONValue(nativeEnvironmentTemplate()),
         "cmake_support_sha256": JSONValue(hash),
         "cmake_support_files": JSONValue(1L),
-        "native_tool_policy": JSONValue("mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
+        "native_tool_policy": JSONValue("non-root invocation; mutable CMake executable/support privately snapshotted with file/byte/depth/time/free-space bounds and no links; remaining tools require root-owned paths not group/other writable; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
         "native_tools": JSONValue(tools),
         "archive_suite_evidence": JSONValue(["schema": JSONValue("scrubbed-archive-suite-evidence-v1"),
             "evidence_tool_name": JSONValue("ranlib-writer"), "evidence_tool_sha256": JSONValue(hash),
@@ -1711,8 +1758,8 @@ int main(string[] args) {
             selfTestLive(args[2]); return 0;
         }
         if (args.length == 3 && args[1] == "--check") {
-            auto report = parseJSON(readText(args[2]));
-            validateReport(report, hashFile(args[0]));
+            auto report = validateCheckedReport(readText(args[2]),
+                hashFile(args[0]));
             writeln("canonical CLI profile valid: ", report["binary_sha256"].str);
             return 0;
         }

@@ -61,6 +61,12 @@ uses the v2 metrics schema because v1 recorded transform elapsed time rather
 than worker CPU. It copies each supplied executable into owner-only scratch,
 makes the copy read-only, verifies its digest around every invocation, and
 atomically publishes reports only after final snapshot verification.
+Every child receives a small declared environment rather than the caller's
+ambient variables. Each sample has a 900-second deadline, the whole run has a
+six-hour deadline, and sampler subprocesses have two seconds; timed-out
+process groups receive TERM, then KILL after a bounded grace period, and are
+always reaped. The self-test poisons unrelated metrics variables and exercises
+the timeout/reap path.
 
 On the recorded Apple M4/macOS 26.6.2/LDC 1.43.0 run, uninstrumented median
 wall times in seconds were many-small 8.091/8.115/3.590 and few-large
@@ -105,7 +111,7 @@ private attested-build closure, requires the exact distinct commits and
 base-to-candidate ancestry, and compiles the measurement harness from the
 attested candidate source with the snapshotted compiler. The measurement
 harness can only write a non-authoritative report inside pipeline-private
-scratch. The pipeline re-derives the gate, embeds both complete v5 build
+scratch. The pipeline re-derives the gate, embeds both complete v6 build
 attestations, and exclusively publishes the final v2 report. It alternates
 base/candidate order for
 five pairs at threads 1/2/4
@@ -197,11 +203,15 @@ diagnostic history rather than reproducible release-gate evidence.
 target exclusively from a hashed Git archive in private scratch with isolated
 DUB dependency resolution, and binds every v5/v6 timing sample to the executed
 target SHA-256 plus a versioned source/compiler/dependency/build attestation.
-The attestation invokes private read-only snapshots of LDC and DUB and
-re-verifies them after the build. It also pins and re-verifies the ambient
+The current v6 attestation invokes private read-only snapshots of LDC and DUB,
+copies LDC configuration/import/runtime and non-system loader dependencies into
+a bounded no-link closure, and re-verifies that closure after the build. It
+also pins and re-verifies the ambient
 `cc`, `ar`, and `ranlib` selectors, their selected compiler/archive
 executables, the selected final linker, and the `cmake` and `make` executables
-used by the hashed pre-build recipe. Per-executable archive versions are never
+used by the hashed pre-build recipe. CMake's support tree is copied under
+explicit file, byte, depth, and time bounds. Attested builds refuse privileged
+invocation and reject native paths writable outside root. Per-executable archive versions are never
 borrowed from another binary: unavailable `ar` versions are explicit, with
 separately hash-bound archive-suite evidence.
 `pipeline_attestation_check.d` is the D-only changed-executable control: two

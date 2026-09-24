@@ -164,12 +164,21 @@ requires the private build and emitted attestation to remain bound to the
 resolved set. A separate D-only same-path replacement control proves the
 private LDC/DUB snapshots remain executable and hash-bound after their source
 paths change.
+Current build attestation v6 retains the v4/v5 fields and additionally copies
+LDC's configuration, import tree, Phobos/druntime archives, compiler runtime,
+and non-system dynamic libraries into a bounded private closure. The closure
+rejects links and special files, limits file count, bytes, depth, and elapsed
+snapshot time, records its tree and loader identities, verifies the selected
+configuration/import and loader paths, and re-verifies the closure after the
+build. The CMake support snapshot uses the same bounded, no-link tree rules.
+Attested builds refuse privileged invocation; all remaining system-selected
+native paths must be root-owned and non-writable by group or other.
 The argparse input digest is likewise verified after compilation. The supported DUB
 1.42.0 target path is derived from the described root `targetPath` plus
 `targetFileName`, required to remain the private relative path `scrubbed`, and
 verified before snapshotting. The D-only build-attestation check poisons caller
-ignored artifacts, mutates a private argparse source to prove digest change and
-rejection, exercises target discovery, and requires actual v5 report
+ignored artifacts, mutates private argparse and compiler-closure inputs to
+prove digest change and rejection, exercises target discovery, and requires actual v6 report
 publication. Attestation v2 and inconsistent v3 records are rejected.
 
 The target is hashed, copied to a read-only snapshot, and accepted only when
@@ -280,7 +289,7 @@ though its executed snapshot hash is retained.
 `scrubbed-cli-profile-v1` is an additive evidence artifact, not a production
 optimization or a speedup claim. `pipeline.d --attested-profile` creates the
 shipping release executable through the existing private
-`scrubbed-build-attestation-v5` closure, snapshots that executable and the
+`scrubbed-build-attestation-v6` closure, snapshots that executable and the
 D-only `pipeline_profile_check.d` harness, and lets the snapshot run the fixed
 matrix. The report can be deleted with its harness/docs to roll this slice
 back; no production format or behavior depends on it.
@@ -377,11 +386,13 @@ interleaved before/after evidence.
 `scrubbed-cli-attribution-v1` is an additive companion to the frozen canonical
 profile. It literal-pins that report and its historical target hash, while each
 new trace binds to the current-base target produced through the same complete
-`scrubbed-build-attestation-v5` closure. V5 isolates the recorded build
+`scrubbed-build-attestation-v6` closure. V6 isolates the recorded build
 environment, privately snapshots the user-writable CMake executable and its
-support tree, and requires every remaining native tool path to be root-owned
-and non-writable by the invoking account. V4 reports remain readable as
-historical evidence. This distinction is explicit because
+bounded support tree, and snapshots and re-verifies the compiler support and
+dynamic-loader closure. V4/V5 remain compatibility schemas. The frozen v4
+profile and attribution reports are accepted only when the complete report
+hash and their historical harness hash match the literal pins; modified or
+newly synthesized v4 reports are rejected. This distinction is explicit because
 later additive production modules changed the shipping Mach-O without changing
 the frozen workload or expected output. The companion independently pins the existing
 record table, 524,288 × 256-byte corpus, layouts, scalar/mixed configs, and

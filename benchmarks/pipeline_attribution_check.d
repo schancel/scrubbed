@@ -30,6 +30,10 @@ version (OSX) extern(C) nothrow @nogc int wait4(int, int*, int, rusage*);
 
 private enum schema = "scrubbed-cli-attribution-v1";
 private enum harnessName = "scrubbed-pipeline-attribution-check";
+private enum historicalV4ReportSha256 =
+    "42659FE34768CF23FE849236998AEA41D79EF54B967A680CF480CC78108C12E0";
+private enum historicalV4HarnessSha256 =
+    "C94316CAE9CB6430D2203ECA61B54BA5949041A6E468CC16C29B27B83F46E1D7";
 private enum harnessBuildRecipe =
     "ldc2 -O3 -release benchmarks/pipeline_attribution_check.d -of=<STANDARD_TMP>/scrubbed-pipeline-attribution-check";
 private enum canonicalProfilePin =
@@ -107,6 +111,14 @@ private string attestedBuildCommand() {
         "--force --non-interactive --cache=local with private DUB_HOME";
 }
 private string nativeEnvironmentTemplate() {
+    return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
+        "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
+        "RANLIB=<system-protected-ranlib>; " ~
+        "COMPILER_PATH=<private-pinned-tools>; SDKROOT=<xcrun-selected-sdk>; " ~
+        "DYLD_LIBRARY_PATH=<private-compiler-loader>; " ~
+        "parent environment excluded";
+}
+private string v5NativeEnvironmentTemplate() {
     return "PATH=<private-pinned-tools>:/usr/bin:/bin:/usr/sbin:/sbin; " ~
         "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
         "RANLIB=<system-protected-ranlib>; " ~
@@ -686,8 +698,9 @@ private JSONValue gcRun(string[] command, string binaryHash, string sourceSha,
 }
 
 private void validateAttestation(JSONValue value, string binaryHash) {
+    auto v6 = value["schema"].str == "scrubbed-build-attestation-v6";
     auto v5 = value["schema"].str == "scrubbed-build-attestation-v5";
-    need(v5 || value["schema"].str == "scrubbed-build-attestation-v4",
+    need(v6 || v5 || value["schema"].str == "scrubbed-build-attestation-v4",
         "build attestation schema");
     foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
             "dub_recipe_sha256", "dependency_lock_sha256",
@@ -696,6 +709,10 @@ private void validateAttestation(JSONValue value, string binaryHash) {
             "native_prebuild_commands_sha256", "target_sha256"])
         need(digestLength(value[key].str,
             key == "source_sha" || key == "source_tree_id" ? 40 : 64),
+            "invalid attestation digest " ~ key);
+    if (v6) foreach (key; ["compiler_support_sha256",
+            "compiler_loader_sha256"])
+        need(digestLength(value[key].str, 64),
             "invalid attestation digest " ~ key);
     need(value["source_status"].str == "clean-before-and-after" &&
         value["source_materialization"].str ==
@@ -707,22 +724,32 @@ private void validateAttestation(JSONValue value, string binaryHash) {
         value["dub_version"].str.startsWith("DUB version 1.42.0,") &&
         !value["dub_version"].str.canFind('/') &&
         !value["dub_version"].str.canFind('\\') &&
-        value["primary_tool_policy"].str ==
-            "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
+        value["primary_tool_policy"].str == (v6 ?
+            "private bounded read-only LDC executable/config/import/runtime/loader closure plus DUB snapshot invoked and hash-verified after build" :
+            "private read-only LDC/DUB snapshots invoked and hash-verified after build") &&
+        (!v6 || (value["compiler_support_files"].integer > 0 &&
+            value["compiler_support_bytes"].integer > 0 &&
+            value["compiler_loader_files"].integer == 3 &&
+            value["compiler_config_policy"].str ==
+                "private relative-path ldc2.conf selected by compile trace" &&
+            value["compiler_loader_policy"].str ==
+                "private hashed LLVM/Z3/zstd snapshots selected by DYLD trace")) &&
         value["dependency_cache_policy"].str ==
             "private DUB_HOME and --cache=local under private source" &&
         value["argparse_name"].str == "argparse" &&
         value["argparse_version"].str == "2.0.2" &&
         value["argparse_input_files"].integer > 1 &&
         value["native_prebuild_command_count"].integer == 5 &&
-        value["native_environment_template"].str == (v5 ?
-            nativeEnvironmentTemplate() : legacyNativeEnvironmentTemplate()) &&
-        (!v5 || (digestLength(value["cmake_support_sha256"].str, 64) &&
+        value["native_environment_template"].str == (v6 ?
+            nativeEnvironmentTemplate() : v5 ? v5NativeEnvironmentTemplate() :
+            legacyNativeEnvironmentTemplate()) &&
+        (!(v5 || v6) || (digestLength(value["cmake_support_sha256"].str, 64) &&
             value["cmake_support_files"].integer > 0)) &&
         value["sdk_version"].str.length && value["sdk_build_version"].str.length &&
         !value["sdk_version"].str.canFind('/') &&
         !value["sdk_build_version"].str.canFind('/') &&
-        value["native_tool_policy"].str == (v5 ?
+        value["native_tool_policy"].str == (v6 ?
+            "non-root invocation; mutable CMake executable/support privately snapshotted with file/byte/depth/time/free-space bounds and no links; remaining tools require root-owned paths not group/other writable; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" : v5 ?
             "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" :
             "exact executables hashed and verified before and after; per-executable version or UNAVAILABLE; separately bound archive-suite evidence; private pinned PATH; CMake selections verified") &&
         value["linker_selection"].str ==
@@ -1402,6 +1429,18 @@ private void validateReport(JSONValue report, string expectedHarness = "") {
     noLeak(report.toString);
 }
 
+private JSONValue validateCheckedReport(string text, string currentHarness) {
+    auto report = parseJSON(text);
+    if (report["build_attestation"]["schema"].str ==
+            "scrubbed-build-attestation-v4") {
+        need(hashBytes(cast(const(ubyte)[])text) == historicalV4ReportSha256 &&
+            report["harness_sha256"].str == historicalV4HarnessSha256,
+            "historical v4 attribution identity differs");
+        validateReport(report, historicalV4HarnessSha256);
+    } else validateReport(report, currentHarness);
+    return report;
+}
+
 private void mustThrow(void delegate() action, string message) {
     bool rejected;
     try action(); catch (Exception) rejected = true;
@@ -1663,9 +1702,10 @@ int main(string[] args) {
             selfTestLiveSample(args[0]); return 0;
         }
         if (args.length == 3 && args[1] == "--check") {
-            validateReport(parseJSON(readText(args[2])), hashFile(args[0]));
+            auto report = validateCheckedReport(readText(args[2]),
+                hashFile(args[0]));
             writeln("canonical CLI attribution valid: ",
-                parseJSON(readText(args[2]))["decision"].str);
+                report["decision"].str);
             return 0;
         }
         need(args.length == 8 && args[1] == "--run",

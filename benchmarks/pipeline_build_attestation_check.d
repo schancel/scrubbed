@@ -78,8 +78,8 @@ int main(string[] args) {
         auto mutation = execute([args[1], "--self-test-build-isolation", source]);
         require(mutation.status == 0 &&
             mutation.output.canFind(
-                "private archive/cache/dependency/target negative passed"),
-            "private dependency mutation/target negative failed: " ~
+                "private archive/cache/dependency/compiler/target negatives passed"),
+            "private dependency/compiler mutation/target negative failed: " ~
                 mutation.output);
 
         auto nativePathReport = buildPath(root, "native-path-report.json");
@@ -90,12 +90,17 @@ int main(string[] args) {
             "native PATH swap control failed: " ~ pathSwap.output);
         auto nativeAttestation = parseJSON(readText(nativePathReport));
         require(nativeAttestation["schema"].str ==
-                "scrubbed-build-attestation-v5" &&
+                "scrubbed-build-attestation-v6" &&
             nativeAttestation["native_tools"].array.length == 9 &&
+            digest(nativeAttestation["compiler_support_sha256"].str) &&
+            nativeAttestation["compiler_support_files"].integer > 0 &&
+            nativeAttestation["compiler_support_bytes"].integer > 0 &&
+            digest(nativeAttestation["compiler_loader_sha256"].str) &&
+            nativeAttestation["compiler_loader_files"].integer == 3 &&
             digest(nativeAttestation["cmake_support_sha256"].str) &&
             nativeAttestation["cmake_support_files"].integer > 0 &&
             nativeAttestation["primary_tool_policy"].str ==
-                "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
+                "private bounded read-only LDC executable/config/import/runtime/loader closure plus DUB snapshot invoked and hash-verified after build" &&
             nativeAttestation["linker_selection"].str ==
                 "COMPILER_PATH private ld selected by attested compiler -### trace",
             "native PATH report lacks complete tool closure");
@@ -145,7 +150,7 @@ int main(string[] args) {
         auto attestation = report["build_attestation"];
         require(report["schema"].str == "scrubbed-pipeline-v5" &&
             report["source_binary_mapping"].str == "ATTESTED" &&
-            attestation["schema"].str == "scrubbed-build-attestation-v5" &&
+            attestation["schema"].str == "scrubbed-build-attestation-v6" &&
             attestation["source_sha"].str ==
                 checked(["git", "-C", source, "rev-parse", "HEAD"]) &&
             attestation["source_materialization"].str ==
@@ -159,6 +164,11 @@ int main(string[] args) {
             digest(attestation["argparse_inputs_sha256"].str) &&
             digest(attestation["native_prebuild_commands_sha256"].str) &&
             attestation["native_prebuild_command_count"].integer == 5 &&
+            digest(attestation["compiler_support_sha256"].str) &&
+            attestation["compiler_support_files"].integer > 0 &&
+            attestation["compiler_support_bytes"].integer > 0 &&
+            digest(attestation["compiler_loader_sha256"].str) &&
+            attestation["compiler_loader_files"].integer == 3 &&
             digest(attestation["cmake_support_sha256"].str) &&
             attestation["cmake_support_files"].integer > 0 &&
             attestation["native_tools"].array.length == 9 &&
@@ -184,7 +194,7 @@ int main(string[] args) {
             "attested build consumed or replaced caller ignored artifacts");
         require(!published.canFind(root) && !published.canFind(source),
             "published report disclosed private checker paths");
-        writeln("attested private archive/cache/argparse/target/publication passed: ",
+        writeln("attested private archive/cache/argparse/compiler/target/publication passed: ",
             report["binary_sha256"].str, " argparse ",
             attestation["argparse_inputs_sha256"].str, " native ",
             attestation["native_prebuild_commands_sha256"].str);

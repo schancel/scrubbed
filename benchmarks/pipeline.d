@@ -3,9 +3,10 @@ module pipeline;
 
 import core.sys.posix.signal : kill, SIGKILL;
 import core.sys.posix.sys.stat : chmod, mkdir, stat, stat_t, S_IRUSR, S_IWGRP,
-    S_IWOTH, S_IXUSR, S_IRWXU;
-import core.sys.posix.unistd : link;
+    S_IWOTH, S_IWUSR, S_IXUSR, S_IRWXU;
+import core.sys.posix.unistd : geteuid, link;
 import core.thread : Thread;
+import std.algorithm.comparison : min;
 import std.algorithm.searching : canFind, endsWith, startsWith;
 import std.algorithm.sorting : sort;
 import std.array : replicate;
@@ -14,12 +15,13 @@ import std.conv : to;
 import std.digest : toHexString;
 import std.digest.sha : SHA256, sha256Of;
 import std.datetime : dur;
+import std.datetime.stopwatch : MonoTime;
 import std.file : SpanMode, copy, dirEntries, exists, getSize, mkdirRecurse,
-    isSymlink, read, readLink, readText, remove, rename, rmdirRecurse, symlink,
-    tempDir, write;
+    getAvailableDiskSpace, isDir, isFile, isSymlink, read, readLink, readText,
+    remove, rename, rmdirRecurse, symlink, tempDir, thisExePath, write;
 import std.json : JSONType, JSONValue, parseJSON;
 import std.path : baseName, buildNormalizedPath, buildPath, dirName, isAbsolute,
-    relativePath;
+    pathSplitter, relativePath;
 import std.process : Config, environment, execute, spawnProcess, wait;
 import std.stdio : File, stderr, writeln;
 import std.string : indexOf, replace, split, splitLines, strip, toStringz;
@@ -239,6 +241,7 @@ private string nativeEnvironmentTemplate() {
         "CC=<system-protected-clang>; AR=<system-protected-ar>; " ~
         "RANLIB=<system-protected-ranlib>; " ~
         "COMPILER_PATH=<private-pinned-tools>; SDKROOT=<xcrun-selected-sdk>; " ~
+        "DYLD_LIBRARY_PATH=<private-compiler-loader>; " ~
         "parent environment excluded";
 }
 
@@ -372,6 +375,14 @@ private struct PreparedAttestedBuild {
     string compiler;
     string compilerHash;
     string compilerVersion;
+    string compilerSupportSha256;
+    size_t compilerSupportFiles;
+    ulong compilerSupportBytes;
+    string compilerLoaderSha256;
+    size_t compilerLoaderFiles;
+    string compilerSupportRoot;
+    string compilerLoaderDirectory;
+    string compilerConfigPath;
     string dub;
     string dubHash;
     string dubVersion;
@@ -388,6 +399,24 @@ private struct PreparedAttestedBuild {
     string[string] environment;
     DependencyInputs dependency;
 }
+
+private struct TreeBounds {
+    size_t maxFiles;
+    ulong maxBytes;
+    size_t maxDepth;
+    long maxSeconds;
+}
+
+private struct TreeIdentity {
+    string sha256;
+    size_t files;
+    ulong bytes;
+}
+
+private enum supportTreeBounds = TreeBounds(8_192, 256UL * 1024 * 1024,
+    32, 120);
+private enum compilerTreeBounds = TreeBounds(8_192, 512UL * 1024 * 1024,
+    32, 180);
 
 private struct NativeTool {
     string name;
@@ -408,47 +437,279 @@ private string resolveToolPath(string path) {
     throw new Exception("native tool symlink chain is too deep");
 }
 
-private string treeDigest(string root, out size_t fileCount) {
+private size_t relativeDepth(string relative) {
+    size_t result;
+    foreach (_; pathSplitter(relative)) ++result;
+    return result;
+}
+
+private void digestFile(ref SHA256 digest, string path, ulong expectedBytes,
+        MonoTime deadline) {
+    auto input = File(path, "rb");
+    ubyte[64 * 1024] buffer;
+    ulong total;
+    while (!input.eof) {
+        require(MonoTime.currTime < deadline,
+            "support tree hashing exceeded its time bound");
+        auto chunk = input.rawRead(buffer[]);
+        if (!chunk.length) break;
+        total += chunk.length;
+        require(total <= expectedBytes,
+            "support file grew while being hashed");
+        digest.put(chunk);
+    }
+    require(total == expectedBytes && getSize(path) == expectedBytes,
+        "support file changed while being hashed");
+}
+
+private void copyBoundedFile(string source, string target,
+        ulong expectedBytes, MonoTime deadline) {
+    auto input = File(source, "rb");
+    auto output = File(target, "wb");
+    ubyte[64 * 1024] buffer;
+    ulong total;
+    while (total < expectedBytes) {
+        require(MonoTime.currTime < deadline,
+            "support tree copy exceeded its time bound");
+        auto wanted = min(cast(size_t)(expectedBytes - total), buffer.length);
+        auto chunk = input.rawRead(buffer[0 .. wanted]);
+        require(chunk.length != 0,
+            "support file shrank while being copied");
+        output.rawWrite(chunk);
+        total += chunk.length;
+    }
+    ubyte[1] extra;
+    require(input.rawRead(extra[]).length == 0 &&
+        getSize(source) == expectedBytes,
+        "support file grew while being copied");
+}
+
+private TreeIdentity treeDigest(string root, TreeBounds bounds) {
+    require(isDir(root) && !isSymlink(root),
+        "support tree root must be a plain directory");
     string[] relatives;
-    foreach (entry; dirEntries(root, SpanMode.depth))
-        if (entry.isFile)
-            relatives ~= relativePath(entry.name, root);
+    ulong totalBytes;
+    auto deadline = MonoTime.currTime + dur!"seconds"(bounds.maxSeconds);
+    foreach (entry; dirEntries(root, SpanMode.depth, false)) {
+        require(MonoTime.currTime < deadline,
+            "support tree enumeration exceeded its time bound");
+        auto relative = relativePath(entry.name, root);
+        require(relativeDepth(relative) <= bounds.maxDepth,
+            "support tree depth exceeds its bound");
+        if (isSymlink(entry.name))
+            throw new Exception("support tree contains a symbolic link");
+        if (entry.isDir) continue;
+        require(entry.isFile, "support tree contains a special file");
+        auto bytes = getSize(entry.name);
+        require(relatives.length < bounds.maxFiles &&
+            bytes <= bounds.maxBytes - totalBytes,
+            "support tree exceeds its file or byte bound");
+        relatives ~= relative;
+        totalBytes += bytes;
+    }
     relatives.sort();
     SHA256 digest;
     digestPart(digest, "scrubbed:attested-support-tree:v1");
     foreach (relative; relatives) {
         digestPart(digest, relative);
-        auto bytes = read(buildPath(root, relative));
-        digestPart(digest, bytes.length.to!string);
-        digest.put(cast(const(ubyte)[])bytes);
+        auto path = buildPath(root, relative);
+        auto bytes = getSize(path);
+        digestPart(digest, bytes.to!string);
+        digestFile(digest, path, bytes, deadline);
     }
-    fileCount = relatives.length;
-    return toHexString(digest.finish()).to!string;
+    return TreeIdentity(toHexString(digest.finish()).to!string,
+        relatives.length, totalBytes);
 }
 
-private void copyRegularTree(string source, string target) {
+private TreeIdentity copyRegularTree(string source, string target,
+        TreeBounds bounds) {
+    auto before = treeDigest(source, bounds);
+    mkdirRecurse(dirName(target));
+    require(getAvailableDiskSpace(dirName(target)) >= before.bytes * 2,
+        "insufficient scratch space for bounded support snapshot");
+    scope(failure) if (exists(target)) rmdirRecurse(target);
     mkdirRecurse(target);
-    foreach (entry; dirEntries(source, SpanMode.depth)) {
+    auto deadline = MonoTime.currTime + dur!"seconds"(bounds.maxSeconds);
+    size_t copiedFiles;
+    ulong copiedBytes;
+    foreach (entry; dirEntries(source, SpanMode.depth, false)) {
+        require(MonoTime.currTime < deadline,
+            "support tree copy exceeded its time bound");
         auto destination = buildPath(target, relativePath(entry.name, source));
+        require(!isSymlink(entry.name),
+            "support tree contains a symbolic link");
         if (entry.isDir) mkdirRecurse(destination);
         else if (entry.isFile) {
+            auto bytes = getSize(entry.name);
+            require(copiedFiles < bounds.maxFiles &&
+                bytes <= bounds.maxBytes - copiedBytes,
+                "support tree exceeds its file or byte bound while copying");
             mkdirRecurse(dirName(destination));
-            copy(entry.name, destination);
+            copyBoundedFile(entry.name, destination, bytes, deadline);
+            ++copiedFiles;
+            copiedBytes += bytes;
         } else throw new Exception("CMake support tree contains a special file");
     }
+    require(copiedFiles == before.files && copiedBytes == before.bytes,
+        "support tree changed while being copied");
+    auto after = treeDigest(target, bounds);
+    require(before == after, "support tree snapshot differs from source");
+    return after;
 }
 
 private void requireSystemProtectedPath(string path) {
+    require(geteuid() != 0,
+        "attested builds refuse a privileged invoking account");
     auto cursor = resolveToolPath(path);
     while (true) {
         stat_t info;
         require(stat(cursor.toStringz, &info) == 0 && info.st_uid == 0 &&
             (info.st_mode & (S_IWGRP | S_IWOTH)) == 0,
-            "native tool path is mutable by the invoking account");
+            "native tool path is mutable by the non-root invoking account");
         auto parent = dirName(cursor);
         if (parent == cursor) break;
         cursor = parent;
     }
+}
+
+private string[] dynamicLibraryDependencies(string executable) {
+    requireSystemProtectedPath("/usr/bin/otool");
+    auto result = checkedSystem(["/usr/bin/otool", "-L", executable]);
+    string[] libraries;
+    foreach (index, line; result.splitLines) {
+        if (index == 0) continue;
+        auto fields = line.strip.split(" ");
+        if (!fields.length || !fields[0].length) continue;
+        auto path = fields[0];
+        if (path.startsWith("/usr/lib/") ||
+            path.startsWith("/System/Library/")) continue;
+        if (resolveToolPath(path) == resolveToolPath(executable)) continue;
+        require(isAbsolute(path) && exists(path),
+            "compiler has an unresolved dynamic library dependency");
+        libraries ~= path;
+    }
+    return libraries;
+}
+
+private void snapshotRegularFile(string source, string target,
+        ulong maxBytes, bool executable = false) {
+    auto resolved = resolveToolPath(source);
+    require(isFile(resolved) && !isSymlink(resolved) &&
+        getSize(resolved) <= maxBytes,
+        "compiler support file is not bounded and regular");
+    mkdirRecurse(dirName(target));
+    copy(resolved, target);
+    require(chmod(target.toStringz,
+        executable ? S_IRUSR | S_IXUSR : S_IRUSR) == 0 &&
+        isFile(target) && !isSymlink(target) &&
+        getSize(target) == getSize(resolved),
+        "compiler support snapshot differs");
+}
+
+private string privateCompilerConfig() {
+    return `"default": {
+    switches ~= ["-defaultlib=phobos2-ldc,druntime-ldc"];
+    post-switches ~= ["-I%%ldcbinarypath%%/../include/dlang/ldc"];
+    lib-dirs = ["%%ldcbinarypath%%/../lib", "%%ldcbinarypath%%/../lib/compiler-rt"];
+    rpath = "%%ldcbinarypath%%/../lib";
+};
+`;
+}
+
+private bool traceContainsPath(string trace, string path) {
+    if (trace.canFind(path)) return true;
+    return path.startsWith("/var/") && trace.canFind("/private" ~ path);
+}
+
+private string findCompilerRuntime(string llvmLibrary) {
+    auto clangRoot = buildPath(dirName(llvmLibrary), "clang");
+    string result;
+    foreach (entry; dirEntries(clangRoot, "libclang_rt.osx.a",
+            SpanMode.depth, false)) {
+        require(!isSymlink(entry.name) && entry.isFile,
+            "compiler runtime selection is not a regular file");
+        require(result.length == 0,
+            "compiler runtime selection is ambiguous");
+        result = entry.name;
+    }
+    require(result.length != 0, "compiler runtime archive is missing");
+    return result;
+}
+
+private void snapshotCompilerClosure(ref PreparedAttestedBuild result,
+        string compilerSource, string scratchRoot) {
+    require(geteuid() != 0,
+        "attested builds refuse a privileged invoking account");
+    auto sourceCompiler = resolveToolPath(compilerSource);
+    auto sourcePrefix = dirName(dirName(sourceCompiler));
+    auto closure = buildPath(scratchRoot, "ldc-closure-" ~
+        randomUUID.toString);
+    auto compilerTarget = buildPath(closure, "bin", "ldc2");
+    snapshotRegularFile(sourceCompiler, compilerTarget,
+        128UL * 1024 * 1024, true);
+    auto includeSource = buildPath(sourcePrefix, "include", "dlang", "ldc");
+    auto includeTarget = buildPath(closure, "include", "dlang", "ldc");
+    copyRegularTree(includeSource, includeTarget, supportTreeBounds);
+    foreach (name; ["libphobos2-ldc.a", "libdruntime-ldc.a", "ldc_rt.dso.o"])
+        snapshotRegularFile(buildPath(sourcePrefix, "lib", name),
+            buildPath(closure, "lib", name), 64UL * 1024 * 1024);
+
+    auto compilerLibraries = dynamicLibraryDependencies(sourceCompiler);
+    require(compilerLibraries.length == 1 &&
+        baseName(compilerLibraries[0]).startsWith("libLLVM."),
+        "LDC dynamic loader closure differs");
+    auto llvmLibrary = resolveToolPath(compilerLibraries[0]);
+    auto loaderDirectory = buildPath(closure, "loader");
+    snapshotRegularFile(llvmLibrary,
+        buildPath(loaderDirectory, baseName(compilerLibraries[0])),
+        256UL * 1024 * 1024);
+    auto transitive = dynamicLibraryDependencies(llvmLibrary);
+    transitive.sort();
+    require(transitive.length == 2 &&
+        transitive[0].canFind("libz3") &&
+        transitive[1].canFind("libzstd"),
+        "LLVM dynamic loader closure differs");
+    foreach (library; transitive)
+        snapshotRegularFile(library,
+            buildPath(loaderDirectory, baseName(library)),
+            128UL * 1024 * 1024);
+    auto compilerRuntime = findCompilerRuntime(llvmLibrary);
+    snapshotRegularFile(compilerRuntime,
+        buildPath(closure, "lib", "compiler-rt", baseName(compilerRuntime)),
+        16UL * 1024 * 1024);
+
+    auto configDirectory = buildPath(closure, "etc", "ldc2.conf");
+    mkdirRecurse(configDirectory);
+    result.compilerConfigPath = buildPath(configDirectory,
+        "50-scrubbed-attested.conf");
+    write(result.compilerConfigPath, privateCompilerConfig());
+    require(chmod(result.compilerConfigPath.toStringz, S_IRUSR) == 0,
+        "cannot make private compiler configuration read-only");
+    auto loaderIdentity = treeDigest(loaderDirectory, compilerTreeBounds);
+    auto closureIdentity = treeDigest(closure, compilerTreeBounds);
+    result.compiler = compilerTarget;
+    result.compilerHash = hashFile(compilerTarget);
+    result.compilerSupportRoot = closure;
+    result.compilerSupportSha256 = closureIdentity.sha256;
+    result.compilerSupportFiles = closureIdentity.files;
+    result.compilerSupportBytes = closureIdentity.bytes;
+    result.compilerLoaderDirectory = loaderDirectory;
+    result.compilerLoaderSha256 = loaderIdentity.sha256;
+    result.compilerLoaderFiles = loaderIdentity.files;
+}
+
+private void verifyCompilerClosure(const ref PreparedAttestedBuild result) {
+    auto loader = treeDigest(result.compilerLoaderDirectory,
+        compilerTreeBounds);
+    auto closure = treeDigest(result.compilerSupportRoot,
+        compilerTreeBounds);
+    require(loader.sha256 == result.compilerLoaderSha256 &&
+        loader.files == result.compilerLoaderFiles &&
+        closure.sha256 == result.compilerSupportSha256 &&
+        closure.files == result.compilerSupportFiles &&
+        closure.bytes == result.compilerSupportBytes &&
+        hashFile(result.compiler) == result.compilerHash,
+        "private compiler closure changed");
 }
 
 private enum unavailableToolVersion = "UNAVAILABLE";
@@ -559,10 +820,9 @@ private void verifyPinnedNativeTools(const(NativeTool)[] tools,
 
 private void verifyCmakeSupport(string pinnedDirectory, string expectedHash,
         size_t expectedFiles) {
-    size_t files;
     auto actual = treeDigest(buildPath(pinnedDirectory, "snapshots",
-        "cmake-root", "share", "cmake"), files);
-    require(files == expectedFiles && actual == expectedHash,
+        "cmake-root", "share", "cmake"), supportTreeBounds);
+    require(actual.files == expectedFiles && actual.sha256 == expectedHash,
         "private CMake support snapshot changed");
 }
 
@@ -596,21 +856,16 @@ private void pinNativeTools(ref PreparedAttestedBuild result,
         auto supportSource = buildPath(prefix, "share", "cmake");
         auto supportTarget = buildPath(snapshots, "cmake-root", "share",
             "cmake");
-        size_t sourceFilesBefore, sourceFilesAfter, snapshotFiles;
-        auto supportHashBefore = treeDigest(supportSource,
-            sourceFilesBefore);
         mkdirRecurse(dirName(supportTarget));
-        copyRegularTree(supportSource, supportTarget);
-        result.cmakeSupportSha256 = treeDigest(supportTarget,
-            snapshotFiles);
-        auto supportHashAfter = treeDigest(supportSource,
-            sourceFilesAfter);
-        require(sourceFilesBefore == sourceFilesAfter &&
-            sourceFilesBefore == snapshotFiles &&
-            supportHashBefore == supportHashAfter &&
-            supportHashBefore == result.cmakeSupportSha256,
+        auto supportBefore = treeDigest(supportSource, supportTreeBounds);
+        auto supportSnapshot = copyRegularTree(supportSource, supportTarget,
+            supportTreeBounds);
+        auto supportAfter = treeDigest(supportSource, supportTreeBounds);
+        require(supportBefore == supportAfter &&
+            supportBefore == supportSnapshot,
             "CMake support tree changed while being snapshotted");
-        result.cmakeSupportFiles = snapshotFiles;
+        result.cmakeSupportSha256 = supportSnapshot.sha256;
+        result.cmakeSupportFiles = supportSnapshot.files;
         snapshotPath = buildPath(snapshots, "cmake-root", "bin", "cmake");
         mkdirRecurse(dirName(snapshotPath));
         copy(resolved, snapshotPath);
@@ -660,11 +915,12 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
     auto compilerSource = selectedCommand("ldc2");
     require(baseName(compilerSource) == "ldc2",
         "attested compiler must resolve to ldc2");
-    auto compilerSnapshot = snapshotExecutable(compilerSource, scratchRoot,
-        "ldc2-attested");
-    result.compiler = compilerSnapshot.path;
-    result.compilerHash = compilerSnapshot.sha256;
-    result.compilerVersion = checked([result.compiler, "--version"]).splitLines[0];
+    snapshotCompilerClosure(result, compilerSource, scratchRoot);
+    auto compilerEnvironment = systemCommandEnvironment();
+    compilerEnvironment["DYLD_LIBRARY_PATH"] =
+        result.compilerLoaderDirectory;
+    result.compilerVersion = checkedEnv([result.compiler, "--version"],
+        compilerEnvironment).splitLines[0];
     auto dubSource = selectedCommand("dub");
     require(baseName(dubSource) == "dub",
         "attested build tool must resolve to dub");
@@ -700,7 +956,28 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
         "RANLIB": ranlib.path,
         "COMPILER_PATH": result.pinnedToolDirectory,
         "SDKROOT": result.sdkRoot,
+        "DYLD_LIBRARY_PATH": result.compilerLoaderDirectory,
     ];
+    auto loaderProbeEnvironment = result.environment.dup;
+    loaderProbeEnvironment["DYLD_PRINT_LIBRARIES"] = "1";
+    auto loaderTrace = checkedEnv([result.compiler, "--version"],
+        loaderProbeEnvironment);
+    foreach (entry; dirEntries(result.compilerLoaderDirectory,
+            SpanMode.shallow, false))
+        require(entry.isFile && loaderTrace.canFind(entry.name),
+            "private compiler loader snapshot was not selected");
+    auto compilerProbe = buildPath(scratchRoot, "compiler-config-probe.d");
+    auto compilerProbeObject = buildPath(scratchRoot,
+        "compiler-config-probe.o");
+    write(compilerProbe, "module compiler_config_probe; enum value = 1;\n");
+    auto compilerTrace = checkedEnv([result.compiler, "-v", "-c",
+        compilerProbe, "-of=" ~ compilerProbeObject], result.environment);
+    auto configuredImport = buildPath(dirName(result.compiler), "..",
+        "include", "dlang", "ldc");
+    require(traceContainsPath(compilerTrace,
+            dirName(result.compilerConfigPath)) &&
+        traceContainsPath(compilerTrace, configuredImport),
+        "private compiler configuration/import tree was not selected");
     auto linkerTrace = checkedEnv([cc.path, "-###", "-x", "c", "/dev/null",
         "-o", buildPath(scratchRoot, "linker-selection-probe")],
         result.environment);
@@ -731,11 +1008,12 @@ private PreparedAttestedBuild prepareAttestedBuild(string sourceRoot,
 }
 
 private void validateAttestation(JSONValue attestation, string targetHash) {
-    require(attestation["schema"].str == "scrubbed-build-attestation-v5",
+    require(attestation["schema"].str == "scrubbed-build-attestation-v6",
         "build attestation schema");
     foreach (key; ["source_sha", "source_tree_id", "source_archive_sha256",
                    "dub_recipe_sha256", "dependency_lock_sha256",
                    "compiler_executable_sha256", "dub_executable_sha256",
+                   "compiler_support_sha256", "compiler_loader_sha256",
                    "argparse_recipe_sha256", "argparse_inputs_sha256",
                    "native_prebuild_commands_sha256",
                    "target_sha256"])
@@ -750,7 +1028,14 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
         attestation["dub_version"].str.startsWith("DUB version 1.42.0,") &&
         !attestation["dub_version"].str.canFind('/') &&
         attestation["primary_tool_policy"].str ==
-            "private read-only LDC/DUB snapshots invoked and hash-verified after build" &&
+            "private bounded read-only LDC executable/config/import/runtime/loader closure plus DUB snapshot invoked and hash-verified after build" &&
+        attestation["compiler_support_files"].integer > 0 &&
+        attestation["compiler_support_bytes"].integer > 0 &&
+        attestation["compiler_loader_files"].integer == 3 &&
+        attestation["compiler_config_policy"].str ==
+            "private relative-path ldc2.conf selected by compile trace" &&
+        attestation["compiler_loader_policy"].str ==
+            "private hashed LLVM/Z3/zstd snapshots selected by DYLD trace" &&
         attestation["source_materialization"].str ==
             "hashed Git archive extracted into private scratch" &&
         attestation["dependency_cache_policy"].str ==
@@ -771,7 +1056,7 @@ private void validateAttestation(JSONValue attestation, string targetHash) {
         !attestation["sdk_version"].str.canFind('/') &&
         !attestation["sdk_build_version"].str.canFind('/') &&
         attestation["native_tool_policy"].str ==
-            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" &&
+            "non-root invocation; mutable CMake executable/support privately snapshotted with file/byte/depth/time/free-space bounds and no links; remaining tools require root-owned paths not group/other writable; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified" &&
         attestation["linker_selection"].str ==
             "COMPILER_PATH private ld selected by attested compiler -### trace" &&
         attestation["build_command_template"].str == attestedBuildCommand() &&
@@ -842,9 +1127,9 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "--build=release", "--compiler=" ~ prepared.compiler, "--force",
         "--non-interactive", "--cache=local"], prepared.environment);
     require(buildResult.status == 0, "attested build failed: " ~ buildResult.output);
-    require(hashFile(prepared.compiler) == prepared.compilerHash &&
-        hashFile(prepared.dub) == prepared.dubHash,
+    require(hashFile(prepared.dub) == prepared.dubHash,
         "private compiler or DUB snapshot changed during attested build");
+    verifyCompilerClosure(prepared);
     verifyDependencyInputs(prepared.dependency);
     verifyNativeTools(prepared.nativeTools);
     verifyPinnedNativeTools(prepared.nativeTools, prepared.pinnedToolDirectory);
@@ -883,7 +1168,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     auto snapshot = snapshotExpectedExecutable(prepared.target, scratchRoot,
         "scrubbed-attested-snapshot", targetHash);
     JSONValue attestation = JSONValue([
-        "schema": JSONValue("scrubbed-build-attestation-v5"),
+        "schema": JSONValue("scrubbed-build-attestation-v6"),
         "source_sha": JSONValue(prepared.sourceSha),
         "source_tree_id": JSONValue(prepared.treeId),
         "source_archive_sha256": JSONValue(prepared.archiveHash),
@@ -895,10 +1180,24 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "compiler_executable_name": JSONValue("ldc2"),
         "compiler_executable_sha256": JSONValue(prepared.compilerHash),
         "compiler_version": JSONValue(prepared.compilerVersion),
+        "compiler_support_sha256": JSONValue(
+            prepared.compilerSupportSha256),
+        "compiler_support_files": JSONValue(
+            cast(long)prepared.compilerSupportFiles),
+        "compiler_support_bytes": JSONValue(
+            cast(long)prepared.compilerSupportBytes),
+        "compiler_loader_sha256": JSONValue(
+            prepared.compilerLoaderSha256),
+        "compiler_loader_files": JSONValue(
+            cast(long)prepared.compilerLoaderFiles),
+        "compiler_config_policy": JSONValue(
+            "private relative-path ldc2.conf selected by compile trace"),
+        "compiler_loader_policy": JSONValue(
+            "private hashed LLVM/Z3/zstd snapshots selected by DYLD trace"),
         "dub_executable_sha256": JSONValue(prepared.dubHash),
         "dub_version": JSONValue(prepared.dubVersion),
         "primary_tool_policy": JSONValue(
-            "private read-only LDC/DUB snapshots invoked and hash-verified after build"),
+            "private bounded read-only LDC executable/config/import/runtime/loader closure plus DUB snapshot invoked and hash-verified after build"),
         "dependency_cache_policy": JSONValue(
             "private DUB_HOME and --cache=local under private source"),
         "argparse_name": JSONValue(prepared.dependency.name),
@@ -915,7 +1214,7 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
         "cmake_support_sha256": JSONValue(prepared.cmakeSupportSha256),
         "cmake_support_files": JSONValue(cast(long)prepared.cmakeSupportFiles),
         "native_tool_policy": JSONValue(
-            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
+            "non-root invocation; mutable CMake executable/support privately snapshotted with file/byte/depth/time/free-space bounds and no links; remaining tools require root-owned paths not group/other writable; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
         "native_tools": nativeToolsJson(prepared.nativeTools),
         "archive_suite_evidence": archiveSuiteJson(prepared.nativeTools),
         "linker_selection": JSONValue(
@@ -1534,6 +1833,50 @@ private void selfTest() {
     require(isolatedEnvironment.status == 0 &&
         !isolatedEnvironment.output.canFind("SCRUBBED_PARENT_MARKER"),
         "isolated build environment inherited a parent variable");
+    auto supportRoot = privateScratch("scrubbed-support-tree-self-test-");
+    scope(exit) rmdirRecurse(supportRoot);
+    auto supportSource = buildPath(supportRoot, "source");
+    auto supportSnapshot = buildPath(supportRoot, "snapshot");
+    mkdirRecurse(supportSource);
+    write(buildPath(supportSource, "one"), "one");
+    write(buildPath(supportSource, "two"), "two");
+    auto smallBounds = TreeBounds(2, 16, 2, 5);
+    auto copiedSupport = copyRegularTree(supportSource, supportSnapshot,
+        smallBounds);
+    write(buildPath(supportSource, "one"), "changed");
+    require(treeDigest(supportSnapshot, smallBounds) == copiedSupport,
+        "support snapshot followed later original-tree replacement");
+    auto sourceExecutable = buildPath(supportRoot, "cmake-original");
+    auto snapExecutable = buildPath(supportRoot, "cmake-snapshot");
+    copy(thisExePath(), sourceExecutable);
+    snapshotRegularFile(sourceExecutable, snapExecutable,
+        64UL * 1024 * 1024, true);
+    auto executableHash = hashFile(snapExecutable);
+    write(sourceExecutable, "replacement");
+    require(hashFile(snapExecutable) == executableHash,
+        "mutable tool snapshot followed original-path replacement");
+    auto linkedSource = buildPath(supportRoot, "linked-source");
+    mkdirRecurse(linkedSource);
+    symlink(".", buildPath(linkedSource, "loop"));
+    bool linkRejected;
+    try treeDigest(linkedSource, smallBounds);
+    catch (Exception) linkRejected = true;
+    require(linkRejected, "support-tree symbolic-link loop was accepted");
+    auto excessSource = buildPath(supportRoot, "excess-source");
+    mkdirRecurse(excessSource);
+    foreach (index; 0 .. 3)
+        write(buildPath(excessSource, index.to!string), "x");
+    bool countRejected;
+    try treeDigest(excessSource, smallBounds);
+    catch (Exception) countRejected = true;
+    require(countRejected, "support-tree file-count bound was not enforced");
+    auto oversizedSource = buildPath(supportRoot, "oversized-source");
+    mkdirRecurse(oversizedSource);
+    write(buildPath(oversizedSource, "seventeen"), "12345678901234567");
+    bool bytesRejected;
+    try treeDigest(oversizedSource, smallBounds);
+    catch (Exception) bytesRejected = true;
+    require(bytesRejected, "support-tree byte bound was not enforced");
     JSONValue report = JSONValue(["schema": JSONValue("scrubbed-pipeline-v3"),
         "source_sha": JSONValue("0".replicate(40)),
         "binary_sha256": JSONValue("0".replicate(64)),
@@ -1579,7 +1922,7 @@ private void selfTest() {
                 unavailableToolVersion : "test " ~ name),
             "role": JSONValue(nativeRoles[index])]);
     JSONValue buildAttestation = JSONValue([
-        "schema": JSONValue("scrubbed-build-attestation-v5"),
+        "schema": JSONValue("scrubbed-build-attestation-v6"),
         "source_sha": JSONValue("0".replicate(40)),
         "source_tree_id": JSONValue("1".replicate(40)),
         "source_archive_sha256": JSONValue("2".replicate(64)),
@@ -1591,10 +1934,19 @@ private void selfTest() {
         "compiler_executable_name": JSONValue("ldc2"),
         "compiler_executable_sha256": JSONValue("5".replicate(64)),
         "compiler_version": JSONValue("LDC test"),
+        "compiler_support_sha256": JSONValue("b".replicate(64)),
+        "compiler_support_files": JSONValue(10),
+        "compiler_support_bytes": JSONValue(1024),
+        "compiler_loader_sha256": JSONValue("c".replicate(64)),
+        "compiler_loader_files": JSONValue(3),
+        "compiler_config_policy": JSONValue(
+            "private relative-path ldc2.conf selected by compile trace"),
+        "compiler_loader_policy": JSONValue(
+            "private hashed LLVM/Z3/zstd snapshots selected by DYLD trace"),
         "dub_executable_sha256": JSONValue("6".replicate(64)),
         "dub_version": JSONValue("DUB version 1.42.0, test"),
         "primary_tool_policy": JSONValue(
-            "private read-only LDC/DUB snapshots invoked and hash-verified after build"),
+            "private bounded read-only LDC executable/config/import/runtime/loader closure plus DUB snapshot invoked and hash-verified after build"),
         "dependency_cache_policy": JSONValue(
             "private DUB_HOME and --cache=local under private source"),
         "argparse_name": JSONValue("argparse"),
@@ -1608,7 +1960,7 @@ private void selfTest() {
         "cmake_support_sha256": JSONValue("a".replicate(64)),
         "cmake_support_files": JSONValue(1),
         "native_tool_policy": JSONValue(
-            "mutable CMake executable/support privately snapshotted; remaining tools require root-owned non-writable paths; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
+            "non-root invocation; mutable CMake executable/support privately snapshotted with file/byte/depth/time/free-space bounds and no links; remaining tools require root-owned paths not group/other writable; exact hashes verified after build; isolated allowlisted environment; per-executable version or UNAVAILABLE; archive-suite evidence and CMake selections verified"),
         "native_tools": JSONValue(nativeToolFixtures),
         "archive_suite_evidence": JSONValue([
             "schema": JSONValue("scrubbed-archive-suite-evidence-v1"),
@@ -2174,10 +2526,20 @@ private void selfTestBuildIsolation(string sourceRoot) {
     try verifyDependencyInputs(prepared.dependency);
     catch (Exception) rejected = true;
     require(rejected, "changed argparse inputs were accepted");
+    require(chmod(prepared.compilerConfigPath.toStringz,
+            S_IRUSR | S_IWUSR) == 0,
+        "cannot prepare compiler-closure mutation negative");
+    write(prepared.compilerConfigPath,
+        readText(prepared.compilerConfigPath) ~ "\n");
+    bool compilerClosureRejected;
+    try verifyCompilerClosure(prepared);
+    catch (Exception) compilerClosureRejected = true;
+    require(compilerClosureRejected,
+        "changed compiler support closure was accepted");
     require(prepared.targetRelative == "scrubbed" &&
         relativePath(prepared.target, prepared.privateSource) == "scrubbed",
         "private DUB target discovery drifted");
-    writeln("private archive/cache/dependency/target negative passed: ",
+    writeln("private archive/cache/dependency/compiler/target negatives passed: ",
         prepared.dependency.sha256, " ", changed);
 }
 
@@ -2213,10 +2575,25 @@ private void selfTestNativePath(string sourceRoot, string poisonPath,
                                 string reportPath) {
     auto root = privateScratch("scrubbed-native-path-test-");
     scope(exit) rmdirRecurse(root);
+    auto poisonedKeys = ["DFLAGS", "CFLAGS", "LDFLAGS",
+        "SCRUBBED_DURABLE_METRICS_V1"];
+    string[string] prior;
+    foreach (key; poisonedKeys) {
+        prior[key] = environment.get(key, "");
+        environment[key] = key == "SCRUBBED_DURABLE_METRICS_V1" ?
+            buildPath(root, "must-not-exist.metrics") :
+            "--scrubbed-invalid-parent-build-flag";
+    }
+    scope(exit) foreach (key; poisonedKeys) {
+        if (prior[key].length) environment[key] = prior[key];
+        else environment.remove(key);
+    }
     auto built = buildAttestedExecutable(sourceRoot, root, poisonPath);
     validateAttestation(built.attestation, built.snapshot.sha256);
     verifySnapshot(built.snapshot);
     write(reportPath, built.attestation.toString ~ "\n");
+    require(!exists(buildPath(root, "must-not-exist.metrics")),
+        "attested build inherited an unrelated scrubbed runtime variable");
     writeln("native PATH swap remained pinned: ", built.snapshot.sha256);
 }
 
@@ -2227,6 +2604,9 @@ private void validateAttributionBuildSource(JSONValue attestation,
 }
 
 private enum coordinationRuns = 5;
+private enum coordinationSampleTimeoutSeconds = 900L;
+private enum coordinationWholeRunTimeoutSeconds = 21_600L;
+private enum coordinationSamplerTimeoutSeconds = 2L;
 private enum coordinationManyInput =
     "5B5D9E66435A5BC705152EB88C551046BE0AA37B51F4FA42A038683AAFB51167";
 private enum coordinationFewInput =
@@ -2248,6 +2628,9 @@ private string[] coordinationMeasurementKeys() {
     return ["schema", "version", "host_os", "host_architecture", "host_cpu",
         "baseline_binary_sha256", "candidate_binary_sha256", "harness_sha256",
         "fixture_table_sha256", "config_sha256", "cache_semantics",
+        "sample_timeout_seconds", "whole_run_timeout_seconds",
+        "sampler_timeout_seconds", "termination_policy",
+        "runtime_environment_policy",
         "control_method", "target_wins", "target_baseline_median_wall_us",
         "target_candidate_median_wall_us", "target_baseline_median_queue_ns",
         "target_candidate_median_queue_ns", "controls_within_five_percent",
@@ -2456,6 +2839,16 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
         report["config_sha256"].str == coordinationConfig &&
         report["cache_semantics"].str ==
             "application-cold; OS cache uncontrolled" &&
+        report["sample_timeout_seconds"].integer ==
+            coordinationSampleTimeoutSeconds &&
+        report["whole_run_timeout_seconds"].integer ==
+            coordinationWholeRunTimeoutSeconds &&
+        report["sampler_timeout_seconds"].integer ==
+            coordinationSamplerTimeoutSeconds &&
+        report["termination_policy"].str ==
+            "TERM process group; one-second grace; KILL process group; reap" &&
+        report["runtime_environment_policy"].str ==
+            "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only" &&
         report["control_method"].str ==
             "at least three of five exact paired candidate values <= 105% of baseline" &&
         !report["production_candidate_authorized"].boolean &&
@@ -2689,6 +3082,16 @@ private JSONValue coordinationMeasurementFixture() {
         "config_sha256": JSONValue(coordinationConfig),
         "cache_semantics": JSONValue(
             "application-cold; OS cache uncontrolled"),
+        "sample_timeout_seconds": JSONValue(
+            coordinationSampleTimeoutSeconds),
+        "whole_run_timeout_seconds": JSONValue(
+            coordinationWholeRunTimeoutSeconds),
+        "sampler_timeout_seconds": JSONValue(
+            coordinationSamplerTimeoutSeconds),
+        "termination_policy": JSONValue(
+            "TERM process group; one-second grace; KILL process group; reap"),
+        "runtime_environment_policy": JSONValue(
+            "Config.newEnv PATH/LC_ALL allowlist plus opt-in coordination metrics only"),
         "control_method": JSONValue(
             "at least three of five exact paired candidate values <= 105% of baseline"),
         "layouts": JSONValue(layouts),
@@ -2777,9 +3180,10 @@ int main(string[] args) {
                 "scrubbed-coordination-profile");
             auto stagedReportPath = buildPath(root,
                 "coordination-measurement.json");
-            auto result = execute([harness.path, "--measure-comparison",
-                baseline.snapshot.path, candidate.snapshot.path,
-                stagedReportPath]);
+            auto result = executeIsolated([harness.path,
+                "--measure-comparison", baseline.snapshot.path,
+                candidate.snapshot.path, stagedReportPath],
+                systemCommandEnvironment());
             verifySnapshot(baseline.snapshot);
             verifySnapshot(candidate.snapshot);
             verifySnapshot(harness);

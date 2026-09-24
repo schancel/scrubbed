@@ -22,14 +22,20 @@ report records disabled/report/mask/redact wall, direct-child user/system CPU,
 peak RSS, exact input/output/audit bytes and SHA-256 identities, compiler and
 flags, source and binary identities, and D-runtime GC-only allocation and
 collection evidence. Unsupported total-process allocation and cross-platform
-performance metrics are explicit rather than represented as zero.
+performance metrics are explicit rather than represented as zero. The
+lowercase 40-hex `source_revision` identifies the production source used for
+the target and is resolved and bound to the recorded stage/audit sources; the
+evidence-only harness has its own SHA-256 identity.
 
 The same actual release binary proves CLI/JSON configuration equivalence,
 `--validate`, `--dry-run`, `--explain`, local-tree and selected-field JSONL
 routes, exact one/four-thread results, durable stale-sidecar refusal and retry,
-and content canaries in audit and diagnostic channels. The strict checker
-mutates every binding named by the evidence contract, including revision,
-output, configuration, document, analyzer, policy, contributor ordering and
+and content canaries across output, audit, and diagnostic channels. The strict
+checker reruns the exact 2-by-4 deterministic byte/hash matrix with the named
+binary, requires complete sorted four-file primary and sidecar manifests for
+one and four threads, then mutates every binding named by the evidence
+contract, including revision, fixture/policy uniqueness, bytes, output,
+configuration, document, analyzer, policy, contributor ordering and
 cardinality, privacy, malformed/oversize audit, and stale-sidecar status.
 
 ```sh
@@ -48,8 +54,10 @@ Generating a replacement report runs the bounded actual-binary matrix:
 ## Exact synthetic handoff for #62
 
 The report's `handoff` object is the machine-readable packet: CC0-1.0,
-authored-synthetic provenance, exact command, UTF-8 fixture, expected
-transformed bytes, canonical audit bytes, and SHA-256 of all three. It uses a
+canonical authored-synthetic provenance, exact executable/argument vector and
+stdin, expected JSONL stdout and transformed bytes, canonical audit bytes, and
+their SHA-256 identities. The checker executes that bounded packet with the
+named binary and requires byte-for-byte stdout and audit equality. It uses a
 stable JSONL namespace/source key, so the audit document ID is reproducible.
-This ticket deliberately does not copy the packet into `examples/**`; #62 owns
-that public example landing.
+This ticket deliberately does not copy the packet into `examples/**`; #62
+owns that public example landing.

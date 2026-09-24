@@ -5,6 +5,7 @@ import domain.document : DocumentId;
 import domain.structured_chunks : ChunkId, ChunkMetadata, StructuredChunk,
     chunkId, chunkSchema, maxChunkBytes, maxMetadataBytes,
     maxStructuredTextBytes;
+import std.array : Appender, appender;
 import std.conv : to;
 import std.exception : enforce;
 import std.json : JSONType, JSONValue, parseJSON;
@@ -12,24 +13,26 @@ import std.utf : validate;
 
 enum size_t maxChunkJsonlBytes = 16 * 1024;
 
-private string quoted(string value) { return JSONValue(value).toString; }
-
-private string numbers(const(uint)[] values) {
-    string result = "[";
-    foreach (i, value; values) {
-        if (i) result ~= ",";
-        result ~= value.to!string;
-    }
-    return result ~ "]";
+private void putQuoted(ref Appender!string output, string value) {
+    JSONValue(value).toString(output);
 }
 
-private string paths(const(uint[][]) values) {
-    string result = "[";
+private void putNumbers(ref Appender!string output, const(uint)[] values) {
+    output.put("[");
     foreach (i, value; values) {
-        if (i) result ~= ",";
-        result ~= numbers(value);
+        if (i) output.put(",");
+        output.put(value.to!string);
     }
-    return result ~ "]";
+    output.put("]");
+}
+
+private void putPaths(ref Appender!string output, const(uint[][]) values) {
+    output.put("[");
+    foreach (i, value; values) {
+        if (i) output.put(",");
+        putNumbers(output, value);
+    }
+    output.put("]");
 }
 
 private void checkChunk(const ref StructuredChunk chunk) {
@@ -75,22 +78,43 @@ private void checkChunk(const ref StructuredChunk chunk) {
 /// One deterministic row including LF. Caller decides whether and where to write.
 string encodeChunkJsonl(const ref StructuredChunk chunk) {
     checkChunk(chunk);
-    auto row = "{\"schema\":\"structured-chunk:v1\",\"version\":" ~
-        chunkSchema.to!string ~ ",\"document_id\":" ~ quoted(chunk.documentId.text) ~
-        ",\"content_revision\":" ~ quoted(chunk.contentRevision) ~
-        ",\"chunk_id\":" ~ quoted(chunk.id.text) ~
-        ",\"start\":" ~ chunk.start.to!string ~
-        ",\"end\":" ~ chunk.end.to!string ~
-        ",\"path\":" ~ numbers(chunk.path) ~
-        ",\"section_paths\":" ~ paths(chunk.sectionPaths) ~
-        ",\"page_paths\":" ~ paths(chunk.pagePaths) ~
-        ",\"metadata\":{\"language\":" ~ quoted(chunk.metadata.language) ~
-        ",\"title\":" ~ quoted(chunk.metadata.title) ~
-        ",\"source_label\":" ~ quoted(chunk.metadata.sourceLabel) ~
-        "},\"text\":" ~ quoted(chunk.text) ~ "}\n";
-    enforce(row.length <= maxChunkJsonlBytes,
+    auto row = appender!string();
+    // Raw variable bytes plus the fixed fields are a cheap lower-bound hint;
+    // escaping and ordinal text may still grow the Appender beyond it.
+    row.reserve(chunk.documentId.text.length + chunk.contentRevision.length +
+        chunk.id.text.length + chunk.metadata.language.length +
+        chunk.metadata.title.length + chunk.metadata.sourceLabel.length +
+        chunk.text.length + 256);
+    row.put("{\"schema\":\"structured-chunk:v1\",\"version\":");
+    row.put(chunkSchema.to!string);
+    row.put(",\"document_id\":");
+    putQuoted(row, chunk.documentId.text);
+    row.put(",\"content_revision\":");
+    putQuoted(row, chunk.contentRevision);
+    row.put(",\"chunk_id\":");
+    putQuoted(row, chunk.id.text);
+    row.put(",\"start\":");
+    row.put(chunk.start.to!string);
+    row.put(",\"end\":");
+    row.put(chunk.end.to!string);
+    row.put(",\"path\":");
+    putNumbers(row, chunk.path);
+    row.put(",\"section_paths\":");
+    putPaths(row, chunk.sectionPaths);
+    row.put(",\"page_paths\":");
+    putPaths(row, chunk.pagePaths);
+    row.put(",\"metadata\":{\"language\":");
+    putQuoted(row, chunk.metadata.language);
+    row.put(",\"title\":");
+    putQuoted(row, chunk.metadata.title);
+    row.put(",\"source_label\":");
+    putQuoted(row, chunk.metadata.sourceLabel);
+    row.put("},\"text\":");
+    putQuoted(row, chunk.text);
+    row.put("}\n");
+    enforce(row.data.length <= maxChunkJsonlBytes,
         "chunk JSONL: row too large");
-    return row;
+    return row.data;
 }
 
 private string fieldString(JSONValue value) {

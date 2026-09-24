@@ -1,2 +1,2 @@
-{"id":1,"text":"FranÃ§ois paid â‚¬5.","title":"Clean title","score":7}
+{"id":1,"text":"FranÃ§ois paid â‚¬5.","title":"Clean title","note":"FranÃ§ois â€” must stay byte-identical","score":7}
 {"id":2,"text":"Already clean café.","title":"Mojibake â€” notes","tags":["kept",true]}

@@ -204,6 +204,22 @@ private void sameTree(string actual, string expected, string label) {
             label ~ " bytes/hash " ~ path);
 }
 
+private void rejectAllTopLevelStringsMutant(string executable, string[] jsonArgs,
+        string input, string expected, string htmlConfig, string textConfig) {
+    auto mutantArgs = jsonArgs.dup;
+    foreach (ref argument; mutantArgs)
+        if (argument == "text,title") argument = "text,title,note";
+    auto mutant = withInput([executable] ~ substitute(mutantArgs, "", "",
+        htmlConfig, textConfig), cast(const(ubyte)[])read(input));
+    need(mutant.status == 0 && mutant.output.canFind(
+        `"note":"François — must stay byte-identical"`),
+        "all-top-level-string mutant did not transform unselected note");
+    expectRejected("transform every top-level string", {
+        need(cast(const(ubyte)[])mutant.output == read(expected),
+            "all-top-level-string mutant differs from selected-field golden");
+    });
+}
+
 private void runRecipes(string repository, string executable, JSONValue manifest) {
     auto htmlConfig = buildPath(repository, "examples/pipelines/quickstart/html-markdown.json");
     auto textConfig = buildPath(repository, "examples/pipelines/quickstart/text-repair.json");
@@ -244,6 +260,10 @@ private void runRecipes(string repository, string executable, JSONValue manifest
                 cast(const(ubyte)[])read(buildPath(inputs, "records.jsonl")));
             need(jsonResult.status == 0 && cast(const(ubyte)[])jsonResult.output ==
                 read(buildPath(expected, "records.jsonl")), "JSONL bytes " ~ label);
+
+            rejectAllTopLevelStringsMutant(executable, jsonArgs,
+                buildPath(inputs, "records.jsonl"), buildPath(expected, "records.jsonl"),
+                htmlConfig, textConfig);
         }
     }
 }

@@ -338,10 +338,14 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         quote.trim();
         writer.block();
         writer.put("> ");
-        foreach (char c; quote.bytes) {
-            writer.put(cast(string)(&c)[0 .. 1]);
-            if (c == '\n') writer.put("> ");
+        size_t lineStart;
+        foreach (i, c; quote.bytes) {
+            if (c != '\n') continue;
+            writer.put(quote.bytes[lineStart .. i + 1]);
+            writer.put("> ");
+            lineStart = i + 1;
         }
+        writer.put(quote.bytes[lineStart .. $]);
         writer.block();
         return;
     }

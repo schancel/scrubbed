@@ -11,8 +11,8 @@ import std.datetime.stopwatch : StopWatch, AutoStart;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : SHA256, sha256Of;
 import std.exception : enforce;
-import std.file : dirEntries, isFile, read, readText, rmdirRecurse, SpanMode,
-    thisExePath, write;
+import std.file : dirEntries, exists, isFile, mkdirRecurse, read, readText,
+    rmdirRecurse, SpanMode, thisExePath, write;
 import std.json : JSONOptions, JSONValue, parseJSON;
 import std.math : isFinite;
 import std.path : buildPath;
@@ -181,6 +181,22 @@ private JSONValue inventoryEvidence() {
     return result;
 }
 
+private void checkBackendVisibility() {
+    auto root = buildPath("/tmp", "scrubbed-sha256-visibility-" ~
+        randomUUID.toString);
+    mkdirRecurse(root);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto probe = buildPath(root, "probe.d");
+    write(probe,
+        "module external_sha256_probe;\n" ~
+        "import crypto.sha256_arm64 : compressArmSha2, armSha2Available;\n" ~
+        "import crypto.sha256_x86_64 : compressX86ShaNi, x86ShaNiAvailable;\n");
+    auto result = execute(["ldc2", "-c", "-Isource", probe,
+        "-of=" ~ buildPath(root, "probe.o")]);
+    enforce(result.status != 0 && result.output.indexOf("not visible") >= 0,
+        "raw SHA-256 backend symbols escaped the crypto package boundary");
+}
+
 private void checkKat(string input, string expected) {
     auto bytes = cast(const(ubyte)[])input;
     auto phobos = sha256Of(bytes);
@@ -297,6 +313,7 @@ private void selfTest() {
     enforce(selectedSha256Backend != Sha256Backend.automatic,
         "automatic SHA-256 selection was not resolved");
     inventoryEvidence;
+    checkBackendVisibility;
     checkVectors;
     checkLifecycle;
     checkConcurrency;
@@ -440,16 +457,21 @@ private void validateNativeReport(string path) {
         report["os"].str.length != 0 && report["os_release"].str.length != 0 &&
         report["microbench_claim"].str ==
             "descriptive crossover evidence; hosted runner frequency uncontrolled" &&
-        isLowerHexDigest(report["harness_binary_sha256"].str),
+        report["harness_binary_sha256"].str == sourceHash(thisExePath),
         "native SHA-256 report identity mismatch");
 
     auto architecture = report["architecture"].str;
     string expectedBackend;
-    if (architecture == "aarch64" || architecture == "arm64")
+    version (AArch64) {
+        enforce(architecture == "aarch64" || architecture == "arm64",
+            "native SHA-256 report architecture mismatch");
         expectedBackend = "armv8-sha2";
-    else if (architecture == "x86_64")
+    } else version (X86_64) {
+        enforce(architecture == "x86_64",
+            "native SHA-256 report architecture mismatch");
         expectedBackend = "x86-sha-ni";
-    else enforce(false, "native SHA-256 report architecture mismatch");
+    } else static assert(false,
+        "unsupported native SHA-256 evidence architecture");
     enforce(report["selected_backend"].str == expectedBackend,
         "native SHA-256 report backend mismatch");
 

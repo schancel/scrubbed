@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - issue-185-sha256-backends
     paths:
       - ".github/workflows/sha256-native-backends.yml"
       - "benchmarks/sha256_backend_check.d"
       - "benchmarks/durable_skip_check.d"
+      - "benchmarks/sha256-native-*-evidence.json"
+      - "benchmarks/sha256-migration-comparison.json"
       - "source/**/*.d"
+      - "third_party/**"
       - "dub.json"
       - "dub.selections.json"
   pull_request:
@@ -17,7 +21,10 @@ on:
       - ".github/workflows/sha256-native-backends.yml"
       - "benchmarks/sha256_backend_check.d"
       - "benchmarks/durable_skip_check.d"
+      - "benchmarks/sha256-native-*-evidence.json"
+      - "benchmarks/sha256-migration-comparison.json"
       - "source/**/*.d"
+      - "third_party/**"
       - "dub.json"
       - "dub.selections.json"
 
@@ -130,10 +137,17 @@ jobs:
           BASE_SHA: cd15948466509055ae0431439f651ecba8a301f6
         run: |
           candidate_sha="$(git rev-parse HEAD)"
+          "$RUNNER_TEMP/scrubbed-durable-skip-check" --self-test-upgrade \
+            "$RUNNER_TEMP/scrubbed-sha-base-bin" \
+            "$RUNNER_TEMP/scrubbed-sha-candidate-bin"
           "$RUNNER_TEMP/scrubbed-durable-skip-check" --compare \
             "$RUNNER_TEMP/scrubbed-sha-base-bin" "$BASE_SHA" \
             "$RUNNER_TEMP/scrubbed-sha-candidate-bin" "$candidate_sha" \
             sha256-migration-comparison.json
+          "$RUNNER_TEMP/scrubbed-durable-skip-check" --check-compare \
+            sha256-migration-comparison.json \
+            "$RUNNER_TEMP/scrubbed-sha-base-bin" "$BASE_SHA" \
+            "$RUNNER_TEMP/scrubbed-sha-candidate-bin" "$candidate_sha"
 
       - name: Upload comparison evidence
         if: always()

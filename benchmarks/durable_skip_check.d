@@ -3,6 +3,7 @@ module benchmarks.durable_skip_check;
 
 import core.atomic : atomicLoad, atomicStore;
 import core.stdc.errno : EINTR, errno;
+import core.stdc.stdint : uint64_t;
 import core.sys.posix.sys.resource : rusage;
 import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED;
 import core.thread : Thread;
@@ -24,20 +25,36 @@ import std.string : splitLines;
 import std.uuid : randomUUID;
 
 extern(C) int wait4(int pid, int* status, int options, rusage* usage);
+version(OSX) extern(C) int proc_pidinfo(int pid, int flavor, uint64_t arg,
+    void* buffer, int bufferSize);
 
 private enum recordBytes = 256;
 private enum recordCount = 524_288;
 private enum runs = 3;
 private enum comparisonRuns = 5;
+private enum procPidListFds = 1;
 private enum double materialImprovementPercent = 10.0;
 private enum double maxTimeRegressionPercent = 5.0;
 private enum ulong maxTimeRegressionUs = 50_000;
 private enum ulong maxPhaseRegressionNs = 5_000_000;
 private enum double maxRssRegressionPercent = 10.0;
 private enum ulong maxRssRegressionBytes = 4 * 1024 * 1024;
+private immutable string[] phaseNames = [
+    "compiled_execution", "identity", "ledger_query", "ledger_transaction",
+    "output_hash", "output_read", "output_safe_open", "publication",
+    "shutdown", "source_hash", "source_open", "source_read", "source_stat"
+];
 
 private void need(bool value, string message) {
     if (!value) throw new Exception("durable skip evidence: " ~ message);
+}
+
+private bool exactKeys(ref JSONValue value, scope const string[] keys) {
+    auto object = value.object;
+    if (object.length != keys.length) return false;
+    foreach (key; keys)
+        if ((key in object) is null) return false;
+    return true;
 }
 
 private immutable string[] records = [
@@ -61,6 +78,26 @@ private immutable Layout[] comparisonLayouts = [
     Layout("few-large", 8, 65_536),
     Layout("startup", 1, 1),
 ];
+
+private string expectedInputTree(string layout) {
+    if (layout == "many-small")
+        return "109a64d1735023b4760b506bfa3b185a48177d7742953ee3f1301ca1b91e2c75";
+    if (layout == "few-large")
+        return "5293cfb9082107b5c698d9e048f9649bbcb4393b26c84d6c83881f260fe94468";
+    if (layout == "startup")
+        return "5d4b3434d25542e8e684614c962d35a758585a24cb290e38520340cb11e29a03";
+    need(false, "unknown comparison layout");
+    return null;
+}
+
+private string expectedInputConcatenated(string layout) {
+    if (layout == "startup")
+        return "bddd9ae8f27c17e350bc258e8a96a268abf8be75bebe36323c53dd7d5d3b70b5";
+    if (layout == "many-small" || layout == "few-large")
+        return "4538a0b393e57fa6ebee19a7c40fc50e1f6d00ffae80c8b2424645b8c8938b3c";
+    need(false, "unknown comparison layout");
+    return null;
+}
 
 private string record(size_t ordinal) {
     auto value = records[ordinal % records.length];
@@ -130,7 +167,7 @@ private ulong rss(ref const rusage value) {
 
 private struct Observation {
     ulong wallUs, userUs, systemUs, rssBytes;
-    size_t fdPeak;
+    size_t fdPeak, fdSamples, fdErrors;
     string logHash;
     string stackStatus;
     string stackHash;
@@ -154,14 +191,26 @@ private Observation invoke(string[] args, string root, string label,
     auto child = spawnProcess(command, input, output, errors);
     input.close(); output.close(); errors.close();
     shared bool stopped;
-    shared size_t peak;
+    shared size_t peak, fdSamples, fdErrors;
     auto sampler = new Thread({
         while (!atomicLoad(stopped)) {
-            auto seen = execute(["/usr/sbin/lsof", "-p", child.processID.to!string]);
-            if (seen.status == 0) {
-                auto count = seen.output.splitLines.length;
-                if (count) --count;
-                if (count > atomicLoad(peak)) atomicStore(peak, count);
+            version(OSX) {
+                auto bytes = proc_pidinfo(child.processID, procPidListFds,
+                    0, null, 0);
+                if (bytes >= 0) {
+                    auto count = cast(size_t)bytes / 8;
+                    atomicStore(fdSamples, atomicLoad(fdSamples) + 1);
+                    if (count > atomicLoad(peak)) atomicStore(peak, count);
+                } else atomicStore(fdErrors, atomicLoad(fdErrors) + 1);
+            } else {
+                auto seen = execute(["/usr/sbin/lsof", "-p",
+                    child.processID.to!string]);
+                if (seen.status == 0) {
+                    auto count = seen.output.splitLines.length;
+                    if (count) --count;
+                    atomicStore(fdSamples, atomicLoad(fdSamples) + 1);
+                    if (count > atomicLoad(peak)) atomicStore(peak, count);
+                } else atomicStore(fdErrors, atomicLoad(fdErrors) + 1);
             }
             Thread.sleep(10.msecs);
         }
@@ -184,7 +233,7 @@ private Observation invoke(string[] args, string root, string label,
     int status; rusage usage; int waited;
     do waited = wait4(child.processID, &status, 0, &usage);
     while (waited < 0 && errno == EINTR);
-    atomicStore(stopped, true); sampler.join(); timer.stop();
+    timer.stop(); atomicStore(stopped, true); sampler.join();
     need(waited == child.processID && WIFEXITED(status) && WEXITSTATUS(status) == 0,
         label ~ " failed: " ~ readText(errPath));
     auto log = readText(outPath);
@@ -198,6 +247,7 @@ private Observation invoke(string[] args, string root, string label,
         "metrics schema mismatch");
     return Observation(timer.peek.total!"usecs", micros(usage.ru_utime),
         micros(usage.ru_stime), rss(usage), atomicLoad(peak),
+        atomicLoad(fdSamples), atomicLoad(fdErrors),
         toHexString!(LetterCase.lower)(sha256Of(cast(const(ubyte)[])log)).idup,
         stackStatus, stackHash, gcProfile ? "supported" : "not-attempted",
         metrics);
@@ -213,6 +263,8 @@ private string observationJson(ref const Observation item, string route,
         `,"wall_us":` ~ item.wallUs.to!string ~ `,"user_us":` ~ item.userUs.to!string ~
         `,"system_us":` ~ item.systemUs.to!string ~ `,"peak_rss_bytes":` ~
         item.rssBytes.to!string ~ `,"sampled_fd_peak":` ~ item.fdPeak.to!string ~
+        `,"fd_poll_samples":` ~ item.fdSamples.to!string ~
+        `,"fd_poll_errors":` ~ item.fdErrors.to!string ~
         `,"log_sha256":` ~ q(item.logHash) ~ `,"output_tree_sha256":` ~
         q(output.tree) ~ `,"output_concatenated_sha256":` ~ q(output.concatenated) ~
         `,"stack_status":` ~ q(item.stackStatus) ~ `,"stack_sha256":` ~
@@ -226,6 +278,9 @@ private string layoutEvidence(string binary, string root, ref const Layout layou
     auto input = buildPath(root, layout.name ~ "-input");
     makeFixture(input, layout);
     auto inputId = identify(input);
+    need(inputId.tree == expectedInputTree(layout.name) &&
+        inputId.concatenated == expectedInputConcatenated(layout.name),
+        "comparison fixture identity mismatch");
     auto result = appender!string;
     result.put(`{"layout":`); result.put(q(layout.name));
     result.put(`,"files":`); result.put(layout.files.to!string);
@@ -305,17 +360,89 @@ private string stateKey(string role, string mode) {
     return role ~ ":" ~ mode;
 }
 
+private JSONValue upgradeProof(ComparisonTarget[] targets, string root,
+        ref const Layout layout, string input, string route) {
+    auto stem = layout.name ~ "-" ~ route ~ "-base-to-candidate";
+    auto output = buildPath(root, stem ~ "-output");
+    auto store = buildPath(root, stem ~ ".db");
+    if (route == "journal-v3") {
+        auto init = execute([targets[0].binary, "errors-init", "--journal", store]);
+        need(init.status == 0, stem ~ " base journal initialization failed");
+    }
+    string[] baseArgs = [targets[0].binary, "run", "--input", input,
+        "--output", output, "--threads", "1", "--explain"];
+    baseArgs ~= route == "manifest-v2" ? ["--manifest", store] :
+        ["--error-journal", store];
+    auto base = invoke(baseArgs, root, stem ~ "-base", 0, false);
+    auto expected = identify(output);
+    need(base.metrics["phases"]["compiled_execution"]["calls"].integer ==
+        layout.files, stem ~ " base publication execution mismatch");
+
+    string[] retryArgs = [targets[1].binary, "run", "--input", input,
+        "--output", output, "--threads", "1", "--explain"];
+    retryArgs ~= route == "manifest-v2"
+        ? ["--manifest", store, "--manifest-retry"]
+        : ["--error-journal", store, "--error-retry"];
+    auto retry = invoke(retryArgs, root, stem ~ "-candidate-retry", 0, false);
+    auto retryOutput = identify(output);
+    need(retryOutput.tree == expected.tree &&
+        retryOutput.concatenated == expected.concatenated,
+        stem ~ " candidate retry changed output");
+    need(retry.metrics["phases"]["compiled_execution"]["calls"].integer ==
+        layout.files, stem ~ " candidate retry execution mismatch");
+
+    string[] replayArgs = [targets[1].binary, "run", "--input", input,
+        "--output", output, "--threads", "1", "--explain"];
+    replayArgs ~= route == "manifest-v2" ? ["--manifest", store] :
+        ["--error-journal", store];
+    auto replay = invoke(replayArgs, root, stem ~ "-candidate-replay",
+        layout.files, false);
+    auto replayOutput = identify(output);
+    need(replayOutput.tree == expected.tree &&
+        replayOutput.concatenated == expected.concatenated,
+        stem ~ " candidate replay changed output");
+    auto replayPhases = replay.metrics["phases"];
+    need(replayPhases["compiled_execution"]["calls"].integer == 0 &&
+        replayPhases["publication"]["calls"].integer == 0 &&
+        replayPhases["source_hash"]["calls"].integer == layout.files &&
+        replayPhases["output_hash"]["calls"].integer == layout.files,
+        stem ~ " candidate replay accounting mismatch");
+
+    JSONValue result;
+    result["route"] = route;
+    result["output_tree_sha256"] = expected.tree;
+    result["output_concatenated_sha256"] = expected.concatenated;
+    result["base_execution_calls"] =
+        base.metrics["phases"]["compiled_execution"]["calls"];
+    result["candidate_retry_execution_calls"] =
+        retry.metrics["phases"]["compiled_execution"]["calls"];
+    result["candidate_retry_publication_calls"] =
+        retry.metrics["phases"]["publication"]["calls"];
+    result["candidate_replay_execution_calls"] =
+        replayPhases["compiled_execution"]["calls"];
+    result["candidate_replay_publication_calls"] =
+        replayPhases["publication"]["calls"];
+    return result;
+}
+
 private JSONValue comparisonLayoutEvidence(ComparisonTarget[] targets,
         string root, ref const Layout layout) {
     auto input = buildPath(root, layout.name ~ "-input");
     makeFixture(input, layout);
     auto inputId = identify(input);
+    need(inputId.tree == expectedInputTree(layout.name) &&
+        inputId.concatenated == expectedInputConcatenated(layout.name),
+        "comparison fixture identity mismatch");
     JSONValue result;
     result["layout"] = layout.name;
     result["files"] = cast(long)layout.files;
     result["input_bytes"] = cast(long)inputId.bytes;
     result["input_tree_sha256"] = inputId.tree;
     result["input_concatenated_sha256"] = inputId.concatenated;
+    JSONValue[] upgradeProofs;
+    foreach (route; ["manifest-v2", "journal-v3"])
+        upgradeProofs ~= upgradeProof(targets, root, layout, input, route);
+    result["upgrade_proofs"] = upgradeProofs;
     JSONValue[] rows;
 
     foreach (route; ["manifest-v2", "journal-v3"]) {
@@ -430,6 +557,25 @@ private ulong[] phaseSamples(ref JSONValue layout, string route, string mode,
     return values;
 }
 
+private ulong[] cpuSamples(ref JSONValue layout, string route, string mode,
+        string role) {
+    ulong[] values;
+    bool[comparisonRuns] seen;
+    foreach (row; layout["runs"].array) {
+        if (row["route"].str != route || row["variant"].str != mode ||
+                row["binary_role"].str != role) continue;
+        auto ordinal = cast(size_t)row["ordinal"].integer;
+        need(ordinal < comparisonRuns && !seen[ordinal],
+            "comparison CPU ordinal duplicate or out of range");
+        seen[ordinal] = true;
+        values ~= cast(ulong)row["user_us"].integer +
+            cast(ulong)row["system_us"].integer;
+    }
+    need(values.length == comparisonRuns,
+        "comparison CPU sample cardinality mismatch");
+    return values;
+}
+
 private ulong median(ulong[] values) {
     need(values.length == comparisonRuns, "comparison median cardinality mismatch");
     values.sort;
@@ -445,6 +591,18 @@ private bool meaningfulRegression(ulong before, ulong after,
         double percentLimit, ulong absoluteLimit) {
     return after > before && after - before > absoluteLimit &&
         percentChange(before, after) > percentLimit;
+}
+
+private JSONValue comparisonThresholds() {
+    JSONValue result;
+    result["material_improvement_percent"] = materialImprovementPercent;
+    result["max_time_regression_percent"] = maxTimeRegressionPercent;
+    result["max_time_regression_us"] = cast(long)maxTimeRegressionUs;
+    result["max_phase_regression_ns"] = cast(long)maxPhaseRegressionNs;
+    result["max_rss_regression_percent"] = maxRssRegressionPercent;
+    result["max_rss_regression_bytes"] = cast(long)maxRssRegressionBytes;
+    result["fd_regression_allowed"] = 0;
+    return result;
 }
 
 private JSONValue[] comparisonRows(JSONValue[] layoutRows,
@@ -481,8 +639,8 @@ private JSONValue[] comparisonRows(JSONValue[] layoutRows,
             "base", "output_hash"));
         auto candidateOutputHash = median(phaseSamples(layout, route, mode,
             "candidate", "output_hash"));
-        auto baseCpu = baseUser + baseSystem;
-        auto candidateCpu = candidateUser + candidateSystem;
+        auto baseCpu = median(cpuSamples(layout, route, mode, "base"));
+        auto candidateCpu = median(cpuSamples(layout, route, mode, "candidate"));
 
         auto wallPercent = percentChange(baseWall, candidateWall);
         auto cpuPercent = percentChange(baseCpu, candidateCpu);
@@ -507,7 +665,8 @@ private JSONValue[] comparisonRows(JSONValue[] layoutRows,
                     maxTimeRegressionPercent, maxPhaseRegressionNs) ||
                 meaningfulRegression(baseOutputHash, candidateOutputHash,
                     maxTimeRegressionPercent, maxPhaseRegressionNs) ||
-                candidateFd > baseFd) noRegression = false;
+                (layout["layout"].str != "startup" &&
+                    candidateFd > baseFd)) noRegression = false;
 
         JSONValue row;
         row["layout"] = layout["layout"].str;
@@ -549,14 +708,20 @@ private bool lowerHex(string value, size_t length) {
 }
 
 private void validateComparisonReport(string path, string baseBinary,
-        string candidateBinary, string harnessBinary) {
+        string baseSource, string candidateBinary, string candidateSource,
+        string harnessBinary) {
     auto report = parseJSON(readText(path));
-    need(report["schema"].str == "scrubbed-sha256-migration-comparison-v2" &&
+    need(exactKeys(report, ["schema", "version", "base_source_sha",
+            "candidate_source_sha", "base_binary_sha256",
+            "candidate_binary_sha256", "harness_sha256", "method",
+            "thresholds", "layouts", "comparisons", "decision", "claim"]) &&
+        report["schema"].str == "scrubbed-sha256-migration-comparison-v2" &&
         report["version"].integer == 2 &&
         lowerHex(report["base_source_sha"].str, 40) &&
         lowerHex(report["candidate_source_sha"].str, 40) &&
         report["base_source_sha"].str != report["candidate_source_sha"].str &&
-        report.object.length == 13,
+        report["base_source_sha"].str == baseSource &&
+        report["candidate_source_sha"].str == candidateSource,
         "comparison report identity mismatch");
     need(report["base_binary_sha256"].str == fileDigest(baseBinary) &&
         report["candidate_binary_sha256"].str == fileDigest(candidateBinary) &&
@@ -565,14 +730,18 @@ private void validateComparisonReport(string path, string baseBinary,
         report["harness_sha256"].str == fileDigest(harnessBinary),
         "comparison report binary identity mismatch");
     auto method = report["method"];
-    need(method["ordering"].str ==
+    need(exactKeys(method, ["ordering", "runs_per_case", "instrumentation"]) &&
+        method["ordering"].str ==
             "paired alternating base/candidate and mode order" &&
         method["runs_per_case"].integer == comparisonRuns &&
-        method["instrumentation"].str == "default-off" &&
-        method.object.length == 3,
+        method["instrumentation"].str == "default-off",
         "comparison method mismatch");
     auto thresholds = report["thresholds"];
-    need(thresholds["material_improvement_percent"].floating ==
+    need(exactKeys(thresholds, ["material_improvement_percent",
+            "max_time_regression_percent", "max_time_regression_us",
+            "max_phase_regression_ns", "max_rss_regression_percent",
+            "max_rss_regression_bytes", "fd_regression_allowed"]) &&
+        thresholds["material_improvement_percent"].floating ==
             materialImprovementPercent &&
         thresholds["max_time_regression_percent"].floating ==
             maxTimeRegressionPercent &&
@@ -582,23 +751,48 @@ private void validateComparisonReport(string path, string baseBinary,
             maxRssRegressionPercent &&
         thresholds["max_rss_regression_bytes"].integer ==
             maxRssRegressionBytes &&
-        thresholds["fd_regression_allowed"].integer == 0 &&
-        thresholds.object.length == 7,
+        thresholds["fd_regression_allowed"].integer == 0,
         "comparison thresholds mismatch");
     auto layoutRows = report["layouts"].array;
     need(layoutRows.length == comparisonLayouts.length,
         "comparison layout cardinality mismatch");
     foreach (index, ref layout; layoutRows) {
         auto expected = comparisonLayouts[index];
-        need(layout["layout"].str == expected.name &&
-            layout.object.length == 6 &&
+        need(exactKeys(layout, ["layout", "files", "input_bytes",
+                "input_tree_sha256", "input_concatenated_sha256",
+                "upgrade_proofs", "runs"]) &&
+            layout["layout"].str == expected.name &&
             layout["files"].integer == expected.files &&
             layout["input_bytes"].integer ==
                 expected.files * expected.recordsPerFile * recordBytes &&
-            lowerHex(layout["input_tree_sha256"].str, 64) &&
-            lowerHex(layout["input_concatenated_sha256"].str, 64) &&
+            layout["input_tree_sha256"].str == expectedInputTree(expected.name) &&
+            layout["input_concatenated_sha256"].str ==
+                expectedInputConcatenated(expected.name) &&
             layout["runs"].array.length == 2 * 2 * 2 * comparisonRuns,
             "comparison layout shape mismatch");
+        auto proofs = layout["upgrade_proofs"].array;
+        need(proofs.length == 2, "comparison upgrade proof cardinality mismatch");
+        foreach (proofIndex, proof; proofs) {
+            need(exactKeys(proof, ["route", "output_tree_sha256",
+                    "output_concatenated_sha256", "base_execution_calls",
+                    "candidate_retry_execution_calls",
+                    "candidate_retry_publication_calls",
+                    "candidate_replay_execution_calls",
+                    "candidate_replay_publication_calls"]) &&
+                proof["route"].str == (proofIndex == 0
+                    ? "manifest-v2" : "journal-v3") &&
+                lowerHex(proof["output_tree_sha256"].str, 64) &&
+                lowerHex(proof["output_concatenated_sha256"].str, 64) &&
+                proof["base_execution_calls"].integer == expected.files &&
+                proof["candidate_retry_execution_calls"].integer ==
+                    expected.files &&
+                proof["candidate_retry_publication_calls"].integer >= 0 &&
+                proof["candidate_retry_publication_calls"].integer <=
+                    expected.files &&
+                proof["candidate_replay_execution_calls"].integer == 0 &&
+                proof["candidate_replay_publication_calls"].integer == 0,
+                "comparison upgrade proof mismatch");
+        }
         string outputTree, outputConcatenated;
         foreach (row; layout["runs"].array) {
             auto tree = row["output_tree_sha256"].str;
@@ -606,7 +800,12 @@ private void validateComparisonReport(string path, string baseBinary,
             auto mode = row["variant"].str;
             auto phases = row["metrics"];
             auto expectedExecutions = mode == "reexecute" ? expected.files : 0;
-            need(row.object.length == 16 &&
+            need(exactKeys(row, ["route", "variant", "ordinal", "wall_us",
+                    "user_us", "system_us", "peak_rss_bytes",
+                    "sampled_fd_peak", "fd_poll_samples", "fd_poll_errors",
+                    "log_sha256", "output_tree_sha256",
+                    "output_concatenated_sha256", "stack_status",
+                    "stack_sha256", "d_gc_status", "metrics", "binary_role"]) &&
                 (row["route"].str == "manifest-v2" ||
                     row["route"].str == "journal-v3") &&
                 (mode == "reexecute" || mode == "verified-skip") &&
@@ -618,9 +817,26 @@ private void validateComparisonReport(string path, string baseBinary,
                 row["system_us"].integer >= 0 &&
                 row["peak_rss_bytes"].integer > 0 &&
                 row["sampled_fd_peak"].integer >= 0 &&
+                row["fd_poll_samples"].integer >= 0 &&
+                row["fd_poll_errors"].integer >= 0 &&
+                (expected.name == "startup" ||
+                    row["fd_poll_samples"].integer > 0) &&
+                row["stack_status"].str == "not-attempted" &&
+                row["stack_sha256"].str.length == 0 &&
+                row["d_gc_status"].str == "not-attempted" &&
                 lowerHex(row["log_sha256"].str, 64) &&
                 lowerHex(tree, 64) && lowerHex(concatenated, 64),
                 "comparison output identity shape mismatch");
+            need(exactKeys(phases, phaseNames),
+                "comparison phase set mismatch");
+            foreach (phaseName; phaseNames) {
+                auto phase = phases[phaseName];
+                need(exactKeys(phase, ["calls", "bytes", "nanoseconds"]) &&
+                    phase["calls"].integer >= 0 &&
+                    phase["bytes"].integer >= 0 &&
+                    phase["nanoseconds"].integer >= 0,
+                    "comparison phase shape mismatch: " ~ phaseName);
+            }
             need(phases["compiled_execution"]["calls"].integer ==
                     expectedExecutions &&
                 phases["publication"]["calls"].integer == 0 &&
@@ -633,6 +849,10 @@ private void validateComparisonReport(string path, string baseBinary,
             } else need(tree == outputTree && concatenated == outputConcatenated,
                 "comparison output identity mismatch");
         }
+        foreach (proof; proofs)
+            need(proof["output_tree_sha256"].str == outputTree &&
+                proof["output_concatenated_sha256"].str == outputConcatenated,
+                "comparison upgrade output identity mismatch");
     }
     bool passed;
     auto derived = comparisonRows(layoutRows, passed);
@@ -654,8 +874,23 @@ private JSONValue syntheticComparisonReport(string baseBinary,
         layoutRow["files"] = cast(long)layout.files;
         layoutRow["input_bytes"] = cast(long)(layout.files *
             layout.recordsPerFile * recordBytes);
-        layoutRow["input_tree_sha256"] = "1".replicate(64);
-        layoutRow["input_concatenated_sha256"] = "2".replicate(64);
+        layoutRow["input_tree_sha256"] = expectedInputTree(layout.name);
+        layoutRow["input_concatenated_sha256"] =
+            expectedInputConcatenated(layout.name);
+        JSONValue[] proofs;
+        foreach (route; ["manifest-v2", "journal-v3"]) {
+            JSONValue proof;
+            proof["route"] = route;
+            proof["output_tree_sha256"] = "4".replicate(64);
+            proof["output_concatenated_sha256"] = "5".replicate(64);
+            proof["base_execution_calls"] = cast(long)layout.files;
+            proof["candidate_retry_execution_calls"] = cast(long)layout.files;
+            proof["candidate_retry_publication_calls"] = cast(long)layout.files;
+            proof["candidate_replay_execution_calls"] = 0;
+            proof["candidate_replay_publication_calls"] = 0;
+            proofs ~= proof;
+        }
+        layoutRow["upgrade_proofs"] = proofs;
         JSONValue[] rows;
         foreach (route; ["manifest-v2", "journal-v3"])
             foreach (mode; ["reexecute", "verified-skip"])
@@ -671,6 +906,8 @@ private JSONValue syntheticComparisonReport(string baseBinary,
                         row["system_us"] = 100_000;
                         row["peak_rss_bytes"] = 64 * 1024 * 1024;
                         row["sampled_fd_peak"] = 12;
+                        row["fd_poll_samples"] = 10;
+                        row["fd_poll_errors"] = 0;
                         row["log_sha256"] = "3".replicate(64);
                         row["output_tree_sha256"] = "4".replicate(64);
                         row["output_concatenated_sha256"] = "5".replicate(64);
@@ -678,20 +915,21 @@ private JSONValue syntheticComparisonReport(string baseBinary,
                         row["stack_sha256"] = "";
                         row["d_gc_status"] = "not-attempted";
                         JSONValue phases;
-                        JSONValue execution, publication, sourceHash, outputHash;
-                        execution["calls"] = mode == "reexecute" ?
-                            cast(long)layout.files : 0;
-                        publication["calls"] = 0;
-                        sourceHash["calls"] = cast(long)layout.files;
-                        sourceHash["nanoseconds"] = candidate ?
+                        foreach (phaseName; phaseNames) {
+                            JSONValue phase;
+                            phase["calls"] = 0;
+                            phase["bytes"] = 0;
+                            phase["nanoseconds"] = 0;
+                            phases[phaseName] = phase;
+                        }
+                        phases["compiled_execution"]["calls"] =
+                            mode == "reexecute" ? cast(long)layout.files : 0;
+                        phases["source_hash"]["calls"] = cast(long)layout.files;
+                        phases["source_hash"]["nanoseconds"] = candidate ?
                             70_000_000 : 100_000_000;
-                        outputHash["calls"] = cast(long)layout.files;
-                        outputHash["nanoseconds"] = candidate ?
+                        phases["output_hash"]["calls"] = cast(long)layout.files;
+                        phases["output_hash"]["nanoseconds"] = candidate ?
                             70_000_000 : 100_000_000;
-                        phases["compiled_execution"] = execution;
-                        phases["publication"] = publication;
-                        phases["source_hash"] = sourceHash;
-                        phases["output_hash"] = outputHash;
                         row["metrics"] = phases;
                         row["binary_role"] = role;
                         rows ~= row;
@@ -714,20 +952,68 @@ private JSONValue syntheticComparisonReport(string baseBinary,
         "ordering": JSONValue("paired alternating base/candidate and mode order"),
         "runs_per_case": JSONValue(comparisonRuns),
         "instrumentation": JSONValue("default-off")]);
-    report["thresholds"] = JSONValue([
-        "material_improvement_percent": JSONValue(10.0),
-        "max_time_regression_percent": JSONValue(5.0),
-        "max_time_regression_us": JSONValue(50_000),
-        "max_phase_regression_ns": JSONValue(5_000_000),
-        "max_rss_regression_percent": JSONValue(10.0),
-        "max_rss_regression_bytes": JSONValue(4 * 1024 * 1024),
-        "fd_regression_allowed": JSONValue(0)]);
+    report["thresholds"] = comparisonThresholds();
     report["layouts"] = layoutRows;
     report["comparisons"] = comparisons;
     report["decision"] = "PASS";
     report["claim"] =
         "same-host interleaved comparison; cache and frequency uncontrolled";
     return report;
+}
+
+private void comparisonDecisionSelfTest(ref const JSONValue good) {
+    bool passed;
+    auto noWall = parseJSON(good.toString);
+    foreach (ref layout; noWall["layouts"].array) {
+        if (layout["layout"].str == "startup") continue;
+        foreach (ref row; layout["runs"].array)
+            if (row["binary_role"].str == "candidate") row["wall_us"] = 950_000;
+    }
+    auto noWallRows = noWall["layouts"].array;
+    comparisonRows(noWallRows, passed);
+    need(!passed, "missing material wall improvement accepted");
+
+    auto noHash = parseJSON(good.toString);
+    foreach (ref layout; noHash["layouts"].array) {
+        if (layout["layout"].str == "startup") continue;
+        foreach (ref row; layout["runs"].array)
+            if (row["binary_role"].str == "candidate") {
+                row["metrics"]["source_hash"]["nanoseconds"] = 95_000_000;
+                row["metrics"]["output_hash"]["nanoseconds"] = 95_000_000;
+            }
+    }
+    auto noHashRows = noHash["layouts"].array;
+    comparisonRows(noHashRows, passed);
+    need(!passed, "missing material hash improvement accepted");
+
+    auto cpuRegression = parseJSON(good.toString);
+    long[comparisonRuns] users = [100_000, 100_000, 100_000, 1_100_000,
+        1_100_000];
+    long[comparisonRuns] systems = [1_100_000, 1_100_000, 100_000, 100_000,
+        100_000];
+    foreach (ref row; cpuRegression["layouts"][0]["runs"].array) {
+        if (row["route"].str != "manifest-v2" ||
+                row["variant"].str != "reexecute") continue;
+        row["wall_us"] = 2_000_000;
+        if (row["binary_role"].str == "candidate") {
+            auto ordinal = cast(size_t)row["ordinal"].integer;
+            row["user_us"] = users[ordinal];
+            row["system_us"] = systems[ordinal];
+        }
+    }
+    auto cpuRows = cpuRegression["layouts"].array;
+    comparisonRows(cpuRows, passed);
+    need(!passed, "paired CPU regression accepted");
+
+    auto fdRegression = parseJSON(good.toString);
+    foreach (ref row; fdRegression["layouts"][0]["runs"].array)
+        if (row["route"].str == "manifest-v2" &&
+                row["variant"].str == "reexecute" &&
+                row["binary_role"].str == "candidate")
+            row["sampled_fd_peak"] = 13;
+    auto fdRows = fdRegression["layouts"].array;
+    comparisonRows(fdRows, passed);
+    need(!passed, "file-descriptor regression accepted");
 }
 
 private void comparisonValidatorSelfTest(string harnessBinary) {
@@ -740,14 +1026,23 @@ private void comparisonValidatorSelfTest(string harnessBinary) {
     auto reportPath = buildPath(root, "report.json");
     write(base, "base");
     write(candidate, "candidate");
+    auto startupFixture = buildPath(root, "startup-fixture");
+    makeFixture(startupFixture, comparisonLayouts[2]);
+    auto startupIdentity = identify(startupFixture);
+    need(startupIdentity.tree == expectedInputTree("startup") &&
+        startupIdentity.concatenated == expectedInputConcatenated("startup"),
+        "startup fixture pin mismatch");
     auto good = syntheticComparisonReport(base, candidate, harnessBinary);
+    comparisonDecisionSelfTest(good);
     write(reportPath, good.toString);
-    validateComparisonReport(reportPath, base, candidate, harnessBinary);
+    validateComparisonReport(reportPath, base, "a".replicate(40), candidate,
+        "b".replicate(40), harnessBinary);
 
     void mustReject(JSONValue mutant, string message) {
         write(reportPath, mutant.toString);
         bool rejected;
-        try validateComparisonReport(reportPath, base, candidate, harnessBinary);
+        try validateComparisonReport(reportPath, base, "a".replicate(40),
+            candidate, "b".replicate(40), harnessBinary);
         catch (Exception) rejected = true;
         need(rejected, message);
     }
@@ -759,12 +1054,37 @@ private void comparisonValidatorSelfTest(string harnessBinary) {
         observation["layouts"][0]["runs"][index]["wall_us"] = 2_000_000;
     mustReject(observation, "observation mutation accepted");
     auto source = parseJSON(good.toString);
-    source["candidate_source_sha"] = source["base_source_sha"];
-    mustReject(source, "identical source identities accepted");
+    source["candidate_source_sha"] = "c".replicate(40);
+    mustReject(source, "forged source identity accepted");
+    auto fixture = parseJSON(good.toString);
+    fixture["layouts"][0]["input_tree_sha256"] = "6".replicate(64);
+    mustReject(fixture, "fixture identity mutation accepted");
     auto decision = parseJSON(good.toString);
     decision["decision"] = "FAIL";
     mustReject(decision, "decision mutation accepted");
     writeln("SHA-256 migration comparison validator self-test passed");
+}
+
+private void upgradeSelfTest(string baseBinary, string candidateBinary) {
+    baseBinary = absolutePath(baseBinary);
+    candidateBinary = absolutePath(candidateBinary);
+    need(exists(baseBinary) && exists(candidateBinary),
+        "upgrade self-test binary missing");
+    auto root = buildPath(tempDir, "scrubbed-sha-upgrade-selftest-" ~
+        randomUUID.toString);
+    mkdirRecurse(root);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto input = buildPath(root, "startup-input");
+    makeFixture(input, comparisonLayouts[2]);
+    auto identity = identify(input);
+    need(identity.tree == expectedInputTree("startup") &&
+        identity.concatenated == expectedInputConcatenated("startup"),
+        "upgrade self-test fixture mismatch");
+    ComparisonTarget[] targets = [ComparisonTarget("base", baseBinary),
+        ComparisonTarget("candidate", candidateBinary)];
+    foreach (route; ["manifest-v2", "journal-v3"])
+        upgradeProof(targets, root, comparisonLayouts[2], input, route);
+    writeln("SHA-256 base-to-candidate durable upgrade self-test passed");
 }
 
 private void writeComparisonReport(string baseBinary, string baseSource,
@@ -801,15 +1121,7 @@ private void writeComparisonReport(string baseBinary, string baseSource,
     method["runs_per_case"] = comparisonRuns;
     method["instrumentation"] = "default-off";
     report["method"] = method;
-    JSONValue thresholds;
-    thresholds["material_improvement_percent"] = 10.0;
-    thresholds["max_time_regression_percent"] = 5.0;
-    thresholds["max_time_regression_us"] = 50_000;
-    thresholds["max_phase_regression_ns"] = 5_000_000;
-    thresholds["max_rss_regression_percent"] = 10.0;
-    thresholds["max_rss_regression_bytes"] = 4 * 1024 * 1024;
-    thresholds["fd_regression_allowed"] = 0;
-    report["thresholds"] = thresholds;
+    report["thresholds"] = comparisonThresholds();
     report["layouts"] = layoutRows;
     report["comparisons"] = comparisons;
     report["decision"] = passed ? "PASS" : "FAIL";
@@ -817,8 +1129,8 @@ private void writeComparisonReport(string baseBinary, string baseSource,
     auto text = report.toString;
     need(!text.canFind(root), "comparison evidence leaked temporary path");
     write(evidence, text ~ "\n");
-    validateComparisonReport(evidence, baseBinary, candidateBinary,
-        harnessBinary);
+    validateComparisonReport(evidence, baseBinary, baseSource, candidateBinary,
+        candidateSource, harnessBinary);
     writeln("SHA-256 migration comparison: wrote ", evidence);
 }
 
@@ -827,22 +1139,28 @@ void main(string[] args) {
         comparisonValidatorSelfTest(args[0]);
         return;
     }
+    if (args.length == 4 && args[1] == "--self-test-upgrade") {
+        upgradeSelfTest(args[2], args[3]);
+        return;
+    }
     if (args.length == 7 && args[1] == "--compare") {
         writeComparisonReport(args[2], args[3], args[4], args[5], args[6],
             args[0]);
         return;
     }
-    if (args.length == 5 && args[1] == "--check-compare") {
-        validateComparisonReport(args[2], absolutePath(args[3]),
-            absolutePath(args[4]), args[0]);
+    if (args.length == 7 && args[1] == "--check-compare") {
+        validateComparisonReport(args[2], absolutePath(args[3]), args[4],
+            absolutePath(args[5]), args[6], args[0]);
         writeln("SHA-256 migration comparison valid");
         return;
     }
     need(args.length == 3, "usage: durable_skip_check <release binary> " ~
         "<evidence.json> | --compare <base binary> <base source SHA> " ~
         "<candidate binary> <candidate source SHA> <evidence.json> | " ~
-        "--check-compare <evidence.json> <base binary> <candidate binary> | " ~
-        "--self-test-comparison");
+        "--check-compare <evidence.json> <base binary> <base source SHA> " ~
+        "<candidate binary> <candidate source SHA> | " ~
+        "--self-test-comparison | --self-test-upgrade <base binary> " ~
+        "<candidate binary>");
     auto binary = absolutePath(args[1]);
     auto evidence = absolutePath(args[2]);
     need(exists(binary) && !exists(evidence), "binary missing or evidence exists");

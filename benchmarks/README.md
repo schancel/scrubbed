@@ -623,8 +623,9 @@ ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \
 The self-test checks authoritative empty/`abc`/long-message vectors, Phobos
 equivalence, every alignment 0..31, boundary and one-byte chunking, repeatable
 `start`, refusal after `finish`, forced-unavailable refusal, eight concurrent
-instances, the frozen caller inventory, and `/usr/bin/shasum` as a separate
-system oracle. The long test streams 4,296,015,890 logical bytes through both
+instances, the frozen caller inventory, compile-time rejection of external raw
+backend imports, and `/usr/bin/shasum` as a separate system oracle. The long
+test streams 4,296,015,890 logical bytes through both
 the selected facade and Phobos without allocating that logical input.
 
 The native report also records five interleaved scalar/hardware samples for
@@ -689,14 +690,25 @@ pinned compiler, then runs them on one macOS ARM host in alternating order.
 `durable_skip_check.d --compare` covers manifest-v2 and journal-v3, forced
 reexecution and verified skip, many-small, few-large, and one-file startup
 layouts. It records five samples per binary/case plus wall, total CPU, RSS,
-sampled file descriptors, source-hash time, output-hash time, exact output
-identities, source revisions, and binary/harness hashes.
+Darwin `proc_pidinfo` sampled file-descriptor lower bounds, source-hash time,
+output-hash time, exact output identities, caller-expected source revisions,
+and binary/harness hashes. Startup wall stops when the child is reaped rather
+than after sampler teardown; the zero-tolerance descriptor gate applies only
+to the longer non-startup layouts with at least one successful sample.
+
+Before timing, each layout and route also proves a real binary upgrade: the
+base creates the durable store and output, the candidate opens those exact
+paths under explicit retry, and a subsequent candidate replay verified-skips
+with no execution or publication. `--self-test-upgrade` runs the same
+base-to-candidate contract on the small startup fixture.
 
 The generated `sha256-migration-comparison.json` is one source-bound artifact;
 its medians and decision are re-derived by the validator. The gate requires a
 material non-startup wall win and source/output-hash win, rejects meaningful
-wall/CPU/hash-phase/RSS regressions and any file-descriptor increase, and keeps
-the artifact on failure for diagnosis. `--self-test-comparison` proves that
-threshold, observation, source-identity, and decision mutations are rejected.
+wall/paired-total-CPU/hash-phase/RSS regressions and any measured non-startup
+file-descriptor increase. A complete artifact is retained when threshold
+validation fails. `--self-test-comparison` proves the decision's missing-win
+and regression cases and rejects threshold, observation, source-identity,
+fixture-identity, and decision mutations.
 No production-migration performance claim is retained until that hosted job
 passes for the exact candidate revision.

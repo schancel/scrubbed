@@ -11,11 +11,12 @@
 /// and one final materialization without hardcoding filter names here.
 module pipeline;
 
+import std.array : appender;
 import std.exception : enforce;
 import std.range.primitives : empty, front, popFront;
 import std.string : indexOf;
 import std.typecons : No;
-import std.utf : byUTF, validate;
+import std.utf : byUTF, encode, validate;
 
 /// Source-compatible plain filter contract. Results from this legacy seam are
 /// copied before retention because it makes no lifetime guarantee.
@@ -349,7 +350,8 @@ struct Pipeline {
                     fused[fusedLength++] = stages[index].streaming;
                     ++index;
                 }
-                text = fusedStreamingRange(text, fused[0 .. fusedLength]).to!string;
+                text = materializeFusedStreaming(text,
+                    fused[0 .. fusedLength]);
                 continue;
             }
             auto stage = stages[index++];
@@ -382,8 +384,8 @@ struct Pipeline {
                     auto input = text;
                     auto inputBytes = input.length;
                     auto before = GC.allocatedInCurrentThread;
-                    text = fusedStreamingRange(text,
-                        fused[0 .. fusedLength]).to!string;
+                    text = materializeFusedStreaming(text,
+                        fused[0 .. fusedLength]);
                     auto after = GC.allocatedInCurrentThread;
                     enforce(after >= before,
                         "pipeline GC counter moved backwards");
@@ -594,6 +596,17 @@ private auto fusedStreamingRange(string text, const(StreamingFilter)[] configure
     return result;
 }
 
+/// Materialize strict Unicode scalars without routing each value through the
+/// generic formatting machinery used by `InputRange.to!string`.
+private string materializeFusedStreaming(string text,
+        const(StreamingFilter)[] configured) {
+    auto output = appender!string;
+    char[4] encoded;
+    foreach (scalar; fusedStreamingRange(text, configured))
+        output.put(cast(string)encoded[0 .. encode(encoded, scalar)]);
+    return output.data;
+}
+
 import std.conv : to;
 import std.range.primitives : isInputRange;
 
@@ -720,6 +733,9 @@ unittest {
     registerStreamingFilter("__stream-delayed-test",
         StreamingFilter(StreamingState.init, &delayedStreamingTest,
             &delayedStreamingFinishTest));
+    auto identityPipeline = Pipeline.buildTyped([
+        TypedFilterSpec("__stream-identity-test")]);
+    assert(identityPipeline.run("héllø 🌍") == "héllø 🌍");
     assert(Pipeline.buildTyped([TypedFilterSpec("__stream-duplicate-test"),
         TypedFilterSpec("__stream-delayed-test")])
         .run("ab") == "aabb");

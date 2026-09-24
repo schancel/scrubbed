@@ -555,7 +555,8 @@ private void comparisonPercentageSelfTest() {
         upper = nextUp(upper);
         lower = nextDown(lower);
     }
-    need(sameSerializedPercentage(upper, 1.0) &&
+    need(comparisonPercentageUlps == 4 &&
+        sameSerializedPercentage(upper, 1.0) &&
         sameSerializedPercentage(lower, 1.0) &&
         !sameSerializedPercentage(nextUp(upper), 1.0) &&
         !sameSerializedPercentage(nextDown(lower), 1.0),

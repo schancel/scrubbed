@@ -3,6 +3,7 @@ module effects.html_markdown;
 
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
 import std.conv : to;
+import std.exception : assumeUnique;
 import std.uni : isControl, isFormat, isSpace;
 import std.utf : UTFException, encode;
 
@@ -37,7 +38,30 @@ private struct Writer {
         if (bytes.length) put("\n\n");
     }
 
-    string result() pure { return bytes.idup; }
+    // bytes starts empty, is only grown internally, and is consumed here.
+    string finish() pure nothrow {
+        if (!bytes.length) {
+            bytes = null;
+            return null;
+        }
+        return assumeUnique(bytes);
+    }
+}
+
+unittest {
+    Writer writer;
+    writer.put("complete");
+    auto storage = writer.bytes.ptr;
+    auto finished = writer.finish();
+    assert(finished == "complete");
+    assert(finished.ptr == storage);
+    assert(writer.bytes is null);
+    writer.put("new");
+    assert(finished == "complete");
+
+    writer.bytes.length = 0;
+    assert(writer.finish() is null);
+    assert(writer.bytes is null);
 }
 
 private bool white(char c) pure {
@@ -80,7 +104,7 @@ private string clean(string input, bool code = false) pure {
         writer.put(cast(string)encoded[0 .. encode(encoded, c)]);
     }
     if (pending) writer.put(" ");
-    return writer.result();
+    return writer.finish();
 }
 
 private string singleLine(string input) pure {
@@ -92,7 +116,7 @@ private string singleLine(string input) pure {
         pending = false;
         writer.put(cast(string)(&c)[0 .. 1]);
     }
-    return writer.result();
+    return writer.finish();
 }
 
 private string attribute(const ref HtmlNode node, string name) pure {
@@ -163,7 +187,7 @@ private string markdownTarget(string target) pure {
         if (c == '&') writer.put("&amp;");
         else writer.put(cast(string)(&c)[0 .. 1]);
     }
-    return writer.result();
+    return writer.finish();
 }
 
 private size_t endOf(const ref HtmlTree tree, size_t index) pure {
@@ -197,7 +221,7 @@ private string nodeText(const ref HtmlTree tree, size_t index) pure {
         }
         if (!hidden) writer.put(breakNode ? "\n" : tree.nodes[i].text);
     }
-    return writer.result();
+    return writer.finish();
 }
 
 private size_t longestRun(string value, char marker) pure {
@@ -278,7 +302,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             auto prefix = name == "ul" ? "- " : to!string(ordinal) ~ ". ";
             if (ordinal < long.max) ++ordinal;
             writer.put(prefix);
-            auto itemValue = item.result();
+            auto itemValue = item.finish();
             foreach (char c; itemValue) {
                 writer.put(cast(string)(&c)[0 .. 1]);
                 if (c == '\n') {
@@ -313,7 +337,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             first = false;
             Writer cell;
             renderChildren(tree, child, cell, depth + 1);
-            writer.put(singleLine(cell.result()));
+            writer.put(singleLine(cell.finish()));
         }
         writer.block();
         return;
@@ -330,7 +354,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     if (name == "strong" || name == "b" || name == "em" || name == "i") {
         Writer emphasized;
         renderChildren(tree, index, emphasized, depth + 1);
-        auto content = emphasized.result();
+        auto content = emphasized.finish();
         size_t left, right = content.length;
         while (left < right && content[left] == ' ') ++left;
         while (right > left && content[right - 1] == ' ') --right;
@@ -373,5 +397,6 @@ string renderMarkdown(const ref HtmlTree tree) pure {
     }
     writer.trim();
     if (writer.bytes.length) writer.put("\n");
-    return writer.result();
+    // Do not retain the growable buffer's spare capacity in the public result.
+    return writer.bytes.idup;
 }

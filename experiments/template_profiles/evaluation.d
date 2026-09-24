@@ -54,6 +54,7 @@ struct Decision {
     bool abstained;
     int score;
     double recurrence;
+    double contentVariation;
     string reason;
 }
 
@@ -65,6 +66,7 @@ struct Metrics {
     size_t chromeFalsePositive;
     size_t chromeFalseNegative;
     size_t abstainedPages;
+    size_t abstainedDecisions;
     size_t familyErrors;
 
     double contentPrecision() const {
@@ -90,6 +92,7 @@ struct Profile {
     string[string] paths;
     string[string] fixtureDigests;
     size_t[string] recurrence;
+    size_t[string] textVariants;
     string[string] representativeText;
 }
 
@@ -221,6 +224,7 @@ Profile[] trainProfiles(string root, Page[] pages) {
         profile.origin = training[0].origin;
         profile.family = training[0].family;
         string identityEvidence;
+        string[string] observedTexts;
         foreach (page; training) {
             profile.trainingPages ~= page.id;
             profile.revisions[page.revision] = page.revision;
@@ -236,6 +240,11 @@ Profile[] trainProfiles(string root, Page[] pages) {
                 }
                 if (signature !in profile.representativeText)
                     profile.representativeText[signature] = block.text;
+                auto textKey = signature ~ "\ntext=" ~ block.text;
+                if (textKey !in observedTexts) {
+                    ++profile.textVariants[signature];
+                    observedTexts[textKey] = textKey;
+                }
             }
         }
         auto evidenceDigest = digestText(identityEvidence);
@@ -243,6 +252,7 @@ Profile[] trainProfiles(string root, Page[] pages) {
             "\nfamily-rule=explicit-origin+path-family:v1\nfamily=" ~ profile.family ~
             "\nminimum-pages=" ~ minimumPages.to!string ~
             "\nrecurrence=" ~ recurrenceThreshold.to!string ~
+            "\ncontent-variation-penalty=1@" ~ recurrenceThreshold.to!string ~
             "\nscore=" ~ removalScoreThreshold.to!string ~
             "\nevidence=" ~ evidenceDigest ~ "\n");
         profiles ~= profile;
@@ -257,7 +267,8 @@ private Profile* findProfile(ref Profile[] profiles, Page page) {
     return null;
 }
 
-Decision[] classify(string root, Page page, ref Profile[] profiles) {
+private Decision[] classifyWithOptions(string root, Page page, ref Profile[] profiles,
+        bool useContentVariation, bool usePreservationVeto) {
     auto profile = findProfile(profiles, page);
     auto blocks = loadBlocks(root, page);
     Decision[] decisions;
@@ -267,21 +278,45 @@ Decision[] classify(string root, Page page, ref Profile[] profiles) {
     bool drift = page.split == "heldout" && !revisionKnown;
     foreach (block; blocks) {
         if (insufficient || drift) {
-            decisions ~= Decision(page.id, block.id, true, true, 0, 0,
+            decisions ~= Decision(page.id, block.id, true, true, 0, 0, 0,
                 insufficient ? "insufficient-family-samples" : "unseen-layout-revision");
             continue;
         }
         auto signature = structuralSignature(block);
         auto count = signature in profile.recurrence ? profile.recurrence[signature] : 0;
         auto recurrence = ratio(count, profile.trainingPages.length);
+        auto variationCount = signature in profile.textVariants ?
+            profile.textVariants[signature] : 0;
+        auto contentVariation = ratio(variationCount, profile.trainingPages.length);
         auto score = chromeScore(block);
+        if (useContentVariation && contentVariation >= recurrenceThreshold && score > 0)
+            --score;
+        auto preserved = usePreservationVeto && preserveRole(block);
         auto remove = recurrence >= recurrenceThreshold &&
-            score >= removalScoreThreshold && !preserveRole(block);
-        decisions ~= Decision(page.id, block.id, !remove, false, score, recurrence,
-            preserveRole(block) ? "semantic-preservation-veto" :
-            remove ? "recurrence+chrome-evidence" : "insufficient-removal-evidence");
+            score >= removalScoreThreshold && !preserved;
+        auto lowConfidence = !preserved && score < removalScoreThreshold;
+        decisions ~= Decision(page.id, block.id, !remove, lowConfidence, score,
+            recurrence, contentVariation,
+            preserved ? "semantic-preservation-veto" :
+            remove ? "recurrence+chrome-evidence" :
+            lowConfidence ? "low-removal-confidence" :
+            "insufficient-structural-recurrence");
     }
     return decisions;
+}
+
+Decision[] classify(string root, Page page, ref Profile[] profiles) {
+    return classifyWithOptions(root, page, profiles, true, true);
+}
+
+Decision[] classifyWithoutContentVariation(string root, Page page,
+        ref Profile[] profiles) {
+    return classifyWithOptions(root, page, profiles, false, true);
+}
+
+Decision[] classifyWithoutPreservationVeto(string root, Page page,
+        ref Profile[] profiles) {
+    return classifyWithOptions(root, page, profiles, true, false);
 }
 
 Metrics evaluate(string root, Page[] pages, ref Profile[] profiles) {
@@ -292,13 +327,16 @@ Metrics evaluate(string root, Page[] pages, ref Profile[] profiles) {
     foreach (page; pages) {
         if (page.split != "heldout") continue;
         auto decisions = classify(root, page, profiles);
-        bool pageAbstained;
+        size_t pageAbstentions;
         foreach (decision; decisions) {
             enforce(decision.page ~ "|" ~ decision.block in truthByBlock,
                 "missing held-out human truth");
             auto truth = truthByBlock[decision.page ~ "|" ~ decision.block];
-            pageAbstained = pageAbstained || decision.abstained;
-            if (decision.abstained) continue;
+            if (decision.abstained) {
+                ++pageAbstentions;
+                ++metrics.abstainedDecisions;
+                continue;
+            }
             if (decision.keep && truth.content) ++metrics.contentTruePositive;
             if (decision.keep && !truth.content) ++metrics.contentFalsePositive;
             if (!decision.keep && truth.content) ++metrics.contentFalseNegative;
@@ -306,7 +344,7 @@ Metrics evaluate(string root, Page[] pages, ref Profile[] profiles) {
             if (!decision.keep && truth.content) ++metrics.chromeFalsePositive;
             if (decision.keep && !truth.content) ++metrics.chromeFalseNegative;
         }
-        metrics.abstainedPages += pageAbstained;
+        metrics.abstainedPages += pageAbstentions == decisions.length;
     }
     return metrics;
 }

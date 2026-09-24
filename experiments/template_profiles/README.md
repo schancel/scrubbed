@@ -22,7 +22,8 @@ ldc2 -i -I=experiments/template_profiles -O3 -release \
 ```
 
 The checker verifies fixture hashes, split disjointness, truth coverage,
-profile identity/order independence, held-out exclusion, minimum-sample and
-layout-drift abstention, grouping confusion, structural-versus-exact-text
-behavior, recurrence-only deletion, bounded decision evidence, and held-out
+profile identity/order independence, held-out exclusion, minimum-sample,
+low-confidence, and layout-drift abstention, grouping confusion,
+structural-versus-exact-text behavior, content-variation and preservation-veto
+mutants, recurrence-only deletion, bounded decision evidence, and held-out
 content/chrome precision and recall.

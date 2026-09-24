@@ -8,7 +8,8 @@ family rule; require at least three distinct training pages; and freeze a
 content-addressed structural profile before publication. A profile may add
 evidence to the future #26 single-page decision, but recurrence must never be a
 removal rule by itself. Unknown families, fewer than three samples, unseen
-layout revisions, or a removal score below 3 must abstain and fall back to #26.
+layout revisions, or a non-preserved removal candidate below score 3 must
+abstain and fall back to #26.
 
 This recommendation is boundary evidence from a small synthetic corpus. It
 does not establish live-web accuracy, parser integration, a durable schema, or
@@ -41,20 +42,26 @@ A candidate removal requires all of:
 - recurrence on at least two of three training pages (threshold `0.66`);
 - a chrome-evidence score of at least 3, where chrome role contributes 2 and
   edge position, low text density, and high link density contribute 1 each;
+  varied text on at least two of three training pages subtracts 1 because it is
+  weak content evidence, while strong multi-cue dynamic chrome can still pass;
 - no semantic preservation veto for article/main, table, infobox, citation,
   caption, code, or structured-list roles.
 
-Every decision records one bounded reason plus its recurrence and score. The
-checker recomputes decisions from fixture bytes; human truth is read only when
-scoring the held-out result.
+An eligible recurrent block below score 3 is kept but explicitly marked
+abstained for the future #26 fallback; it is not silently counted as a content
+decision. Every decision records one bounded reason plus recurrence, content
+variation, and score. The checker recomputes decisions from fixture bytes;
+human truth is read only when scoring the held-out result.
 
 ## Results
 
-Three sufficiently sampled, revision-matched held-out pages were scored. They
-contain 6 content spans and 9 chrome spans. Content precision and recall were
-both `1.000`; chrome precision and recall were both `1.000`. Two other held-out
-pages explicitly abstained: the one-sample report family and the unseen article
-layout revision. Abstentions are excluded from the precision/recall
+Three sufficiently sampled, revision-matched held-out pages were eligible.
+Their decided spans contain 5 content spans and 9 chrome spans. Content
+precision and recall were both `1.000`; chrome precision and recall were both
+`1.000`. One additional eligible article-series span was kept and explicitly
+abstained at adjusted score 2. Two other held-out pages fully abstained: the
+one-sample report family and the unseen article layout revision. Thus 11
+decisions abstained in total. Abstentions are excluded from precision/recall
 denominators and reported separately, so they cannot inflate quality silently.
 
 The comparison and mutants were:
@@ -66,13 +73,15 @@ The comparison and mutants were:
 | One training page | Report family cannot distinguish recurrence from coincidence; 1 held-out page abstained | Reject as insufficient |
 | Three distinct training pages | All 3 eligible families produced a frozen profile | Minimum for the next prototype, not a production claim |
 | Exact-text recurrence | Missed 12 dynamic chrome spans, including the drift probe | Reject |
-| Structural recurrence + score >= 3 + veto | 6/6 content and 9/9 chrome decisions correct on scored held-out pages | Best evaluated candidate |
+| Structural recurrence + variation-adjusted score >= 3 + veto | 5/5 decided content and 9/9 chrome spans correct; 1 eligible low-score content span kept and abstained | Best evaluated candidate |
+| Ignore content variation | Deleted the varied article-series span that the candidate keeps and abstains on | Reject; accepted signal is material |
+| Disable semantic preservation veto | Deleted a stable recurring meaningful table at score 3 | Reject; preservation invariant is material |
 | Recurrence alone | Deleted 6 repeated meaningful content spans | Reject; invariant violation |
 | Unseen revision | 1 page abstained rather than applying a stale profile | Required drift behavior |
 | Reversed input order | Identical profile identities and aggregate results | Pass |
 | Poisoned held-out metadata | Training profile identities unchanged | Pass leakage control |
 
-The perfect scored-page result is not an estimate of population accuracy. The
+The perfect decided-span result is not an estimate of population accuracy. The
 fixtures were authored to test decisions and failure modes, not sampled to
 represent the web. The score threshold of 3 is a conservative evaluated
 starting point: it requires recurrence plus multiple independent chrome cues.
@@ -89,7 +98,8 @@ content-addressed record containing:
 - sorted training page identities, layout revisions, and fixture/source
   digests, never held-out identities;
 - algorithm version and canonical options, including minimum samples,
-  recurrence threshold, score threshold, and preservation policy;
+  recurrence and content-variation thresholds, variation penalty, score
+  threshold, and preservation policy;
 - sorted structural signature counts and bounded aggregate evidence; and
 - an evidence digest, followed by the profile identity digest.
 

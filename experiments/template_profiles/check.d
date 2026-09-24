@@ -2,6 +2,7 @@
 module check;
 
 import evaluation : Decision, Metrics, Profile, classify, digestText, evaluate,
+    classifyWithoutContentVariation, classifyWithoutPreservationVeto,
     exactTextChromeMisses, loadBlocks, loadPages, loadTruth,
     originOnlyFamilyErrors, recurrenceOnlyContentDeletions, trainProfiles;
 import std.algorithm : canFind, reverse;
@@ -56,6 +57,8 @@ int main(string[] arguments) {
     close(metrics.chromePrecision, 1.0, "held-out chrome precision");
     close(metrics.chromeRecall, 1.0, "held-out chrome recall");
     enforce(metrics.abstainedPages == 2, "expected sparse and drift abstentions");
+    enforce(metrics.abstainedDecisions == 11,
+        "expected ten family/revision plus one low-confidence abstention");
     enforce(originOnlyFamilyErrors(pages) == 3,
         "origin-only grouping must expose same-origin family errors");
 
@@ -73,6 +76,40 @@ int main(string[] arguments) {
         "exact-text representation mutant unexpectedly succeeds");
     enforce(recurrenceDeletions >= 6,
         "recurrence-only mutant failed to delete repeated meaningful content");
+
+    // Variation is material: without it, recurring varied article-series content
+    // reaches the removal threshold. With it, the block is kept via explicit fallback.
+    foreach (page; pages)
+        if (page.id == "news-gallery-h1") {
+            auto candidate = classify(root, page, profiles);
+            auto noVariation = classifyWithoutContentVariation(root, page, profiles);
+            foreach (i; 0 .. candidate.length)
+                if (candidate[i].block == "body") {
+                    enforce(candidate[i].keep && candidate[i].abstained &&
+                        candidate[i].score == 2 && candidate[i].contentVariation == 1.0 &&
+                        candidate[i].reason == "low-removal-confidence",
+                        "eligible low-score block must explicitly abstain and keep");
+                    enforce(!noVariation[i].keep && !noVariation[i].abstained &&
+                        noVariation[i].score == 3,
+                        "content-variation mutant must expose article-series deletion");
+                }
+        }
+
+    // The preservation veto is independently necessary for a stable, recurring
+    // table whose other features resemble chrome.
+    foreach (page; pages)
+        if (page.id == "news-article-h1") {
+            auto candidate = classify(root, page, profiles);
+            auto noVeto = classifyWithoutPreservationVeto(root, page, profiles);
+            foreach (i; 0 .. candidate.length)
+                if (candidate[i].block == "meaningful-table") {
+                    enforce(candidate[i].keep && !candidate[i].abstained &&
+                        candidate[i].reason == "semantic-preservation-veto",
+                        "meaningful table must be kept by preservation veto");
+                    enforce(!noVeto[i].keep && noVeto[i].score == 3,
+                        "preservation-veto mutant must expose table deletion");
+                }
+        }
 
     // Input order cannot alter profile identities or outcomes.
     auto reversed = pages.dup;
@@ -103,18 +140,28 @@ int main(string[] arguments) {
         foreach (decision; classify(root, page, profiles)) {
             enforce(decision.reason.length && decision.reason.length < 48,
                 "decision evidence missing or unbounded");
+            enforce(decision.recurrence >= 0 && decision.recurrence <= 1 &&
+                decision.contentVariation >= 0 && decision.contentVariation <= 1,
+                "decision evidence ratio out of bounds");
+            if (decision.score < 3 &&
+                    !["semantic-preservation-veto", "insufficient-family-samples",
+                        "unseen-layout-revision"].canFind(decision.reason))
+                enforce(decision.keep && decision.abstained,
+                    "non-preserved low-score decision must keep and abstain");
             if (["meaningful-table", "infobox", "citation", "caption", "code",
                     "structured-list"].canFind(decision.block))
                 enforce(decision.keep, "meaningful repeated structure removed");
         }
     }
 
-    writeln(format("PASS: pages=%s train=10 heldout=5 spans=%s scored=3 abstained=%s ",
+    writeln(format("PASS: pages=%s train=10 heldout=5 spans=%s eligible=3 full_abstained=%s ",
         pages.length, truth.length, metrics.abstainedPages),
         format("content_p=%.3f content_r=%.3f chrome_p=%.3f chrome_r=%.3f ",
         metrics.contentPrecision, metrics.contentRecall,
         metrics.chromePrecision, metrics.chromeRecall),
         "origin_only_family_errors=3 recurrence_mutant_deletions=", recurrenceDeletions,
-        " exact_text_misses=", exactTextMisses, " order/leakage/drift checks=pass");
+        " exact_text_misses=", exactTextMisses,
+        " decision_abstentions=", metrics.abstainedDecisions,
+        " variation/veto/order/leakage/drift checks=pass");
     return 0;
 }

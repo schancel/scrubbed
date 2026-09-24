@@ -6,8 +6,8 @@ import std.array : replicate;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : SHA256, sha256Of;
-import std.file : SpanMode, dirEntries, exists, mkdir, readText, rmdirRecurse,
-    symlink, tempDir, write;
+import std.file : SpanMode, copy, dirEntries, exists, getAttributes, mkdir,
+    mkdirRecurse, readText, rmdirRecurse, setAttributes, symlink, tempDir, write;
 import std.json : parseJSON;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
@@ -16,6 +16,24 @@ import std.uuid : randomUUID;
 
 private void check(bool condition, string label) {
     if (!condition) throw new Exception("CLI golden: " ~ label);
+}
+
+private string posixQuoted(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'') quoted ~= "'\\''";
+        else quoted ~= character;
+    }
+    return quoted ~ "'";
+}
+
+private string fishQuoted(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'' || character == '\\') quoted ~= '\\';
+        quoted ~= character;
+    }
+    return quoted ~ "'";
 }
 
 private struct Captured {
@@ -401,24 +419,32 @@ int main(string[] args) {
         !exists(extractOutput), "extract argument golden");
 
     auto executable = buildNormalizedPath(absolutePath(exe));
+    auto bashCommand = "eval " ~ posixQuoted(posixQuoted(executable) ~
+        " completion complete --bash --") ~ " \"$COMP_LINE\" ---";
     auto bashSetup =
         "# Add this source command into .bashrc:\n" ~
-        "#       source <(" ~ executable ~ " completion init --bash)\n" ~
-        "complete -C 'eval " ~ executable ~
-            " completion complete --bash -- $COMP_LINE ---' scrubbed\n";
+        "#       source <(" ~ posixQuoted(executable) ~
+            " completion init --bash)\n" ~
+        "complete -C " ~ posixQuoted(bashCommand) ~ " scrubbed\n";
+    auto zshCommand = "eval " ~ posixQuoted(posixQuoted(executable) ~
+        " completion complete --zsh --") ~ " \"$COMP_LINE\" ---";
     auto zshSetup =
         "# Ensure that you called compinit and bashcompinit like below in your .zshrc:\n" ~
         "#       autoload -Uz compinit && compinit\n" ~
         "#       autoload -Uz bashcompinit && bashcompinit\n" ~
         "# And then add this source command after them into your .zshrc:\n" ~
-        "#       source <(" ~ executable ~ " completion init --zsh)\n" ~
-        "complete -C 'eval " ~ executable ~
-            " completion complete --zsh -- $COMP_LINE ---' scrubbed\n";
+        "#       source <(" ~ posixQuoted(executable) ~
+            " completion init --zsh)\n" ~
+        "complete -C " ~ posixQuoted(zshCommand) ~ " scrubbed\n";
+    auto fishCommand = "(COMMAND_LINE=(commandline -p) " ~
+        fishQuoted(executable) ~
+        " completion complete --fish -- (commandline -op))";
     auto fishSetup =
         "# Add this source command into ~/.config/fish/config.fish:\n" ~
-        "#       " ~ executable ~ " completion init --fish | source\n" ~
-        "complete -c scrubbed -a '(COMMAND_LINE=(commandline -p) " ~ executable ~
-            " completion complete --fish -- (commandline -op))' --no-files\n";
+        "#       " ~ fishQuoted(executable) ~
+            " completion init --fish | source\n" ~
+        "complete -c scrubbed -a " ~ fishQuoted(fishCommand) ~
+            " --no-files\n";
     auto shells = ["bash", "zsh", "fish"];
     auto setupGoldens = [bashSetup, zshSetup, fishSetup];
     foreach (index, shell; shells) {
@@ -459,6 +485,54 @@ int main(string[] args) {
     check(legacyBash.status == 0 && legacyBash.output == "--threads\n" &&
         legacyFish.status == 0 && legacyFish.output == "--threads\n",
         "legacy generated candidate compatibility");
+
+    auto quotedDirectory = buildPath(root, "completion path's release");
+    mkdirRecurse(quotedDirectory);
+    auto quotedExe = buildPath(quotedDirectory, "scrubbed");
+    copy(exe, quotedExe);
+    setAttributes(quotedExe, getAttributes(exe));
+    auto bashQuoted = execute(["bash", "-c", q"BASH
+set -e
+setup=$("$1" completion init --bash)
+eval "$setup"
+complete -p scrubbed >/dev/null
+line=${setup##*$'\n'}
+eval "set -- ${line#complete }"
+[ "$1" = -C ]
+[ "$3" = scrubbed ]
+COMP_LINE='scrubbed repair --th'
+eval "$2"
+BASH", "completion-path-check", quotedExe]);
+    check(bashQuoted.status == 0 && bashQuoted.output == "--threads\n",
+        "bash quoted executable setup and registered invocation: status=" ~
+            bashQuoted.status.to!string ~ "; stdout=" ~ bashQuoted.output ~
+            "; expected --threads");
+    auto zshQuoted = execute(["zsh", "-fc", q"ZSH
+set -e
+autoload -Uz compinit && compinit
+autoload -Uz bashcompinit && bashcompinit
+setup=$("$1" completion init --zsh)
+eval "$setup"
+complete -p scrubbed >/dev/null
+line=${setup##*$'\n'}
+eval "set -- ${line#complete }"
+[ "$1" = -C ]
+[ "$3" = scrubbed ]
+COMP_LINE='scrubbed repair --th'
+eval "$2"
+ZSH", "completion-path-check", quotedExe]);
+    check(zshQuoted.status == 0 && zshQuoted.output == "--threads\n",
+        "zsh quoted executable setup and registered invocation");
+    auto fishAvailable = execute(["sh", "-c", "command -v fish >/dev/null 2>&1"]);
+    if (fishAvailable.status == 0) {
+        auto fishQuoted = execute(["fish", "-c", q"FISH
+set setup ("$argv[1]" completion init --fish | string collect)
+eval $setup
+complete -C 'scrubbed repair --th'
+FISH", "completion-path-check", quotedExe]);
+        check(fishQuoted.status == 0 && fishQuoted.output == "--threads\n",
+            "fish quoted executable setup and registered invocation");
+    }
     string[][] malformedCases = [["completion"], ["completion", "bogus"],
             ["completion", "init"], ["completion", "init", "--tcsh"],
             ["completion", "init", "--bash", "extra"],

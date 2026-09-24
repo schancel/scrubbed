@@ -227,27 +227,56 @@ private int completionError(string message) {
     return 2;
 }
 
+private string posixShellLiteral(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'') quoted ~= "'\\''";
+        else quoted ~= character;
+    }
+    return quoted ~ "'";
+}
+
+private string fishShellLiteral(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'' || character == '\\') quoted ~= '\\';
+        quoted ~= character;
+    }
+    return quoted ~ "'";
+}
+
 private int printCompletionSetup(string shell) {
     auto executable = thisExePath();
     if (shell == "--bash") {
+        auto prefix = posixShellLiteral(executable) ~
+            " completion complete --bash --";
+        auto command = "eval " ~ posixShellLiteral(prefix) ~
+            " \"$COMP_LINE\" ---";
         writeln("# Add this source command into .bashrc:");
-        writeln("#       source <(", executable, " completion init --bash)");
-        writeln("complete -C 'eval ", executable,
-            " completion complete --bash -- $COMP_LINE ---' scrubbed");
+        writeln("#       source <(", posixShellLiteral(executable),
+            " completion init --bash)");
+        writeln("complete -C ", posixShellLiteral(command), " scrubbed");
     } else if (shell == "--zsh") {
+        auto prefix = posixShellLiteral(executable) ~
+            " completion complete --zsh --";
+        auto command = "eval " ~ posixShellLiteral(prefix) ~
+            " \"$COMP_LINE\" ---";
         writeln("# Ensure that you called compinit and bashcompinit like below in your .zshrc:");
         writeln("#       autoload -Uz compinit && compinit");
         writeln("#       autoload -Uz bashcompinit && bashcompinit");
         writeln("# And then add this source command after them into your .zshrc:");
-        writeln("#       source <(", executable, " completion init --zsh)");
-        writeln("complete -C 'eval ", executable,
-            " completion complete --zsh -- $COMP_LINE ---' scrubbed");
+        writeln("#       source <(", posixShellLiteral(executable),
+            " completion init --zsh)");
+        writeln("complete -C ", posixShellLiteral(command), " scrubbed");
     } else {
+        auto command = "(COMMAND_LINE=(commandline -p) " ~
+            fishShellLiteral(executable) ~
+            " completion complete --fish -- (commandline -op))";
         writeln("# Add this source command into ~/.config/fish/config.fish:");
-        writeln("#       ", executable, " completion init --fish | source");
-        writeln("complete -c scrubbed -a '(COMMAND_LINE=(commandline -p) ",
-            executable,
-            " completion complete --fish -- (commandline -op))' --no-files");
+        writeln("#       ", fishShellLiteral(executable),
+            " completion init --fish | source");
+        writeln("complete -c scrubbed -a ", fishShellLiteral(command),
+            " --no-files");
     }
     return 0;
 }

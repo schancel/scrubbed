@@ -1,0 +1,1 @@
+{"version":3,"stages":[{"id":"extract","implementation":"html-markdown","options":{"max-html-bytes":1048576},"filters":[]}]}

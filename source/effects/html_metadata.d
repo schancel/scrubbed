@@ -235,67 +235,103 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
     return result;
 }
 
-private string quote(string value) pure {
-    enum hex = "0123456789abcdef";
-    string result = "\"";
-    size_t runStart;
-    foreach (i, c; value) {
-        if (cast(ubyte)c >= 0x20 && c != '"' && c != '\\') continue;
-        if (runStart < i) result ~= value[runStart .. i];
-        switch (c) {
-            case '"': result ~= `\"`; break;
-            case '\\': result ~= `\\`; break;
-            case '\b': result ~= `\b`; break;
-            case '\f': result ~= `\f`; break;
-            case '\n': result ~= `\n`; break;
-            case '\r': result ~= `\r`; break;
-            case '\t': result ~= `\t`; break;
-            default:
-                auto byteValue = cast(ubyte)c;
-                char[6] escaped = ['\\', 'u', '0', '0',
-                    hex[byteValue >> 4], hex[byteValue & 0xf]];
-                result ~= escaped[];
-        }
-        runStart = i + 1;
-    }
-    if (runStart < value.length) result ~= value[runStart .. $];
-    return result ~ "\"";
-}
-
-unittest {
-    assert(quote("") == `""`);
-    assert(quote("plain/é") == `"plain/é"`);
-    assert(quote("\"\\\b\f\n\r\t\0\x1f") ==
-        `"\"\\\b\f\n\r\t\u0000\u001f"`);
-}
-
-private string fieldJson(const ref MetadataField field) pure {
-    string encoded = `{"status":` ~ quote(field.status) ~ `,"value":`;
-    encoded ~= field.status == "selected" ? quote(field.value) : "null";
-    encoded ~= `,"rule":` ~ (field.status == "selected" ? quote(field.rule) : "null");
-    encoded ~= `,"node":` ~ (field.status == "selected" ? field.node.to!string : "null");
-    encoded ~= `,"conflict":` ~ (field.conflict ? "true" : "false") ~
-        `,"invalidEvidence":` ~ (field.invalidEvidence ? "true" : "false") ~
-        `,"overflow":` ~ (field.overflow ? "true" : "false") ~ `,"candidates":[`;
-    foreach (i, candidate; field.candidates) {
-        if (i) encoded ~= ",";
-        encoded ~= `{"value":` ~ quote(candidate.value) ~ `,"rule":` ~ quote(candidate.rule) ~
-            `,"node":` ~ candidate.node.to!string ~ `}`;
-    }
-    return encoded ~ "]}";
-}
-
 class HtmlMetadataOutputLimit : Exception {
     this() pure { super("metadata output limit"); }
 }
 
+private struct Writer {
+    char[] bytes;
+
+    void put(scope const(char)[] value) pure {
+        if (value.length > maxMetadataJsonBytes - bytes.length)
+            throw new HtmlMetadataOutputLimit;
+        bytes ~= value;
+    }
+
+    void quoted(string value) pure {
+        enum hex = "0123456789abcdef";
+        put("\"");
+        size_t runStart;
+        foreach (i, c; value) {
+            if (cast(ubyte)c >= 0x20 && c != '"' && c != '\\') continue;
+            if (runStart < i) put(value[runStart .. i]);
+            switch (c) {
+                case '"': put(`\"`); break;
+                case '\\': put(`\\`); break;
+                case '\b': put(`\b`); break;
+                case '\f': put(`\f`); break;
+                case '\n': put(`\n`); break;
+                case '\r': put(`\r`); break;
+                case '\t': put(`\t`); break;
+                default:
+                    auto byteValue = cast(ubyte)c;
+                    char[6] escaped = ['\\', 'u', '0', '0',
+                        hex[byteValue >> 4], hex[byteValue & 0xf]];
+                    put(escaped[]);
+            }
+            runStart = i + 1;
+        }
+        if (runStart < value.length) put(value[runStart .. $]);
+        put("\"");
+    }
+}
+
+unittest {
+    Writer writer;
+    writer.quoted("");
+    assert(writer.bytes == `""`);
+    writer.bytes.length = 0;
+    writer.quoted("plain/é");
+    assert(writer.bytes == `"plain/é"`);
+    writer.bytes.length = 0;
+    writer.quoted("\"\\\b\f\n\r\t\0\x1f");
+    assert(writer.bytes == `"\"\\\b\f\n\r\t\u0000\u001f"`);
+}
+
+private void putField(ref Writer writer, const ref MetadataField field) pure {
+    writer.put(`{"status":`);
+    writer.quoted(field.status);
+    writer.put(`,"value":`);
+    if (field.status == "selected") writer.quoted(field.value);
+    else writer.put("null");
+    writer.put(`,"rule":`);
+    if (field.status == "selected") writer.quoted(field.rule);
+    else writer.put("null");
+    writer.put(`,"node":`);
+    writer.put(field.status == "selected" ? field.node.to!string : "null");
+    writer.put(`,"conflict":`);
+    writer.put(field.conflict ? "true" : "false");
+    writer.put(`,"invalidEvidence":`);
+    writer.put(field.invalidEvidence ? "true" : "false");
+    writer.put(`,"overflow":`);
+    writer.put(field.overflow ? "true" : "false");
+    writer.put(`,"candidates":[`);
+    foreach (i, candidate; field.candidates) {
+        if (i) writer.put(",");
+        writer.put(`{"value":`);
+        writer.quoted(candidate.value);
+        writer.put(`,"rule":`);
+        writer.quoted(candidate.rule);
+        writer.put(`,"node":`);
+        writer.put(candidate.node.to!string);
+        writer.put("}");
+    }
+    writer.put("]}");
+}
+
 /// Fixed key order and one LF are metadata-json:v1's canonical wire.
 string serializeHtmlMetadata(DocumentId id, const HtmlMetadata metadata) pure {
-    auto encoded = `{"version":"metadata-json:v1","documentId":` ~ quote(id.text) ~
-        `,"fields":{"title":` ~ fieldJson(metadata.title) ~
-        `,"author":` ~ fieldJson(metadata.author) ~
-        `,"date":` ~ fieldJson(metadata.date) ~
-        `,"url":` ~ fieldJson(metadata.url) ~ "}}\n";
-    if (encoded.length > maxMetadataJsonBytes) throw new HtmlMetadataOutputLimit;
-    return encoded;
+    Writer writer;
+    writer.put(`{"version":"metadata-json:v1","documentId":`);
+    writer.quoted(id.text);
+    writer.put(`,"fields":{"title":`);
+    writer.putField(metadata.title);
+    writer.put(`,"author":`);
+    writer.putField(metadata.author);
+    writer.put(`,"date":`);
+    writer.putField(metadata.date);
+    writer.put(`,"url":`);
+    writer.putField(metadata.url);
+    writer.put("}}\n");
+    return writer.bytes.idup;
 }

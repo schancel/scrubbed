@@ -44,11 +44,13 @@ private bool terminalDot(const(ubyte)[] b, size_t i) {
 private size_t emailEnd(const(ubyte)[] b, size_t i) {
     if ((i > 0 && (localChar(b[i - 1]) || b[i - 1] == '@')) || !alnum(b[i])) return i;
     size_t p = i;
-    while (p < b.length && localChar(b[p])) {
+    // A longer local part can never match. Stop at the first impossible byte
+    // instead of walking the rest of a large local-character run.
+    while (p < b.length && p - i <= 64 && localChar(b[p])) {
         if (b[p] == '.' && (p == i || p + 1 == b.length || b[p + 1] == '.')) return i;
         ++p;
     }
-    if (p == i || b[p - 1] == '.' || p >= b.length || b[p] != '@' || p - i > 64) return i;
+    if (p == i || p - i > 64 || b[p - 1] == '.' || p >= b.length || b[p] != '@') return i;
     ++p;
     size_t domainStart = p;
     size_t dots;
@@ -181,19 +183,45 @@ PiiFinding[] scanPii(const(ubyte)[] bytes, string locale) {
         if (findings.length >= maxPiiFindings) throw new PiiScanException("findings exceed cap");
         findings ~= PiiFinding(start, end, category, rule, locale, confidence);
     }
-    foreach (i; 0 .. bytes.length) {
-        auto e = emailEnd(bytes, i);
-        add(i, e, PiiCategory.email, "email.ascii-domain.v1");
-        e = ipEnd(bytes, i);
-        add(i, e, PiiCategory.ip, "ip.v4.v1");
-        e = cardEnd(bytes, i);
-        add(i, e, PiiCategory.card, "card.luhn.ambiguous.v1", PiiConfidence.ambiguous);
+    foreach (i, value; bytes) {
+        auto groupStart = findings.length;
+        if (alnum(value)) {
+            auto e = emailEnd(bytes, i);
+            add(i, e, PiiCategory.email, "email.ascii-domain.v1");
+        }
+        if (!digit(value) && value != '+') continue;
+        if (digit(value)) {
+            auto e = ipEnd(bytes, i);
+            add(i, e, PiiCategory.ip, "ip.v4.v1");
+            e = cardEnd(bytes, i);
+            add(i, e, PiiCategory.card, "card.luhn.ambiguous.v1", PiiConfidence.ambiguous);
+        }
         bool ambiguous;
-        e = phoneEnd(bytes, i, locale, ambiguous);
+        auto e = phoneEnd(bytes, i, locale, ambiguous);
         add(i, e, PiiCategory.phone, ambiguous ? "phone.national.ambiguous.v1" :
             "phone.international.v1", ambiguous ? PiiConfidence.ambiguous : PiiConfidence.high);
+        // Starts are visited in ascending order, so only findings discovered
+        // at this byte can need the v1 end/category tie-break ordering.
+        if (findings.length - groupStart > 1)
+            sort!((a, b) => a.end < b.end ||
+                (a.end == b.end && a.category < b.category))
+                (findings[groupStart .. $]);
     }
-    sort!((a, b) => a.start < b.start || (a.start == b.start &&
-        (a.end < b.end || (a.end == b.end && a.category < b.category))))(findings);
     return findings;
+}
+
+unittest {
+    import std.array : replicate;
+
+    auto maximumLocal = "a".replicate(64) ~ "@example.com";
+    auto accepted = scanPii(cast(const(ubyte)[]) maximumLocal, "US");
+    assert(accepted.length == 1 && accepted[0].start == 0 &&
+        accepted[0].end == maximumLocal.length &&
+        accepted[0].category == PiiCategory.email);
+
+    auto excessiveLocal = "a".replicate(65) ~ "@example.com";
+    assert(scanPii(cast(const(ubyte)[]) excessiveLocal, "US").length == 0);
+
+    auto cappedRun = "a".replicate(maxPiiInputBytes);
+    assert(scanPii(cast(const(ubyte)[]) cappedRun, "US").length == 0);
 }

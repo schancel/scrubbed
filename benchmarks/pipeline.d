@@ -14,8 +14,9 @@ import std.digest : toHexString;
 import std.digest.sha : SHA256, sha256Of;
 import std.datetime : dur;
 import std.file : SpanMode, copy, dirEntries, exists, getSize, mkdirRecurse,
-    read, readText, remove, rename, rmdirRecurse, symlink, tempDir, write;
-import std.json : JSONValue, parseJSON;
+    isSymlink, read, readLink, readText, remove, rename, rmdirRecurse, symlink,
+    tempDir, write;
+import std.json : JSONType, JSONValue, parseJSON;
 import std.path : baseName, buildNormalizedPath, buildPath, isAbsolute,
     relativePath;
 import std.process : environment, execute, spawnProcess, wait;
@@ -43,6 +44,7 @@ private struct AttestedExecutable {
     string privateSource;
     string[string] buildEnvironment;
     NativeTool[] nativeTools;
+    string pinnedToolDirectory;
 }
 
 private struct ControlVariant {
@@ -461,6 +463,20 @@ private void verifyNativeTools(const(NativeTool)[] tools) {
             "native build tool changed during attested build");
 }
 
+private void verifyPinnedNativeTools(const(NativeTool)[] tools,
+        string pinnedDirectory) {
+    foreach (tool; tools) if (!tool.name.endsWith("-driver")) {
+        auto pinnedName = tool.name == "cc-compiler" ? "cc" :
+            tool.name == "ar-writer" ? "ar" :
+            tool.name == "ranlib-writer" ? "ranlib" :
+            tool.name == "linker" ? "ld" : tool.name;
+        auto pinnedPath = buildPath(pinnedDirectory, pinnedName);
+        require(isSymlink(pinnedPath) && readLink(pinnedPath) == tool.path &&
+            hashFile(pinnedPath) == tool.sha256,
+            "pinned native build tool binding changed");
+    }
+}
+
 private void pinNativeTools(ref PreparedAttestedBuild result,
                             string scratchRoot) {
     result.nativeTools = resolveNativeTools();
@@ -772,7 +788,8 @@ private AttestedExecutable buildAttestedExecutable(string sourceRoot,
     validateAttestation(attestation, snapshot.sha256);
     return AttestedExecutable(snapshot, attestation,
         ExecutableSnapshot(prepared.compiler, prepared.compilerHash),
-        prepared.privateSource, prepared.environment, prepared.nativeTools);
+        prepared.privateSource, prepared.environment, prepared.nativeTools,
+        prepared.pinnedToolDirectory);
 }
 
 private void validateBuildProvenance(JSONValue report, bool comparator,
@@ -1794,16 +1811,62 @@ private void selfTest() {
     auto coordination = coordinationMeasurementFixture();
     require(recomputeCoordinationThresholds(coordination),
         "valid coordination measurement did not satisfy thresholds");
-    auto contradictoryCoordination = parseJSON(coordination.toString);
-    contradictoryCoordination["target_wins"] = 4;
-    failed = false;
-    try recomputeCoordinationThresholds(contradictoryCoordination);
-    catch (Exception) { failed = true; }
-    require(failed,
-        "contradictory coordination summary was accepted");
+    foreach (key; ["target_wins", "target_baseline_median_wall_us",
+            "target_candidate_median_wall_us",
+            "target_baseline_median_queue_ns",
+            "target_candidate_median_queue_ns"]) {
+        auto contradictory = parseJSON(coordination.toString);
+        contradictory[key] = contradictory[key].integer + 1;
+        requireCoordinationRejected(contradictory,
+            "contradictory coordination summary " ~ key);
+    }
+    auto contradictoryControl = parseJSON(coordination.toString);
+    contradictoryControl["controls_within_five_percent"] = false;
+    requireCoordinationRejected(contradictoryControl,
+        "contradictory coordination control summary");
+    auto wrongInput = parseJSON(coordination.toString);
+    wrongInput["layouts"].array[0]["input_bytes"] = 1;
+    requireCoordinationRejected(wrongInput,
+        "wrong coordination input byte count");
+    auto wrongOutput = parseJSON(coordination.toString);
+    wrongOutput["layouts"].array[0]["baseline_samples"].array[0]
+        ["output_bytes"] = 1;
+    requireCoordinationRejected(wrongOutput,
+        "wrong coordination output byte count");
+    auto wrongMetrics = parseJSON(coordination.toString);
+    wrongMetrics["baseline_attribution"].array[0]["metrics"]["limits"]
+        ["worker_descriptors"] = 0;
+    requireCoordinationRejected(wrongMetrics,
+        "invalid coordination metrics envelope");
+    auto improvementBoundary = parseJSON(coordination.toString);
+    foreach (side; ["baseline_samples", "candidate_samples"])
+        foreach (ref coordinationSample;
+                improvementBoundary["layouts"].array[0][side].array)
+            if (coordinationSample["threads"].integer == 4)
+                coordinationSample["wall_us"] =
+                    side == "baseline_samples" ? 101 : 91;
+    improvementBoundary["target_baseline_median_wall_us"] = 101;
+    improvementBoundary["target_candidate_median_wall_us"] = 91;
+    require(!recomputeCoordinationThresholds(improvementBoundary),
+        "sub-ten-percent coordination improvement passed");
     require(coordinationWithinFivePercent(101, 106) &&
         !coordinationWithinFivePercent(101, 107),
         "coordination five-percent remainder boundary differs");
+    auto toolRoot = privateScratch("scrubbed-pinned-tool-self-test-");
+    scope(exit) rmdirRecurse(toolRoot);
+    auto trueTool = "/usr/bin/true";
+    auto falseTool = "/usr/bin/false";
+    auto pinnedTool = buildPath(toolRoot, "cmake");
+    symlink(trueTool, pinnedTool);
+    auto expectedTool = NativeTool("cmake", trueTool, hashFile(trueTool),
+        "test", "test tool binding");
+    verifyPinnedNativeTools([expectedTool], toolRoot);
+    remove(pinnedTool);
+    symlink(falseTool, pinnedTool);
+    failed = false;
+    try verifyPinnedNativeTools([expectedTool], toolRoot);
+    catch (Exception) { failed = true; }
+    require(failed, "replaced pinned native tool binding was accepted");
     writeln("pipeline release self-test passed");
 }
 
@@ -2000,6 +2063,137 @@ private enum coordinationManyOutput =
     "3ED0A176AA89B8B9428FD3F937042EE45781C6FF3546069BB7CF92A4FA6D9529";
 private enum coordinationFewOutput =
     "9AAC92A1892B67FCADCAD16E98917446B8077ABB0F8B6826810E5767EACB6DDC";
+private enum coordinationInputBytes = 134_217_728L;
+private enum coordinationOutputBytes = 132_579_328L;
+private enum coordinationOutputConcatenated =
+    "870D401642B372263AED96C938DE8B2E1E1A466DDCEFA193085889435665A069";
+
+private void coordinationRequireKeys(ref JSONValue value, string[] expected,
+        string label) {
+    require(value.type == JSONType.object &&
+        value.object.length == expected.length,
+        label ~ " object shape differs");
+    foreach (key; expected)
+        require((key in value.object) !is null, label ~ " omitted " ~ key);
+}
+
+private long coordinationNonnegative(ref JSONValue value, string key,
+        string label) {
+    auto result = value[key].integer;
+    require(result >= 0, label ~ " contains negative " ~ key);
+    return result;
+}
+
+private void validateCoordinationMetrics(ref JSONValue sample) {
+    auto metrics = sample["metrics"];
+    coordinationRequireKeys(metrics, ["schema", "version", "wall_nanoseconds",
+        "limits", "counts", "phases"], "coordination metrics");
+    require(metrics["schema"].str == "scrubbed.coordination-metrics.v2" &&
+        metrics["version"].integer == 2 &&
+        coordinationNonnegative(metrics, "wall_nanoseconds", "metrics") > 0,
+        "coordination metrics revision/wall differs");
+    auto limits = metrics["limits"];
+    coordinationRequireKeys(limits, ["queued_documents", "reserved_bytes",
+        "worker_descriptors"], "coordination limits");
+    auto queuedLimit = coordinationNonnegative(limits, "queued_documents", "limits");
+    auto byteLimit = coordinationNonnegative(limits, "reserved_bytes", "limits");
+    auto descriptorLimit = coordinationNonnegative(limits,
+        "worker_descriptors", "limits");
+    require(queuedLimit > 0 && byteLimit > 0 && descriptorLimit > 0,
+        "coordination metrics limits are empty");
+    auto counts = metrics["counts"];
+    coordinationRequireKeys(counts, ["queued_documents", "reserved_bytes",
+        "worker_descriptors", "peak_queued_documents", "peak_reserved_bytes",
+        "peak_worker_descriptors", "submitted", "succeeded", "failed",
+        "skipped"], "coordination counts");
+    foreach (key; ["queued_documents", "reserved_bytes", "worker_descriptors",
+            "peak_queued_documents", "peak_reserved_bytes",
+            "peak_worker_descriptors", "submitted", "succeeded", "failed",
+            "skipped"])
+        coordinationNonnegative(counts, key, "counts");
+    require(counts["submitted"].integer == 4096 &&
+        counts["succeeded"].integer == 4096 &&
+        counts["failed"].integer == 0 && counts["skipped"].integer == 0 &&
+        counts["queued_documents"].integer == 0 &&
+        counts["reserved_bytes"].integer == 0 &&
+        counts["worker_descriptors"].integer == 0 &&
+        counts["peak_queued_documents"].integer <= queuedLimit &&
+        counts["peak_reserved_bytes"].integer <= byteLimit &&
+        counts["peak_worker_descriptors"].integer <= descriptorLimit,
+        "coordination metrics count accounting differs");
+    auto phases = metrics["phases"];
+    auto rootPhases = ["source_stat", "ordinal_assignment", "admission_wait",
+        "accepted_worker_queue", "descriptor_wait", "descriptor_hold",
+        "transform", "ordered_result_wait", "atomic_publication"];
+    coordinationRequireKeys(phases,
+        ["discovery"] ~ rootPhases ~ ["shutdown_join"],
+        "coordination phases");
+    foreach (name; ["discovery"] ~ rootPhases ~ ["shutdown_join"]) {
+        auto phase = phases[name];
+        coordinationRequireKeys(phase, ["calls", "units", "nanoseconds"],
+            "coordination phase " ~ name);
+        foreach (key; ["calls", "units", "nanoseconds"])
+            coordinationNonnegative(phase, key, "phase " ~ name);
+    }
+    foreach (name; rootPhases)
+        require(phases[name]["calls"].integer == 4096,
+            "coordination phase call count differs");
+    require(phases["discovery"]["calls"].integer == 1 &&
+        phases["discovery"]["units"].integer == 4096 &&
+        phases["source_stat"]["units"].integer == 4096 &&
+        phases["ordinal_assignment"]["units"].integer == 4096 &&
+        phases["admission_wait"]["units"].integer == coordinationInputBytes &&
+        phases["accepted_worker_queue"]["units"].integer ==
+            coordinationInputBytes &&
+        phases["accepted_worker_queue"]["nanoseconds"].integer > 0 &&
+        phases["descriptor_wait"]["units"].integer == coordinationInputBytes &&
+        phases["descriptor_hold"]["units"].integer == coordinationInputBytes &&
+        phases["transform"]["units"].integer == coordinationInputBytes &&
+        phases["transform"]["nanoseconds"].integer > 0 &&
+        phases["ordered_result_wait"]["units"].integer == 0 &&
+        phases["atomic_publication"]["units"].integer > 0 &&
+        phases["shutdown_join"]["calls"].integer == 1 &&
+        phases["shutdown_join"]["units"].integer == 0,
+        "coordination phase accounting differs");
+    auto user = coordinationNonnegative(sample, "user_us", "sample");
+    auto system = coordinationNonnegative(sample, "system_us", "sample");
+    require(user <= long.max - system &&
+        user + system <= (long.max - 1_000_000) / 1_000 &&
+        phases["transform"]["nanoseconds"].integer <=
+            (user + system) * 1_000 + 1_000_000,
+        "coordination transform CPU exceeds process CPU");
+}
+
+private void validateCoordinationSample(ref JSONValue sample,
+        string expectedOutput, bool attribution) {
+    auto expected = ["threads", "ordinal", "wall_us", "user_us", "system_us",
+        "peak_rss_bytes", "sampled_fd_peak", "log_sha256", "stack_status",
+        "stack_sha256", "d_gc_status", "syscall_status", "output_bytes",
+        "output_tree_sha256", "output_concatenated_sha256"];
+    if (attribution) expected ~= "metrics";
+    coordinationRequireKeys(sample, expected, "coordination sample");
+    foreach (key; ["threads", "ordinal", "wall_us", "user_us", "system_us",
+            "peak_rss_bytes", "sampled_fd_peak", "output_bytes"])
+        coordinationNonnegative(sample, key, "sample");
+    auto stackStatus = sample["stack_status"].str;
+    require(digestField(sample["log_sha256"].str, 64) &&
+        (stackStatus == "not-attempted" || stackStatus == "supported" ||
+            stackStatus == "unsupported-empty" ||
+            stackStatus == "unsupported-sample-failed") &&
+        (stackStatus == "supported" ?
+            digestField(sample["stack_sha256"].str, 64) :
+            sample["stack_sha256"].str.length == 0) &&
+        (sample["d_gc_status"].str == "not-attempted" ||
+            sample["d_gc_status"].str == "supported") &&
+        sample["syscall_status"].str ==
+            "unsupported-no-exact-child-counter" &&
+        sample["output_bytes"].integer == coordinationOutputBytes &&
+        sample["output_tree_sha256"].str == expectedOutput &&
+        sample["output_concatenated_sha256"].str ==
+            coordinationOutputConcatenated,
+        "coordination sample output identity differs");
+    if (attribution) validateCoordinationMetrics(sample);
+}
 
 private long coordinationSampleValue(JSONValue[] samples, long threads,
         long ordinal, string field) {
@@ -2052,25 +2246,9 @@ private bool coordinationPairedControl(JSONValue[] baseline,
 private long coordinationQueueValue(JSONValue[] samples, long ordinal) {
     foreach (sample; samples) if (sample["threads"].integer == 4 &&
             sample["ordinal"].integer == ordinal) {
-        auto metrics = sample["metrics"];
-        auto counts = metrics["counts"];
-        auto queue = metrics["phases"]["accepted_worker_queue"];
-        auto transform = metrics["phases"]["transform"];
-        require(metrics["schema"].str ==
-                "scrubbed.coordination-metrics.v2" &&
-            metrics["version"].integer == 2 &&
-            counts["submitted"].integer == 4096 &&
-            counts["succeeded"].integer == 4096 &&
-            counts["failed"].integer == 0 && counts["skipped"].integer == 0 &&
-            queue["calls"].integer == 4096 &&
-            queue["units"].integer == 134_217_728 &&
-            queue["nanoseconds"].integer > 0 &&
-            transform["calls"].integer == 4096 &&
-            transform["units"].integer == 134_217_728 &&
-            transform["nanoseconds"].integer > 0 &&
-            sample["output_tree_sha256"].str == coordinationManyOutput,
-            "coordination attribution sample is invalid");
-        return queue["nanoseconds"].integer;
+        validateCoordinationSample(sample, coordinationManyOutput, true);
+        return sample["metrics"]["phases"]["accepted_worker_queue"]
+            ["nanoseconds"].integer;
     }
     throw new Exception("coordination attribution sample missing");
 }
@@ -2082,6 +2260,9 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
     bool sawMany, sawFew;
     bool controlsPass = true;
     foreach (layout; layouts) {
+        coordinationRequireKeys(layout, ["layout", "files", "input_bytes",
+            "input_tree_sha256", "baseline_samples", "candidate_samples"],
+            "coordination layout");
         auto name = layout["layout"].str;
         auto isMany = name == "many-small";
         require(isMany || name == "few-large",
@@ -2093,6 +2274,7 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
         auto expectedInput = isMany ? coordinationManyInput : coordinationFewInput;
         auto expectedOutput = isMany ? coordinationManyOutput : coordinationFewOutput;
         require(layout["files"].integer == expectedFiles &&
+            layout["input_bytes"].integer == coordinationInputBytes &&
             layout["input_tree_sha256"].str == expectedInput,
             "coordination layout fixture identity differs");
         auto baseline = layout["baseline_samples"].array;
@@ -2100,12 +2282,10 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
         require(baseline.length == coordinationRuns * 3 &&
             candidate.length == coordinationRuns * 3,
             "coordination performance sample cardinality differs");
-        foreach (sample; baseline)
-            require(sample["output_tree_sha256"].str == expectedOutput,
-                "coordination baseline output identity differs");
-        foreach (sample; candidate)
-            require(sample["output_tree_sha256"].str == expectedOutput,
-                "coordination candidate output identity differs");
+        foreach (ref sample; baseline)
+            validateCoordinationSample(sample, expectedOutput, false);
+        foreach (ref sample; candidate)
+            validateCoordinationSample(sample, expectedOutput, false);
         foreach (threads; [1L, 2L, 4L]) {
             // These calls also prove each thread/ordinal identity is present once.
             coordinationMedian(baseline, threads, "wall_us");
@@ -2160,6 +2340,13 @@ private bool recomputeCoordinationThresholds(ref JSONValue report) {
         candidateQueueMedian < baselineQueueMedian && controlsPass;
 }
 
+private void requireCoordinationRejected(JSONValue report, string label) {
+    bool failed;
+    try recomputeCoordinationThresholds(report);
+    catch (Exception) { failed = true; }
+    require(failed, label ~ " was accepted");
+}
+
 private JSONValue coordinationMeasurementFixture() {
     JSONValue[] layouts;
     foreach (name; ["many-small", "few-large"]) {
@@ -2175,8 +2362,17 @@ private JSONValue coordinationMeasurementFixture() {
                 "user_us": JSONValue(100), "system_us": JSONValue(100),
                 "peak_rss_bytes": JSONValue(100),
                 "sampled_fd_peak": JSONValue(10),
+                "log_sha256": JSONValue("0".replicate(64)),
+                "stack_status": JSONValue("not-attempted"),
+                "stack_sha256": JSONValue(""),
+                "d_gc_status": JSONValue("not-attempted"),
+                "syscall_status": JSONValue(
+                    "unsupported-no-exact-child-counter"),
+                "output_bytes": JSONValue(coordinationOutputBytes),
                 "output_tree_sha256": JSONValue(many ?
-                    coordinationManyOutput : coordinationFewOutput)]);
+                    coordinationManyOutput : coordinationFewOutput),
+                "output_concatenated_sha256": JSONValue(
+                    coordinationOutputConcatenated)]);
             candidate ~= JSONValue([
                 "threads": JSONValue(threads),
                 "ordinal": JSONValue(cast(long)ordinal),
@@ -2184,12 +2380,22 @@ private JSONValue coordinationMeasurementFixture() {
                 "user_us": JSONValue(100), "system_us": JSONValue(100),
                 "peak_rss_bytes": JSONValue(100),
                 "sampled_fd_peak": JSONValue(10),
+                "log_sha256": JSONValue("0".replicate(64)),
+                "stack_status": JSONValue("not-attempted"),
+                "stack_sha256": JSONValue(""),
+                "d_gc_status": JSONValue("not-attempted"),
+                "syscall_status": JSONValue(
+                    "unsupported-no-exact-child-counter"),
+                "output_bytes": JSONValue(coordinationOutputBytes),
                 "output_tree_sha256": JSONValue(many ?
-                    coordinationManyOutput : coordinationFewOutput)]);
+                    coordinationManyOutput : coordinationFewOutput),
+                "output_concatenated_sha256": JSONValue(
+                    coordinationOutputConcatenated)]);
         }
         layouts ~= JSONValue([
             "layout": JSONValue(name),
             "files": JSONValue(many ? 4096 : 8),
+            "input_bytes": JSONValue(coordinationInputBytes),
             "input_tree_sha256": JSONValue(many ?
                 coordinationManyInput : coordinationFewInput),
             "baseline_samples": JSONValue(baseline),
@@ -2197,26 +2403,64 @@ private JSONValue coordinationMeasurementFixture() {
     }
     JSONValue[] baselineAttribution, candidateAttribution;
     foreach (ordinal; 0 .. coordinationRuns) {
-        auto attribution = (long queueNanoseconds) => JSONValue([
-            "threads": JSONValue(4),
-            "ordinal": JSONValue(cast(long)ordinal),
-            "output_tree_sha256": JSONValue(coordinationManyOutput),
-            "metrics": JSONValue([
-                "schema": JSONValue("scrubbed.coordination-metrics.v2"),
-                "version": JSONValue(2),
-                "counts": JSONValue([
-                    "submitted": JSONValue(4096),
-                    "succeeded": JSONValue(4096),
-                    "failed": JSONValue(0), "skipped": JSONValue(0)]),
-                "phases": JSONValue([
-                    "accepted_worker_queue": JSONValue([
-                        "calls": JSONValue(4096),
-                        "units": JSONValue(134_217_728),
-                        "nanoseconds": JSONValue(queueNanoseconds)]),
-                    "transform": JSONValue([
-                        "calls": JSONValue(4096),
-                        "units": JSONValue(134_217_728),
-                        "nanoseconds": JSONValue(1)])])])]);
+        auto attribution = (long queueNanoseconds) {
+            JSONValue phases = JSONValue(null);
+            foreach (name; ["source_stat", "ordinal_assignment",
+                    "admission_wait", "accepted_worker_queue",
+                    "descriptor_wait", "descriptor_hold", "transform",
+                    "ordered_result_wait", "atomic_publication"])
+                phases[name] = JSONValue([
+                    "calls": JSONValue(4096),
+                    "units": JSONValue(name == "source_stat" ||
+                        name == "ordinal_assignment" ? 4096 :
+                        name == "ordered_result_wait" ? 0 :
+                        name == "atomic_publication" ? 1 :
+                        coordinationInputBytes),
+                    "nanoseconds": JSONValue(
+                        name == "accepted_worker_queue" ? queueNanoseconds : 1)]);
+            phases["discovery"] = JSONValue([
+                "calls": JSONValue(1), "units": JSONValue(4096),
+                "nanoseconds": JSONValue(1)]);
+            phases["shutdown_join"] = JSONValue([
+                "calls": JSONValue(1), "units": JSONValue(0),
+                "nanoseconds": JSONValue(1)]);
+            return JSONValue([
+                "threads": JSONValue(4),
+                "ordinal": JSONValue(cast(long)ordinal),
+                "wall_us": JSONValue(1_000),
+                "user_us": JSONValue(100), "system_us": JSONValue(100),
+                "peak_rss_bytes": JSONValue(100),
+                "sampled_fd_peak": JSONValue(10),
+                "log_sha256": JSONValue("0".replicate(64)),
+                "stack_status": JSONValue("not-attempted"),
+                "stack_sha256": JSONValue(""),
+                "d_gc_status": JSONValue("not-attempted"),
+                "syscall_status": JSONValue(
+                    "unsupported-no-exact-child-counter"),
+                "output_bytes": JSONValue(coordinationOutputBytes),
+                "output_tree_sha256": JSONValue(coordinationManyOutput),
+                "output_concatenated_sha256": JSONValue(
+                    coordinationOutputConcatenated),
+                "metrics": JSONValue([
+                    "schema": JSONValue("scrubbed.coordination-metrics.v2"),
+                    "version": JSONValue(2),
+                    "wall_nanoseconds": JSONValue(1_000),
+                    "limits": JSONValue([
+                        "queued_documents": JSONValue(64),
+                        "reserved_bytes": JSONValue(268_435_456),
+                        "worker_descriptors": JSONValue(4)]),
+                    "counts": JSONValue([
+                        "queued_documents": JSONValue(0),
+                        "reserved_bytes": JSONValue(0),
+                        "worker_descriptors": JSONValue(0),
+                        "peak_queued_documents": JSONValue(64),
+                        "peak_reserved_bytes": JSONValue(1),
+                        "peak_worker_descriptors": JSONValue(4),
+                        "submitted": JSONValue(4096),
+                        "succeeded": JSONValue(4096),
+                        "failed": JSONValue(0), "skipped": JSONValue(0)]),
+                    "phases": phases])]);
+        };
         baselineAttribution ~= attribution(100);
         candidateAttribution ~= attribution(90);
     }
@@ -2272,16 +2516,33 @@ int main(string[] args) {
             require(harnessSourceHash == expectedHarnessSourceHash &&
                 hashFile(expectedHarnessSource) == expectedHarnessSourceHash,
                 "coordination harness source changed during attested build");
+            auto harnessSourceSnapshotPath = buildPath(root,
+                "coordination-profile-source.d");
+            copy(harnessSource, harnessSourceSnapshotPath);
+            require(chmod(harnessSourceSnapshotPath.toStringz, S_IRUSR) == 0,
+                "cannot make coordination harness source read-only");
+            auto harnessSourceSnapshot = ExecutableSnapshot(
+                harnessSourceSnapshotPath, hashFile(harnessSourceSnapshotPath));
+            require(harnessSourceSnapshot.sha256 == expectedHarnessSourceHash,
+                "coordination harness source snapshot differs");
             auto harnessTarget = buildPath(root, "coordination-profile-built");
             verifySnapshot(candidate.compiler);
             verifyNativeTools(candidate.nativeTools);
+            verifyPinnedNativeTools(candidate.nativeTools,
+                candidate.pinnedToolDirectory);
             auto harnessBuild = execute([candidate.compiler.path, "-O3", "-release",
-                harnessSource, "-of=" ~ harnessTarget],
+                "-Xcc=-v", harnessSourceSnapshot.path, "-of=" ~ harnessTarget],
                 candidate.buildEnvironment);
             require(harnessBuild.status == 0,
                 "coordination harness build failed: " ~ harnessBuild.output);
+            require(harnessBuild.output.canFind(
+                    buildPath(candidate.pinnedToolDirectory, "ld")),
+                "coordination harness build did not select attested linker binding");
+            verifySnapshot(harnessSourceSnapshot);
             verifySnapshot(candidate.compiler);
             verifyNativeTools(candidate.nativeTools);
+            verifyPinnedNativeTools(candidate.nativeTools,
+                candidate.pinnedToolDirectory);
             auto harness = snapshotExecutable(harnessTarget, root,
                 "scrubbed-coordination-profile");
             auto stagedReportPath = buildPath(root,

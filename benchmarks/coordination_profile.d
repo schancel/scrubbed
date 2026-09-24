@@ -322,8 +322,11 @@ private string[string] childEnvironment(bool instrumented,
 }
 
 private bool processGroupHasDescendants(int pid,
-        bool injectFailureForTest = false) {
-    need(!injectFailureForTest, "injected process-group membership failure");
+        size_t* queryCount = null, size_t injectFailureAtQuery = 0) {
+    size_t queryOrdinal;
+    if (queryCount !is null) queryOrdinal = ++(*queryCount);
+    need(injectFailureAtQuery == 0 || queryOrdinal != injectFailureAtQuery,
+        "injected process-group membership failure");
     enum procPgrpOnly = 2U;
     int[16] members;
     errno = 0;
@@ -339,9 +342,10 @@ private bool processGroupHasDescendants(int pid,
 }
 
 private bool tryReapExited(int pid, out int status, out rusage usage,
-        out bool groupClean, bool injectMembershipFailureForTest = false,
+        out bool groupClean, size_t injectMembershipFailureAtQuery = 0,
         bool allowGroupGrace = false,
-        MonoTime groupGraceDeadline = MonoTime.init) {
+        MonoTime groupGraceDeadline = MonoTime.init,
+        bool forceInitialDescendantForTest = false) {
     processGroupMutex.lock();
     bool mutexHeld = true;
     scope(exit) if (mutexHeld) processGroupMutex.unlock();
@@ -356,19 +360,26 @@ private bool tryReapExited(int pid, out int status, out rusage usage,
     if (information.si_pid != pid) return false;
     bool descendantsRemain;
     Exception membershipError;
+    size_t membershipQueries;
     try descendantsRemain = processGroupHasDescendants(pid,
-        injectMembershipFailureForTest);
+        &membershipQueries, injectMembershipFailureAtQuery);
     catch (Exception error) {
         membershipError = error;
         descendantsRemain = true;
     }
+    if (forceInitialDescendantForTest) descendantsRemain = true;
     groupClean = !descendantsRemain;
     if (membershipError is null && descendantsRemain && allowGroupGrace) {
         processGroupMutex.unlock();
         mutexHeld = false;
-        while (MonoTime.currTime < groupGraceDeadline &&
-                processGroupHasDescendants(pid))
-            Thread.sleep(10.msecs);
+        try {
+            while (MonoTime.currTime < groupGraceDeadline &&
+                    processGroupHasDescendants(pid, &membershipQueries,
+                        injectMembershipFailureAtQuery))
+                Thread.sleep(10.msecs);
+        } catch (Exception error) {
+            membershipError = error;
+        }
         processGroupMutex.lock();
         mutexHeld = true;
     }
@@ -386,9 +397,13 @@ private bool tryReapExited(int pid, out int status, out rusage usage,
 
 private bool reapUntil(int pid, MonoTime deadline, out int status,
         out rusage usage, out bool groupClean, bool allowGroupGrace = false,
-        MonoTime groupGraceDeadline = MonoTime.init) {
-    while (!tryReapExited(pid, status, usage, groupClean, false,
-            allowGroupGrace, groupGraceDeadline)) {
+        MonoTime groupGraceDeadline = MonoTime.init,
+        size_t injectMembershipFailureAtQuery = 0,
+        bool forceInitialDescendantForTest = false) {
+    while (!tryReapExited(pid, status, usage, groupClean,
+            injectMembershipFailureAtQuery,
+            allowGroupGrace, groupGraceDeadline,
+            forceInitialDescendantForTest)) {
         if (MonoTime.currTime >= deadline) return false;
         Thread.sleep(10.msecs);
     }
@@ -396,10 +411,10 @@ private bool reapUntil(int pid, MonoTime deadline, out int status,
 }
 
 private bool reapBlocking(int pid, out int status, out rusage usage,
-        bool injectMembershipFailureForTest = false) {
+        size_t injectMembershipFailureAtQuery = 0) {
     bool groupClean;
     while (!tryReapExited(pid, status, usage, groupClean,
-            injectMembershipFailureForTest))
+            injectMembershipFailureAtQuery))
         Thread.sleep(10.msecs);
     return groupClean;
 }
@@ -417,12 +432,14 @@ private void signalRegisteredProcess(int pid, int signal,
 }
 
 private void terminateGroupAndReap(int pid, out int status,
-        out rusage usage) {
+        out rusage usage, size_t injectMembershipFailureAtQuery = 0,
+        bool forceInitialDescendantForTest = false) {
     signalRegisteredProcess(pid, SIGTERM, true);
     auto graceDeadline = MonoTime.currTime + seconds(1);
     bool groupClean;
     if (!reapUntil(pid, graceDeadline, status, usage, groupClean, true,
-            graceDeadline)) {
+            graceDeadline, injectMembershipFailureAtQuery,
+            forceInitialDescendantForTest)) {
         signalRegisteredProcess(pid, SIGKILL, true);
         reapBlocking(pid, status, usage);
     }
@@ -797,7 +814,7 @@ private void runSelfTest(string harnessPath) {
     int membershipStatus; rusage membershipUsage;
     bool membershipFailureObserved;
     try reapBlocking(membershipChild.processID, membershipStatus,
-        membershipUsage, true);
+        membershipUsage, 1);
     catch (Exception error)
         membershipFailureObserved = error.msg ==
             "coordination evidence: injected process-group membership failure";
@@ -895,6 +912,54 @@ private void runSelfTest(string harnessPath) {
         "wait\n");
     need(chmod(hangingProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
         "cannot make hanging probe executable");
+    auto graceFailureProbe = buildPath(root, "grace-failure-probe");
+    write(graceFailureProbe, "#!/bin/sh\n" ~
+        "sh -c 'trap \"\" HUP TERM; while :; do :; done' &\n" ~
+        "echo $! > '" ~ descendantPidPath ~ "'\n" ~
+        "exit 0\n");
+    need(chmod(graceFailureProbe.toStringz, S_IRUSR | S_IXUSR) == 0,
+        "cannot make grace-failure probe executable");
+    auto graceFailureOut = buildPath(root, "grace-failure.out");
+    auto graceFailureErr = buildPath(root, "grace-failure.err");
+    auto graceFailureReady = buildPath(root, "grace-failure.ready");
+    auto graceFailureInputFile = File("/dev/null", "rb");
+    auto graceFailureOutputFile = File(graceFailureOut, "wb");
+    auto graceFailureErrorFile = File(graceFailureErr, "wb");
+    auto graceFailureChild = spawnGrouped([graceFailureProbe],
+        graceFailureReady, graceFailureInputFile, graceFailureOutputFile,
+        graceFailureErrorFile, childEnvironment(false),
+        MonoTime.currTime + seconds(5));
+    graceFailureInputFile.close(); graceFailureOutputFile.close();
+    graceFailureErrorFile.close();
+    auto graceFailureSetupDeadline = MonoTime.currTime + seconds(1);
+    while (!exists(descendantPidPath) &&
+            MonoTime.currTime < graceFailureSetupDeadline)
+        Thread.sleep(1.msecs);
+    need(exists(descendantPidPath),
+        "grace-failure descendant did not become ready");
+    auto graceFailureDescendantPid =
+        readText(descendantPidPath).strip.to!int;
+    int graceFailureStatus; rusage graceFailureUsage;
+    bool graceMembershipFailureObserved;
+    try terminateGroupAndReap(graceFailureChild.processID,
+        graceFailureStatus, graceFailureUsage, 2, true);
+    catch (Exception error)
+        graceMembershipFailureObserved = error.msg ==
+            "coordination evidence: injected process-group membership failure";
+    need(graceMembershipFailureObserved,
+        "grace-loop membership failure was not preserved");
+    need(processDisappeared(graceFailureDescendantPid,
+            MonoTime.currTime + seconds(1)),
+        "grace-loop membership failure left a descendant running");
+    processGroupMutex.lock();
+    bool graceFailureChildRegistered;
+    foreach (active; activeProcessGroups)
+        if (active == graceFailureChild.processID)
+            graceFailureChildRegistered = true;
+    processGroupMutex.unlock();
+    need(!graceFailureChildRegistered,
+        "grace-loop membership failure left its child registered");
+    remove(descendantPidPath);
     auto gracefulProbe = buildPath(root, "graceful-probe");
     auto gracefulReady = buildPath(root, "graceful-descendant.ready");
     auto gracefulMarker = buildPath(root, "graceful-descendant.done");

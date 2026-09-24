@@ -23,7 +23,10 @@ private struct Writer {
 
     void quoted(string value) pure {
         put("\"");
-        foreach (char c; value) {
+        size_t runStart;
+        foreach (i, c; value) {
+            if (cast(ubyte)c >= 0x20 && c != '"' && c != '\\') continue;
+            if (runStart < i) put(value[runStart .. i]);
             switch (c) {
             case '"': put("\\\""); break;
             case '\\': put("\\\\"); break;
@@ -38,9 +41,11 @@ private struct Writer {
                     char[6] escaped = ['\\', 'u', '0', '0',
                         hex[(cast(ubyte)c >> 4) & 15], hex[cast(ubyte)c & 15]];
                     put(cast(string)escaped[]);
-                } else put(cast(string)(&c)[0 .. 1]);
+                }
             }
+            runStart = i + 1;
         }
+        if (runStart < value.length) put(value[runStart .. $]);
         put("\"");
     }
 }
@@ -90,6 +95,13 @@ unittest {
     import effects.html_tree : HtmlAttribute, HtmlNode;
     import std.json : parseJSON;
     import std.exception : assertThrown;
+
+    Writer quoteWriter;
+    quoteWriter.quoted("plain/é");
+    assert(quoteWriter.bytes == `"plain/é"`);
+    quoteWriter.bytes.length = 0;
+    quoteWriter.quoted("\"\\\b\f\n\r\t\0\x1f");
+    assert(quoteWriter.bytes == `"\"\\\b\f\n\r\t\u0000\u001f"`);
 
     auto document = Document(SourceLocator("local-html:v1", "/tmp/a", "x.html"),
         OutputName("x.html.tree.json"));

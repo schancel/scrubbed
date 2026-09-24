@@ -111,13 +111,26 @@ private string clean(string input, bool code = false) pure {
 private string singleLine(string input) pure {
     Writer writer;
     bool pending;
-    foreach (char c; input) {
-        if (white(c)) { pending = true; continue; }
-        if (pending && writer.bytes.length) writer.put(" ");
-        pending = false;
-        writer.put(cast(string)(&c)[0 .. 1]);
+    size_t runStart;
+    foreach (i, c; input) {
+        if (white(c)) {
+            if (!pending) writer.put(input[runStart .. i]);
+            pending = true;
+        } else if (pending) {
+            if (writer.bytes.length) writer.put(" ");
+            pending = false;
+            runStart = i;
+        }
     }
+    if (!pending) writer.put(input[runStart .. $]);
     return writer.finish();
+}
+
+unittest {
+    assert(singleLine("") is null);
+    assert(singleLine(" \t\r\n\f") is null);
+    assert(singleLine("  alpha \t beta\r\n gamma  ") == "alpha beta gamma");
+    assert(singleLine("é\t界") == "é 界");
 }
 
 private string attribute(const ref HtmlNode node, string name) pure {

@@ -5,7 +5,9 @@ Each implemented module here owns its transform, registration, and nearby
 its public compatibility functions return materialized strings, while
 `static this()` uses `registerStreamingFilter` to register bounded scalar
 push/finish callbacks. The pipeline fuses consecutive streaming registrations
-in the user's specified order and materializes once at the end of the group.
+in the user's specified order. It keeps an unchanged result on the original
+immutable storage and otherwise materializes once from the first differing
+byte.
 
 For example, `--filters normalize-line-endings,strip-control` changes
 `"a\r\n\0b"` to `"a\nb"`: the first stage normalizes CRLF and the second

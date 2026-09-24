@@ -36,7 +36,7 @@ version (D_Optimized) {} else static assert(false,
 version (assert) static assert(false,
     "materialization evidence requires -release");
 
-private enum sourceBase = "c46abf30872ffd213801babd442835aaa15d692f";
+private enum sourceBase = "645517f0c0b3512ae3d6e9356b7817919d2ea218";
 private enum oneMiB = 1024 * 1024;
 private enum fourMiB = 4 * oneMiB;
 private enum evidenceSourcePaths = [
@@ -242,9 +242,11 @@ private void validateEvidence(ref const Evidence evidence) {
     need(evidence.pipeline.fusedScalar.calls == 2 &&
         evidence.pipeline.fusedScalar.inputBytes == 12 &&
         evidence.pipeline.fusedScalar.outputBytes == 18 &&
-        evidence.pipeline.fusedScalar.logicalMaterializedBytes == 18 &&
-        evidence.pipeline.fusedScalar.distinctOutputCalls == 2 &&
-        evidence.pipeline.fusedScalar.distinctOutputBytes == 18 &&
+        evidence.pipeline.fusedScalar.logicalMaterializedBytes == 12 &&
+        evidence.pipeline.fusedScalar.aliasedOutputCalls == 1 &&
+        evidence.pipeline.fusedScalar.aliasedOutputBytes == 6 &&
+        evidence.pipeline.fusedScalar.distinctOutputCalls == 1 &&
+        evidence.pipeline.fusedScalar.distinctOutputBytes == 12 &&
         evidence.pipeline.wholeTextFilter.calls == 1 &&
         evidence.pipeline.wholeTextFilter.inputBytes == 6 &&
         evidence.pipeline.wholeTextFilter.outputBytes == 6 &&
@@ -276,8 +278,10 @@ private void validateEvidence(ref const Evidence evidence) {
         evidence.split.filterExecution.calls == 2 &&
         evidence.split.filterExecution.inputBytes == 4 * oneMiB &&
         evidence.split.filterExecution.outputBytes == 4 * oneMiB &&
-        evidence.split.filterExecution.distinctOutputCalls == 2 &&
-        evidence.split.filterExecution.distinctOutputBytes == 4 * oneMiB &&
+        evidence.split.filterExecution.aliasedOutputCalls == 2 &&
+        evidence.split.filterExecution.aliasedOutputBytes == 4 * oneMiB &&
+        evidence.split.filterExecution.distinctOutputCalls == 0 &&
+        evidence.split.filterExecution.distinctOutputBytes == 0 &&
         evidence.split.filterResultToOwnedPiece.calls == 2 &&
         evidence.split.filterResultToOwnedPiece.inputBytes == 4 * oneMiB &&
         evidence.split.filterResultToOwnedPiece.outputBytes == 4 * oneMiB &&
@@ -333,6 +337,9 @@ private Evidence measure() {
     auto measuredPipeline = chain.runMeasured(pipelineInput, evidence.pipeline);
     need(measuredPipeline == expectedPipeline &&
         evidence.pipeline.fusedScalar.calls == 2 &&
+        evidence.pipeline.fusedScalar.logicalMaterializedBytes == 12 &&
+        evidence.pipeline.fusedScalar.aliasedOutputCalls == 1 &&
+        evidence.pipeline.fusedScalar.distinctOutputCalls == 1 &&
         evidence.pipeline.wholeTextFilter.calls == 1 &&
         evidence.pipeline.wholeTextFilter.aliasedOutputBytes ==
             pipelineInput.length,
@@ -701,7 +708,7 @@ private JSONValue report(ref const Evidence evidence) {
     root["ordinary_algorithm_changed"] = true;
     root["representation_change_authorized"] = true;
     root["performance_claim_authorized"] = false;
-    root["reason"] = "DIP1000-checked allocation-sized filter results are retained without a payload copy while legacy results and pathological slices are copied; deterministic allocation and lifetime proof passed, but loaded-host wall timing is not a performance claim";
+    root["reason"] = "unchanged fused scalar results retain their input storage without output materialization, while changed results materialize once; DIP1000-checked allocation-sized filter results are retained without a payload copy while legacy results and pathological slices are copied; deterministic allocation and lifetime proof passed, but loaded-host wall timing is not a performance claim";
     JSONValue sources;
     foreach (path; evidenceSourcePaths)
         sources[path] = digestText(embeddedSource(path));
@@ -803,6 +810,7 @@ private JSONValue report(ref const Evidence evidence) {
     root["controls"] = JSONValue([
         "allocation_heavy_positive": JSONValue(true),
         "ordinary_measured_equivalence": JSONValue(true),
+        "fused_noop_materialization": JSONValue(true),
         "pipeline_executor_storage_relations": JSONValue(true),
         "partial_overlap_not_distinct": JSONValue(true),
         "owner_close": JSONValue(true),
@@ -845,6 +853,14 @@ void main(string[] args) {
     aliasMutant.pipeline.wholeTextFilter.distinctOutputBytes = 6;
     expectInvalid(() { validateEvidence(aliasMutant); },
         "borrowed-output classification");
+    auto fusedMaterializationMutant = evidence;
+    fusedMaterializationMutant.pipeline.fusedScalar.logicalMaterializedBytes += 6;
+    fusedMaterializationMutant.pipeline.fusedScalar.aliasedOutputCalls = 0;
+    fusedMaterializationMutant.pipeline.fusedScalar.aliasedOutputBytes = 0;
+    fusedMaterializationMutant.pipeline.fusedScalar.distinctOutputCalls = 2;
+    fusedMaterializationMutant.pipeline.fusedScalar.distinctOutputBytes = 18;
+    expectInvalid(() { validateEvidence(fusedMaterializationMutant); },
+        "unchanged fused materialization");
     if (args.length == 2) {
         writeln("materialization work self-test passed");
         return;

@@ -158,12 +158,15 @@ Input is already memory-mapped: the source `string` is a zero-copy view kept
 alive by `MmFile`. Output-producing filters still allocate. The line-ending,
 control-character, and quote transforms register bounded scalar transducers.
 Consecutive transducers are fused by the registry into one caller-owned
-Voldemort range traversal and one final string materialization; contextual
-filters remain explicit materialization barriers. Mojibake candidates compose
-a lazy legacy-byte Voldemort range with Phobos's strict UTF-8 decoder, so rejected candidates are scored
-without allocation and only a winning repair is materialized. This removes
-intermediate whole-string buffers for the three scalar filters, not the final
-output allocation or whole-document requirements of contextual algorithms.
+Voldemort range traversal with at most one final string materialization;
+unchanged output retains the immutable input storage. Contextual filters remain
+explicit materialization barriers. Mojibake candidates compose a lazy
+legacy-byte Voldemort range with Phobos's strict UTF-8 decoder, so rejected
+candidates are scored without allocation and only a winning repair is
+materialized. This removes
+intermediate whole-string buffers for the three scalar filters and avoids the
+final output allocation when the fused result is unchanged; contextual
+algorithms may still require whole-document storage.
 
 For terabyte-scale corpora, mmap keeps input bytes out of the GC heap and the
 CLI now walks paths incrementally through a bounded local task queue. Separate

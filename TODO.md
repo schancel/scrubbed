@@ -309,8 +309,10 @@ is useful, but it is not sufficient on its own.
 - [~] Define which filters are truly streaming and which require document
       context. The registry now fuses consecutive `normalize-line-endings`,
       `strip-control`, and `uncurl-quotes` scalar transducers into one strict
-      UTF-8 traversal with inline caller-owned state and one final
-      materialization. An exact-output 4.06 MiB synthetic `-O3 -release`
+      UTF-8 traversal with inline caller-owned state. An unchanged result
+      retains the input storage; changed output materializes once from the
+      first differing byte. An exact-output 4.06 MiB synthetic
+      `-O3 -release`
       microbenchmark is about 1.9x faster than the former three-materialization
       chain. Canonical local, selected-field JSONL, and durable routes already
       use typed `Document`/`Content` execution. Entity decoding, mojibake, HTML,

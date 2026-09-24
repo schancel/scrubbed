@@ -34,6 +34,8 @@ pointer plus transitive-immutable parsed configuration; mutable streaming
 state is created anew by each run. `Pipeline.run` passes whole-buffer results
 between materialization
 barriers; consecutive bounded scalar registrations share one lazy traversal.
+An unchanged fused traversal returns the original immutable storage; changed
+traversals materialize once from their first differing byte.
 
 [`job/`](job/README.md) owns the pure v3 linear-job model and additive explicit
 v4 dispatch root. Strict v3 JSON, ordered composition tokens, and predecessor

@@ -8,7 +8,7 @@
 /// Whole-buffer filters retain the original `string -> string` contract.
 /// Bounded scalar transducers may additionally register a streaming
 /// descriptor; consecutive streaming filters then share one lazy traversal
-/// and one final materialization without hardcoding filter names here.
+/// and at most one final materialization without hardcoding filter names here.
 module pipeline;
 
 import std.array : appender;
@@ -341,7 +341,7 @@ struct Pipeline {
         while (index < stages.length) {
             if (stages[index].streaming.push !is null) {
                 // Bound recursive pull depth without restricting user chains;
-                // unusually long runs become multiple fused materializations.
+                // unusually long runs become multiple bounded fused runs.
                 StreamingFilter[maxFusedStages] fused;
                 size_t fusedLength;
                 while (index < stages.length &&
@@ -393,7 +393,9 @@ struct Pipeline {
                     ++boundary.calls;
                     boundary.inputBytes += inputBytes;
                     boundary.outputBytes += text.length;
-                    boundary.logicalMaterializedBytes += text.length;
+                    if (classifyOutputStorage(input, text) ==
+                            OutputStorageRelation.distinct)
+                        boundary.logicalMaterializedBytes += text.length;
                     boundary.gcAllocatedBytes += after - before;
                     recordOutputRelation(*boundary, input, text);
                     continue;
@@ -596,14 +598,33 @@ private auto fusedStreamingRange(string text, const(StreamingFilter)[] configure
     return result;
 }
 
-/// Materialize strict Unicode scalars without routing each value through the
-/// generic formatting machinery used by `InputRange.to!string`.
+/// Encode strict Unicode scalars without routing each value through the
+/// generic formatting machinery used by `InputRange.to!string`. Keep the
+/// original prefix borrowed until the first differing byte; a wholly
+/// unchanged result therefore needs no output buffer.
 private string materializeFusedStreaming(string text,
         const(StreamingFilter)[] configured) {
     auto output = appender!string;
+    size_t unchangedBytes;
+    bool changed;
     char[4] encoded;
-    foreach (scalar; fusedStreamingRange(text, configured))
-        output.put(cast(string)encoded[0 .. encode(encoded, scalar)]);
+    foreach (scalar; fusedStreamingRange(text, configured)) {
+        auto bytes = cast(string)encoded[0 .. encode(encoded, scalar)];
+        if (!changed && bytes.length <= text.length - unchangedBytes &&
+                bytes == text[unchangedBytes .. unchangedBytes + bytes.length]) {
+            unchangedBytes += bytes.length;
+            continue;
+        }
+        if (!changed) {
+            output.put(text[0 .. unchangedBytes]);
+            changed = true;
+        }
+        output.put(bytes);
+    }
+    if (!changed) {
+        if (unchangedBytes == text.length) return text;
+        output.put(text[0 .. unchangedBytes]);
+    }
     return output.data;
 }
 
@@ -646,6 +667,13 @@ private size_t duplicateStreamingTest(ref StreamingState, dchar input,
 
 private size_t identityStreamingTest(ref StreamingState, dchar input,
         dchar[maxStreamingExpansion]* output) pure {
+    (*output)[0] = input;
+    return 1;
+}
+
+private size_t removeXStreamingTest(ref StreamingState, dchar input,
+        dchar[maxStreamingExpansion]* output) pure {
+    if (input == 'x') return 0;
     (*output)[0] = input;
     return 1;
 }
@@ -730,12 +758,40 @@ unittest {
         StreamingFilter(StreamingState.init, &duplicateStreamingTest, null));
     registerStreamingFilter("__stream-identity-test",
         StreamingFilter(StreamingState.init, &identityStreamingTest, null));
+    registerStreamingFilter("__stream-remove-x-test",
+        StreamingFilter(StreamingState.init, &removeXStreamingTest, null));
     registerStreamingFilter("__stream-delayed-test",
         StreamingFilter(StreamingState.init, &delayedStreamingTest,
             &delayedStreamingFinishTest));
     auto identityPipeline = Pipeline.buildTyped([
         TypedFilterSpec("__stream-identity-test")]);
-    assert(identityPipeline.run("héllø 🌍") == "héllø 🌍");
+    auto identityInput = "héllø 🌍";
+    auto identityOutput = identityPipeline.run(identityInput);
+    assert(identityOutput == identityInput &&
+        identityOutput.ptr is identityInput.ptr);
+    auto suffixInput = "abx";
+    auto suffixOutput = Pipeline.buildTyped([
+        TypedFilterSpec("__stream-remove-x-test")]).run(suffixInput);
+    assert(suffixOutput == "ab" && suffixOutput.ptr !is suffixInput.ptr);
+    assert(Pipeline.buildTyped([TypedFilterSpec("__stream-remove-x-test")])
+        .run("axb") == "ab");
+    auto leadingDeletionInput = "xab";
+    auto leadingDeletionOutput = Pipeline.buildTyped([
+        TypedFilterSpec("__stream-remove-x-test")]).run(
+            leadingDeletionInput);
+    assert(leadingDeletionOutput == "ab" &&
+        leadingDeletionOutput.ptr !is leadingDeletionInput.ptr);
+    auto largeSuffix = new char[128 * 1024];
+    largeSuffix[] = 'x';
+    largeSuffix[0] = 'a';
+    auto compactPrefix = Pipeline.buildTyped([
+        TypedFilterSpec("__stream-remove-x-test")]).run(
+            cast(string)largeSuffix);
+    assert(compactPrefix == "a" && compactPrefix.ptr !is largeSuffix.ptr);
+    auto emptyOutput = Pipeline.buildTyped([
+        TypedFilterSpec("__stream-remove-x-test")]).run(
+            cast(string)largeSuffix[1 .. $]);
+    assert(emptyOutput.length == 0 && emptyOutput.ptr !is largeSuffix.ptr + 1);
     assert(Pipeline.buildTyped([TypedFilterSpec("__stream-duplicate-test"),
         TypedFilterSpec("__stream-delayed-test")])
         .run("ab") == "aabb");
@@ -746,7 +802,9 @@ unittest {
         TypedFilterSpec("__stream-delayed-test")]).run("a") == "aa!");
     TypedFilterSpec[] longRun;
     foreach (_; 0 .. 17) longRun ~= TypedFilterSpec("__stream-identity-test");
-    assert(Pipeline.buildTyped(longRun).run("bounded") == "bounded");
+    auto longInput = "bounded";
+    auto longOutput = Pipeline.buildTyped(longRun).run(longInput);
+    assert(longOutput == longInput && longOutput.ptr is longInput.ptr);
 
     // Explicit registries make resolution testable without global mutation.
     FilterRegistry isolated;

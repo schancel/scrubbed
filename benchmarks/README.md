@@ -146,8 +146,9 @@ probe APIs nor counter/GC branches. The JSON identifies the executable and
 embeds and hashes each instrumented source plus its harness; execution refuses
 a checkout that differs from those compiled-in texts. It also embeds and
 hashes the frozen #59 canonical profile and attribution inputs without editing
-or reinterpreting them. The current candidate changes only the filter-result
-ownership boundary. Exact byte accounting, allocation bounds,
+or reinterpreting them. The current evidence covers the fused-scalar
+materialization and filter-result ownership boundaries. Exact byte accounting,
+allocation bounds,
 ordinary/measured equivalence, and post-collection lifetime checks authorize
 it. It does not authorize a
 wall-time performance claim: this host was loaded during development and no
@@ -165,8 +166,9 @@ The self-test compares ordinary and measured execution, checks strict invalid
 UTF-8 exceptions, independent concurrent counters, split identity/order,
 terminal reject/quarantine filter skipping, post-owner-close retained output, exact atomic
 sink bytes and failure non-publication, identical/prefix/suffix/interior/empty
-borrowed and distinct filter outputs in both measured paths, three accounting
-mutants, and a 4 MiB allocation-heavy positive control. GC numbers are D
+borrowed and distinct filter outputs in both measured paths, four accounting
+mutants plus the fused no-op materialization mutant, and a 4 MiB
+allocation-heavy positive control. GC numbers are D
 runtime current-thread allocation evidence, not total process or native
 allocation.
 
@@ -175,7 +177,7 @@ allocation.
 | mapped view -> borrowed `ContentPiece` | Descriptor retains a checked `DocumentViewOwner`; even an empty borrow fails after close. | No payload copy; mandatory zero-copy admission seam. |
 | `Content` descriptor snapshot/edit/split | Descriptor arrays may be copied, every borrow still requires its live owner, and split children may share immutable input. An owned fragment is compacted only when its backing allocation would exceed the same 2× plus 64 KiB retention bound. | Borrowed payloads are never copied. Allocation-sized owned fragments share storage; pathological shrinking edits copy only the surviving fragment. |
 | `Content` -> UTF-8 string | `composition.executor` and the selected-field JSONL sink use `Content.copy` to allocate the exact final byte length; the executor validates it before the public filter ABI. | One exact-size payload copy; mandatory while filters and JSONL field results accept owning `string` values. |
-| fused scalar run | Up to 16 consecutive caller-owned transducers borrow the input string and materialize one owning result. | One result materialization per fused run; longer runs intentionally form another bounded barrier. |
+| fused scalar run | Up to 16 consecutive caller-owned transducers borrow the input string. An unchanged result retains that immutable storage; changed output is independently owned. | No output materialization for unchanged results; otherwise one materialization begins at the first differing byte. Longer runs intentionally form another bounded barrier. |
 | whole-text filter | The pure public filter may return the identical input, a borrowed prefix/suffix/interior/empty subslice, a partially overlapping slice, or distinct GC-owned storage. The probe uses integer byte intervals rather than ordering unrelated pointers and records borrowed/overlap/distinct calls and bytes without retaining mutable state. | Borrowed subslices are not materializations; partial overlaps are never reported as distinct. Distinct algorithm-owned work is not removable by orchestration evidence alone. |
 | filter result -> owned `ContentPiece` | The source-compatible public filter ABI still copies results. Built-ins may opt into a DIP1000-checked safe registration seam; `composition.executor` retains those immutable GC results only when the backing allocation is bounded. Unknown provenance, unsafe `NO_INTERIOR` subslices, empty interior slices, and GC backing larger than twice the logical length plus 64 KiB are copied. `ContentPiece` applies the same rule again when edits form owned subpieces. | Zero logical payload copies for allocation-sized results from the safe seam. For a 2 MiB result the release probe observed 224 bookkeeping bytes rather than the 2,101,472-byte baseline allocation; two 2 MiB results observed 448 bytes rather than 4,202,944. Legacy/custom callbacks keep copy isolation, and pathological shrinking slices retain at most 2× their logical size plus 64 KiB of backing. These are deterministic allocation observations, not wall-time claims. |
 | final-event split/map descriptors | Events retain `Content` references synchronously; after-filters independently retain each immutable emitted result. | Unfiltered sharing is payload-copy-free; filtered siblings still repeat filter materialization, but no longer add a second payload copy when retaining each result. |

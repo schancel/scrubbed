@@ -24,10 +24,7 @@ private StageDecision applyHtmlMetadata(StageDocument input,
     auto charset = configured.charset;
     if (input.content.size > maxRawBytes)
         return StageDecision.quarantine("rawLimit");
-    auto raw = new ubyte[input.content.size];
-    size_t offset;
-    foreach (piece; input.content.pieces())
-        foreach (i; 0 .. piece.size) raw[offset++] = piece.at(i);
+    auto raw = input.content.copy();
     auto outcome = parseHtml(raw, charset, input.document.source.recordKey);
     if (!outcome.isParsed) {
         auto failure = outcome.failure;

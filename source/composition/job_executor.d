@@ -4,6 +4,7 @@ module composition.job_executor;
 import composition.compiler : CompiledJob;
 import composition.executor : runCompiledStage;
 import stages.contract : EventKind, StageDocument, StageEvent;
+import stages.registry : SideOutputCapability;
 import std.exception : enforce;
 
 /// Identifies the compiled stage whose execution failed without exposing a
@@ -48,6 +49,13 @@ private void retainLineage(ref StageEvent output, const ref StageEvent input) {
 /// existing order. Only terminal/final events are returned.
 StageEvent[] runCompiledJob(StageDocument input, const ref CompiledJob job) {
     if (job.stages.length == 0) validateNoOpInput(input);
+    size_t producerOrdinal = size_t.max;
+    string producerId;
+    foreach (ordinal, ref stage; job.stages)
+        if (stage.sideOutputCapability == SideOutputCapability.terminal) {
+            producerOrdinal = ordinal;
+            producerId = stage.id;
+        }
     StageEvent[] events = [StageEvent(EventKind.emitted, input)];
     foreach (stageOrdinal, ref stage; job.stages) {
         StageEvent[] next;
@@ -75,6 +83,11 @@ StageEvent[] runCompiledJob(StageDocument input, const ref CompiledJob job) {
         }
         events = next;
     }
+    if (producerOrdinal != size_t.max &&
+            (events.length != 1 || events[0].sideOutputs.length != 1))
+        throw new CompiledJobFailure(job.identity, producerId,
+            producerOrdinal, new Exception(
+                "side-output plan did not produce exactly one root side output"));
     return events;
 }
 

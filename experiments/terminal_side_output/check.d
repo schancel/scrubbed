@@ -91,6 +91,14 @@ private ConfiguredStageTransform plainFactory(const ref StageOptions) {
     return ConfiguredStageTransform(&applyPlain);
 }
 
+private StageDecision applyEarlyReject(StageDocument input,
+        immutable(StageConfiguration)) pure {
+    return StageDecision.reject("early policy");
+}
+private ConfiguredStageTransform earlyRejectFactory(const ref StageOptions) {
+    return ConfiguredStageTransform(&applyEarlyReject);
+}
+
 private StageRegistration terminal(string key,
         ConfiguredStageTransform function(const ref StageOptions) factory,
         FilterPlacement placement = FilterPlacement.none,
@@ -245,6 +253,18 @@ private void proveDecisionsFailureAndConcurrency() {
     auto omit = planFor("omit", &stages, &filters);
     enforce(throws(() { runCompiledJob(inputFor(9), omit); }),
         "declared producer omitted its side output");
+
+    StageRegistry bypassStages;
+    bypassStages.add(StageRegistration(StageDeclaration("early-reject",
+        PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
+        &earlyRejectFactory, FilterPlacement.none, StageCardinality.oneToOne));
+    bypassStages.add(terminal("producer", &mapFactory));
+    auto bypassSpec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"early","implementation":"early-reject"},` ~
+        `{"id":"producer","implementation":"producer"}]}`);
+    auto bypassPlan = compileJob(bypassSpec, &bypassStages, &filters);
+    enforce(throws(() { runCompiledJob(inputFor(10), bypassPlan); }),
+        "terminal policy bypass returned without the required side output");
 
     auto sharedPlan = planFor("map", &stages, &filters);
     auto passed = new bool[4];

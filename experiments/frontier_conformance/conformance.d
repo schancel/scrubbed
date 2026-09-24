@@ -30,6 +30,7 @@ private JobQueue open(QueueFactory factory, FrontierLimits bounded = limits()) {
     auto opened = factory(bounded, FrontierRequirements());
     need(opened.code == QueueOpenCode.opened && opened.queue !is null, "open");
     need(opened.backend == opened.queue.descriptor, "descriptor is stable");
+    need(opened.queue.limits == bounded, "limits round trip exactly");
     return opened.queue;
 }
 
@@ -132,6 +133,7 @@ private void admissionLimits(QueueFactory factory) {
 
 private void leasesRetriesAndTermination(QueueFactory factory) {
     auto queue = open(factory, limits(8, 8, 2, 1, 1));
+    need(!queue.isSealed && !queue.isCanceled, "initial lifecycle flags");
     need(queue.takeLease().unavailable == LeaseUnavailable.noQueuedWork,
         "truthful open no-work");
     need(!queue.isComplete, "open empty is not complete");
@@ -142,12 +144,14 @@ private void leasesRetriesAndTermination(QueueFactory factory) {
     need(queue.takeLease().unavailable == LeaseUnavailable.activeLimit,
         "active limit");
     queue.cancelLeasing();
-    need(queue.takeLease().unavailable == LeaseUnavailable.canceled,
+    need(queue.isCanceled && queue.takeLease().unavailable ==
+        LeaseUnavailable.canceled,
         "cancellation");
     need(queue.reclaim(first.lease) == ReclaimCode.reclaimed, "reclaim");
     need(queue.finish(first.lease, LeaseOutcome.completed).code ==
         FinishCode.staleGeneration, "stale completion");
     queue.resumeLeasing();
+    need(!queue.isCanceled, "resume clears cancellation");
     auto second = queue.takeLease();
     need(second.candidate.canonicalLocator == item(2).canonicalLocator,
         "reclaim joins FIFO tail");
@@ -162,6 +166,7 @@ private void leasesRetriesAndTermination(QueueFactory factory) {
     need(retry.candidate.canonicalLocator == item(2).canonicalLocator,
         "retry tail");
     queue.seal();
+    need(queue.isSealed, "seal flag");
     need(queue.finish(retry.lease, LeaseOutcome.permanentFailure).code ==
         FinishCode.applied, "poison finish");
     need(queue.finish(retry.lease, LeaseOutcome.completed).code ==
@@ -171,6 +176,61 @@ private void leasesRetriesAndTermination(QueueFactory factory) {
     need(queue.admit(item(3)).code == AdmissionCode.refusedSealed,
         "sealed admission");
     checkCaps(queue);
+}
+
+private void lookupTracksExactTransitions(QueueFactory factory) {
+    auto queue = open(factory);
+    CandidateView view;
+    auto candidate = item(7, 1, "lookup", "canonical:v2", "lookup-source");
+    auto key = CandidateKey(candidate.policyId, candidate.canonicalLocator);
+    auto missing = CandidateKey("canonical:v1", "opaque://missing");
+    need(!queue.lookup(missing, view), "lookup miss");
+    need(queue.admit(candidate).code == AdmissionCode.admittedQueued,
+        "lookup admission");
+    need(queue.lookup(key, view) &&
+        view == CandidateView(candidate, CandidateState.queued, 0),
+        "lookup queued view");
+    auto first = queue.takeLease();
+    need(queue.lookup(key, view) &&
+        view == CandidateView(candidate, CandidateState.leased, 1),
+        "lookup leased view");
+    need(queue.finish(first.lease, LeaseOutcome.retryableFailure).code ==
+        FinishCode.applied, "lookup retry transition");
+    need(queue.lookup(key, view) &&
+        view == CandidateView(candidate, CandidateState.retryableFailed, 1),
+        "lookup retryable view");
+    auto retry = queue.takeLease();
+    need(queue.lookup(key, view) &&
+        view == CandidateView(candidate, CandidateState.leased, 2),
+        "lookup retry lease view");
+    need(queue.finish(retry.lease, LeaseOutcome.completed).code ==
+        FinishCode.applied, "lookup completion transition");
+    need(queue.lookup(key, view) &&
+        view == CandidateView(candidate, CandidateState.completed, 2),
+        "lookup terminal view");
+}
+
+private void sealedActiveFinishWithDiscovery(QueueFactory factory) {
+    auto queue = open(factory);
+    auto producerInput = item(20);
+    need(queue.admit(producerInput).code == AdmissionCode.admittedQueued,
+        "sealed finish producer admission");
+    auto producer = queue.takeLease();
+    queue.seal();
+    auto finished = queue.finish(producer.lease, LeaseOutcome.completed,
+        [item(21), item(22)]);
+    need(finished.code == FinishCode.applied && finished.discoveries.length == 2 &&
+        finished.discoveries[0].code == AdmissionCode.refusedSealed &&
+        finished.discoveries[1].code == AdmissionCode.refusedSealed,
+        "sealed active finish applies outcome and refuses discoveries");
+    CandidateView producerView;
+    need(queue.lookup(producer.lease.key, producerView) &&
+        producerView == CandidateView(producerInput, CandidateState.completed, 1),
+        "sealed finish exact terminal producer");
+    auto expectedCounts = FrontierCounts(1, 0, 0, 0, 1, 0, 0, 37);
+    need(queue.counts == expectedCounts, "sealed finish exact terminal counts");
+    need(queue.isSealed && !queue.isCanceled && queue.isComplete,
+        "sealed active lease drains to completion");
 }
 
 private void finishIsAtomicAndSaturationDrains(QueueFactory factory) {
@@ -250,6 +310,8 @@ string[] runConformance(QueueFactory factory) {
     requirementsArePreMutation(factory);
     admissionLimits(factory);
     leasesRetriesAndTermination(factory);
+    lookupTracksExactTransitions(factory);
+    sealedActiveFinishWithDiscovery(factory);
     finishIsAtomicAndSaturationDrains(factory);
     snapshotsAreBoundedAndReadOnly(factory);
     auto first = replay(factory);

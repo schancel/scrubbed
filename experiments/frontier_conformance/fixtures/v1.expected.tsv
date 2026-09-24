@@ -1,0 +1,7 @@
+admittedQueued	1/1/0/0/0/0/0/35	canonical:v1|opaque://2|example|0|from:2|queued|0
+admittedQueued	2/2/0/0/0/0/0/70	canonical:v1|opaque://1|example|0|from:1|queued|0	canonical:v1|opaque://2|example|0|from:2|queued|0
+refusedDepthLimit	2/2/0/0/0/0/0/70	canonical:v1|opaque://1|example|0|from:1|queued|0	canonical:v1|opaque://2|example|0|from:2|queued|0
+1	2/1/0/1/0/0/0/70	canonical:v1|opaque://1|example|0|from:1|queued|0	canonical:v1|opaque://2|example|0|from:2|leased|1
+applied/admittedQueued	3/2/0/0/1/0/0/105	canonical:v1|opaque://1|example|0|from:1|queued|0	canonical:v1|opaque://2|example|0|from:2|completed|1	canonical:v1|opaque://4|example|0|from:4|queued|0
+staleGeneration	3/2/0/0/1/0/0/105	canonical:v1|opaque://1|example|0|from:1|queued|2	canonical:v1|opaque://2|example|0|from:2|completed|1	canonical:v1|opaque://4|example|0|from:4|queued|0
+true	3/0/0/0/3/0/0/105	canonical:v1|opaque://1|example|0|from:1|completed|3	canonical:v1|opaque://2|example|0|from:2|completed|1	canonical:v1|opaque://4|example|0|from:4|completed|1

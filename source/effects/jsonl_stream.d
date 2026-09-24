@@ -5,7 +5,7 @@ import domain.document : DocumentId, SourceLocator;
 import std.array : Appender, appender;
 import std.conv : to;
 import std.json : JSONType, JSONValue, parseJSON;
-import std.utf : validate;
+import std.utf : encode, validate;
 
 alias ReadBytes = size_t delegate(ubyte[] destination);
 alias WriteBytes = void delegate(const(ubyte)[] bytes);
@@ -222,18 +222,45 @@ private void processLine(ubyte[] raw, size_t ordinal, size_t completed,
     if (committed !is null) committed(source);
 }
 
-private void putBounded(ref Appender!string output, string piece, size_t cap) {
+private void putBounded(ref Appender!string output, const(char)[] piece, size_t cap) {
     if (piece.length > cap - output.data.length)
         throw new Exception("byte cap reached");
     output.put(piece);
 }
 
+private struct BoundedJsonSink {
+    Appender!string* output;
+    size_t cap;
+
+    void put(char value) {
+        if (output.data.length == cap)
+            throw new Exception("byte cap reached");
+        output.put(value);
+    }
+
+    void put(const(char)[] value) {
+        putBounded(*output, value, cap);
+    }
+
+    void put(dchar value) {
+        char[4] bytes;
+        auto length = encode(bytes, value);
+        putBounded(*output, bytes[0 .. length], cap);
+    }
+}
+
+private void scalarBounded(ref Appender!string output, JSONValue value, size_t cap) {
+    auto sink = BoundedJsonSink(&output, cap);
+    value.toString(sink);
+}
+
 private void quotedBounded(ref Appender!string output, string value, size_t cap) {
-    // JSON quoting expands by at most six bytes per input byte. Refuse a
-    // too-large string before calling std.json's allocating scalar encoder.
+    // Refuse an impossible string before entering std.json's scalar encoder.
+    // Its sink overload preserves the library's escaping while enforcing the
+    // cap directly in the destination buffer.
     if (value.length > cap - output.data.length)
         throw new Exception("string exceeds remaining byte cap");
-    putBounded(output, JSONValue(value).toString(), cap);
+    scalarBounded(output, JSONValue(value), cap);
 }
 
 private void encodeBounded(JSONValue value, ref Appender!string output, size_t cap) {
@@ -267,7 +294,7 @@ private void encodeBounded(JSONValue value, ref Appender!string output, size_t c
         case JSONType.true_:
         case JSONType.false_:
         case JSONType.null_:
-            putBounded(output, value.toString(), cap);
+            scalarBounded(output, value, cap);
             return;
     }
 }

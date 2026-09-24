@@ -176,6 +176,19 @@ void main(string[] args) {
         JsonlLimits(1024, 18));
     require(escapeExpansion.output.length == 0, "escaped output cap emitted");
 
+    enum escapedRecord = `{"text":"\"\\\/\b\f\n\r\t\u0000\u001f café 🚀"}`;
+    auto escapedExpected = parseJSON(escapedRecord).toString();
+    auto escapedScalar = Fixture(escapedRecord ~ "\n");
+    escapedScalar.run([], null,
+        JsonlLimits(1024, escapedExpected.length + 1));
+    require(escapedScalar.output == escapedExpected ~ "\n",
+        "bounded scalar sink changed JSON escaping");
+    auto escapedAtLimit = Fixture(escapedRecord ~ "\n");
+    expectFailure(escapedAtLimit, JsonlFailureKind.outputLimit, [], null,
+        JsonlLimits(1024, escapedExpected.length));
+    require(escapedAtLimit.output.length == 0,
+        "bounded scalar sink exceeded output cap");
+
     // A writer is called synchronously once per record. On failure, the next
     // record is not processed; bytes for it may already be in the read chunk.
     auto writerFault = Fixture("{\"text\":\"a\"}\n{\"text\":\"b\"}\n");

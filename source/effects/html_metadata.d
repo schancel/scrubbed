@@ -238,7 +238,10 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
 private string quote(string value) pure {
     enum hex = "0123456789abcdef";
     string result = "\"";
-    foreach (char c; value) {
+    size_t runStart;
+    foreach (i, c; value) {
+        if (cast(ubyte)c >= 0x20 && c != '"' && c != '\\') continue;
+        if (runStart < i) result ~= value[runStart .. i];
         switch (c) {
             case '"': result ~= `\"`; break;
             case '\\': result ~= `\\`; break;
@@ -249,12 +252,21 @@ private string quote(string value) pure {
             case '\t': result ~= `\t`; break;
             default:
                 auto byteValue = cast(ubyte)c;
-                if (byteValue < 0x20)
-                    result ~= `\u00` ~ hex[byteValue >> 4] ~ hex[byteValue & 0xf];
-                else result ~= c;
+                char[6] escaped = ['\\', 'u', '0', '0',
+                    hex[byteValue >> 4], hex[byteValue & 0xf]];
+                result ~= escaped[];
         }
+        runStart = i + 1;
     }
+    if (runStart < value.length) result ~= value[runStart .. $];
     return result ~ "\"";
+}
+
+unittest {
+    assert(quote("") == `""`);
+    assert(quote("plain/é") == `"plain/é"`);
+    assert(quote("\"\\\b\f\n\r\t\0\x1f") ==
+        `"\"\\\b\f\n\r\t\u0000\u001f"`);
 }
 
 private string fieldJson(const ref MetadataField field) pure {

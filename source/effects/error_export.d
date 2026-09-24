@@ -5,6 +5,7 @@ import effects.sqlite_ffi;
 import effects.failure_journal : validateV2ReadSnapshot;
 import effects.durable_job : validateV3ReadSnapshot;
 import effects.local_manifest : resolvedName, safeRegularOrAbsent, sameInode;
+import std.array : appender;
 import std.conv : to;
 import std.algorithm.searching : canFind;
 import std.digest : LetterCase, toHexString;
@@ -100,12 +101,39 @@ private string historyLine(sqlite3_stmt* s) {
         (phase == "retry" && code == "retry-succeeded"), "invalid-event");
     need(state == "failed" || state == "uncertain" || state == "committed", "invalid-event");
     if (retry != "null") need(uuid4(textColumn(s, 11)), "invalid-event");
-    return `{"schema":"scrubbed.error-event.v1","event_id":"` ~ eventId ~
-        `","sequence":` ~ to!string(sequence) ~ `,"run_id":"` ~ runId ~
-        `","config_sha256":"` ~ hexColumn(s, 6) ~ `","document_id":"` ~ doc ~
-        `","input_sha256":"` ~ hexColumn(s, 5) ~ `","sink_id":"` ~ sink ~
-        `","phase":"` ~ phase ~ `","code":"` ~ code ~ `","state":"` ~
-        state ~ `","retry_of":` ~ retry ~ `,"time_utc_ms":` ~ to!string(at) ~ "}\n";
+    auto sequenceText = to!string(sequence);
+    auto atText = to!string(at);
+    auto config = hexColumn(s, 6);
+    auto input = hexColumn(s, 5);
+    auto row = appender!string();
+    row.reserve(eventId.length + runId.length + doc.length + sink.length +
+        phase.length + code.length + state.length + retry.length + 384);
+    row.put(`{"schema":"scrubbed.error-event.v1","event_id":"`);
+    row.put(eventId);
+    row.put(`","sequence":`);
+    row.put(sequenceText);
+    row.put(`,"run_id":"`);
+    row.put(runId);
+    row.put(`","config_sha256":"`);
+    row.put(config);
+    row.put(`","document_id":"`);
+    row.put(doc);
+    row.put(`","input_sha256":"`);
+    row.put(input);
+    row.put(`","sink_id":"`);
+    row.put(sink);
+    row.put(`","phase":"`);
+    row.put(phase);
+    row.put(`","code":"`);
+    row.put(code);
+    row.put(`","state":"`);
+    row.put(state);
+    row.put(`","retry_of":`);
+    row.put(retry);
+    row.put(`,"time_utc_ms":`);
+    row.put(atText);
+    row.put("}\n");
+    return row.data;
 }
 private string outstandingLine(sqlite3_stmt* s) {
     auto doc = textColumn(s, 0);
@@ -122,11 +150,31 @@ private string outstandingLine(sqlite3_stmt* s) {
         (origin == "event" && eventId != "null" && runId != "null" && at != "null" &&
          uuid4(textColumn(s, 6)) && uuid4(textColumn(s, 7)) &&
          sqlite3_column_int64(s, 8) >= 0), "invalid-outstanding");
-    return `{"schema":"scrubbed.outstanding.v1","document_id":"` ~ doc ~
-        `","input_sha256":"` ~ hexColumn(s, 1) ~ `","config_sha256":"` ~
-        hexColumn(s, 2) ~ `","sink_id":"` ~ sink ~ `","state":"` ~ state ~
-        `","origin":"` ~ origin ~ `","event_id":` ~ eventId ~
-        `,"run_id":` ~ runId ~ `,"time_utc_ms":` ~ at ~ "}\n";
+    auto input = hexColumn(s, 1);
+    auto config = hexColumn(s, 2);
+    auto row = appender!string();
+    row.reserve(doc.length + sink.length + state.length + origin.length +
+        eventId.length + runId.length + at.length + 320);
+    row.put(`{"schema":"scrubbed.outstanding.v1","document_id":"`);
+    row.put(doc);
+    row.put(`","input_sha256":"`);
+    row.put(input);
+    row.put(`","config_sha256":"`);
+    row.put(config);
+    row.put(`","sink_id":"`);
+    row.put(sink);
+    row.put(`","state":"`);
+    row.put(state);
+    row.put(`","origin":"`);
+    row.put(origin);
+    row.put(`","event_id":`);
+    row.put(eventId);
+    row.put(`,"run_id":`);
+    row.put(runId);
+    row.put(`,"time_utc_ms":`);
+    row.put(at);
+    row.put("}\n");
+    return row.data;
 }
 private enum historySql = `SELECT event_id,sequence,run_id,0,document_id,input_sha256,
     config_sha256,sink_id,phase,code,state,retry_of,time_utc_ms

@@ -121,7 +121,10 @@ decision record per visited file; parallel record order is not fixed. See the
 [inspection guide](docs/cli-inspection.md). A later traversal error can cancel
 already-admitted files; those receive failure records, and the command exits 2.
 `run` and `repair` also route to the implemented filter pipeline, with generated
-help and command/option-name completion. `extract --format=tree-json` exports a
+help and command/option-name completion. Generate shell setup with
+`scrubbed completion init --bash`, `--zsh`, or `--fish`; generated setup uses
+the same nested `completion` interface for candidates. `extract
+--format=tree-json` exports a
 bounded selected HTML parse tree; `--format=markdown` mechanically renders that
 tree without main-content selection. See the [HTML parser guide](docs/html-parser.md) and
 [command guide](docs/cli-commands.md).

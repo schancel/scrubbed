@@ -1357,6 +1357,29 @@ private void requireSameBuildToolClosure(JSONValue baseline,
         "baseline and candidate native-tool closures differ");
 }
 
+private void requireSameBuildToolClosure(ref const AttestedExecutable baseline,
+        ref const AttestedExecutable candidate) {
+    requireSameBuildToolClosure(baseline.attestation,
+        candidate.attestation);
+    require(resolveToolPath(baseline.buildEnvironment["SDKROOT"]) ==
+            resolveToolPath(candidate.buildEnvironment["SDKROOT"]),
+        "baseline and candidate SDK roots differ");
+    require(baseline.nativeTools.length == candidate.nativeTools.length,
+        "baseline and candidate native-tool cardinality differs");
+    foreach (index, baselineTool; baseline.nativeTools) {
+        auto candidateTool = candidate.nativeTools[index];
+        require(baselineTool.name == candidateTool.name,
+            "baseline and candidate native-tool order differs");
+        // CMake is copied to an isomorphic private closure under each build
+        // root. Every other native tool remains a system-selected executable
+        // whose resolved path is itself a build input.
+        if (baselineTool.name != "cmake")
+            require(resolveToolPath(baselineTool.path) ==
+                    resolveToolPath(candidateTool.path),
+                "baseline and candidate native-tool paths differ");
+    }
+}
+
 private void requireCmakeSelection(string cache, string key,
                                    string expected) {
     foreach (line; cache.splitLines)
@@ -3461,8 +3484,7 @@ int main(string[] args) {
             auto candidate = buildAttestedExecutable(args[4], candidateRoot);
             validateAttestation(baseline.attestation, baseline.snapshot.sha256);
             validateAttestation(candidate.attestation, candidate.snapshot.sha256);
-            requireSameBuildToolClosure(baseline.attestation,
-                candidate.attestation);
+            requireSameBuildToolClosure(baseline, candidate);
             require(baseline.attestation["source_sha"].str == args[3] &&
                 candidate.attestation["source_sha"].str == args[5],
                 "attested coordination source revision differs");

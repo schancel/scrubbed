@@ -21,7 +21,9 @@ The frontier owns these transitions:
   Permanent failure is terminal, so a poison item cannot prevent draining.
 - `finish` is the atomic boundary for one outcome and its discoveries. Each
   discovery receives a typed admission or refusal; a refusal does not undo the
-  valid lease outcome or other admissions.
+  valid lease outcome or other admissions. Per-finish discovery-count and
+  aggregate input-byte caps are checked before any lease or frontier mutation;
+  exceeding either rejects the whole transition and leaves the lease live.
 - Reclaim invalidates the old generation before rescheduling the item. Stale,
   unknown, reused, and double-completed leases do not mutate state.
 - Cancellation stops new leases but preserves every admitted item and live
@@ -32,7 +34,15 @@ The frontier owns these transitions:
 
 Admission is bounded by total pages, pages per host, maximum depth, provenance
 bytes, and total retained string bytes. Ready items and active leases have
-separate caps. Refusals are values rather than waits or implicit drops.
+separate caps. Each finish also bounds discovery count and aggregate discovery
+input bytes. Refusals are values rather than waits or implicit drops.
+
+Identity and host accounting use content-keyed indexes. Ready and deferred work
+use geometrically grown ring FIFOs, so filling and draining a valid `P`-page
+frontier does not scan all prior pages or copy an array tail per lease. The
+release checks fill and drain 4,096 pages and assert fewer than `2P` FIFO resize
+moves, guarding the linear-growth bound while checking deterministic order in
+the smaller lifecycle fixtures.
 
 The release checker exercises duplicate and policy identity, every cap,
 ready/deferred saturation and FIFO promotion, retry/reclaim generations,

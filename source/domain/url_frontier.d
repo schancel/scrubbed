@@ -28,7 +28,14 @@ enum AdmissionCode : ubyte {
 
 enum LeaseUnavailable : ubyte { none, canceled, activeLimit, noQueuedWork }
 enum LeaseOutcome : ubyte { completed, retryableFailure, permanentFailure }
-enum FinishCode : ubyte { applied, unknownCandidate, notLeased, staleGeneration }
+enum FinishCode : ubyte {
+    applied,
+    unknownCandidate,
+    notLeased,
+    staleGeneration,
+    discoveryCountLimit,
+    discoveryInputByteLimit,
+}
 enum ReclaimCode : ubyte { reclaimed, unknownCandidate, notLeased, staleGeneration }
 
 struct FrontierLimits {
@@ -39,6 +46,8 @@ struct FrontierLimits {
     size_t maxActiveLeases;
     size_t maxStoredBytes;
     size_t maxProvenanceBytes;
+    size_t maxDiscoveriesPerFinish;
+    size_t maxDiscoveryInputBytes;
 }
 
 /// The policy and canonical locator jointly form identity. All strings are opaque:
@@ -114,12 +123,56 @@ private:
         bool deferredRetry;
     }
 
+    struct IndexQueue {
+    private:
+        size_t[] slots;
+        size_t head;
+        size_t count;
+
+    public:
+        @property size_t length() const { return count; }
+
+        void put(size_t value, size_t maximum, ref size_t resizeMoves) {
+            require(count < maximum, "pending queue exceeds limit");
+            if (count == slots.length) {
+                auto capacity = slots.length == 0 ? cast(size_t)4 : slots.length;
+                if (capacity > maximum) capacity = maximum;
+                if (capacity <= count) {
+                    capacity = count > size_t.max / 2 ? maximum : count * 2;
+                    if (capacity > maximum) capacity = maximum;
+                }
+                require(capacity > count, "pending queue cannot grow");
+                auto replacement = new size_t[capacity];
+                foreach (offset; 0 .. count) {
+                    replacement[offset] = slots[(head + offset) % slots.length];
+                    ++resizeMoves;
+                }
+                slots = replacement;
+                head = 0;
+            }
+            slots[(head + count) % slots.length] = value;
+            ++count;
+        }
+
+        size_t take() {
+            require(count != 0, "empty pending queue");
+            auto result = slots[head];
+            head = (head + 1) % slots.length;
+            --count;
+            if (count == 0) head = 0;
+            return result;
+        }
+    }
+
     FrontierLimits limits_;
     Record[] records;
-    size_t[] ready;
-    size_t[] deferred;
+    size_t[CandidateKey] identityIndex;
+    size_t[string] hostCounts;
+    IndexQueue ready;
+    IndexQueue deferred;
     size_t active_;
     size_t storedBytes_;
+    size_t queueResizeMoves_;
     bool sealed_;
     bool canceled_;
 
@@ -130,6 +183,10 @@ public:
         require(limits.maxQueued > 0, "queued limit must be positive");
         require(limits.maxActiveLeases > 0, "active lease limit must be positive");
         require(limits.maxStoredBytes > 0, "stored-byte limit must be positive");
+        require(limits.maxDiscoveriesPerFinish > 0,
+            "per-finish discovery limit must be positive");
+        require(limits.maxDiscoveryInputBytes > 0,
+            "discovery input-byte limit must be positive");
         limits_ = limits;
     }
 
@@ -166,7 +223,7 @@ public:
             return result;
         }
 
-        auto index = popFront(ready);
+        auto index = ready.take();
         auto record = &records[index];
         require(record.state == CandidateState.queued ||
             record.state == CandidateState.retryableFailed,
@@ -203,6 +260,20 @@ public:
         if (record.state != CandidateState.leased) {
             result.code = FinishCode.notLeased;
             return result;
+        }
+        if (discoveries.length > limits_.maxDiscoveriesPerFinish) {
+            result.code = FinishCode.discoveryCountLimit;
+            return result;
+        }
+        size_t discoveryBytes;
+        foreach (discovery; discoveries) {
+            size_t bytes;
+            if (!storedBytes(discovery, bytes) ||
+                    bytes > limits_.maxDiscoveryInputBytes - discoveryBytes) {
+                result.code = FinishCode.discoveryInputByteLimit;
+                return result;
+            }
+            discoveryBytes += bytes;
         }
         require(cast(uint)outcome <= cast(uint)LeaseOutcome.permanentFailure,
             "invalid lease outcome");
@@ -307,6 +378,8 @@ private:
         auto index = records.length;
         records ~= record;
         storedBytes_ += bytes;
+        identityIndex[keyOf(records[index].candidate)] = index;
+        ++hostCounts[records[index].candidate.hostKey];
         enqueue(index, false);
         return Admission(records[index].state == CandidateState.deferred ?
             AdmissionCode.admittedDeferred : AdmissionCode.admittedQueued,
@@ -318,38 +391,34 @@ private:
         if (deferred.length != 0 || ready.length >= limits_.maxQueued) {
             record.state = CandidateState.deferred;
             record.deferredRetry = retry;
-            deferred ~= index;
+            deferred.put(index, limits_.maxPages, queueResizeMoves_);
         } else {
             record.state = retry ? CandidateState.retryableFailed : CandidateState.queued;
             record.deferredRetry = false;
-            ready ~= index;
+            ready.put(index, limits_.maxQueued, queueResizeMoves_);
         }
     }
 
     void promote() {
         while (ready.length < limits_.maxQueued && deferred.length != 0) {
-            auto index = popFront(deferred);
+            auto index = deferred.take();
             auto record = &records[index];
             require(record.state == CandidateState.deferred, "invalid deferred state");
             record.state = record.deferredRetry ? CandidateState.retryableFailed :
                 CandidateState.queued;
             record.deferredRetry = false;
-            ready ~= index;
+            ready.put(index, limits_.maxQueued, queueResizeMoves_);
         }
     }
 
     size_t find(CandidateKey key) const {
-        foreach (index, record; records)
-            if (record.candidate.policyId == key.policyId &&
-                    record.candidate.canonicalLocator == key.canonicalLocator)
-                return index;
-        return size_t.max;
+        auto index = key in identityIndex;
+        return index is null ? size_t.max : *index;
     }
 
     size_t hostPages(string host) const {
-        size_t count;
-        foreach (record; records) if (record.candidate.hostKey == host) ++count;
-        return count;
+        auto count = host in hostCounts;
+        return count is null ? 0 : *count;
     }
 }
 
@@ -371,15 +440,8 @@ private bool storedBytes(CandidateInput input, out size_t result) {
     return true;
 }
 
-private size_t popFront(ref size_t[] values) {
-    require(values.length != 0, "empty pending queue");
-    auto result = values[0];
-    values = values[1 .. $].dup;
-    return result;
-}
-
 unittest {
-    auto frontier = new UrlFrontier(FrontierLimits(4, 4, 2, 1, 1, 100, 20));
+    auto frontier = new UrlFrontier(FrontierLimits(4, 4, 2, 1, 1, 100, 20, 4, 100));
     auto input = CandidateInput("canonical:v1", "https://example/a", "example", 0, "seed");
     assert(frontier.admitSeed(input).code == AdmissionCode.admittedQueued);
     assert(frontier.admitSeed(input).code == AdmissionCode.duplicate);
@@ -389,4 +451,25 @@ unittest {
     assert(frontier.finish(lease.lease, LeaseOutcome.completed).code == FinishCode.notLeased);
     frontier.seal();
     assert(frontier.isComplete);
+
+    import std.conv : to;
+    enum pages = 4096;
+    auto scale = new UrlFrontier(FrontierLimits(pages, pages, 1, 64, 64,
+        512 * 1024, 16, 8, 1024));
+    foreach (number; 0 .. pages) {
+        auto text = number.to!string;
+        auto admission = scale.admitSeed(CandidateInput("canonical:v1",
+            "opaque://" ~ text, "example", 0, "from:" ~ text)).code;
+        assert(admission == AdmissionCode.admittedQueued ||
+            admission == AdmissionCode.admittedDeferred);
+    }
+    size_t completed;
+    while (completed != pages) {
+        auto next = scale.takeLease();
+        assert(next.available);
+        assert(scale.finish(next.lease, LeaseOutcome.completed).code ==
+            FinishCode.applied);
+        ++completed;
+    }
+    assert(scale.queueResizeMoves_ < pages * 2);
 }

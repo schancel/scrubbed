@@ -18,8 +18,97 @@ private CandidateInput item(size_t number, size_t depth = 0,
 
 private FrontierLimits limits(size_t pages = 32, size_t host = 32,
         size_t depth = 4, size_t queued = 2, size_t active = 2,
-        size_t bytes = 4096, size_t provenance = 32) {
-    return FrontierLimits(pages, host, depth, queued, active, bytes, provenance);
+        size_t bytes = 4096, size_t provenance = 32,
+        size_t discoveries = 8, size_t discoveryBytes = 1024) {
+    return FrontierLimits(pages, host, depth, queued, active, bytes, provenance,
+        discoveries, discoveryBytes);
+}
+
+private void finishInputCapsAreAtomic() {
+    auto frontier = new UrlFrontier(limits(3, 3, 1, 1, 1, 256, 8, 2, 48));
+    frontier.admitSeed(item(1));
+    auto lease = frontier.takeLease();
+    frontier.admitSeed(item(9));
+    frontier.admitSeed(item(10));
+    auto beforeCounts = frontier.counts;
+    auto beforeState = frontier.snapshot;
+
+    auto countOverflow = frontier.finish(lease.lease, LeaseOutcome.completed,
+        [item(2), item(3), item(4)]);
+    need(countOverflow.code == FinishCode.discoveryCountLimit &&
+        countOverflow.discoveries.length == 0, "finish discovery-count refusal");
+    need(frontier.counts == beforeCounts && frontier.snapshot == beforeState,
+        "count overflow leaves frontier unchanged");
+
+    auto byteOverflow = frontier.finish(lease.lease, LeaseOutcome.completed,
+        [item(2), item(3)]);
+    need(byteOverflow.code == FinishCode.discoveryInputByteLimit &&
+        byteOverflow.discoveries.length == 0, "finish discovery-byte refusal");
+    need(frontier.counts == beforeCounts && frontier.snapshot == beforeState,
+        "byte overflow leaves frontier unchanged");
+
+    need(frontier.finish(lease.lease, LeaseOutcome.completed).code ==
+        FinishCode.applied, "lease remains live after finish refusal");
+    foreach (expected; [9, 10]) {
+        auto pending = frontier.takeLease();
+        need(pending.available && pending.candidate.canonicalLocator ==
+            item(expected).canonicalLocator, "finish refusal preserves queue order");
+        frontier.finish(pending.lease, LeaseOutcome.completed);
+    }
+    checkCaps(frontier);
+}
+
+private void completionAndMixedBatchEdges() {
+    auto frontier = new UrlFrontier(limits(8, 8, 1, 1, 1));
+    need(!frontier.isComplete, "open empty frontier is not complete");
+    frontier.admitSeed(item(0));
+    frontier.seal();
+    need(!frontier.isComplete, "sealed queued frontier is not complete");
+    auto lease = frontier.takeLease();
+    need(lease.available, "sealed frontier remains leaseable while draining");
+    need(frontier.finish(lease.lease, LeaseOutcome.completed).code ==
+        FinishCode.applied && frontier.isComplete, "sealed frontier drains");
+
+    auto mixed = new UrlFrontier(limits(8, 8, 1, 1, 1));
+    mixed.admitSeed(item(0));
+    auto producer = mixed.takeLease();
+    auto result = mixed.finish(producer.lease, LeaseOutcome.completed,
+        [item(1), item(2, 2), item(3)]);
+    need(result.code == FinishCode.applied && result.discoveries.length == 3 &&
+        result.discoveries[0].code == AdmissionCode.admittedQueued &&
+        result.discoveries[1].code == AdmissionCode.refusedDepthLimit &&
+        result.discoveries[2].code == AdmissionCode.admittedDeferred,
+        "mixed valid/refused/valid discoveries");
+    need(mixed.counts.pages == 3 && mixed.counts.completed == 1,
+        "mixed batch commits valid discoveries and outcome");
+    checkCaps(mixed);
+}
+
+private void indexedScaleDrain() {
+    enum pages = 4096;
+    auto frontier = new UrlFrontier(limits(pages, pages, 1, 64, 64,
+        512 * 1024, 16));
+    foreach (number; 0 .. pages)
+        need(frontier.admitSeed(item(number)).code ==
+            (number < 64 ? AdmissionCode.admittedQueued :
+             AdmissionCode.admittedDeferred), "scale admission");
+    checkCaps(frontier);
+    size_t completed;
+    while (completed != pages) {
+        LeaseToken[] leases;
+        foreach (_; 0 .. 64) {
+            auto lease = frontier.takeLease();
+            if (!lease.available) break;
+            leases ~= lease.lease;
+        }
+        foreach (lease; leases) {
+            need(frontier.finish(lease, LeaseOutcome.completed).code ==
+                FinishCode.applied, "scale completion");
+            ++completed;
+        }
+    }
+    frontier.seal();
+    need(frontier.isComplete, "scale drain");
 }
 
 private void checkCaps(UrlFrontier frontier) {
@@ -247,6 +336,9 @@ void main() {
     saturationAndPromotion();
     generationsCancellationAndRaces();
     activeLimitAndPolicyIdentity();
+    finishInputCapsAreAtomic();
+    completionAndMixedBatchEdges();
+    indexedScaleDrain();
     randomizedTraces();
     writeln("URL frontier checker passed: 64 deterministic randomized traces");
 }

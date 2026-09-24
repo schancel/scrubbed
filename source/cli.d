@@ -12,7 +12,7 @@ import core.sync.condition : Condition;
 import effects.bounded_input : BoundedInput, CoordinationMetricsV2,
     CoordinationPhaseV2, InputLimits, beginCoordinationMetricV2;
 import effects.jsonl_stream : JsonlFailure, JsonlFailureKind, JsonlLimits;
-import effects.jsonl_job : runJsonlField;
+import effects.jsonl_job : runJsonlFieldOutcome;
 import effects.stdio_stream : processStandardJsonlDocuments;
 import effects.local_manifest : SinkKey, inputDigest;
 import effects.durable_job : DurableAction, DurableEventPlan, DurableEventState,
@@ -27,14 +27,17 @@ import effects.dispatch_record : canonicalDispatchCancellationRecordV1,
 import effects.atomic_piece_sink : OutputPolicyViolation, ResourceExhaustion,
     writeAtomicPieces;
 import effects.local_job : LocalJobOutcome, runLocalJob, runLocalJobBatch;
+import effects.mapped_file : openMappedFile;
+import effects.independent_sinks : IndependentSinkFailure;
 import effects.runner : EffectFailure, EffectPhase;
 import content.pieces : Content, ContentPiece;
-import domain.document : Document, DocumentId, OutputName, SourceLocator;
+import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
+    SourceLocator;
 import effects.html_tree : checkedHtmlByteLimit, defaultExtractHtmlBytes;
 import effects.html_tree_json_stage;
 import effects.html_markdown_stage;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
-    StageDocument, StageEvent;
+    StageDocument, StageEvent, TerminalSideOutput;
 import stages.pii_four_class;
 import stages.text_transform;
 import job.cli_tokens : parseJobTokens;
@@ -56,6 +59,7 @@ import std.algorithm.iteration : map;
 import std.algorithm.sorting : sort;
 import std.array : array, split;
 import std.conv : to;
+import std.digest : LetterCase, toHexString;
 import std.file : FileException, SpanMode, dirEntries, exists,
     getSize, isDir, isFile, isSymlink, mkdir, mkdirRecurse, remove, rename, readText,
     write, thisExePath;
@@ -255,9 +259,147 @@ private void preflightDestination(string destination, string outputRoot) {
         throw new Exception("output destination is not a plain file: " ~ destination);
 }
 
+private void requireUnaliasedFileOrAbsent(string path, string label) {
+    bool link;
+    try link = isSymlink(path);
+    catch (FileException failure) { if (exists(path)) throw failure; }
+    if (link || exists(path) && !isFile(path))
+        throw new OutputPolicyViolation(label ~ " must be a plain file or absent");
+    if (exists(path)) {
+        stat_t info;
+        if (stat(path.toStringz, &info) != 0 || info.st_nlink != 1)
+            throw new OutputPolicyViolation(label ~ " has a hard-link alias");
+    }
+}
+
+private void preflightSidecarRoots(string inputPath, string outputPath,
+        string sidecarPath, bool inputIsDir) {
+    if (!sidecarPath.length)
+        throw new OutputPolicyViolation(
+            "side-output-producing plan requires --sidecar-output");
+    if (exists(sidecarPath) && isSymlink(sidecarPath))
+        throw new OutputPolicyViolation("refusing symlink sidecar output path");
+    rejectUnresolvableAncestorLinks(sidecarPath);
+    auto resolved = resolveExistingPrefix(sidecarPath);
+    if (inputIsDir) {
+        if (pathsOverlap(resolved, inputPath) ||
+                pathsOverlap(resolved, outputPath))
+            throw new OutputPolicyViolation(
+                "sidecar root overlaps input or primary output");
+        preflightOutput(resolved, true);
+    } else {
+        if (resolved == inputPath || resolved == outputPath ||
+                sameFile(sidecarPath, inputPath) ||
+                sameFile(sidecarPath, outputPath) ||
+                sameFile(inputPath, outputPath))
+            throw new OutputPolicyViolation(
+                "sidecar destination aliases input or primary output");
+        preflightOutput(resolved, false);
+        requireUnaliasedFileOrAbsent(sidecarPath, "sidecar destination");
+        requireUnaliasedFileOrAbsent(outputPath, "primary destination");
+    }
+}
+
+private string sidecarDestinationFor(string sidecarRoot, bool inputIsDir,
+        const ref StageEvent event, const ref TerminalSideOutput output) {
+    if (!inputIsDir) return sidecarRoot;
+    return buildPath(sidecarRoot,
+        checkedOutputName(event.payload.document.outputName.text ~ output.suffix));
+}
+
+/// Stages complete side records in input/field order, then atomically replace
+/// the append-free JSONL destination only after the whole stream succeeds.
+private final class JsonlSidecarWriter {
+    private string destination;
+    private string spoolPath;
+    private File spool;
+    private ulong bytes;
+    private size_t recordLimit;
+    private ulong aggregateLimit;
+    private bool dryRun;
+    private bool finished;
+
+    this(string destination, size_t recordLimit, ulong aggregateLimit,
+            bool dryRun) {
+        this.destination = destination.idup;
+        this.recordLimit = recordLimit;
+        this.aggregateLimit = aggregateLimit;
+        this.dryRun = dryRun;
+        if (!dryRun) {
+            auto parent = dirName(destination);
+            ensurePlainDirectory(parent, parent);
+            spoolPath = buildPath(parent, "." ~ baseName(destination) ~
+                ".scrubbed-sidecar-" ~ randomUUID.toString ~ ".tmp");
+            spool = File(spoolPath, "wxb");
+        }
+    }
+
+    void append(const ref TerminalSideOutput output) {
+        auto payload = output.bytes;
+        auto recordBytes = cast(ulong) payload.length + 1;
+        if (recordBytes > recordLimit)
+            throw new ResourceExhaustion(
+                "JSONL side-output record exceeds byte cap", 0);
+        if (recordBytes > aggregateLimit || bytes > aggregateLimit - recordBytes)
+            throw new ResourceExhaustion(
+                "JSONL side-output aggregate exceeds byte cap", 0);
+        // A JSONL destination admits one complete JSON object per selected
+        // field. The generic effects layer validates framing, not its schema.
+        try {
+            auto parsed = parseJSON(cast(string) payload);
+            if (parsed.type != JSONType.object)
+                throw new Exception("record is not an object");
+        } catch (Exception) {
+            throw new OutputPolicyViolation(
+                "JSONL side output is not one JSON object");
+        }
+        if (!dryRun) {
+            spool.rawWrite(payload);
+            spool.rawWrite(cast(const(ubyte)[]) "\n");
+        }
+        bytes += recordBytes;
+    }
+
+    void commit() {
+        if (finished) return;
+        if (dryRun) { finished = true; return; }
+        spool.flush();
+        spool.close();
+        scope owner = bytes == 0 ? new DocumentViewOwner(new ubyte[0]) :
+            openMappedFile(spoolPath, bytes);
+        auto content = new Content([ContentPiece.borrow(
+            owner.view(0, cast(size_t) bytes))]);
+        writeAtomicPieces(destination, content.pieces());
+        owner.close();
+        remove(spoolPath);
+        spoolPath = null;
+        finished = true;
+    }
+
+    void abort() nothrow {
+        if (finished) return;
+        finished = true;
+        try spool.close(); catch (Exception) {}
+        try if (spoolPath.length && exists(spoolPath)) remove(spoolPath);
+        catch (Exception) {}
+    }
+}
+
 private string destinationFor(string file, string inputRoot, string outputRoot,
                               bool inputIsDir) {
     return inputIsDir ? buildPath(outputRoot, relativePath(file, inputRoot)) : outputRoot;
+}
+
+private string durableOutputIdentity(string primary, string sidecar) {
+    return sidecar.length ? primary ~ "\nsidecar-output=" ~ sidecar : primary;
+}
+
+private string sideOutputExplainRecord(const ref StageEvent event,
+        const ref TerminalSideOutput output, string status) {
+    return ("EXPLAIN\tside_output_status=" ~ status ~
+        "\tdocument_id=" ~ event.payload.document.id.text ~
+        "\tschema=" ~ output.schema ~ "\tsink_key=" ~ output.key ~
+        "\tdigest=" ~ toHexString!(LetterCase.lower)(output.digest)).idup;
 }
 
 /// Opt-in local selected-tree export. It does not use the filter/manifest route.
@@ -385,7 +527,7 @@ int runExtract(string requestedInput, string requestedOutput,
 private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         string outputRoot, bool inputIsDir, ref RuntimePlanV1 job,
         ulong reservedBytes, bool dryRun, PublicationOrder publication,
-        CoordinationMetricsV2 metrics = null) {
+        CoordinationMetricsV2 metrics = null, string sidecarRoot = null) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto rootDestination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
     auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
@@ -394,6 +536,84 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
     bool entered;
     try {
         string dispatchRecord;
+        if (sidecarRoot.length) {
+            struct PendingWrite {
+                string sink;
+                string destination;
+                Content content;
+            }
+            string[] sideRecords;
+            auto result = runLocalJobBatch(file, reservedBytes, document, job,
+                (ref const ubyte[32]) {},
+                (ref RuntimeExecutionV1 execution, ref const ubyte[32]) {
+                    if (execution.hasDispatch)
+                        dispatchRecord = canonicalDispatchRecordV1(
+                            execution.dispatch);
+                    PendingWrite[] writes;
+                    bool[string] destinations;
+                    foreach (ref event; execution.events) {
+                        if (event.kind == EventKind.emitted) {
+                            auto destination = !event.isChild ? rootDestination :
+                                buildPath(inputIsDir ? outputRoot : dirName(outputRoot),
+                                    checkedOutputName(
+                                        event.payload.document.outputName.text));
+                            writes ~= PendingWrite("local-primary:v1",
+                                destination, event.payload.content);
+                        }
+                        foreach (ref output; event.sideOutputs) {
+                            auto destination = sidecarDestinationFor(sidecarRoot,
+                                inputIsDir, event, output);
+                            auto content = new Content([ContentPiece.own(output.bytes)]);
+                            writes ~= PendingWrite("side-output:" ~ output.key,
+                                destination, content);
+                            sideRecords ~= sideOutputExplainRecord(event, output,
+                                dryRun ? "dry-run" : "published");
+                        }
+                    }
+                    // Resolve and reserve the complete destination set before
+                    // the first publication attempt for this document.
+                    foreach (ref pendingWrite; writes) {
+                        auto selectedRoot = pendingWrite.sink == "local-primary:v1"
+                            ? (inputIsDir ? outputRoot : dirName(outputRoot))
+                            : (inputIsDir ? sidecarRoot : dirName(sidecarRoot));
+                        auto normalized = normalizedAbsolute(
+                            pendingWrite.destination);
+                        if (normalized in destinations)
+                            throw new OutputPolicyViolation(
+                                "primary and side-output destinations collide");
+                        destinations[normalized] = true;
+                        publication.reserve(normalized);
+                        preflightDestination(pendingWrite.destination,
+                            selectedRoot);
+                        requireUnaliasedFileOrAbsent(pendingWrite.destination,
+                            pendingWrite.sink);
+                    }
+                    foreach (ref pendingWrite; writes) {
+                        auto selectedRoot = pendingWrite.sink == "local-primary:v1"
+                            ? (inputIsDir ? outputRoot : dirName(outputRoot))
+                            : (inputIsDir ? sidecarRoot : dirName(sidecarRoot));
+                        if (!dryRun) ensurePlainDirectory(selectedRoot,
+                            dirName(normalizedAbsolute(pendingWrite.destination)));
+                    }
+                    publication.enter(ordinal);
+                    entered = true;
+                    IndependentSinkFailure first;
+                    if (!dryRun) foreach (ref pendingWrite; writes) try {
+                        writeAtomicPieces(pendingWrite.destination,
+                            pendingWrite.content.pieces());
+                    } catch (Exception failure) {
+                        if (first is null) first = new IndependentSinkFailure(
+                            pendingWrite.sink, failure);
+                    }
+                    if (first !is null) throw first;
+                });
+            if (!entered)
+                throw new Exception("compiled job produced no terminal decision");
+            publication.complete();
+            result.dispatchRecord = dispatchRecord;
+            result.sideOutputRecords = sideRecords;
+            return result;
+        }
         auto result = runLocalJob(file, reservedBytes, document, job,
             (const ref StageEvent event) {
                 if (!event.isChild) return rootDestination;
@@ -747,7 +967,7 @@ private bool sameFile(string a, string b) {
 }
 
 private void preflightManifest(string path, string inputPath, string outputPath,
-                               bool inputIsDir) {
+                               bool inputIsDir, string sidecarPath = null) {
     if (!path.length) throw new Exception("--manifest path is required");
     foreach (candidate; [path, path ~ "-wal", path ~ "-shm"]) {
         auto resolved = resolveExistingPrefix(candidate);
@@ -761,6 +981,10 @@ private void preflightManifest(string path, string inputPath, string outputPath,
             (inputIsDir && pathIsWithin(resolved, outputPath)) ||
             (!inputIsDir && (resolved == outputPath || sameFile(candidate, outputPath))))
             throw new Exception("manifest and companions must be outside input and output");
+        if (sidecarPath.length && (pathsOverlap(resolved, sidecarPath) ||
+                sameFile(candidate, sidecarPath)))
+            throw new Exception(
+                "manifest and companions must be outside sidecar output");
         if (exists(candidate)) {
             // A hard link to any tree member would be expensive to discover;
             // reject every multiply linked DB/companion instead.
@@ -859,6 +1083,7 @@ private struct ManifestOutcome {
     bool hasKey;
     bool terminal;
     string dispatchRecord;
+    string[] sideOutputRecords;
 }
 
 private ManifestOutcome manifestOutcome(string status, string detail, SinkKey key,
@@ -887,11 +1112,16 @@ private void v2Explain(string status, SinkKey key, string sinkId,
 }
 
 version (FailurePolicyHarness) {
-    private void failureAt(string databasePath, string phase, string file) {
-        auto marker = databasePath ~ ".fault-" ~ phase;
-        if (exists(marker) && (readText(marker).length == 0 ||
-            readText(marker) == baseName(file)))
-            throw new Exception("injected " ~ phase ~ " fault");
+    private void failureAt(string databasePath, string phase, string file,
+            size_t eventOrdinal = size_t.max) {
+        auto markers = [databasePath ~ ".fault-" ~ phase];
+        if (eventOrdinal != size_t.max)
+            markers = [databasePath ~ ".fault-" ~ phase ~ "-" ~
+                eventOrdinal.to!string] ~ markers;
+        foreach (marker; markers)
+            if (exists(marker) && (readText(marker).length == 0 ||
+                readText(marker) == baseName(file)))
+                throw new Exception("injected " ~ phase ~ " fault");
     }
 }
 
@@ -975,7 +1205,8 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
         string databasePath, string file, string inputRoot, string outputRoot,
         bool inputIsDir, ref RuntimePlanV1 job, ulong reservedBytes,
         ref const(ubyte[32]) configHash, bool retry, bool journalRoute,
-        bool targeted, bool requireRuntimeEvidence, bool allowVerifiedSkip) {
+        bool targeted, bool requireRuntimeEvidence, bool allowVerifiedSkip,
+        string sidecarRoot = null) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
         OutputName(inputIsDir ? relative : baseName(outputRoot)));
@@ -985,6 +1216,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
     bool allEventsPreviouslyTerminal = true;
     bool verifiedSkip;
     string dispatchRecord;
+    string[] sideOutputRecords;
     try outcome = runLocalJobBatch(file, reservedBytes, document, job,
         (ref const ubyte[32] inputHash) {
             rootKey = DurableRootKey(document.id, inputHash, configHash);
@@ -1027,10 +1259,13 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                 dispatchRecord = canonicalDispatchRecordV1(
                     execution.dispatch);
             DurableEventPlan[] plans;
+            Content[] planContents;
+            string[] planSideSchemas;
+            string[] planSideKeys;
             bool[string] destinations;
-            foreach (ordinal, ref event; events) {
+            foreach (ref event; events) {
                 DurableEventPlan plan;
-                plan.ordinal = ordinal;
+                plan.ordinal = plans.length;
                 final switch (event.kind) {
                 case EventKind.emitted: plan.kind = "emitted"; break;
                 case EventKind.rejected: plan.kind = "rejected"; break;
@@ -1045,7 +1280,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         buildPath(selectedRoot, checkedOutputName(plan.outputName));
                     plan.outputSha256 = durableContentDigest(event.payload.content);
                     plan.sink = !event.isChild ? "local-primary:v1" :
-                        derivedSink(plan.kind, plan.document, ordinal);
+                        derivedSink(plan.kind, plan.document, plan.ordinal);
                     try preflightDestination(plan.destination, selectedRoot);
                     catch (Exception failure) {
                         throw new DurableDocumentFailure(rootKey, "failure",
@@ -1059,9 +1294,49 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                 } else {
                     plan.hasReason = true;
                     plan.reasonSha256 = reasonDigest(event.reason);
-                    plan.sink = derivedSink(plan.kind, plan.document, ordinal);
+                    plan.sink = derivedSink(plan.kind, plan.document,
+                        plan.ordinal);
                 }
                 plans ~= plan;
+                planContents ~= event.kind == EventKind.emitted
+                    ? event.payload.content : null;
+                planSideSchemas ~= null;
+                planSideKeys ~= null;
+                foreach (ref output; event.sideOutputs) {
+                    DurableEventPlan side;
+                    side.ordinal = plans.length;
+                    side.kind = "emitted";
+                    side.document = event.payload.document.id;
+                    side.outputName = event.payload.document.outputName.text ~
+                        output.suffix;
+                    side.hasOutput = true;
+                    side.destination = sidecarDestinationFor(sidecarRoot,
+                        inputIsDir, event, output);
+                    side.outputSha256 = output.digest;
+                    side.sink = "side-output:" ~ output.key;
+                    try preflightDestination(side.destination,
+                        inputIsDir ? sidecarRoot : dirName(sidecarRoot));
+                    catch (Exception failure) {
+                        throw new DurableDocumentFailure(rootKey, "failure",
+                            "policy-failed", side.sink, failure, true);
+                    }
+                    try requireUnaliasedFileOrAbsent(side.destination,
+                        side.sink);
+                    catch (Exception failure) {
+                        throw new DurableDocumentFailure(rootKey, "failure",
+                            "policy-failed", side.sink, failure, true);
+                    }
+                    auto normalized = normalizedAbsolute(side.destination);
+                    if (normalized in destinations)
+                        throw new OutputPolicyViolation(
+                            "primary and side-output destinations collide");
+                    destinations[normalized] = true;
+                    plans ~= side;
+                    planContents ~= new Content([
+                        ContentPiece.own(output.bytes)]);
+                    planSideSchemas ~= output.schema;
+                    planSideKeys ~= output.key;
+                }
             }
             try ledger.planEvents(rootKey, plans);
             catch (Exception failure) {
@@ -1070,7 +1345,8 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         derivedSink("root", rootKey.document, 0), failure, true);
             }
             version (ManifestCliHarness) manifestKillAt(databasePath, "after-event-plan");
-            foreach (ordinal, ref event; events) {
+            DurableDocumentFailure firstSinkFailure;
+            foreach (ordinal, ref plan; plans) {
                 auto prior = ledger.readEvent(rootKey, ordinal);
                 if (prior.state != DurableEventState.committed &&
                         prior.state != DurableEventState.acknowledged)
@@ -1081,18 +1357,30 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                     if (decision.msg == "durable job: retry-required")
                         throw new DurableDocumentFailure(rootKey,
                             "retry-required", "retry-required",
-                            plans[ordinal].sink, decision);
+                            plan.sink, decision);
                     throw new DurableDocumentFailure(rootKey, "failure",
                         cast(ResourceExhaustion)decision !is null ?
                             "resource-failed" : "inspect-invalidated",
-                        plans[ordinal].sink, decision, true);
+                        plan.sink, decision, true);
                 }
-                if (action == DurableAction.skip) continue;
+                if (action == DurableAction.skip) {
+                    if (planSideSchemas[ordinal].length)
+                        sideOutputRecords ~= ("EXPLAIN\tside_output_status=verified" ~
+                            "\tdocument_id=" ~ plan.document.text ~
+                            "\tschema=" ~ planSideSchemas[ordinal] ~
+                            "\tsink_key=" ~ planSideKeys[ordinal] ~
+                            "\tdigest=" ~ toHexString!(LetterCase.lower)(
+                                plan.outputSha256)).idup;
+                    continue;
+                }
                 bool touched;
                 string activePhase = "policy";
                 try {
-                    ensurePlainDirectory(selectedRoot,
-                        dirName(plans[ordinal].destination));
+                    auto activeRoot = plan.sink.startsWith("side-output:")
+                        ? (inputIsDir ? sidecarRoot : dirName(sidecarRoot))
+                        : selectedRoot;
+                    ensurePlainDirectory(activeRoot,
+                        dirName(plan.destination));
                     version (FailurePolicyHarness)
                         failureAt(databasePath, "policy", file);
                     version (FailurePolicyHarness)
@@ -1107,18 +1395,18 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                     version (FailurePolicyHarness) {
                         if (exists(databasePath ~ ".fault-policy-swap")) {
                             import std.file : symlink;
-                            symlink(file, plans[ordinal].destination);
+                            symlink(file, plan.destination);
                         }
                     }
                     version (FailurePolicyHarness)
-                        failureAt(databasePath, "sink", file);
+                        failureAt(databasePath, "sink", file, ordinal);
                     {
                         auto publicationStarted = beginDurableMetricV1();
                         scope(exit) recordDurableMetricV1(
                             DurableMetricPhaseV1.publication,
-                            event.payload.content.size, publicationStarted);
-                        writeAtomicPieces(plans[ordinal].destination,
-                            event.payload.content.pieces());
+                            planContents[ordinal].size, publicationStarted);
+                        writeAtomicPieces(plan.destination,
+                            planContents[ordinal].pieces());
                     }
                     version (ManifestCliHarness) manifestKillAt(databasePath,
                         ordinal == 0 ? "after-first-publish" : "after-last-output");
@@ -1127,6 +1415,14 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                     version (ManifestCliHarness) manifestKillAt(databasePath,
                         "after-publish");
                     ledger.commitPublished(rootKey, ordinal);
+                    if (planSideSchemas[ordinal].length)
+                        sideOutputRecords ~= ("EXPLAIN\tside_output_status=" ~
+                            (retry ? "retried" : "published") ~
+                            "\tdocument_id=" ~ plan.document.text ~
+                            "\tschema=" ~ planSideSchemas[ordinal] ~
+                            "\tsink_key=" ~ planSideKeys[ordinal] ~
+                            "\tdigest=" ~ toHexString!(LetterCase.lower)(
+                                plan.outputSha256)).idup;
                     version (ManifestCliHarness) manifestKillAt(databasePath,
                         ordinal == 0 ? "after-first-commit" : "after-event-commit");
                     version (ManifestCliHarness) manifestKillAt(databasePath,
@@ -1141,16 +1437,22 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         phase = "resource"; code = "resource-failed";
                     }
                     try ledger.recordFailure(rootKey, ordinal, touched, phase, code);
-                    catch (Throwable ignored) { throw failure; }
+                    catch (Exception ledgerFailure) {
+                        throw new DurableDocumentFailure(rootKey, "failure",
+                            "manifest-failed", plan.sink,
+                            ledgerFailure, true);
+                    }
                     if (phase == "policy" || phase == "resource")
                         throw new DurableDocumentFailure(rootKey,
                             touched ? "uncertain" : "failed", code,
-                            plans[ordinal].sink, failure, true);
-                    throw new DurableDocumentFailure(rootKey,
-                        touched ? "uncertain" : "failed", code,
-                        plans[ordinal].sink, failure);
+                            plan.sink, failure, true);
+                    if (firstSinkFailure is null)
+                        firstSinkFailure = new DurableDocumentFailure(rootKey,
+                            touched ? "uncertain" : "failed", code,
+                            plan.sink, failure);
                 }
             }
+            if (firstSinkFailure !is null) throw firstSinkFailure;
             version (ManifestCliHarness) manifestKillAt(databasePath,
                 "before-root-commit");
             ledger.completeRoot(rootKey);
@@ -1195,6 +1497,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
         SinkKey(rootKey.document, rootKey.inputSha256, rootKey.configSha256,
             "local-primary:v1"), terminal);
     result.dispatchRecord = dispatchRecord;
+    result.sideOutputRecords = sideOutputRecords;
     return result;
 }
 
@@ -1224,8 +1527,10 @@ int runApp(string[] args) {
     string errorJournalPath;
     bool errorRetry;
     bool errorTargeted;
+    string sidecarPath;
     string jsonlFields, datasetNamespace, sourceKey;
     size_t maxJsonlLineBytes, maxJsonlOutputBytes;
+    ulong maxJsonlSidecarBytes = 64UL * 1024 * 1024;
     const filtersExplicit = args.canFindOption("--filters");
     const descriptorsExplicit = args.canFindOption("--max-open-inputs");
     const fieldsExplicit = args.canFindOption("--jsonl-fields");
@@ -1233,8 +1538,11 @@ int runApp(string[] args) {
     const sourceExplicit = args.canFindOption("--source-key");
     const lineCapExplicit = args.canFindOption("--max-jsonl-line-bytes");
     const outputCapExplicit = args.canFindOption("--max-jsonl-output-bytes");
+    const sidecarCapExplicit = args.canFindOption(
+        "--max-jsonl-sidecar-bytes");
     const manifestExplicit = args.canFindOption("--manifest");
     const errorJournalExplicit = args.canFindOption("--error-journal");
+    const sidecarExplicit = args.canFindOption("--sidecar-output");
     const fileSchedulingExplicit = args.canFindOption("--threads") ||
         args.canFindOption("--max-queued-docs") ||
         args.canFindOption("--max-input-bytes") || descriptorsExplicit;
@@ -1264,17 +1572,19 @@ int runApp(string[] args) {
         "error-journal", "Existing opt-in v3 failure journal", &errorJournalPath,
         "error-retry", "Explicitly retry unresolved v3 outputs", &errorRetry,
         "error-targeted", "Retry only exact local v3 outstanding targets", &errorTargeted,
+        "sidecar-output", "Generic terminal side-output file or mirrored tree root", &sidecarPath,
         "jsonl-fields", "Comma-separated selected JSONL text fields", &jsonlFields,
         "dataset-namespace", "Stable JSONL dataset namespace", &datasetNamespace,
         "source-key", "Stable JSONL source key", &sourceKey,
         "max-jsonl-line-bytes", "Maximum input JSONL record bytes", &maxJsonlLineBytes,
-        "max-jsonl-output-bytes", "Maximum output JSONL record bytes including LF", &maxJsonlOutputBytes);
+        "max-jsonl-output-bytes", "Maximum output JSONL record bytes including LF", &maxJsonlOutputBytes,
+        "max-jsonl-sidecar-bytes", "Maximum aggregate terminal side-output JSONL bytes", &maxJsonlSidecarBytes);
     if (helpInfo.helpWanted) {
         defaultGetoptPrinter("scrubbed", helpInfo.options);
         return 0;
     }
     const jsonlOptions = fieldsExplicit || namespaceExplicit || sourceExplicit ||
-        lineCapExplicit || outputCapExplicit;
+        lineCapExplicit || outputCapExplicit || sidecarCapExplicit;
     const jsonlRoute = jsonlOptions || inputPath == "-" || outputPath == "-";
     string configContents;
     bool versionedConfig;
@@ -1304,6 +1614,11 @@ int runApp(string[] args) {
             throw new Exception("file scheduling limits are unavailable in JSONL mode");
         if (!maxJsonlLineBytes || !maxJsonlOutputBytes)
             throw new Exception("JSONL byte caps must be positive");
+        if (!maxJsonlSidecarBytes || maxJsonlSidecarBytes > size_t.max)
+            throw new Exception("JSONL sidecar byte cap is out of range");
+        if (sidecarCapExplicit && !sidecarExplicit)
+            throw new Exception(
+                "--max-jsonl-sidecar-bytes requires --sidecar-output");
         auto fields = jsonlFields.split(",");
         if (!fields.length || !datasetNamespace.length || !sourceKey.length)
             throw new Exception("JSONL fields, namespace and source key must be nonempty");
@@ -1322,6 +1637,28 @@ int runApp(string[] args) {
         versionedConfig = configContents.length && hasJobVersion(configContents);
         auto runtimePlan = selectedRuntimePlan(compositionTokens, filtersExplicit,
             filterList, configPath.length != 0, configContents, versionedConfig);
+        const producesSideOutput = runtimePlan.producesTerminalSideOutput;
+        if (producesSideOutput != sidecarExplicit)
+            throw new Exception(producesSideOutput ?
+                "side-output-producing plan requires --sidecar-output" :
+                "--sidecar-output requires a side-output-producing plan");
+        if (sidecarExplicit) {
+            if (!sidecarPath.length || sidecarPath == "-")
+                throw new Exception(
+                    "JSONL --sidecar-output must name a distinct file");
+            if (exists(sidecarPath) && isSymlink(sidecarPath))
+                throw new Exception("refusing symlink sidecar output path");
+            rejectUnresolvableAncestorLinks(sidecarPath);
+            sidecarPath = resolveExistingPrefix(sidecarPath);
+            preflightOutput(sidecarPath, false);
+            requireUnaliasedFileOrAbsent(sidecarPath,
+                "JSONL sidecar destination");
+            if (configPath.length && (sidecarPath ==
+                    resolveExistingPrefix(configPath) ||
+                    sameFile(sidecarPath, configPath)))
+                throw new Exception(
+                    "JSONL sidecar destination aliases configuration");
+        }
         if (explain && !runtimePlan.isDispatch)
             throw new Exception("--explain is unavailable for v3 JSONL mode");
         if (validateOnly) {
@@ -1329,27 +1666,54 @@ int runApp(string[] args) {
             return 0;
         }
         string[] pendingDispatchRecords;
+        TerminalSideOutput[] pendingSideOutputs;
+        JsonlSidecarWriter sideWriter;
+        if (sidecarExplicit)
+            sideWriter = new JsonlSidecarWriter(sidecarPath,
+                maxJsonlOutputBytes, maxJsonlSidecarBytes, dryRun);
+        scope(failure) if (sideWriter !is null) sideWriter.abort();
+        size_t completed;
+        size_t committedPrimary;
         try {
-            const completed = processStandardJsonlDocuments(datasetNamespace,
+            completed = processStandardJsonlDocuments(datasetNamespace,
                 sourceKey, fields,
                 (string field, string text, SourceLocator source,
-                        size_t selectedOrdinal) =>
-                    runJsonlField(source, field, text, runtimePlan,
+                        size_t selectedOrdinal) {
+                    auto result = runJsonlFieldOutcome(source, field, text,
+                        runtimePlan,
                         (ref RuntimeExecutionV1 execution) {
                             if (explain && execution.hasDispatch)
                                 pendingDispatchRecords ~=
                                     canonicalJsonlDispatchRecordV1(
                                         execution.dispatch, selectedOrdinal);
-                        }),
+                        });
+                    pendingSideOutputs ~= result.sideOutputs;
+                    return result.text;
+                },
                 JsonlLimits(maxJsonlLineBytes, maxJsonlOutputBytes), dryRun,
                 (SourceLocator committed) {
+                    ++committedPrimary;
+                    if (sideWriter !is null)
+                        foreach (ref output; pendingSideOutputs)
+                            sideWriter.append(output);
+                    if (explain) foreach (ref output; pendingSideOutputs)
+                        stderr.writeln("EXPLAIN\tside_output_status=",
+                            dryRun ? "dry-run" : "staged",
+                            "\tdocument_id=", DocumentId.from(committed).text,
+                            "\tschema=", output.schema,
+                            "\tsink_key=", output.key,
+                            "\tdigest=", toHexString!(LetterCase.lower)(
+                                output.digest));
+                    pendingSideOutputs = null;
                     foreach (record; pendingDispatchRecords)
                         stderr.writeln("EXPLAIN\t", record);
                     pendingDispatchRecords = null;
                 });
+            if (sideWriter !is null) sideWriter.commit();
             stderr.writeln("JSONL done. ", completed, " records processed", dryRun ? "; dry-run, no stdout." : ".");
             return 0;
         } catch (JsonlFailure error) {
+            if (sideWriter !is null) sideWriter.abort();
             if (explain && runtimePlan.isDispatch &&
                     (error.kind == JsonlFailureKind.rejected ||
                         error.kind == JsonlFailureKind.quarantined))
@@ -1388,6 +1752,11 @@ int runApp(string[] args) {
                     (error.partialOutputPossible ? "may be partially written" :
                     "was not written"));
             return 1;
+        } catch (Exception error) {
+            if (sideWriter !is null) sideWriter.abort();
+            stderr.writefln("JSONL side output failed after %s primary records fully flushed; side destination not committed",
+                committedPrimary);
+            return 1;
         }
     }
     if (listFilters) {
@@ -1418,6 +1787,11 @@ int runApp(string[] args) {
             "coordination metrics are unavailable with durable routes");
     auto runtimePlan = selectedRuntimePlan(compositionTokens, filtersExplicit,
         filterList, configPath.length != 0, configContents, versionedConfig);
+    const producesSideOutput = runtimePlan.producesTerminalSideOutput;
+    if (producesSideOutput != sidecarExplicit)
+        throw new Exception(producesSideOutput ?
+            "side-output-producing plan requires --sidecar-output" :
+            "--sidecar-output requires a side-output-producing plan");
     auto canonicalSpec = runtimePlan.canonical;
     string chainLabel = runtimePlan.identity;
     if (!versionedConfig && !compositionExplicit) {
@@ -1447,20 +1821,26 @@ int runApp(string[] args) {
         if (pathIsWithin(outputPath, inputPath))
             throw new Exception("output directory must not be inside the input tree");
     }
+    if (sidecarExplicit) {
+        preflightSidecarRoots(inputPath, outputPath, sidecarPath, inputIsDir);
+        sidecarPath = resolveExistingPrefix(sidecarPath);
+    }
     if (!errorTargeted) preflightOutput(outputPath, inputIsDir);
     if (manifestPath.length) {
         manifestPath = resolveExistingPrefix(manifestPath);
-        preflightManifest(manifestPath, inputPath, outputPath, inputIsDir);
+        preflightManifest(manifestPath, inputPath, outputPath, inputIsDir,
+            sidecarPath);
     }
     if (errorJournalPath.length) {
         errorJournalPath = resolveExistingPrefix(errorJournalPath);
-        preflightManifest(errorJournalPath, inputPath, outputPath, inputIsDir);
+        preflightManifest(errorJournalPath, inputPath, outputPath, inputIsDir,
+            sidecarPath);
     }
     if (validateOnly) {
         auto executable = runningExecutableDigest();
         auto durableDigest = deriveDurableIdentity(canonicalSpec,
             runtimePlan.identity, inputIsDir ? "tree" : "file",
-            outputPath, executable);
+            durableOutputIdentity(outputPath, sidecarPath), executable);
         if (errorJournalPath.length) {
             auto checkedJournal = new DurableJobLedger(errorJournalPath,
                 DurableKind.journal,
@@ -1488,7 +1868,7 @@ int runApp(string[] args) {
         executable = runningExecutableDigest();
         configHash = deriveDurableIdentity(canonicalSpec,
             runtimePlan.identity, inputIsDir ? "tree" : "file",
-            outputPath, executable);
+            durableOutputIdentity(outputPath, sidecarPath), executable);
     }
     DurableJobLedger durableLedger;
     if (durableRoute)
@@ -1500,6 +1880,9 @@ int runApp(string[] args) {
     if (!dryRun && !errorTargeted)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
+    if (sidecarPath.length && !dryRun && !errorTargeted)
+        ensurePlainDirectory(inputIsDir ? sidecarPath : dirName(sidecarPath),
+            inputIsDir ? sidecarPath : dirName(sidecarPath));
     auto pending = explain ? new PendingExplanations : null;
     auto coordination = coordinationPath.length ? new CoordinationMetricsV2 : null;
     scope(exit) if (coordination !is null) {
@@ -1521,16 +1904,18 @@ int runApp(string[] args) {
                     bytes, configHash,
                     manifestPath.length ? manifestRetry : errorRetry,
                     errorJournalPath.length != 0,
-                    errorTargeted, explain && runtimePlan.isDispatch,
-                    allowVerifiedSkip);
+                    errorTargeted, explain &&
+                        (runtimePlan.isDispatch || sidecarPath.length),
+                    allowVerifiedSkip, sidecarPath);
             } else {
                 auto local = processCompiledOne(file, inputPath, outputPath,
                     inputIsDir, runtimePlan, bytes, dryRun, publication,
-                    coordination);
+                    coordination, sidecarPath);
                 decision.status = local.status;
                 decision.detail = local.firstReason;
                 decision.terminal = local.rejected != 0 || local.quarantined != 0;
                 decision.dispatchRecord = local.dispatchRecord;
+                decision.sideOutputRecords = local.sideOutputRecords;
             }
             if (decision.terminal) {
                 decisionMutex.lock();
@@ -1548,6 +1933,8 @@ int runApp(string[] args) {
                     !durableRoute ? decision.detail : "", durableRoute ? decision.detail : "",
                     decision.hasKey ? decision.key.document.text : "",
                     decision.hasKey ? decision.key.sink : "");
+            if (explain) foreach (record; decision.sideOutputRecords)
+                writeln(record);
             if (explain) pending.remove(file);
         },
         (string file, Throwable error) {

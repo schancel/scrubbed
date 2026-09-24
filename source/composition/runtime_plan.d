@@ -8,6 +8,7 @@ import composition.dispatch_executor : DispatchExecutionEventV1,
 import composition.job_executor : runCompiledJob;
 import domain.document : DocumentId;
 import stages.contract : EventKind, StageDocument, StageEvent;
+import stages.registry : SideOutputCapability;
 import std.exception : enforce;
 
 enum RuntimePlanKindV1 : ubyte { linearV3, dispatchV4 }
@@ -62,6 +63,15 @@ public:
             ? linearValue.value.identity : dispatchValue.value.identity;
     }
     string canonical() const { requireInitialized; return canonicalValue; }
+    bool producesTerminalSideOutput() {
+        requireInitialized;
+        auto stages = kindValue == RuntimePlanKindV1.linearV3
+            ? linearValue.value.stages : dispatchValue.value.common.stages;
+        foreach (ref stage; stages)
+            if (stage.sideOutputCapability == SideOutputCapability.terminal)
+                return true;
+        return false;
+    }
     CompiledJob linear() {
         enforce(kind == RuntimePlanKindV1.linearV3, "runtime plan is not v3");
         return linearValue.value;

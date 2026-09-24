@@ -16,11 +16,29 @@ class HtmlMarkdownOutputLimit : Exception {
 
 private struct Writer {
     char[] bytes;
+    version (unittest) size_t putCalls;
+    version (unittest) size_t lastPutLength;
 
     void put(scope const(char)[] value) pure {
         if (value.length > maxMarkdownBytes - bytes.length)
             throw new HtmlMarkdownOutputLimit;
+        version (unittest) {
+            ++putCalls;
+            lastPutLength = value.length;
+        }
         bytes ~= value;
+    }
+
+    size_t putDecimal(ulong value) pure {
+        char[ulong.sizeof * 3] digits;
+        size_t start = digits.length;
+        do {
+            digits[--start] = cast(char)('0' + value % 10);
+            value /= 10;
+        } while (value);
+        auto length = digits.length - start;
+        put(digits[start .. $]);
+        return length;
     }
 
     void putText(string value) pure {
@@ -63,6 +81,22 @@ unittest {
     writer.bytes.length = 0;
     assert(writer.finish() is null);
     assert(writer.bytes is null);
+
+    foreach (value; [ulong(0), 9, 10, 99, 100, cast(ulong)long.max]) {
+        Writer decimal;
+        auto length = decimal.putDecimal(value);
+        assert(decimal.bytes == value.to!string);
+        assert(length == decimal.bytes.length && decimal.putCalls == 1 &&
+            decimal.lastPutLength == decimal.bytes.length);
+    }
+    Writer exactFit;
+    exactFit.bytes.length = maxMarkdownBytes - 3;
+    assert(exactFit.putDecimal(100) == 3);
+    assert(exactFit.bytes.length == maxMarkdownBytes);
+    Writer oneOver;
+    oneOver.bytes.length = maxMarkdownBytes - 2;
+    import std.exception : assertThrown;
+    assertThrown!HtmlMarkdownOutputLimit(oneOver.putDecimal(100));
 }
 
 private bool white(char c) pure {
@@ -335,9 +369,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             size_t prefixLength = 2;
             if (name == "ul") writer.put("- ");
             else {
-                auto ordinalText = to!string(ordinal);
-                prefixLength += ordinalText.length;
-                writer.put(ordinalText);
+                prefixLength += writer.putDecimal(cast(ulong)ordinal);
                 writer.put(". ");
             }
             if (ordinal < long.max) ++ordinal;

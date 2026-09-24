@@ -241,11 +241,27 @@ class HtmlMetadataOutputLimit : Exception {
 
 private struct Writer {
     char[] bytes;
+    version (unittest) size_t putCalls;
+    version (unittest) size_t lastPutLength;
 
     void put(scope const(char)[] value) pure {
         if (value.length > maxMetadataJsonBytes - bytes.length)
             throw new HtmlMetadataOutputLimit;
+        version (unittest) {
+            ++putCalls;
+            lastPutLength = value.length;
+        }
         bytes ~= value;
+    }
+
+    void putDecimal(size_t value) pure {
+        char[size_t.sizeof * 3] digits;
+        size_t start = digits.length;
+        do {
+            digits[--start] = cast(char)('0' + value % 10);
+            value /= 10;
+        } while (value);
+        put(digits[start .. $]);
     }
 
     void quoted(string value) pure {
@@ -286,6 +302,21 @@ unittest {
     writer.bytes.length = 0;
     writer.quoted("\"\\\b\f\n\r\t\0\x1f");
     assert(writer.bytes == `"\"\\\b\f\n\r\t\u0000\u001f"`);
+
+    foreach (value; [size_t(0), 9, 10, 99, 100, size_t.max]) {
+        Writer decimal;
+        decimal.putDecimal(value);
+        assert(decimal.bytes == value.to!string);
+        assert(decimal.putCalls == 1 && decimal.lastPutLength == decimal.bytes.length);
+    }
+    Writer exactFit;
+    exactFit.bytes.length = maxMetadataJsonBytes - 3;
+    exactFit.putDecimal(100);
+    assert(exactFit.bytes.length == maxMetadataJsonBytes);
+    Writer oneOver;
+    oneOver.bytes.length = maxMetadataJsonBytes - 2;
+    import std.exception : assertThrown;
+    assertThrown!HtmlMetadataOutputLimit(oneOver.putDecimal(100));
 }
 
 private void putField(ref Writer writer, const ref MetadataField field) pure {
@@ -298,7 +329,8 @@ private void putField(ref Writer writer, const ref MetadataField field) pure {
     if (field.status == "selected") writer.quoted(field.rule);
     else writer.put("null");
     writer.put(`,"node":`);
-    writer.put(field.status == "selected" ? field.node.to!string : "null");
+    if (field.status == "selected") writer.putDecimal(field.node);
+    else writer.put("null");
     writer.put(`,"conflict":`);
     writer.put(field.conflict ? "true" : "false");
     writer.put(`,"invalidEvidence":`);
@@ -313,7 +345,7 @@ private void putField(ref Writer writer, const ref MetadataField field) pure {
         writer.put(`,"rule":`);
         writer.quoted(candidate.rule);
         writer.put(`,"node":`);
-        writer.put(candidate.node.to!string);
+        writer.putDecimal(candidate.node);
         writer.put("}");
     }
     writer.put("]}");

@@ -101,8 +101,16 @@ void main(string[] args) {
         "isolate mark joiner\n", "Unicode-format targets");
     golden("<ol start='oops'><li>A</li></ol>", "1. A\n",
         "invalid ordered start");
+    golden("<ol start='0'><li>A</li></ol>", "1. A\n",
+        "zero ordered start");
     golden("<ol start='-2'><li>A</li></ol>", "1. A\n",
         "negative ordered start");
+    golden("<ol start='9223372036854775808'><li>A</li></ol>", "1. A\n",
+        "overflow ordered start");
+    golden("<ol start='9'><li>A</li><li>B</li></ol>", "9. A\n10. B\n",
+        "ordered 9 to 10 transition");
+    golden("<ol start='99'><li>A</li><li>B</li></ol>", "99. A\n100. B\n",
+        "ordered 99 to 100 transition");
     golden("<p>A<br>B</p>", "A  \nB\n", "line break");
     golden("<ul><li>Outer<ul><li>Inner</li></ul></li></ul>",
         "- Outer\n  \n  - Inner\n", "nested list");

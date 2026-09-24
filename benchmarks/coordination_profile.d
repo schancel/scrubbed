@@ -354,10 +354,16 @@ private bool tryReapExited(int pid, out int status, out rusage usage,
         need(false, "child exit could not be observed for PID " ~
             pid.to!string ~ " (errno " ~ errno.to!string ~ ")");
     if (information.si_pid != pid) return false;
-    auto descendantsRemain = processGroupHasDescendants(pid,
+    bool descendantsRemain;
+    Exception membershipError;
+    try descendantsRemain = processGroupHasDescendants(pid,
         injectMembershipFailureForTest);
+    catch (Exception error) {
+        membershipError = error;
+        descendantsRemain = true;
+    }
     groupClean = !descendantsRemain;
-    if (descendantsRemain && allowGroupGrace) {
+    if (membershipError is null && descendantsRemain && allowGroupGrace) {
         processGroupMutex.unlock();
         mutexHeld = false;
         while (MonoTime.currTime < groupGraceDeadline &&
@@ -374,6 +380,7 @@ private bool tryReapExited(int pid, out int status, out rusage usage,
     while (waited < 0 && errno == EINTR);
     if (waited == pid) removeProcessGroupLocked(pid);
     need(waited == pid, "observed child could not be reaped");
+    if (membershipError !is null) throw membershipError;
     return true;
 }
 
@@ -797,10 +804,13 @@ private void runSelfTest(string harnessPath) {
     need(membershipFailureObserved,
         "injected membership failure did not reach the reap boundary");
     processGroupMutex.lock();
+    bool failedMembershipChildRegistered;
+    foreach (active; activeProcessGroups)
+        if (active == membershipChild.processID)
+            failedMembershipChildRegistered = true;
     processGroupMutex.unlock();
-    need(reapBlocking(membershipChild.processID, membershipStatus,
-            membershipUsage),
-        "membership failure prevented retrying registered-child cleanup");
+    need(!failedMembershipChildRegistered,
+        "membership failure left its child registered after cleanup");
 
     auto environmentProbe = buildPath(root, "environment-probe");
     write(environmentProbe,

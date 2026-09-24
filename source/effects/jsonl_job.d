@@ -54,11 +54,9 @@ private final class FieldSink : Sink {
         child = event.isChild;
         reason = event.reason.idup;
         if (event.kind == EventKind.emitted && !event.isChild) {
-            ubyte[] bytes;
-            event.payload.content.stream((const(ubyte)[] chunk) {
-                bytes ~= chunk;
-            });
-            mapped = cast(string) bytes;
+            // The returned field must outlive the runner's input owner. Copy
+            // once into its exact final size instead of growing a stream sink.
+            mapped = cast(string) event.payload.content.copy;
         }
     }
 }

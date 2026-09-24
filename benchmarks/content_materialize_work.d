@@ -21,13 +21,14 @@ version (MaterializationWorkProbe) {} else static assert(false,
 version (ContentStreamWorkProbe) {} else static assert(false,
     "content materialization evidence requires ContentStreamWorkProbe");
 
-private enum sourceBase = "f4703c0aae2e6713e1b9b0d15ce9b3a4f3ab2a7d";
+private enum sourceBase = "c9c6937355bcdbbb7b68b416352ec9b939eff0ad";
 private enum inputBytes = 4 * 1024 * 1024;
 private enum chunkBytes = 8 * 1024;
 private enum evidenceSourcePaths = [
     "source/domain/document.d",
     "source/content/pieces.d",
     "source/composition/executor.d",
+    "source/effects/jsonl_job.d",
     "benchmarks/content_materialize_work.d"
 ];
 
@@ -39,6 +40,8 @@ private string embeddedSource(string path) pure {
         return import("source/content/pieces.d");
     case "source/composition/executor.d":
         return import("source/composition/executor.d");
+    case "source/effects/jsonl_job.d":
+        return import("source/effects/jsonl_job.d");
     case "benchmarks/content_materialize_work.d":
         return import("benchmarks/content_materialize_work.d");
     }

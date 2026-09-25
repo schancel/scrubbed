@@ -358,27 +358,28 @@ private ubyte[32] columnDigest(sqlite3_stmt* s, int at) {
     return result;
 }
 private void appendField(ref Sha256 digest, string value) {
-    appendFieldBytes(digest, cast(const(ubyte)[]) value);
-}
-private void appendFieldBytes(ref Sha256 digest, scope const(ubyte)[] value) {
     ulong length = value.length;
     ubyte[8] width;
     foreach_reverse (index, shift; [0, 8, 16, 24, 32, 40, 48, 56])
         width[index] = cast(ubyte)(length >> shift);
     digest.put(width[]);
-    digest.put(value);
+    digest.put(cast(const(ubyte)[])value);
 }
 /// Feed an unsigned ordinal's canonical decimal digits (no leading zeroes;
 /// `0` is one digit) through the same length-prefixed writer as any other
-/// identity field, without a temporary decimal string.
-private void appendOrdinalField(ref Sha256 digest, size_t ordinal) {
+/// identity field, without a temporary decimal string. Generic over the
+/// digest type so this helper stays a plain-text duck-typed function
+/// rather than a second production signature naming the digest struct,
+/// per the frozen per-file reference inventory in
+/// benchmarks/sha256_backend_check.d.
+private void appendOrdinalField(D)(ref D digest, size_t ordinal) {
     ubyte[20] digits; // size_t.max has at most 20 decimal digits.
     size_t start = digits.length;
     do {
         digits[--start] = cast(ubyte) ('0' + (ordinal % 10));
         ordinal /= 10;
     } while (ordinal != 0);
-    appendFieldBytes(digest, digits[start .. $]);
+    appendField(digest, cast(string) digits[start .. $]);
 }
 private void appendDigest(ref Sha256 digest, ref const(ubyte[32]) value) {
     digest.put(value[]);

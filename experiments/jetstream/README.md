@@ -35,9 +35,14 @@ empty fetch is checked against a monotonic 150--1,000 ms window. Every probe has
 a 15-second self-alarm and is also tracked by exact PID under a 16-second
 harness deadline.
 
-After the semantic probes, the runner intentionally fails a nested fixture
-that starts the real server and writes throwaway content. The parent verifies
-that the nested trap stopped that exact PID and removed the content directory.
+After the semantic probes, the runner interrupts a real, actively-connected
+reconnect probe client with an external `TERM` sent to the nested harness that
+owns it, reusing the already-running fixed-config server. The parent verifies
+that the exact client PID was reaped, its nested scratch directory is gone,
+and an ephemeral token copy written into that scratch is gone too. It then
+intentionally fails a separate nested fixture that starts the real server and
+writes throwaway content. The parent verifies that the nested trap stopped
+that exact PID and removed the content directory.
 
 Tested: macOS arm64. The runner contains official-release hashes and platform
 selection for macOS x86_64 and Linux x86_64/arm64, but those paths remain

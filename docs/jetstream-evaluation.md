@@ -38,9 +38,9 @@ auth correct-token-plaintext-rejected=true tls-listener-advertised=true token-re
 setup admit=true duplicate=true nak-redelivery-before-ack-expiry=true causal-ack-wait-ms=10000 max-ack-pending-blocks-second=true ack-releases-second=true restart-ack-wait-ms=500 ack=true payload-limit=512 stream-limit=4 inflight-limit=1 fetch-timeout-window-ms=150..1000 pending-restart=true client-rlimit=64 outer-deadline-s=15
 restart durable-identity=true redelivery=true state-survived=true fetch-timeout-ms=200 fetch-timeout-window-ms=150..1000 drained=true client-rlimit=64 outer-deadline-s=15
 reconnect disconnected=true reconnected=true publish-after-reconnect=true client-rlimit=64 outer-deadline-s=15
-resources platform=darwin-arm64 server-fds=7/64 client-fds=6/64 store-bytes=0/4194304 scratch-bytes=50696192/268435456 runtime-processes=2 build-jobs=2
+resources platform=darwin-arm64 server-fds=7/64 client-fds=6/64 store-bytes=0/4194304 scratch-bytes=51142656/268435456 runtime-processes=2 build-jobs=2
 packaging nats-c=3.14.0-static nats-server=2.15.0-official-binary openssl-pkgconfig=3.6.4-dynamic openssl-pc-dir=/opt/homebrew/lib/pkgconfig/../../Cellar/openssl@3/3.6.4/lib/pkgconfig sbom-verified=true
-cleanup server-stopped=true client-stopped=true failure-trap=true scratch-removed=true ephemeral-secrets-removed=true
+cleanup server-stopped=true client-stopped=true active-probe-interrupt=true failure-trap=true scratch-removed=true ephemeral-secrets-removed=true
 ```
 
 The runner downloads the selected official artifacts into a fresh scratch
@@ -97,8 +97,8 @@ linkage checks on each shipping target.
 | Stream bytes | 4,096 bytes |
 | Server stores | 4 MiB file, 1 MiB memory; file-backed stream only |
 | In-flight work | one durable-consumer ack pending and one-message pull batches |
-| Time | 300 ms connect, 10 s causal-Nak ack wait, 500 ms restart ack wait, 100 ms reconnect wait × 40 attempts, 500 ms publish/API, 200--1,000 ms fetch, monotonic 150--1,000 ms assertion around every 200 ms empty fetch, 2 s client teardown, 5 s process start/stop, 15 s client self-alarm plus 16 s exact-PID harness deadline |
-| Scratch | 256 MiB; observed 50,696,192 bytes including downloads, SBOM, linkage evidence, and build |
+| Time | 300 ms connect, 10 s causal-Nak ack wait, 500 ms restart ack wait, 100 ms reconnect wait × 40 attempts, 500 ms publish/API, 200--1,000 ms fetch, monotonic 150--1,000 ms assertion around every 200 ms empty fetch, 2 s client teardown, 5 s process start/stop, 15 s client self-alarm plus 16 s exact-PID harness deadline, 5 s active-probe interrupt readiness bound |
+| Scratch | 256 MiB; observed 51,142,656 bytes including downloads, SBOM, linkage evidence, and build |
 
 The evaluated server requires TLS and a token. A raw socket first sends the
 correct-token plaintext NATS `CONNECT` and `PING` to a non-TLS control and
@@ -110,10 +110,15 @@ separate TLS path proves the wrong token fails. The random token, CA private
 key, server key, payloads, store, logs, and binaries exist only below a
 mode-0700 scratch directory. They
 are never passed on a command line or copied into evidence. Normal and error
-traps stop recorded PIDs and remove the directory. An intentional failure
-fixture starts the real pinned server, writes throwaway content, exits nonzero,
-and proves that its exact PID and nested scratch are gone. The successful run
-also checks that the outer directory no longer exists.
+traps stop recorded PIDs and remove the directory. An active-probe interrupt
+fixture keeps a real, connected reconnect probe client running against the
+already-started fixed-config server, sends `TERM` to the nested harness
+subshell that owns it, and proves that the exact client PID was reaped and its
+nested scratch directory and ephemeral token copy are both gone. A separate
+intentional failure fixture starts the real pinned server, writes throwaway
+content, exits nonzero, and proves that its exact PID and nested scratch are
+gone. The successful run also checks that the outer directory no longer
+exists.
 
 ## Mapping to the fixed Frontier / JobQueue contract
 

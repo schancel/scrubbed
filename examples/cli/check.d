@@ -6,16 +6,34 @@ import std.array : replicate;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : SHA256, sha256Of;
-import std.file : SpanMode, dirEntries, exists, mkdir, readText, rmdirRecurse,
-    symlink, tempDir, write;
+import std.file : SpanMode, copy, dirEntries, exists, getAttributes, mkdir,
+    mkdirRecurse, readText, rmdirRecurse, setAttributes, symlink, tempDir, write;
 import std.json : parseJSON;
-import std.path : baseName, buildPath;
+import std.path : absolutePath, baseName, buildNormalizedPath, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
 import std.string : replace, split, splitLines, startsWith;
 import std.uuid : randomUUID;
 
 private void check(bool condition, string label) {
     if (!condition) throw new Exception("CLI golden: " ~ label);
+}
+
+private string posixQuoted(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'') quoted ~= "'\\''";
+        else quoted ~= character;
+    }
+    return quoted ~ "'";
+}
+
+private string fishQuoted(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'' || character == '\\') quoted ~= '\\';
+        quoted ~= character;
+    }
+    return quoted ~ "'";
 }
 
 private struct Captured {
@@ -113,6 +131,18 @@ int main(string[] args) {
         check(help.status == 0 && help.output.startsWith("Usage: scrubbed " ~ canonical ~ " "),
             verb ~ " help");
     }
+    auto completionHelp = execute([exe, "completion", "--help"]);
+    check(completionHelp.status == 0 && completionHelp.output ==
+        "Usage: scrubbed completion [-h] <operation> [<args>]\n\n" ~
+        "Generate shell setup or command/option-name candidates.\n\n" ~
+        "Operations:\n" ~
+        "  init --bash|--zsh|--fish\n" ~
+        "      Print initialization script for the selected shell.\n" ~
+        "  complete --bash|--zsh|--fish -- <tokens>\n" ~
+        "      Print command and option name candidates.\n\n" ~
+        "Optional arguments:\n" ~
+        "  -h, --help    Show this help message and exit\n\n",
+        "completion help golden");
     auto list = execute([exe, "--list-filters"]);
     check(list.status == 0 && list.output ==
         "registered filters: fix-mojibake, strip-control, decode-html-entities, uncurl-quotes, normalize-line-endings\n",
@@ -388,15 +418,160 @@ int main(string[] args) {
         extract.error == "scrubbed: extract requires --input, --output and --format=tree-json|markdown\n" &&
         !exists(extractOutput), "extract argument golden");
 
-    foreach (shell; ["bash", "zsh", "fish"]) {
+    auto executable = buildNormalizedPath(absolutePath(exe));
+    auto bashCommand = posixQuoted(executable) ~
+        " completion complete --bash -- \"${COMP_WORDS[@]}\" ---";
+    auto bashSetup =
+        "# Add this source command into .bashrc:\n" ~
+        "#       source <(" ~ posixQuoted(executable) ~
+            " completion init --bash)\n" ~
+        "_scrubbed_completion() {\n" ~
+        "    local candidate\n" ~
+        "    COMPREPLY=()\n" ~
+        "    while IFS= read -r candidate; do\n" ~
+        "        COMPREPLY+=(\"$candidate\")\n" ~
+        "    done < <(" ~ bashCommand ~ ")\n" ~
+        "}\n" ~
+        "complete -F _scrubbed_completion scrubbed\n";
+    auto zshCommand = posixQuoted(executable) ~
+        " completion complete --zsh -- \"${COMP_WORDS[@]}\" ---";
+    auto zshSetup =
+        "# Ensure that you called compinit and bashcompinit like below in your .zshrc:\n" ~
+        "#       autoload -Uz compinit && compinit\n" ~
+        "#       autoload -Uz bashcompinit && bashcompinit\n" ~
+        "# And then add this source command after them into your .zshrc:\n" ~
+        "#       source <(" ~ posixQuoted(executable) ~
+            " completion init --zsh)\n" ~
+        "_scrubbed_completion() {\n" ~
+        "    local candidate\n" ~
+        "    COMPREPLY=()\n" ~
+        "    while IFS= read -r candidate; do\n" ~
+        "        COMPREPLY+=(\"$candidate\")\n" ~
+        "    done < <(" ~ zshCommand ~ ")\n" ~
+        "}\n" ~
+        "complete -F _scrubbed_completion scrubbed\n";
+    auto fishCommand = "(COMMAND_LINE=(commandline -p) " ~
+        fishQuoted(executable) ~
+        " completion complete --fish -- (commandline -op))";
+    auto fishSetup =
+        "# Add this source command into ~/.config/fish/config.fish:\n" ~
+        "#       " ~ fishQuoted(executable) ~
+            " completion init --fish | source\n" ~
+        "complete -c scrubbed -a " ~ fishQuoted(fishCommand) ~
+            " --no-files\n";
+    auto shells = ["bash", "zsh", "fish"];
+    auto setupGoldens = [bashSetup, zshSetup, fishSetup];
+    foreach (index, shell; shells) {
         auto setup = execute([exe, "completion", "init", "--" ~ shell]);
-        check(setup.status == 0 && setup.output.canFind("complete") &&
-            setup.output.canFind("scrubbed --"), shell ~ " setup");
+        check(setup.status == 0 && setup.output == setupGoldens[index],
+            shell ~ " exact setup golden");
+        check(!setup.output.canFind(executable ~ " init") &&
+            !setup.output.canFind(executable ~ " --") &&
+            !setup.output.canFind("eval"),
+            shell ~ " setup contains only nested self-invocations");
     }
     auto commands = execute([exe, "completion", "complete", "--fish", "--", "re"]);
     check(commands.status == 0 && commands.output == "repair\n", "command candidate golden");
-    auto options = execute([exe, "--fish", "--", "repair", "--th"]);
-    check(options.status == 0 && options.output == "--threads\n", "option candidate golden");
+    foreach (shell; ["bash", "zsh"]) {
+        auto nested = execute(["env", "COMP_LINE=scrubbed repair --th", exe,
+            "completion", "complete", "--" ~ shell, "--", "scrubbed",
+            "repair", "--th", "---"]);
+        check(nested.status == 0 && nested.output == "--threads\n",
+            shell ~ " generated nested self-invocation");
+    }
+    auto fishNested = execute(["env", "COMMAND_LINE=scrubbed repair --th", exe,
+        "completion", "complete", "--fish", "--", "scrubbed", "repair", "--th"]);
+    check(fishNested.status == 0 && fishNested.output == "--threads\n",
+        "fish generated nested self-invocation");
+    auto directBash = execute([exe, "completion", "complete", "--bash", "--", "re"]);
+    auto directZsh = execute([exe, "completion", "complete", "--zsh", "--", "re"]);
+    check(directBash.status == 0 && directBash.output == "repair\n" &&
+        directZsh.status == 0 && directZsh.output == "repair\n",
+        "bash/zsh direct canonical candidates");
+    foreach (shell; ["bash", "zsh", "fish"]) {
+        auto legacySetup = execute([exe, "init", "--" ~ shell]);
+        check(legacySetup.status == 0 && legacySetup.output.length != 0,
+            shell ~ " legacy setup compatibility");
+    }
+    auto legacyBash = execute(["env", "COMP_LINE=scrubbed repair --th", exe,
+        "--bash", "--", "scrubbed", "repair", "--th", "---"]);
+    auto legacyFish = execute(["env", "COMMAND_LINE=scrubbed repair --th", exe,
+        "--fish", "--", "scrubbed", "repair", "--th"]);
+    check(legacyBash.status == 0 && legacyBash.output == "--threads\n" &&
+        legacyFish.status == 0 && legacyFish.output == "--threads\n",
+        "legacy generated candidate compatibility");
+
+    auto quotedDirectory = buildPath(root, "completion path's release");
+    mkdirRecurse(quotedDirectory);
+    auto quotedExe = buildPath(quotedDirectory, "scrubbed");
+    copy(exe, quotedExe);
+    setAttributes(quotedExe, getAttributes(exe));
+    auto marker = buildPath(root, "completion-metacharacter-marker");
+    auto bashQuoted = execute(["bash", "-c", q"BASH
+set -e
+setup=$("$1" completion init --bash)
+source /dev/stdin <<< "$setup"
+complete -p scrubbed >/dev/null
+marker=$2
+COMP_WORDS=(scrubbed repair "--th;touch $marker")
+COMP_LINE="scrubbed repair --th;touch $marker"
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 0 ]
+[ ! -e "$marker" ]
+COMP_WORDS=(scrubbed repair --th)
+COMP_LINE='scrubbed repair --th'
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 1 ]
+printf '%s\n' "${COMPREPLY[0]}"
+BASH", "completion-path-check", quotedExe, marker]);
+    check(bashQuoted.status == 0 && bashQuoted.output == "--threads\n",
+        "bash quoted executable setup and registered invocation: status=" ~
+            bashQuoted.status.to!string ~ "; stdout=" ~ bashQuoted.output ~
+            "; expected --threads");
+    auto zshQuoted = execute(["zsh", "-fc", q"ZSH
+set -e
+autoload -Uz compinit && compinit
+autoload -Uz bashcompinit && bashcompinit
+setup=$("$1" completion init --zsh)
+source /dev/stdin <<< "$setup"
+complete -p scrubbed >/dev/null
+marker=$2
+COMP_WORDS=(scrubbed repair "--th;touch $marker")
+COMP_LINE="scrubbed repair --th;touch $marker"
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 0 ]
+[ ! -e "$marker" ]
+COMP_WORDS=(scrubbed repair --th)
+COMP_LINE='scrubbed repair --th'
+_scrubbed_completion
+[ "${#COMPREPLY[@]}" -eq 1 ]
+printf '%s\n' "${COMPREPLY[1]}"
+ZSH", "completion-path-check", quotedExe, marker]);
+    check(zshQuoted.status == 0 && zshQuoted.output == "--threads\n",
+        "zsh quoted executable setup and registered invocation");
+    auto fishAvailable = execute(["sh", "-c", "command -v fish >/dev/null 2>&1"]);
+    if (fishAvailable.status == 0) {
+        auto fishQuoted = execute(["fish", "-c", q"FISH
+"$argv[1]" completion init --fish | source
+complete -C "scrubbed repair '--th;touch $argv[2]'" >/dev/null
+test ! -e "$argv[2]"
+complete -C 'scrubbed repair --th'
+FISH", "completion-path-check", quotedExe, marker]);
+        check(fishQuoted.status == 0 && fishQuoted.output == "--threads\n",
+            "fish quoted executable setup and registered invocation");
+    }
+    string[][] malformedCases = [["completion"], ["completion", "bogus"],
+            ["completion", "init"], ["completion", "init", "--tcsh"],
+            ["completion", "init", "--bash", "extra"],
+            ["completion", "complete", "--fish", "re"],
+            ["completion", "complete", "--tcsh", "--", "re"]];
+    foreach (bad; malformedCases) {
+        auto malformed = separately([exe] ~ bad);
+        check(malformed.status == 2 && malformed.output == "" &&
+            malformed.error.startsWith("scrubbed: ") &&
+            malformed.error.canFind("scrubbed completion --help"),
+            "malformed completion exits 2: " ~ bad[0]);
+    }
 
     // Real release-path cancellation regression: processing these files takes
     // long enough that the later symlink catches admitted work still queued.

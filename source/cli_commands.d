@@ -6,7 +6,8 @@ import cli : runApp, runExtract;
 import effects.error_cli : runErrorCommand;
 import effects.metadata_route_cli : runMetadataRoute;
 import std.conv : to;
-import std.stdio : stderr;
+import std.file : thisExePath;
+import std.stdio : stderr, writeln;
 import std.string : indexOf, startsWith;
 
 mixin template ProcessingOptions() {
@@ -62,6 +63,8 @@ mixin template ProcessingOptions() {
     bool errorRetry;
     @(NamedArgument("error-targeted").Description("Retry only exact local v3 outstanding targets"))
     bool errorTargeted;
+    @(NamedArgument("sidecar-output").Description("Generic terminal side-output file or mirrored tree root"))
+    string sidecarOutput;
     @(NamedArgument("jsonl-fields").Description("Comma-separated top-level JSON text fields for stdin/stdout JSONL"))
     string jsonlFields;
     @(NamedArgument("dataset-namespace").Description("Stable JSONL dataset namespace"))
@@ -72,6 +75,8 @@ mixin template ProcessingOptions() {
     size_t maxJsonlLineBytes;
     @(NamedArgument("max-jsonl-output-bytes").Description("Maximum JSONL output record bytes including LF"))
     size_t maxJsonlOutputBytes;
+    @(NamedArgument("max-jsonl-sidecar-bytes").Description("Maximum aggregate terminal side-output JSONL bytes"))
+    ulong maxJsonlSidecarBytes;
 }
 
 @(Command("run", "clean").Description("Run the bounded filter pipeline (also the no-verb default)."))
@@ -191,6 +196,8 @@ private int process(T)(ref T options, const string[] original) {
         forwarded ~= "--error-journal=" ~ options.errorJournal;
     if (options.errorRetry) forwarded ~= "--error-retry";
     if (options.errorTargeted) forwarded ~= "--error-targeted";
+    if (present(original, "--sidecar-output"))
+        forwarded ~= "--sidecar-output=" ~ options.sidecarOutput;
     if (present(original, "--jsonl-fields"))
         forwarded ~= "--jsonl-fields=" ~ options.jsonlFields;
     if (present(original, "--dataset-namespace"))
@@ -201,7 +208,123 @@ private int process(T)(ref T options, const string[] original) {
         forwarded ~= ["--max-jsonl-line-bytes", options.maxJsonlLineBytes.to!string];
     if (present(original, "--max-jsonl-output-bytes"))
         forwarded ~= ["--max-jsonl-output-bytes", options.maxJsonlOutputBytes.to!string];
+    if (present(original, "--max-jsonl-sidecar-bytes"))
+        forwarded ~= ["--max-jsonl-sidecar-bytes",
+            options.maxJsonlSidecarBytes.to!string];
     return runApp(forwarded);
+}
+
+private void printCompletionHelp() {
+    writeln("Usage: scrubbed completion [-h] <operation> [<args>]\n");
+    writeln("Generate shell setup or command/option-name candidates.\n");
+    writeln("Operations:");
+    writeln("  init --bash|--zsh|--fish");
+    writeln("      Print initialization script for the selected shell.");
+    writeln("  complete --bash|--zsh|--fish -- <tokens>");
+    writeln("      Print command and option name candidates.\n");
+    writeln("Optional arguments:");
+    writeln("  -h, --help    Show this help message and exit\n");
+}
+
+private bool publicCompletionShell(string value) {
+    return value == "--bash" || value == "--zsh" || value == "--fish";
+}
+
+private int completionError(string message) {
+    stderr.writeln("scrubbed: ", message);
+    stderr.writeln("Try 'scrubbed completion --help' for usage.");
+    return 2;
+}
+
+private string posixShellLiteral(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'') quoted ~= "'\\''";
+        else quoted ~= character;
+    }
+    return quoted ~ "'";
+}
+
+private string fishShellLiteral(string value) {
+    string quoted = "'";
+    foreach (character; value) {
+        if (character == '\'' || character == '\\') quoted ~= '\\';
+        quoted ~= character;
+    }
+    return quoted ~ "'";
+}
+
+private int printCompletionSetup(string shell) {
+    auto executable = thisExePath();
+    if (shell == "--bash") {
+        auto command = posixShellLiteral(executable) ~
+            " completion complete --bash -- \"${COMP_WORDS[@]}\" ---";
+        writeln("# Add this source command into .bashrc:");
+        writeln("#       source <(", posixShellLiteral(executable),
+            " completion init --bash)");
+        writeln("_scrubbed_completion() {");
+        writeln("    local candidate");
+        writeln("    COMPREPLY=()");
+        writeln("    while IFS= read -r candidate; do");
+        writeln("        COMPREPLY+=(\"$candidate\")");
+        writeln("    done < <(", command, ")");
+        writeln("}");
+        writeln("complete -F _scrubbed_completion scrubbed");
+    } else if (shell == "--zsh") {
+        auto command = posixShellLiteral(executable) ~
+            " completion complete --zsh -- \"${COMP_WORDS[@]}\" ---";
+        writeln("# Ensure that you called compinit and bashcompinit like below in your .zshrc:");
+        writeln("#       autoload -Uz compinit && compinit");
+        writeln("#       autoload -Uz bashcompinit && bashcompinit");
+        writeln("# And then add this source command after them into your .zshrc:");
+        writeln("#       source <(", posixShellLiteral(executable),
+            " completion init --zsh)");
+        writeln("_scrubbed_completion() {");
+        writeln("    local candidate");
+        writeln("    COMPREPLY=()");
+        writeln("    while IFS= read -r candidate; do");
+        writeln("        COMPREPLY+=(\"$candidate\")");
+        writeln("    done < <(", command, ")");
+        writeln("}");
+        writeln("complete -F _scrubbed_completion scrubbed");
+    } else {
+        auto command = "(COMMAND_LINE=(commandline -p) " ~
+            fishShellLiteral(executable) ~
+            " completion complete --fish -- (commandline -op))";
+        writeln("# Add this source command into ~/.config/fish/config.fish:");
+        writeln("#       ", fishShellLiteral(executable),
+            " completion init --fish | source");
+        writeln("complete -c scrubbed -a ", fishShellLiteral(command),
+            " --no-files");
+    }
+    return 0;
+}
+
+private int runPublicCompletion(const string[] argv) {
+    if (argv.length == 3 && (argv[2] == "--help" || argv[2] == "-h")) {
+        printCompletionHelp();
+        return 0;
+    }
+    if (argv.length < 3)
+        return completionError("completion requires init or complete");
+    if (argv[2] == "init") {
+        if (argv.length != 4 || !publicCompletionShell(argv[3]))
+            return completionError("completion init requires exactly one of --bash, --zsh or --fish");
+        return printCompletionSetup(argv[3]);
+    }
+    if (argv[2] == "complete") {
+        if (argv.length < 5 || !publicCompletionShell(argv[3]) || argv[4] != "--")
+            return completionError("completion complete requires --bash, --zsh or --fish followed by -- <tokens>");
+        string backend;
+        if (argv[3] == "--zsh") backend = "--bash";
+        else backend = argv[3].dup;
+        string[] forwarded = ["complete", backend];
+        forwarded ~= argv[4 .. $].dup;
+        if (backend == "--bash" && forwarded[$ - 1] != "---")
+            forwarded ~= "---";
+        return CLI!(parserConfig, Commands).complete(forwarded);
+    }
+    return completionError("unknown completion operation: " ~ argv[2]);
 }
 
 /// Dispatch from the shipping executable; argparse owns parsing, help and completion.
@@ -250,25 +373,15 @@ int runCommands(string[] argv) {
         stderr.writeln("scrubbed: errors-invalid-arguments");
         return 2;
     }
-    // Generated setup scripts invoke the executable directly with --bash or
-    // --fish, so these entry points must use the same argparse completer.
+    // Retain argparse's old hidden entry points so previously generated setup
+    // keeps working. New help and generated bytes use the nested public form.
     if (argv.length > 1 && (argv[1] == "--bash" || argv[1] == "--fish" ||
         argv[1] == "--zsh" || argv[1] == "--tcsh"))
         return CLI!(parserConfig, Commands).complete(argv[1 .. $]);
     if (argv.length > 1 && argv[1] == "init")
         return CLI!(parserConfig, Commands).complete(argv[1 .. $]);
-    if (argv.length > 1 && argv[1] == "completion") {
-        if (argv.length < 3 || argv[2] == "--help" || argv[2] == "-h") {
-            Commands help;
-            auto result = CLI!(parserConfig, Commands).parseArgs(help, ["completion", "--help"]);
-            return result.exitCode;
-        }
-        if (argv[2] != "init" && argv[2] != "complete") {
-            stderr.writeln("scrubbed: unknown completion operation: ", argv[2]);
-            return 2;
-        }
-        return CLI!(parserConfig, Commands).complete(argv[2 .. $]);
-    }
+    if (argv.length > 1 && argv[1] == "completion")
+        return runPublicCompletion(argv);
     Commands commands;
     const original = argv[1 .. $].dup;
     auto result = CLI!(parserConfig, Commands).parseArgs(commands, argv[1 .. $]);

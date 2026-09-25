@@ -8,6 +8,13 @@ scrubbed run --input - --output - --jsonl-fields text,title \
   --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152
 ```
 
+Plans with one terminal side output additionally require
+`--sidecar-output FILE`. That distinct file is an append-free atomic JSONL
+publication containing one bounded record per present selected field in the
+same input/field order. `--max-jsonl-sidecar-bytes` bounds the aggregate spool
+(default 67108864 bytes) independently of the per-record output cap. See
+[side-output-publication.md](side-output-publication.md).
+
 All five JSONL options and both `-` endpoints are required. Field names are
 unique top-level JSON keys. The default, `--filters`, v1/v3 `--config`, ordered
 v3 composition tokens, and explicit v4 JSON/tokens all compile before stdin is

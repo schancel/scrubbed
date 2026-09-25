@@ -3,6 +3,25 @@
 All project benchmark and corpus-analysis utilities are written in D. The
 baseline also measures the external ftfy CLI on its task-equivalent fixture.
 
+## Four-class PII pipeline evidence
+
+`pii_pipeline_check.d` generates and strictly checks the bounded O3/release
+four-class PII evidence. It uses authored 1 MiB clean and exact-4,096-finding
+fixtures, measures disabled/report/mask/redact through the actual binary, and
+proves the local-tree, JSONL, durable retry/restart, thread-count, and privacy
+matrix. The exact commands, mutation controls, limitations, and #62 handoff
+are documented in [`docs/pii-pipeline.md`](../docs/pii-pipeline.md).
+
+```sh
+ldc2 -O3 -release benchmarks/pii_pipeline_check.d \
+  -of=.dub/pii-pipeline-check
+mkdir -p .dub/pii-pipeline-artifact
+.dub/pii-pipeline-check --generate benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
+.dub/pii-pipeline-check --check benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
+```
+
 ## Exact durable verified-skip evidence
 
 `durable_skip_check.d` reproduces the frozen 128 MiB many-small (4,096 files)
@@ -28,6 +47,75 @@ environment. The evidence contains phase counts, bytes and elapsed time plus
 child wall/CPU/RSS and sampled-FD observations. The first run in each series
 also enables the D runtime's GC summary as a release-active availability
 control. Scratch fixtures and raw logs remain private and are removed.
+
+## Many-small-file coordination attribution
+
+`coordination_profile.d` measures issue #182's default-off, fixed-cardinality
+coordination counters separately from uninstrumented shipping timings. It
+reuses the canonical 524,288-record logical stream as 4,096 small files and
+eight large files, runs threads 1/2/4 five times for each layout and mode, and
+requires the pinned input and exact output tree identities on every child.
+
+```sh
+dub build --compiler=ldc2 --build=release --force
+ldc2 -O3 -release benchmarks/coordination_profile.d \
+  -of=/tmp/scrubbed-coordination-profile
+/tmp/scrubbed-coordination-profile --self-test
+rm -f benchmarks/coordination-profile-evidence.json
+/tmp/scrubbed-coordination-profile ./scrubbed \
+  benchmarks/coordination-profile-evidence.json
+/tmp/scrubbed-coordination-profile --validate-report \
+  benchmarks/coordination-profile-evidence.json ./scrubbed
+```
+
+The performance series does not set the metrics environment or run stack/GC
+probes. The attribution series sets `SCRUBBED_COORDINATION_METRICS_V2`; its
+first sample per thread also attempts a D-GC availability control and a
+one-second `/usr/bin/sample` trace. A runtime that emits no D-GC summary is
+recorded as unsupported rather than treated as measured GC evidence. The
+metrics destination must be a new
+plain file outside the input, output, config, manifest, and journal routes;
+publication is create-only. Darwin `wait4` supplies direct-child CPU
+and peak RSS. FD counts are sampled with `lsof`, and exact child syscall counts
+are explicitly unsupported. OS cache state is uncontrolled and is never
+described as cold. Metrics are unavailable with manifest or error-journal
+durable routes; those combinations are rejected before output or durable state
+is created or opened. Transform nanoseconds use the executing worker's thread CPU
+clock; the remaining phase durations use a monotonic elapsed clock. The harness
+uses the v2 metrics schema because v1 recorded transform elapsed time rather
+than worker CPU. The reported worker-descriptor limit is the effective
+`min(threads, configured-worker-descriptor-cap)` processing gate. It copies
+each supplied executable into owner-only scratch,
+makes the copy read-only, verifies its digest around every invocation, and
+atomically publishes reports only after final snapshot verification.
+Every child receives a small declared environment rather than the caller's
+ambient variables. Each sample has a 900-second deadline, the whole run has a
+six-hour deadline, and sampler subprocesses have two seconds; timed-out
+process groups receive TERM, then KILL after a bounded grace period, and are
+always reaped. A hard harness watchdog covers fixture, validation, publication,
+and other non-child phases. Because that final watchdog uses `SIGKILL`, a
+standalone run can leave its owner-only temporary scratch for manual cleanup
+if a non-child phase stalls for the full six-hour deadline. The self-test
+poisons unrelated metrics variables and exercises the timeout/reap and
+hard-watchdog paths.
+
+On the recorded Apple M4/macOS 26.6.2/LDC 1.43.0 run, uninstrumented median
+wall times in seconds were many-small 18.661/18.354/11.166 and few-large
+3.905/2.137/1.324 for threads 1/2/4. The matching instrumented medians were
+17.470/17.133/10.283 and 3.894/2.150/1.463. Accepted-to-worker queue time was the
+largest aggregate waiting signal in the parallel many-small samples; ordered
+result wait was much smaller, and descriptor wait was negligible. Performance
+and attribution remain separate series because instrumentation changes the
+measured work. These are Darwin-local diagnostic observations, not Linux or
+Windows claims.
+
+The initial attribution slice included no scheduler candidate, so its report records
+`ATTRIBUTION_ONLY_NO_CANDIDATE` and `production_candidate_authorized: false`.
+The contract's four-of-five, 10% before/after gate therefore cannot authorize
+a scheduling change. Shipping order, admission, descriptor ownership,
+cancellation, error selection, publication, and resource-cap behavior are
+unchanged; when the environment variable is absent, the metrics object is not
+allocated and no instrumentation clock or mutex is touched.
 
 ## Attested full-process target
 
@@ -651,8 +739,8 @@ any cross-tool comparison. No HTML extractor or trafilatura parity is claimed.
 ## SHA-256 backend-only evidence
 
 `sha256_backend_check.d` exercises the private incremental facade introduced
-for #185. The migration inventory is fixed at 77 `Sha256`/`sha256Of`
-occurrences in the same 21 production modules recorded at base
+for #185. The migration inventory is fixed at 79 `Sha256`/`sha256Of`
+occurrences in 22 production modules, including the additive URL seam, from base
 `cd15948466509055ae0431439f651ecba8a301f6`. The generated backend evidence
 records each module's source hash and preserves representative document,
 child, and v3 job identity fixtures.
@@ -706,8 +794,8 @@ forceable, and digest state belongs to each facade instance.
 
 The evidence binds a sanitized host identity: Darwin release, architecture,
 and CPU brand, with no serial number or other private identifier. On the
-recorded hosted `Apple M1 (Virtual)` AArch64 host, ARM execution and
-disassembly prove
+recorded local `Apple M4` / Darwin 25.6.0 AArch64 host, the documented harness
+used `/opt/homebrew/bin/ldc2` 1.43.0. ARM execution and disassembly prove
 `sha256h`, `sha256h2`, `sha256su0`, and `sha256su1`. The D source also
 cross-compiles to x86-64 Mach-O and Linux objects whose disassembly contains
 32 `sha256rnds2` instructions. Because this process is AArch64, x86 execution
@@ -727,12 +815,16 @@ schema, source hashes, benchmark rows, and digests. Caller-only source changes
 trigger the workflow; a macOS ARM job also tests and builds the production
 package. Workflow actions and LDC 1.43.0 are pinned; the workflow has read-only
 repository permission.
-Run `35955574514` at source head
-`9857764f3185e57a23d4df37caccb4e182152199` generated the committed backend
-and native artifacts. Both native generation/self-validation steps and the
-hosted backend report step passed; the overall bootstrap run later failed on
-the deliberately stale committed-native checks and the comparison-validator
-defect corrected in the following candidate. The native artifacts record
+Run `36035753344` at source head
+`b21f8acb90d63b50d8ac8ddd6ca3d23d8dbb5d85` generated and self-validated the
+committed native artifacts: arm64 artifact `10824821195` and x86-64 artifact
+`10824626173`. Both record checker source hash
+`0fdaa0c3d6e7a30993b7a47777914fda199bfb3880fb90c070e7d08916beec38`;
+the later evidence-only candidate did not change that source. Run
+`36039308448` validated both installed artifacts on their respective native
+architectures. The canonical backend report was generated separately by the
+documented local Apple M4 harness and is not attributed to either CI run. The
+native artifacts record
 `SUPPORTED_AND_PASSED` with automatic selection of `x86-sha-ni` on x86-64 and
 `armv8-sha2` on arm64, and identical source hashes across both architectures.
 Native x86 execution is therefore no longer an external blocker.

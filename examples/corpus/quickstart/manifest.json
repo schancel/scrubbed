@@ -1,0 +1,139 @@
+{
+  "schema": "scrubbed.quickstart-corpus.v1",
+  "licenseFile": "examples/corpus/quickstart/LICENSE.txt",
+  "claims": {
+    "mainContentExtraction": false,
+    "trainingReady": false
+  },
+  "configurations": [
+    {
+      "path": "examples/pipelines/quickstart/html-markdown.json",
+      "sha256": "c69a7156955b248703c4049eaf007314ed882ab2c5215a96d4642ada2a8ac875"
+    },
+    {
+      "path": "examples/pipelines/quickstart/text-repair.json",
+      "sha256": "7f3242069cb64ff4f4778b5b2707646c77159195c57be263cd40ea0f87d1b2b4"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "examples/corpus/quickstart/inputs/html/campus/index.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #259 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "fb6340855e817ee81831d9263147260e915f75d893ac881ae6039ef89903743a",
+      "intendedPipeline": "html-markdown",
+      "expectedOutcome": "Published as campus/index.html.md with deliberately visible header, navigation, and footer chrome; the unsafe javascript target is emitted as inert text."
+    },
+    {
+      "path": "examples/corpus/quickstart/inputs/html/campus/notes/day-1.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #259 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "c0f6f8bf2cb8fa1673405121112384b17bd8e7156748930d7ae2cb1e97a25495",
+      "intendedPipeline": "html-markdown",
+      "expectedOutcome": "Published as campus/notes/day-1.html.md; the unsafe data image target is omitted while its alt text remains inert."
+    },
+    {
+      "path": "examples/corpus/quickstart/inputs/html/quarantine/unclosed-depth.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #259 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "fc4dbde7f9af82ade8bb7eae8cb8e697370b3259e2b8574de61ef33b2aab231f",
+      "intendedPipeline": "html-markdown",
+      "expectedOutcome": "Quarantined with depthLimit and no output artifact."
+    },
+    {
+      "path": "examples/corpus/quickstart/inputs/text/clean.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #259 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "45ec54f363dee101302dc07dbff6ba1c5e86d5b35043c610b6d56787c47f637e",
+      "intendedPipeline": "text-repair",
+      "expectedOutcome": "Preserved byte-for-byte."
+    },
+    {
+      "path": "examples/corpus/quickstart/inputs/text/repair.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #259 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "f040970ae53cec1537926ff4d56cb72063c7cc476d27a15fae5103d01ef10f0a",
+      "intendedPipeline": "text-repair",
+      "expectedOutcome": "Latin-1/Windows-1252 mojibake is repaired."
+    },
+    {
+      "path": "examples/corpus/quickstart/inputs/records.jsonl",
+      "mediaType": "application/x-ndjson; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #259 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "7a8a3e00ce4f38d461d9c485998648d34102eff4a2b145fe2536ba365048e401",
+      "intendedPipeline": "selected-field-jsonl",
+      "expectedOutcome": "Only top-level text and title strings are selected for repair; other values remain semantically unchanged."
+    },
+    {
+      "path": "examples/corpus/quickstart/expected/html/campus/index.html.md",
+      "mediaType": "text/markdown; charset=utf-8",
+      "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "399da01905275bb76e1c23aebd1191a81c5da885fa0a1d26354a2f22c55b5b5d",
+      "intendedPipeline": "html-markdown",
+      "expectedOutcome": "Exact expected mechanical Markdown bytes, including visible page chrome."
+    },
+    {
+      "path": "examples/corpus/quickstart/expected/html/campus/notes/day-1.html.md",
+      "mediaType": "text/markdown; charset=utf-8",
+      "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "2049986a6b7f973dc759366e974695224e579d7762e84d0735f805f626c42c7e",
+      "intendedPipeline": "html-markdown",
+      "expectedOutcome": "Exact expected mechanical Markdown bytes with an unsafe image destination omitted."
+    },
+    {
+      "path": "examples/corpus/quickstart/expected/text/clean.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "45ec54f363dee101302dc07dbff6ba1c5e86d5b35043c610b6d56787c47f637e",
+      "intendedPipeline": "text-repair",
+      "expectedOutcome": "Exact clean-preservation output bytes."
+    },
+    {
+      "path": "examples/corpus/quickstart/expected/text/repair.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "cca433ff25edfa44eee62f69918cb9d0994647dfb59bf858ca61e246a5a0559c",
+      "intendedPipeline": "text-repair",
+      "expectedOutcome": "Exact repaired UTF-8 output bytes."
+    },
+    {
+      "path": "examples/corpus/quickstart/expected/records.jsonl",
+      "mediaType": "application/x-ndjson; charset=utf-8",
+      "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "ee11f6ee85a44811a4065a1886b20c66ca022d1c3e42d6f29a6f650b4bdc158b",
+      "intendedPipeline": "selected-field-jsonl",
+      "expectedOutcome": "Exact canonical JSONL output bytes for selected-field repair."
+    }
+  ],
+  "recipes": [
+    {
+      "id": "html-markdown",
+      "expectedExit": 1,
+      "configArguments": ["extract", "--input", "${INPUT}", "--output", "${OUTPUT}", "--format", "markdown", "--config", "${HTML_CONFIG}"],
+      "cliArguments": ["extract", "--input", "${INPUT}", "--output", "${OUTPUT}", "--format", "markdown", "--max-html-bytes", "1048576"]
+    },
+    {
+      "id": "text-repair",
+      "expectedExit": 0,
+      "configArguments": ["repair", "--input", "${INPUT}", "--output", "${OUTPUT}", "--config", "${TEXT_CONFIG}", "--threads", "1"],
+      "cliArguments": ["repair", "--input", "${INPUT}", "--output", "${OUTPUT}", "--stage", "clean=text-transform", "--filter", "fix-mojibake", "--filter-option", "encodings=text:latin1,cp1252", "--filter-option", "max-passes=integer:2", "--threads", "1"]
+    },
+    {
+      "id": "selected-field-jsonl",
+      "expectedExit": 0,
+      "configArguments": ["run", "--input", "-", "--output", "-", "--jsonl-fields", "text,title", "--dataset-namespace", "scrubbed-quickstart-v1", "--source-key", "records", "--max-jsonl-line-bytes", "1048576", "--max-jsonl-output-bytes", "2097152", "--config", "${TEXT_CONFIG}"],
+      "cliArguments": ["run", "--input", "-", "--output", "-", "--jsonl-fields", "text,title", "--dataset-namespace", "scrubbed-quickstart-v1", "--source-key", "records", "--max-jsonl-line-bytes", "1048576", "--max-jsonl-output-bytes", "2097152", "--stage", "clean=text-transform", "--filter", "fix-mojibake", "--filter-option", "encodings=text:latin1,cp1252", "--filter-option", "max-passes=integer:2"]
+    }
+  ]
+}

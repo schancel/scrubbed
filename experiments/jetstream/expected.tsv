@@ -1,0 +1,5 @@
+plaintext-control	correct-token-plaintext-accepted=true	tls-listener-advertised=false	client-rlimit=64	outer-deadline-s=15
+auth	correct-token-plaintext-rejected=true	tls-listener-advertised=true	token-rejected=true	trusted-token=true	connect-timeout-ms=300	client-rlimit=64	outer-deadline-s=15
+setup	admit=true	duplicate=true	nak-redelivery-before-ack-expiry=true	causal-ack-wait-ms=10000	max-ack-pending-blocks-second=true	ack-releases-second=true	restart-ack-wait-ms=500	ack=true	payload-limit=512	stream-limit=4	inflight-limit=1	fetch-timeout-window-ms=150..1000	pending-restart=true	client-rlimit=64	outer-deadline-s=15
+restart	durable-identity=true	redelivery=true	state-survived=true	fetch-timeout-ms=200	fetch-timeout-window-ms=150..1000	drained=true	client-rlimit=64	outer-deadline-s=15
+reconnect	disconnected=true	reconnected=true	publish-after-reconnect=true	client-rlimit=64	outer-deadline-s=15

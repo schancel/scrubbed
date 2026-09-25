@@ -5,7 +5,8 @@ import composition.compiler : compileJob;
 import composition.executor : runCompiledStage;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, OutputName, SourceLocator;
-import effects.html_metadata : extractHtmlMetadata, serializeHtmlMetadata;
+import effects.html_metadata : extractHtmlMetadata, HtmlMetadata,
+    MetadataCandidate, serializeHtmlMetadata;
 import effects.html_metadata_stage;
 import effects.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree,
     maxRawBytes, parseHtml;
@@ -104,6 +105,32 @@ void main() {
         `"url":{"status":"absent","value":null,"rule":null,"node":null,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]}}}` ~ "\n";
     check(serializeHtmlMetadata(document.id, extractHtmlMetadata(wireTree)) == exact,
         "exact canonical wire mismatch");
+    HtmlMetadata ordinalMetadata;
+    ordinalMetadata.title.status = "selected";
+    ordinalMetadata.title.value = "X";
+    ordinalMetadata.title.rule = "r";
+    ordinalMetadata.title.node = 8191;
+    foreach (node; [size_t(0), 9, 10, 99, 100, 8191])
+        ordinalMetadata.title.candidates ~= MetadataCandidate("X", "r", node);
+    ordinalMetadata.author.status = "absent";
+    ordinalMetadata.date.status = "absent";
+    ordinalMetadata.url.status = "absent";
+    auto ordinalExact = `{"version":"metadata-json:v1","documentId":"` ~
+        document.id.text ~ `","fields":{"title":{"status":"selected","value":"X",` ~
+        `"rule":"r","node":8191,"conflict":false,"invalidEvidence":false,` ~
+        `"overflow":false,"candidates":[{"value":"X","rule":"r","node":0},` ~
+        `{"value":"X","rule":"r","node":9},{"value":"X","rule":"r","node":10},` ~
+        `{"value":"X","rule":"r","node":99},{"value":"X","rule":"r","node":100},` ~
+        `{"value":"X","rule":"r","node":8191}]},` ~
+        `"author":{"status":"absent","value":null,"rule":null,"node":null,` ~
+        `"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]},` ~
+        `"date":{"status":"absent","value":null,"rule":null,"node":null,` ~
+        `"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]},` ~
+        `"url":{"status":"absent","value":null,"rule":null,"node":null,` ~
+        `"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]}}}` ~
+        "\n";
+    auto ordinalWire = serializeHtmlMetadata(document.id, ordinalMetadata);
+    check(ordinalWire == ordinalExact, "metadata ordinal transition bytes");
     auto metadataSpec = parseJobJson(`{"version":3,"stages":[{"id":"metadata",` ~
         `"implementation":"html-metadata","options":{},"filters":[]}]}`);
     auto plan = compileJob(metadataSpec);

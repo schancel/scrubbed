@@ -11,7 +11,7 @@ import extraction.contracts : DetectionOutcomeV1, DetectionResultV1,
 import extraction.detector : detectMediaV1;
 import extraction.port : ExtractionInputV1, SourceContentV1;
 import extraction.refinement : RefinedMediaV1, refineMediaV1;
-import stages.contract : EventKind, StageDocument;
+import stages.contract : EventKind, StageDocument, TerminalSideOutput;
 import std.exception : enforce;
 
 enum DispatchEventKindV1 : ubyte { emitted, rejected, quarantined, passed }
@@ -33,6 +33,7 @@ private:
     ExtractionProvenanceV1 provenanceValue;
     bool hasProvenanceValue;
     string reasonValue;
+    TerminalSideOutput[] sideOutputsValue;
 public:
     string jobIdentity() const pure { return jobIdentityValue; }
     DispatchEventKindV1 kind() const pure { return kindValue; }
@@ -60,6 +61,9 @@ public:
         return provenanceValue;
     }
     string reason() const pure { return reasonValue; }
+    const(TerminalSideOutput)[] sideOutputs() const pure {
+        return sideOutputsValue;
+    }
 }
 
 final class DispatchExecutionFailureV1 : Exception {
@@ -150,6 +154,7 @@ DispatchExecutionEventV1 runDispatchJobV1(StageDocument input,
         enforce(commonEvents.length == 1,
             "common plan must converge to exactly one terminal event");
         auto common = commonEvents[0];
+        event.sideOutputsValue = common.sideOutputs.dup;
         enforce(!common.isChild && common.payload.document.id == input.document.id,
             "common plan must not split or derive a child");
         enforce(common.payload.document.outputName == input.document.outputName,
@@ -235,9 +240,10 @@ version (unittest) {
     import job.spec : JobOption, JobSpec, JobStageSpec;
     import pipeline : FilterRegistry;
     import stages.contract : PassMode, ResourceDeclaration, StageDecision,
-        StageDeclaration;
+        StageDeclaration, TerminalSideOutput;
     import stages.registry : ConfiguredStageTransform, FilterPlacement,
-        StageConfiguration, StageOptions, StageRegistration, StageRegistry;
+        SideOutputCapability, StageCardinality, StageConfiguration,
+        StageOptions, StageRegistration, StageRegistry;
 
     private __gshared size_t dispatchFactoryCalls;
     private __gshared size_t commonFactoryCalls;
@@ -271,6 +277,16 @@ version (unittest) {
     private ConfiguredStageTransform appendCommonFactory(const ref StageOptions) {
         ++commonFactoryCalls;
         return ConfiguredStageTransform(&applyAppendCommon);
+    }
+    private StageDecision applySideOutputCommon(StageDocument input,
+            immutable(StageConfiguration)) pure {
+        auto output = TerminalSideOutput("audit", "side-output-v1",
+            ".audit.json", cast(const(ubyte)[]) "audit");
+        return StageDecision.map(input, [output]);
+    }
+    private ConfiguredStageTransform sideOutputCommonFactory(
+            const ref StageOptions) {
+        return ConfiguredStageTransform(&applySideOutputCommon);
     }
     private StageDecision applySplitCommon(StageDocument input,
             immutable(StageConfiguration)) pure {
@@ -487,6 +503,20 @@ unittest {
     assert(event.provenance.routeName == "text" &&
         event.provenance.sourceBytes == 5 && event.warnings.length == 1);
     assert(owner.view(0, 1).at(0) == 'h'); // executor did not close borrowed owner
+
+    StageRegistry sideOutputStages;
+    sideOutputStages.add(StageRegistration(StageDeclaration("side-output",
+        PassMode.singlePass, ResourceDeclaration(1, 0)), null, null, null,
+        &sideOutputCommonFactory, FilterPlacement.none,
+        StageCardinality.oneToOne, SideOutputCapability.terminal));
+    auto sideOutputSpec = testDispatchSpec("side-output");
+    auto sideOutputPlan = compileDispatchJobV1(sideOutputSpec, &extractors,
+        &sideOutputStages, &filters);
+    auto sideOutputEvent = runDispatchJobV1(StageDocument(document,
+        new Content([ContentPiece.own(cast(const(ubyte)[]) "hello")])),
+        sideOutputPlan);
+    assert(sideOutputEvent.sideOutputs.length == 1 &&
+        cast(string) sideOutputEvent.sideOutputs[0].bytes == "audit");
 
     auto repeated = runDispatchJobV1(StageDocument(document, source), plan);
     assert(repeated.jobIdentity == event.jobIdentity);

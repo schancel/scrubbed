@@ -9,7 +9,6 @@ import job.json : canonicalJobJson, parseJobJson;
 import job.spec : JobOption, JobOptions, JobOptionType, validateJobKey;
 import std.algorithm.sorting : sort;
 import std.array : Appender, appender;
-import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import crypto.sha256 : sha256Of;
 import std.exception : enforce;
@@ -108,15 +107,15 @@ string canonicalDispatchJobJsonV1(const ref DispatchJobSpecV1 spec) {
     validateDispatchJobSpecV1(spec);
     auto output = appender!string;
     output.put(`{"version":4,"dispatch":{"detector":{"prefix-bytes":`);
-    output.put(spec.dispatch.detector.prefixBytes.to!string);
-    output.put(`,"evidence-records":`); output.put(spec.dispatch.detector.evidenceRecords.to!string);
-    output.put(`,"warnings":`); output.put(spec.dispatch.detector.warnings.to!string);
+    putUnsignedDecimal(output, spec.dispatch.detector.prefixBytes);
+    output.put(`,"evidence-records":`); putUnsignedDecimal(output, spec.dispatch.detector.evidenceRecords);
+    output.put(`,"warnings":`); putUnsignedDecimal(output, spec.dispatch.detector.warnings);
     output.put(`},"container":{"max-physical-bytes":`);
-    output.put(spec.dispatch.container.maxPhysicalBytes.to!string);
-    output.put(`,"max-expanded-bytes":`); output.put(spec.dispatch.container.maxExpandedBytes.to!string);
-    output.put(`,"max-entries":`); output.put(spec.dispatch.container.maxEntries.to!string);
-    output.put(`,"max-depth":`); output.put(spec.dispatch.container.maxDepth.to!string);
-    output.put(`,"max-ratio":`); output.put(spec.dispatch.container.maxRatio.to!string);
+    putUnsignedDecimal(output, spec.dispatch.container.maxPhysicalBytes);
+    output.put(`,"max-expanded-bytes":`); putUnsignedDecimal(output, spec.dispatch.container.maxExpandedBytes);
+    output.put(`,"max-entries":`); putUnsignedDecimal(output, spec.dispatch.container.maxEntries);
+    output.put(`,"max-depth":`); putUnsignedDecimal(output, spec.dispatch.container.maxDepth);
+    output.put(`,"max-ratio":`); putUnsignedDecimal(output, spec.dispatch.container.maxRatio);
     output.put(`},"routes":[`);
     auto routeNames = new string[spec.dispatch.routes.length];
     foreach (index, route; spec.dispatch.routes) routeNames[index] = route.name;
@@ -126,8 +125,8 @@ string canonicalDispatchJobJsonV1(const ref DispatchJobSpecV1 spec) {
         foreach (ref route; spec.dispatch.routes) if (route.name == name) selected = &route;
         auto route = *selected;
         if (index) output.put(',');
-        output.put(`{"name":`); output.put(quote(route.name));
-        output.put(`,"extractor":`); output.put(quote(route.extractor));
+        output.put(`{"name":`); putQuoted(output, route.name);
+        output.put(`,"extractor":`); putQuoted(output, route.extractor);
         output.put(`,"options":`); appendOptions(output, route.options);
         output.put('}');
     }
@@ -138,12 +137,12 @@ string canonicalDispatchJobJsonV1(const ref DispatchJobSpecV1 spec) {
             if (cast(size_t) action.outcome == index) selected = &action;
         auto action = *selected;
         if (index) output.put(',');
-        output.put(`{"outcome":`); output.put(quote(outcomeName(action.outcome)));
-        output.put(`,"action":`); output.put(quote(actionName(action.kind)));
+        output.put(`{"outcome":`); putQuoted(output, outcomeName(action.outcome));
+        output.put(`,"action":`); putQuoted(output, actionName(action.kind));
         if (action.kind == DispatchActionKindV1.route) {
-            output.put(`,"route":`); output.put(quote(action.target));
+            output.put(`,"route":`); putQuoted(output, action.target);
         } else {
-            output.put(`,"reason":`); output.put(quote(action.target));
+            output.put(`,"reason":`); putQuoted(output, action.target);
         }
         output.put('}');
     }
@@ -217,15 +216,45 @@ private JobOptions parseOptions(ref JSONValue value, string context) {
     return result;
 }
 
-private string quote(string value) { return JSONValue(value).toString; }
+/// Writes `value` as a quoted, escaped JSON string straight into `output`
+/// using Phobos' output-sink JSON quoting (`JSONValue.toString(sink)`),
+/// avoiding the temporary string that `JSONValue.toString` (no sink)
+/// would otherwise allocate.
+private void putQuoted(ref Appender!string output, string value) {
+    JSONValue(value).toString(output);
+}
+
+/// Fixed-stack unsigned decimal emitter: no heap allocation, no `to!string`.
+private void putUnsignedDecimal(ref Appender!string output, ulong value) {
+    char[20] digits; // ulong.max ("18446744073709551615") is 20 digits.
+    size_t index = digits.length;
+    do {
+        digits[--index] = cast(char)('0' + (value % 10));
+        value /= 10;
+    } while (value != 0);
+    foreach (i; index .. digits.length) output.put(digits[i]);
+}
+
+/// Fixed-stack signed decimal emitter: no heap allocation, no `to!string`.
+/// Handles `long.min` via unsigned two's-complement negation, avoiding
+/// signed overflow on the naive `-value`.
+private void putSignedDecimal(ref Appender!string output, long value) {
+    if (value < 0) {
+        output.put('-');
+        putUnsignedDecimal(output, -(cast(ulong) value));
+    } else {
+        putUnsignedDecimal(output, cast(ulong) value);
+    }
+}
+
 private void appendOptions(ref Appender!string output, const ref JobOptions options) {
     output.put('{'); auto keys = options.keys; keys.sort;
     foreach (index, key; keys) {
-        if (index) output.put(','); output.put(quote(key)); output.put(':');
+        if (index) output.put(','); putQuoted(output, key); output.put(':');
         auto value = options[key];
         final switch (value.type) {
-        case JobOptionType.text: output.put(quote(value.asText)); break;
-        case JobOptionType.integer: output.put(value.asInteger.to!string); break;
+        case JobOptionType.text: putQuoted(output, value.asText); break;
+        case JobOptionType.integer: putSignedDecimal(output, value.asInteger); break;
         case JobOptionType.boolean: output.put(value.asBoolean ? "true" : "false"); break;
         }
     } output.put('}');
@@ -278,7 +307,7 @@ unittest {
     foreach (i; 0 .. cast(size_t) DispatchOutcomeV1.max + 1) {
         if (i) actions ~= ",";
         auto outcome = cast(DispatchOutcomeV1) i;
-        actions ~= `{"outcome":` ~ quote(outcomeName(outcome)) ~
+        actions ~= `{"outcome":"` ~ outcomeName(outcome) ~ `"` ~
             (outcome == DispatchOutcomeV1.plainText
                 ? `,"action":"route","route":"text"}`
                 : `,"action":"reject","reason":"not selected"}`);
@@ -307,4 +336,43 @@ unittest {
         `"route":"text"}`, `"route":"text","reason":"mixed"}`)));
     assertThrown(parseDispatchJobJsonV1(json.replace(
         `}],"actions":[`, `},{"name":"unused","extractor":"identity","options":{}}],"actions":[`)));
+}
+
+// Golden coverage for the streamed v4 quote/decimal call sites: quotes,
+// backslash, slash, named and numeric controls, non-ASCII, empty text,
+// booleans, zero, digit-count transitions, and the reachable size_t/ulong
+// maxima on detector/container fields. The literal is both valid input
+// and its own expected canonical output.
+unittest {
+    auto golden = `{"version":4,"dispatch":{"detector":{"prefix-bytes":9,` ~
+        `"evidence-records":10,"warnings":18446744073709551615},` ~
+        `"container":{"max-physical-bytes":99,"max-expanded-bytes":100,` ~
+        `"max-entries":1,"max-depth":1,"max-ratio":18446744073709551615},` ~
+        `"routes":[{"name":"text","extractor":"identity","options":{` ~
+        `"a-bool-false":false,"b-bool-true":true,"c-empty":"","d-zero":0,` ~
+        `"e-quote":"a\"b","f-backslash":"a\\b","g-slash":"a\/b",` ~
+        `"h-controls":"\n\t\r\b\f\u001F","i-nonascii":"café 测试 🎉"` ~
+        `}}],"actions":[` ~
+        `{"outcome":"unknown","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"plain-text","action":"route","route":"text"},` ~
+        `{"outcome":"html","action":"reject","reason":"a\"b\\c\/d\n\u001F café"},` ~
+        `{"outcome":"pdf","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"png","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"jpeg","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"gif","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"ambiguous","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"malformed","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"encrypted","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"unsupported","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"generic-zip","action":"reject","reason":"not selected"},` ~
+        `{"outcome":"ooxml-word","action":"reject","reason":"not selected"}` ~
+        `]},"common":{"version":3,"stages":[]}}`;
+    auto parsed = parseDispatchJobJsonV1(golden);
+    auto canonical = canonicalDispatchJobJsonV1(parsed);
+    assert(canonical == golden, canonical);
+    auto reparsed = parseDispatchJobJsonV1(canonical);
+    assert(canonicalDispatchJobJsonV1(reparsed) == canonical);
+    assert(dispatchJobIdentityV1(parsed) ==
+        "job:v4:6f854bdc341aa331200307e5d3c1bc71067c9ac4c3a072a2b8b560dfd4c2f1b3",
+        dispatchJobIdentityV1(parsed));
 }

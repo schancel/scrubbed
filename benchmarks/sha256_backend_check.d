@@ -56,8 +56,11 @@ private immutable InventoryEntry[] expectedInventory = [
     InventoryEntry("source/effects/metadata_route_cli.d", 2),
     InventoryEntry("source/effects/mix_export.d", 8),
     InventoryEntry("source/effects/pii_policy_overlay.d", 2),
+    InventoryEntry("source/effects/web_url.d", 2),
     InventoryEntry("source/job/dispatch_json.d", 2),
     InventoryEntry("source/job/json.d", 2),
+    InventoryEntry("source/stages/contract.d", 2),
+    InventoryEntry("source/stages/pii_four_class.d", 3),
 ];
 
 private immutable string[] identityFixtures = [
@@ -169,7 +172,7 @@ private JSONValue inventoryEvidence() {
             enforce((path in expected) !is null,
                 "new production SHA-256 caller is outside the frozen inventory: " ~ path);
     }
-    enforce(total == 90 && rows.length == 22,
+    enforce(total == 97 && rows.length == 25,
         "production SHA-256 inventory cardinality drift");
     JSONValue result;
     result["base"] = "cd15948466509055ae0431439f651ecba8a301f6";

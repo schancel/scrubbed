@@ -24,6 +24,12 @@ fresh v2 path. The remainder of this document describes the retained v1 API
 used by offline migration and predecessor consumers; it is not the canonical
 shipping writer.
 
+Generic terminal side outputs use separate existing-format final-event rows
+under the same root; no schema migration is involved. Verified skip checks the
+primary and side destinations, and retry publishes only unresolved rows. The
+side destination is part of derived config identity. Details are in
+[side-output-publication.md](side-output-publication.md).
+
 ## Archival v1 API (not a live CLI route)
 
 `effects.local_manifest.LocalManifest` is retained for offline migration and

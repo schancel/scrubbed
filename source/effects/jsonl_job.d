@@ -7,7 +7,14 @@ import content.pieces : Content, ContentPiece;
 import domain.document : Document, OutputName, SourceLocator, DocumentViewOwner;
 import effects.jsonl_stream : JsonlDecisionFailure, JsonlDecisionKind;
 import effects.runner : Parser, Sink, Source, SourceRecord, runEffects;
-import stages.contract : EventKind, StageEvent;
+import stages.contract : EventKind, StageEvent, TerminalSideOutput;
+
+/// One independently owned selected-field result. Side outputs remain ordered
+/// with the field and can be staged until the enclosing JSON record commits.
+struct JsonlFieldOutcome {
+    string text;
+    TerminalSideOutput[] sideOutputs;
+}
 
 private final class FieldSource : Source {
     private SourceLocator locator;
@@ -46,6 +53,7 @@ private final class FieldSink : Sink {
     bool child;
     string reason;
     string mapped;
+    TerminalSideOutput[] sideOutputs;
 
     override void accept(StageEvent event) {
         ++events;
@@ -53,6 +61,7 @@ private final class FieldSink : Sink {
         kind = event.kind;
         child = event.isChild;
         reason = event.reason.idup;
+        sideOutputs = event.sideOutputs.dup;
         if (event.kind == EventKind.emitted && !event.isChild) {
             // The returned field must outlive the runner's input owner. Copy
             // once into its exact final size instead of growing a stream sink.
@@ -61,28 +70,37 @@ private final class FieldSink : Sink {
     }
 }
 
+private JsonlFieldOutcome checkedOutcome(FieldSink sink, string identity) {
+    if (sink.events != 1 || sink.child)
+        throw new JsonlDecisionFailure(JsonlDecisionKind.unsupportedFanout,
+            "compiled JSONL job " ~ identity ~ " produced unsupported fanout");
+    final switch (sink.kind) {
+    case EventKind.emitted:
+        return JsonlFieldOutcome(sink.mapped, sink.sideOutputs);
+    case EventKind.rejected:
+        throw new JsonlDecisionFailure(JsonlDecisionKind.rejected,
+            "compiled JSONL job " ~ identity ~
+            " rejected selected field: " ~ sink.reason);
+    case EventKind.quarantined:
+        throw new JsonlDecisionFailure(JsonlDecisionKind.quarantined,
+            "compiled JSONL job " ~ identity ~
+            " quarantined selected field: " ~ sink.reason);
+    }
+}
+
 /// Execute exactly one selected field. Returned text owns its bytes after the
 /// effects runner invalidates the input view owner.
 string runJsonlField(SourceLocator locator, string field, string text,
         const ref CompiledJob job) {
+    return runJsonlFieldOutcome(locator, field, text, job).text;
+}
+
+JsonlFieldOutcome runJsonlFieldOutcome(SourceLocator locator, string field,
+        string text, const ref CompiledJob job) {
     auto source = new FieldSource(locator, field, text);
     auto sink = new FieldSink;
     runEffects(source, new FieldParser(text.length), sink, job);
-    if (sink.events != 1 || sink.child)
-        throw new JsonlDecisionFailure(JsonlDecisionKind.unsupportedFanout,
-            "compiled JSONL job " ~ job.identity ~ " produced unsupported fanout");
-    final switch (sink.kind) {
-    case EventKind.emitted:
-        return sink.mapped;
-    case EventKind.rejected:
-        throw new JsonlDecisionFailure(JsonlDecisionKind.rejected,
-            "compiled JSONL job " ~ job.identity ~
-            " rejected selected field: " ~ sink.reason);
-    case EventKind.quarantined:
-        throw new JsonlDecisionFailure(JsonlDecisionKind.quarantined,
-            "compiled JSONL job " ~ job.identity ~
-            " quarantined selected field: " ~ sink.reason);
-    }
+    return checkedOutcome(sink, job.identity);
 }
 
 alias JsonlDispatchObserverV1 = void delegate(
@@ -90,24 +108,16 @@ alias JsonlDispatchObserverV1 = void delegate(
 
 string runJsonlField(SourceLocator locator, string field, string text,
         ref RuntimePlanV1 plan, scope JsonlDispatchObserverV1 observe = null) {
+    return runJsonlFieldOutcome(locator, field, text, plan, observe).text;
+}
+
+JsonlFieldOutcome runJsonlFieldOutcome(SourceLocator locator, string field,
+        string text, ref RuntimePlanV1 plan,
+        scope JsonlDispatchObserverV1 observe = null) {
     auto source = new FieldSource(locator, field, text);
     auto sink = new FieldSink;
     runEffects(source, new FieldParser(text.length), sink, plan, observe);
-    if (sink.events != 1 || sink.child)
-        throw new JsonlDecisionFailure(JsonlDecisionKind.unsupportedFanout,
-            "compiled JSONL job " ~ plan.identity ~ " produced unsupported fanout");
-    final switch (sink.kind) {
-    case EventKind.emitted:
-        return sink.mapped;
-    case EventKind.rejected:
-        throw new JsonlDecisionFailure(JsonlDecisionKind.rejected,
-            "compiled JSONL job " ~ plan.identity ~
-            " rejected selected field: " ~ sink.reason);
-    case EventKind.quarantined:
-        throw new JsonlDecisionFailure(JsonlDecisionKind.quarantined,
-            "compiled JSONL job " ~ plan.identity ~
-            " quarantined selected field: " ~ sink.reason);
-    }
+    return checkedOutcome(sink, plan.identity);
 }
 
 version (unittest) {

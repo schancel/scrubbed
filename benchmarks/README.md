@@ -3,6 +3,25 @@
 All project benchmark and corpus-analysis utilities are written in D. The
 baseline also measures the external ftfy CLI on its task-equivalent fixture.
 
+## Four-class PII pipeline evidence
+
+`pii_pipeline_check.d` generates and strictly checks the bounded O3/release
+four-class PII evidence. It uses authored 1 MiB clean and exact-4,096-finding
+fixtures, measures disabled/report/mask/redact through the actual binary, and
+proves the local-tree, JSONL, durable retry/restart, thread-count, and privacy
+matrix. The exact commands, mutation controls, limitations, and #62 handoff
+are documented in [`docs/pii-pipeline.md`](../docs/pii-pipeline.md).
+
+```sh
+ldc2 -O3 -release benchmarks/pii_pipeline_check.d \
+  -of=.dub/pii-pipeline-check
+mkdir -p .dub/pii-pipeline-artifact
+.dub/pii-pipeline-check --generate benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
+.dub/pii-pipeline-check --check benchmarks/pii-pipeline.json \
+  .dub/pii-pipeline-artifact/scrubbed
+```
+
 ## Exact durable verified-skip evidence
 
 `durable_skip_check.d` reproduces the frozen 128 MiB many-small (4,096 files)

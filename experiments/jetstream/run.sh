@@ -302,6 +302,97 @@ run_probe()
     wait_probe_pid "$probe_pid" "$probe_label"
 }
 
+# Prove that an externally delivered TERM reaching a running harness while a
+# real probe client is actively connected reaps that exact client PID and
+# removes its scratch directory and ephemeral secret copy. This mirrors the
+# intentional-failure fixture below (bespoke local cleanup, PID/path recorded
+# to files, assert-not-log) but exercises the signal-trap path instead of a
+# self-inflicted nonzero exit. The nested harness reuses the already-running
+# fixed-config server; no extra server is started.
+prove_active_probe_cleanup()
+{
+    fixture_pid_record="$scratch/active-probe.pid"
+    fixture_path_record="$scratch/active-probe.path"
+    fixture_ready_record="$scratch/active-probe.ready"
+    (
+        active_probe_scratch=$(mktemp -d "$scratch/active-probe.XXXXXX")
+        active_probe_client_pid=
+        active_probe_cleanup()
+        {
+            stop_pid "$active_probe_client_pid" active-probe
+            active_probe_client_pid=
+            rm -rf -- "$active_probe_scratch"
+        }
+        trap active_probe_cleanup EXIT
+        trap 'trap - EXIT HUP INT TERM; active_probe_cleanup; exit 143' TERM
+        printf '%s\n' "$active_probe_scratch" > "$fixture_path_record"
+        printf '%s\n' "$NATS_TOKEN" > "$active_probe_scratch/token"
+        (
+            ulimit -n 64
+            exec "$scratch/probe" reconnect "$active_probe_scratch/reconnect.ready"
+        ) >/dev/null 2>&1 &
+        active_probe_client_pid=$!
+        printf '%s\n' "$active_probe_client_pid" > "$fixture_pid_record"
+        active_probe_checks=0
+        while [ ! -f "$active_probe_scratch/reconnect.ready" ] &&
+                [ "$active_probe_checks" -lt 100 ]; do
+            kill -0 "$active_probe_client_pid" 2>/dev/null || exit 2
+            sleep 0.05
+            active_probe_checks=$((active_probe_checks + 1))
+        done
+        [ -f "$active_probe_scratch/reconnect.ready" ] || exit 2
+        : > "$fixture_ready_record"
+        while :; do sleep 1; done
+    ) &
+    fixture_pid=$!
+
+    fixture_checks=0
+    while [ ! -f "$fixture_ready_record" ] && [ "$fixture_checks" -lt 100 ]; do
+        if ! kill -0 "$fixture_pid" 2>/dev/null; then
+            wait "$fixture_pid" || true
+            echo "jetstream evaluation: active-probe interrupt fixture exited before ready" >&2
+            return 2
+        fi
+        sleep 0.05
+        fixture_checks=$((fixture_checks + 1))
+    done
+    [ -f "$fixture_ready_record" ] || {
+        echo "jetstream evaluation: active-probe interrupt fixture did not become ready" >&2
+        stop_pid "$fixture_pid" active-probe-fixture
+        return 2
+    }
+
+    fixture_client_pid=$(sed -n '1p' "$fixture_pid_record")
+    fixture_active_scratch=$(sed -n '1p' "$fixture_path_record")
+    kill -0 "$fixture_client_pid" 2>/dev/null || {
+        echo "jetstream evaluation: active-probe PID $fixture_client_pid already gone before interrupt" >&2
+        return 2
+    }
+
+    kill -TERM "$fixture_pid"
+    if wait "$fixture_pid"; then
+        fixture_status=0
+    else
+        fixture_status=$?
+    fi
+    [ "$fixture_status" -eq 143 ] || {
+        echo "jetstream evaluation: interrupted active-probe fixture exited $fixture_status (expected 143)" >&2
+        return 2
+    }
+    if kill -0 "$fixture_client_pid" 2>/dev/null; then
+        echo "jetstream evaluation: interrupt left active-probe PID $fixture_client_pid running" >&2
+        return 2
+    fi
+    if [ -e "$fixture_active_scratch" ]; then
+        echo "jetstream evaluation: interrupt left active-probe scratch: $fixture_active_scratch" >&2
+        return 2
+    fi
+    if [ -e "$fixture_active_scratch/token" ]; then
+        echo "jetstream evaluation: interrupt left ephemeral token copy: $fixture_active_scratch/token" >&2
+        return 2
+    fi
+}
+
 bootstrap_config="$scratch/server-bootstrap.conf"
 fixed_config="$scratch/server.conf"
 control_config="$scratch/server-control.conf"
@@ -369,6 +460,8 @@ server_pid=
 start_server "$fixed_config"
 wait_probe_pid "$client_pid" reconnect
 client_pid=
+
+prove_active_probe_cleanup
 
 run_probe delete delete
 cmp "$here/expected.tsv" "$results"
@@ -441,4 +534,4 @@ trap - EXIT HUP INT TERM
     echo "jetstream evaluation: scratch cleanup failed: $scratch_path" >&2
     exit 2
 }
-printf 'cleanup\tserver-stopped=true\tclient-stopped=true\tfailure-trap=true\tscratch-removed=true\tephemeral-secrets-removed=true\n'
+printf 'cleanup\tserver-stopped=true\tclient-stopped=true\tactive-probe-interrupt=true\tfailure-trap=true\tscratch-removed=true\tephemeral-secrets-removed=true\n'

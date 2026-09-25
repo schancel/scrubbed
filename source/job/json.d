@@ -5,7 +5,6 @@ import job.spec : JobFilterSpec, JobOption, JobOptions, JobOptionType, JobSpec,
     JobStageSpec, jobSpecVersion, validateJobKey, validateJobSpec;
 import std.algorithm.sorting : sort;
 import std.array : Appender, appender;
-import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import crypto.sha256 : sha256Of;
 import std.exception : enforce;
@@ -121,8 +120,35 @@ JobSpec parseJobJson(string json) {
     return result;
 }
 
-private string quote(string value) {
-    return JSONValue(value).toString;
+/// Writes `value` as a quoted, escaped JSON string straight into `output`
+/// using Phobos' output-sink JSON quoting (`JSONValue.toString(sink)`),
+/// avoiding the temporary string that `JSONValue.toString` (no sink)
+/// would otherwise allocate.
+private void putQuoted(ref Appender!string output, string value) {
+    JSONValue(value).toString(output);
+}
+
+/// Fixed-stack unsigned decimal emitter: no heap allocation, no `to!string`.
+private void putUnsignedDecimal(ref Appender!string output, ulong value) {
+    char[20] digits; // ulong.max ("18446744073709551615") is 20 digits.
+    size_t index = digits.length;
+    do {
+        digits[--index] = cast(char)('0' + (value % 10));
+        value /= 10;
+    } while (value != 0);
+    foreach (i; index .. digits.length) output.put(digits[i]);
+}
+
+/// Fixed-stack signed decimal emitter: no heap allocation, no `to!string`.
+/// Handles `long.min` via unsigned two's-complement negation, avoiding
+/// signed overflow on the naive `-value`.
+private void putSignedDecimal(ref Appender!string output, long value) {
+    if (value < 0) {
+        output.put('-');
+        putUnsignedDecimal(output, -(cast(ulong) value));
+    } else {
+        putUnsignedDecimal(output, cast(ulong) value);
+    }
 }
 
 private void appendOptions(ref Appender!string output, const ref JobOptions options) {
@@ -131,12 +157,12 @@ private void appendOptions(ref Appender!string output, const ref JobOptions opti
     keys.sort;
     foreach (index, key; keys) {
         if (index) output.put(',');
-        output.put(quote(key));
+        putQuoted(output, key);
         output.put(':');
         auto value = options[key];
         final switch (value.type) {
-        case JobOptionType.text: output.put(quote(value.asText)); break;
-        case JobOptionType.integer: output.put(value.asInteger.to!string); break;
+        case JobOptionType.text: putQuoted(output, value.asText); break;
+        case JobOptionType.integer: putSignedDecimal(output, value.asInteger); break;
         case JobOptionType.boolean: output.put(value.asBoolean ? "true" : "false"); break;
         }
     }
@@ -151,16 +177,16 @@ string canonicalJobJson(const JobSpec spec) {
     foreach (stageIndex, stage; spec.stages) {
         if (stageIndex) output.put(',');
         output.put(`{"id":`);
-        output.put(quote(stage.id));
+        putQuoted(output, stage.id);
         output.put(`,"implementation":`);
-        output.put(quote(stage.implementation));
+        putQuoted(output, stage.implementation);
         output.put(`,"options":`);
         appendOptions(output, stage.options);
         output.put(`,"filters":[`);
         foreach (filterIndex, filter; stage.filters) {
             if (filterIndex) output.put(',');
             output.put(`{"name":`);
-            output.put(quote(filter.name));
+            putQuoted(output, filter.name);
             output.put(`,"options":`);
             appendOptions(output, filter.options);
             output.put('}');
@@ -203,4 +229,27 @@ unittest {
         `{"version":3,"stages":[{"id":"x","implementation":"text-transform","filters":{}}]}`,
         `{"version":3,"stages":[{"id":"x","implementation":"text-transform","filters":[{"name":"f","options":{"x":null}}]}]}`
     ]) assertThrown(parseJobJson(bad));
+}
+
+// Golden coverage for the streamed quote/decimal call sites: quotes,
+// backslash, slash, named and numeric controls, non-ASCII, empty text,
+// booleans, zero, digit-count transitions and the long boundaries. The
+// literal is both valid input and its own expected canonical output.
+unittest {
+    auto golden = `{"version":3,"stages":[{"id":"golden",` ~
+        `"implementation":"text-transform","options":{` ~
+        `"a-bool-false":false,"b-bool-true":true,"c-empty":"","d-zero":0,` ~
+        `"e-nine":9,"f-ten":10,"g-ninety-nine":99,"h-hundred":100,` ~
+        `"i-neg-one":-1,"j-neg-nine":-9,"k-neg-ten":-10,"l-neg-hundred":-100,` ~
+        `"m-long-max":9223372036854775807,"n-long-min":-9223372036854775808,` ~
+        `"o-quote":"a\"b","p-backslash":"a\\b","q-slash":"a\/b",` ~
+        `"r-controls":"\n\t\r\b\f\u001F","s-nonascii":"café 测试 🎉"` ~
+        `},"filters":[]}]}`;
+    auto parsed = parseJobJson(golden);
+    auto canonical = canonicalJobJson(parsed);
+    assert(canonical == golden, canonical);
+    assert(canonicalJobJson(parseJobJson(canonical)) == canonical);
+    assert(jobIdentity(parsed) ==
+        "job:v3:98d0cb8dbfa0b7dd1a2f0f35219b7a5f13723c3a1124ce4598aaf16eff941855",
+        jobIdentity(parsed));
 }

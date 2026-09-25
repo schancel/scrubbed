@@ -231,8 +231,17 @@ process-isolated maximum-payload and maximum-chunk-count checks enforce a
 [four-class PII scanner](docs/pii-patterns.md) is a pure D API with an
 [opt-in C01 findings overlay](docs/pii-annotations.md) and a
 [pure report/mask/opt-in redact policy](docs/pii-policy.md) plus a
-[revision-bound C01 policy overlay](docs/pii-policy-overlay.md), not CLI
-redaction or complete de-identification.
+[revision-bound C01 policy overlay](docs/pii-policy-overlay.md). The
+self-registering [`pii-four-class` terminal stage](docs/pii-four-class-stage.md)
+exposes this as a v3/v4-common CLI/JSON stage with `locale`, `policy`
+(`report`/`mask`/opt-in `redact` behind an `allow-redact` gate), `categories`,
+and `confidences` options, and publishes a content-free, revision-bound
+`pii-audit` side output through the generic
+[`--sidecar-output` publication route](docs/side-output-publication.md); see
+the [bounded release evidence](docs/pii-pipeline.md) for benchmarks and the
+exact synthetic handoff. This is deterministic email/phone/card/IPv4 pattern
+handling, not complete de-identification, name/address recognition, or
+model-backed NER.
 None of these APIs establishes
 corpus-scale throughput or main-content extraction.
 

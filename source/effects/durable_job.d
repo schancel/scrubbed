@@ -358,12 +358,27 @@ private ubyte[32] columnDigest(sqlite3_stmt* s, int at) {
     return result;
 }
 private void appendField(ref Sha256 digest, string value) {
+    appendFieldBytes(digest, cast(const(ubyte)[]) value);
+}
+private void appendFieldBytes(ref Sha256 digest, scope const(ubyte)[] value) {
     ulong length = value.length;
     ubyte[8] width;
     foreach_reverse (index, shift; [0, 8, 16, 24, 32, 40, 48, 56])
         width[index] = cast(ubyte)(length >> shift);
     digest.put(width[]);
-    digest.put(cast(const(ubyte)[])value);
+    digest.put(value);
+}
+/// Feed an unsigned ordinal's canonical decimal digits (no leading zeroes;
+/// `0` is one digit) through the same length-prefixed writer as any other
+/// identity field, without a temporary decimal string.
+private void appendOrdinalField(ref Sha256 digest, size_t ordinal) {
+    ubyte[20] digits; // size_t.max has at most 20 decimal digits.
+    size_t start = digits.length;
+    do {
+        digits[--start] = cast(ubyte) ('0' + (ordinal % 10));
+        ordinal /= 10;
+    } while (ordinal != 0);
+    appendFieldBytes(digest, digits[start .. $]);
 }
 private void appendDigest(ref Sha256 digest, ref const(ubyte[32]) value) {
     digest.put(value[]);
@@ -399,7 +414,7 @@ string derivedSink(string kind, DocumentId document, size_t ordinal) {
     digest.put(cast(const(ubyte)[])"scrubbed:compiled-final-sink:v1\0");
     appendField(digest, kind);
     appendField(digest, document.text);
-    appendField(digest, ordinal.to!string);
+    appendOrdinalField(digest, ordinal);
     return "compiled:v1:" ~
         toHexString!(LetterCase.lower)(digest.finish()).idup;
 }
@@ -410,7 +425,7 @@ ubyte[32] eventSetDigest(const(DurableEventPlan)[] events) {
     digest.put(cast(const(ubyte)[])"scrubbed:compiled-final-events:v1\0");
     foreach (ordinal, ref event; events) {
         need(event.ordinal == ordinal, "noncanonical-event-ordinal");
-        appendField(digest, event.ordinal.to!string);
+        appendOrdinalField(digest, event.ordinal);
         appendField(digest, event.kind);
         appendField(digest, event.document.text);
         appendField(digest, event.outputName);
@@ -420,6 +435,40 @@ ubyte[32] eventSetDigest(const(DurableEventPlan)[] events) {
         appendField(digest, event.destination);
     }
     return digest.finish();
+}
+
+unittest { // Known-answer ordinal encoding at digit-length transitions and
+    // the largest reachable ordinal: pins the stack-formatted decimal bytes
+    // against the parent implementation's temporary-string output.
+    import std.array : replicate;
+
+    auto document = DocumentId.fromCanonicalText("doc:v1:" ~ "3".replicate(64));
+    assert(derivedSink("root", document, 0) ==
+        "compiled:v1:0279b4988baa2a8a5b692ddd684b41b2a116f2950cae5b3042f7d78ee2250da5");
+    assert(derivedSink("root", document, 9) ==
+        "compiled:v1:ccf32d91611e1fdd2b2bffea9e63630970620fc2710003e0e2943629315b99c3");
+    assert(derivedSink("root", document, 10) ==
+        "compiled:v1:5fdf6b5d4c8489ea5ad4909810c36f15559dabefaf236edf7f870e127bf2fe56");
+    assert(derivedSink("root", document, 99) ==
+        "compiled:v1:1d0e2465c09de2be22ee4db3b4d81f64e92a723eed930ca659f4e098563a5c42");
+    assert(derivedSink("root", document, 100) ==
+        "compiled:v1:365e08e950b776915bad2a64f29a3a6c94b14dfeaa9f44de319302068c65564c");
+    assert(derivedSink("root", document, size_t.max) ==
+        "compiled:v1:08b5fec2a45c629d394a78b6d89dd5dbc072b2936f4ccdaadf2e5e2fe4edd3cf");
+
+    // Ordinals 0 through 100 inline, covering the 9/10 and 99/100 digit
+    // transitions within one canonical event-set digest.
+    DurableEventPlan[101] events;
+    foreach (ordinal, ref event; events) {
+        event.ordinal = ordinal;
+        event.kind = "emitted";
+        event.document = document;
+        event.outputName = "out";
+        event.sink = "sink";
+        event.destination = "dest";
+    }
+    assert(toHexString!(LetterCase.lower)(eventSetDigest(events[])) ==
+        "73776a669db0e3ba1a6d1fe1f9e538214a31d42d6af365816b2deb37e6ca2edf");
 }
 
 private extern(C) void arc4random_buf(void*, size_t);

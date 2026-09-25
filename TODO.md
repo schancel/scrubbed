@@ -430,8 +430,12 @@ is useful, but it is not sufficient on its own.
       report/mask/opt-in redact API now resolves overlapping byte spans and
       emits typed, content-free audit records (`docs/pii-policy.md`). The
       revision-bound C01 policy overlay stores compact typed audit and output
-      digest without transformed content (`docs/pii-policy-overlay.md`). CLI
-      publication remains separate; this is not complete de-identification.
+      digest without transformed content (`docs/pii-policy-overlay.md`). The
+      self-registering `pii-four-class` terminal stage (C17/#180, PR #265)
+      now exposes this as a CLI/JSON v3/v4-common stage with a generic
+      `--sidecar-output` publication route for its content-free audit record
+      (`docs/pii-four-class-stage.md`, PR #268); this is still not complete
+      de-identification.
 - [~] Mix from annotation policies (C08/#40). A pure, deterministic policy
       selects only C02 KEEP and C04 representatives for seeded sampling, with
       typed exclusion and missing-annotation reasons. A read-only C01 join now
@@ -475,10 +479,12 @@ is useful, but it is not sufficient on its own.
       bit-for-bit reproducible builds.
 - [ ] Publish the #62 executable pipeline gallery and redistributable
       demonstration corpus only for shipping commands. Repair, HTML, and JSONL
-      may form the first reviewed slice; PII report/mask/redact waits for #180,
-      and later WARC, specialist-adapter, curated-shard, or model examples wait
-      for their production owners. Unsupported routes remain explicit rather
-      than being staged as successful examples.
+      may form the first reviewed slice; C17/#180 shipped PII report/mask/
+      redact (PRs #261/#265/#268/#272) and its exact synthetic handoff
+      packet is ready but deliberately not yet copied into `examples/**`
+      pending this ticket, and later WARC, specialist-adapter, curated-shard,
+      or model examples wait for their production owners. Unsupported routes
+      remain explicit rather than being staged as successful examples.
 - [~] Stress interruption, disk-full, invalid UTF-8, permission failures,
       changing inputs, and process restart. F12's local-manifest release-active
       faults and earlier process-kill probes cover bounded subsets without a

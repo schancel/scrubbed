@@ -80,7 +80,7 @@ struct DocumentId {
         bytes.put(cast(const(ubyte)[]) "scrubbed:child-document-id:v1\0");
         appendField(bytes, parent.text);
         appendField(bytes, canonicalField(stageKey));
-        appendField(bytes, ordinal.to!string);
+        appendOrdinalField(bytes, ordinal);
         return DocumentId("child:v1:" ~
             toHexString!(LetterCase.lower)(sha256Of(bytes.data)).idup);
     }
@@ -129,11 +129,28 @@ private string canonicalField(string input) pure {
 }
 
 private void appendField(ref Appender!(ubyte[]) bytes, string field) pure {
+    appendFieldBytes(bytes, cast(const(ubyte)[]) field);
+}
+
+private void appendFieldBytes(ref Appender!(ubyte[]) bytes, scope const(ubyte)[] field) pure {
     enforce(field.length <= uint.max, "identity field too long");
     auto length = cast(uint) field.length;
     foreach_reverse (shift; [0, 8, 16, 24])
         bytes.put(cast(ubyte) (length >> shift));
-    bytes.put(cast(const(ubyte)[]) field);
+    bytes.put(field);
+}
+
+/// Feed an unsigned ordinal's canonical decimal digits (no leading zeroes;
+/// `0` is one digit) through the same length-prefixed writer as any other
+/// identity field, without a temporary decimal string.
+private void appendOrdinalField(ref Appender!(ubyte[]) bytes, size_t ordinal) pure {
+    ubyte[20] digits; // size_t.max has at most 20 decimal digits.
+    size_t start = digits.length;
+    do {
+        digits[--start] = cast(ubyte) ('0' + (ordinal % 10));
+        ordinal /= 10;
+    } while (ordinal != 0);
+    appendFieldBytes(bytes, digits[start .. $]);
 }
 
 /// Owns the backing lifetime for borrowed byte ranges. Effects may transfer
@@ -297,6 +314,21 @@ unittest {
         OutputName("part")).id);
     assert(child.id != Document.derivedChild(parent, "split:stage|10", 0,
         OutputName("part")).id);
+
+    // Known-answer ordinal encoding at digit-length transitions and the
+    // largest reachable ordinal: pins the stack-formatted decimal bytes
+    // against the parent implementation's temporary-string output.
+    assert(Document.derivedChild(parent, "split:stage|1", 9, OutputName("part")).id.text ==
+        "child:v1:49b54fc08e14a43c3dc872b3a36e8dadf8fa4abc18ff54d21ce4d8b7aef241da");
+    assert(Document.derivedChild(parent, "split:stage|1", 10, OutputName("part")).id.text ==
+        "child:v1:d7ac85cdb96d9d2fd86b24136891ba7ff7adc46030d488e0e7a0a6c1ec98b750");
+    assert(Document.derivedChild(parent, "split:stage|1", 99, OutputName("part")).id.text ==
+        "child:v1:38992de616fa09e7e4d88f5ee4f0587330e0da861f3dd7e3d84b70e39e4851dc");
+    assert(Document.derivedChild(parent, "split:stage|1", 100, OutputName("part")).id.text ==
+        "child:v1:717ce668654f724b70450bc923c64a63e61984adcfebb4676b15983289e3654f");
+    assert(Document.derivedChild(parent, "split:stage|1", size_t.max, OutputName("part")).id.text ==
+        "child:v1:633d70ccee47111aa5923358a50dcdb2ad67c00d7f67f267264b7a8f4c1aa86a");
+
     auto renamed = child;
     renamed.outputName = OutputName("renamed");
     assert(renamed.id == child.id);

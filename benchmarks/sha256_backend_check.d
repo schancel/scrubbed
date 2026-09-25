@@ -44,6 +44,7 @@ private immutable InventoryEntry[] expectedInventory = [
     InventoryEntry("source/domain/shard_format.d", 5),
     InventoryEntry("source/domain/source_rights.d", 2),
     InventoryEntry("source/domain/structured_chunks.d", 2),
+    InventoryEntry("source/domain/topical_tags.d", 13),
     InventoryEntry("source/effects/dispatch_record.d", 4),
     InventoryEntry("source/effects/document_shards.d", 4),
     InventoryEntry("source/effects/durable_job.d", 12),
@@ -168,7 +169,7 @@ private JSONValue inventoryEvidence() {
             enforce((path in expected) !is null,
                 "new production SHA-256 caller is outside the frozen inventory: " ~ path);
     }
-    enforce(total == 77 && rows.length == 21,
+    enforce(total == 90 && rows.length == 22,
         "production SHA-256 inventory cardinality drift");
     JSONValue result;
     result["base"] = "cd15948466509055ae0431439f651ecba8a301f6";

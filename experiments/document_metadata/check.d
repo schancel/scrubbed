@@ -95,6 +95,43 @@ void main() {
         "canonical wire: standard + extension combination");
     expect(decodeDocumentMetadataV1(id, comboWire) == combo, "round-trip: combo decodes to identical value");
 
+    // --- Full-byte-range extension-value round-trip (#287): 0x00, 0xFF,
+    // 0x80, 0xC0 (an invalid UTF-8 lead byte, included as a realistic
+    // adversarial single-byte case even though extension values are never
+    // UTF-8-validated), and a full 0-255 sweep in one extension value, all
+    // as real opaque extension values round-tripped through
+    // withExtensionField -> encode -> decode. Distinct from the
+    // corrupt-whole-wire-buffer 0xff/0xfe cases below/above, which prove
+    // UTF-8 decode rejection, not value round-trip.
+    immutable(ubyte)[] zeroByteValue = cast(immutable(ubyte)[]) [0x00];
+    immutable(ubyte)[] ffByteValue = cast(immutable(ubyte)[]) [0xff];
+    immutable(ubyte)[] highBitByteValue = cast(immutable(ubyte)[]) [0x80];
+    immutable(ubyte)[] invalidLeadByteValue = cast(immutable(ubyte)[]) [0xc0];
+    ubyte[] sweepBuilder;
+    foreach (b; 0 .. 256) sweepBuilder ~= cast(ubyte) b;
+    immutable(ubyte)[] fullSweepValue = sweepBuilder.idup;
+
+    auto byteRangeMeta = DocumentMetadata.empty()
+        .withExtensionField("ext-zero", zeroByteValue, "stage-range")
+        .withExtensionField("ext-ff", ffByteValue, "stage-range")
+        .withExtensionField("ext-80", highBitByteValue, "stage-range")
+        .withExtensionField("ext-c0", invalidLeadByteValue, "stage-range")
+        .withExtensionField("ext-sweep", fullSweepValue, "stage-range");
+    auto byteRangeWire = encodeDocumentMetadataV1(id, byteRangeMeta);
+    auto decodedByteRange = decodeDocumentMetadataV1(id, byteRangeWire);
+    expect(decodedByteRange.extensionFieldCount == 5,
+        "byte-range round-trip: all five extension fields decoded");
+    expect(decodedByteRange.extensionFields[0].value == zeroByteValue,
+        "byte-range round-trip: 0x00 identical after decode");
+    expect(decodedByteRange.extensionFields[1].value == ffByteValue,
+        "byte-range round-trip: 0xFF identical after decode");
+    expect(decodedByteRange.extensionFields[2].value == highBitByteValue,
+        "byte-range round-trip: 0x80 identical after decode");
+    expect(decodedByteRange.extensionFields[3].value == invalidLeadByteValue,
+        "byte-range round-trip: 0xC0 (invalid UTF-8 lead byte) identical after decode");
+    expect(decodedByteRange.extensionFields[4].value == fullSweepValue,
+        "byte-range round-trip: full 0-255 sweep identical after decode");
+
     // --- No silent overwrite: second write to an existing key fails. ---
     assertThrown(combo.withStandardField(StandardMetadataKey.title, "again", "stage-x"));
     expect(true, "construction-time refusal: second write to existing standard key");

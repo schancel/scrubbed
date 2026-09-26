@@ -23,9 +23,16 @@ struct GeneratedProfiles {
     string[] es;
     string[] fr;
     string[] de;
+    string[] pt;
+    string[] it;
+    string[] nl;
+    string[] tr;
+    string[] vi;
+    string[] pl;
+    string[] id;
 }
 
-/// Regenerate the four language profile tables from the checked-in seed
+/// Regenerate the eleven language profile tables from the checked-in seed
 /// corpora under `root` (normally `experiments/language_id/fixtures/
 /// profiles`). A pure, deterministic function of the checked-in seed corpus
 /// files: no network access, no randomness, and it writes nothing.
@@ -35,6 +42,13 @@ GeneratedProfiles generateProfiles(string root) {
     result.es = rankedNgramProfile(readText(buildPath(root, "es.txt")));
     result.fr = rankedNgramProfile(readText(buildPath(root, "fr.txt")));
     result.de = rankedNgramProfile(readText(buildPath(root, "de.txt")));
+    result.pt = rankedNgramProfile(readText(buildPath(root, "pt.txt")));
+    result.it = rankedNgramProfile(readText(buildPath(root, "it.txt")));
+    result.nl = rankedNgramProfile(readText(buildPath(root, "nl.txt")));
+    result.tr = rankedNgramProfile(readText(buildPath(root, "tr.txt")));
+    result.vi = rankedNgramProfile(readText(buildPath(root, "vi.txt")));
+    result.pl = rankedNgramProfile(readText(buildPath(root, "pl.txt")));
+    result.id = rankedNgramProfile(readText(buildPath(root, "id.txt")));
     return result;
 }
 
@@ -74,4 +88,11 @@ void main(string[] args) {
     printTable("languageProfileEs", generated.es);
     printTable("languageProfileFr", generated.fr);
     printTable("languageProfileDe", generated.de);
+    printTable("languageProfilePt", generated.pt);
+    printTable("languageProfileIt", generated.it);
+    printTable("languageProfileNl", generated.nl);
+    printTable("languageProfileTr", generated.tr);
+    printTable("languageProfileVi", generated.vi);
+    printTable("languageProfilePl", generated.pl);
+    printTable("languageProfileId", generated.id);
 }

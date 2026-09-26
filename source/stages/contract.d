@@ -3,6 +3,7 @@ module stages.contract;
 import content.pieces : Content;
 import crypto.sha256 : sha256Of;
 import domain.document : Document, DocumentId, OutputName, SourceLocator;
+import domain.document_metadata : DocumentMetadata;
 import std.conv : to;
 import std.exception : enforce;
 import std.range.primitives : empty, front, isInputRange, popFront;
@@ -11,9 +12,15 @@ import std.utf : validate;
 
 /// Payload flowing through a document-range stage. Content retains its own
 /// borrowed/owned lifetime rules; a stage does not extend a view owner.
+/// `metadata` is a new trailing field (#285 integration slice): every current
+/// `StageDocument(...)` construction site uses the 2-positional-arg
+/// (document, content) form, so the compiler-generated field-wise
+/// constructor defaults this field to `DocumentMetadata.init` and no
+/// existing call site changes behavior.
 struct StageDocument {
     Document document;
     Content content;
+    DocumentMetadata metadata;
 }
 
 enum PassMode { singlePass, resumable }

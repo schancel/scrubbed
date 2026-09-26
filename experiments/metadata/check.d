@@ -1,4 +1,4 @@
-// Release-active, D-only field and stage goldens for metadata-json:v1.
+// Release-active, D-only field and stage goldens for metadata-json:v2.
 module experiments.metadata.check;
 
 import composition.compiler : compileJob;
@@ -42,8 +42,8 @@ private string bytes(Content content) {
 
 private struct Fixture {
     string html;
-    string[4] expected;
-    string[4] status;
+    string[5] expected;
+    string[5] status;
 }
 
 void main() {
@@ -52,43 +52,83 @@ void main() {
             <meta name="author" content="Ana &quot;Q&quot;"><meta name="date" content="2024-02-29">
             <link rel="canonical" href="https://example.org/a?x=1&amp;y=2">
             <meta property="og:url" content="https://elsewhere.org/a"></head>`,
-            ["Café & Tea", `Ana "Q"`, "2024-02-29", "https://example.org/a?x=1&y=2"],
-            ["selected", "selected", "selected", "selected"]),
+            ["Café & Tea", `Ana "Q"`, "2024-02-29", "https://example.org/a?x=1&y=2", ""],
+            ["selected", "selected", "selected", "selected", "absent"]),
         Fixture(`<head><meta property="og:title" content="One"><meta property="og:title" content="Two">
             <meta name="author" content="A"><meta name="author" content="B">
             <meta name="date" content="2024-01-01"><meta name="date" content="2024-01-02">
             <link rel="canonical" href="https://a.test/"><link rel="canonical" href="https://b.test/"></head>`,
-            ["", "", "", ""], ["ambiguous", "ambiguous", "ambiguous", "ambiguous"]),
+            ["", "", "", "", ""], ["ambiguous", "ambiguous", "ambiguous", "ambiguous", "absent"]),
         Fixture(`<head><title>Solo</title><meta property="og:title" content="Solo">
             <meta name="author" content=" Zoë  Smith "><meta property="article:published_time" content="2024-03-05T10:11:12Z">
             <meta property="og:url" content="https://example.test/story"></head>`,
-            ["Solo", "Zoë Smith", "2024-03-05", "https://example.test/story"],
-            ["selected", "selected", "selected", "selected"]),
+            ["Solo", "Zoë Smith", "2024-03-05", "https://example.test/story", ""],
+            ["selected", "selected", "selected", "selected", "absent"]),
         Fixture(`<head><meta name="date" content="2024-02-30"><link rel="canonical" href="/relative">
             <meta name="author" content=" "></head>`,
-            ["", "", "", ""], ["absent", "invalid", "invalid", "invalid"]),
+            ["", "", "", "", ""], ["absent", "invalid", "invalid", "invalid", "absent"]),
         Fixture(`<head><title>Real</title><meta name="og:title" content="Wrong">
             <meta property="author" content="Wrong"><meta name="article:published_time" content="2024-01-01">
             <meta property="date" content="2024-01-02"><meta name="og:url" content="https://wrong.test/"></head>`,
-            ["Real", "", "", ""], ["selected", "absent", "absent", "absent"]),
+            ["Real", "", "", "", ""], ["selected", "absent", "absent", "absent", "absent"]),
         Fixture(`<head><link rel="canonical" href="https://:443/path">
             <meta property="og:url" content="https://fallback.test/path"></head>`,
-            ["", "", "", "https://fallback.test/path"],
-            ["absent", "absent", "absent", "selected"]),
+            ["", "", "", "https://fallback.test/path", ""],
+            ["absent", "absent", "absent", "selected", "absent"]),
         Fixture(`<head><link rel="canonical" href="https://example.test:bad/path">
             <meta property="og:url" content="https://fallback.test/second"></head>`,
-            ["", "", "", "https://fallback.test/second"],
-            ["absent", "absent", "absent", "selected"]),
+            ["", "", "", "https://fallback.test/second", ""],
+            ["absent", "absent", "absent", "selected", "absent"]),
         Fixture(`<head><link rel="canonical" href="https://[:::]/">
             <meta property="og:url" content="https://fallback.test/malformed"></head>`,
-            ["", "", "", "https://fallback.test/malformed"],
-            ["absent", "absent", "absent", "selected"]),
+            ["", "", "", "https://fallback.test/malformed", ""],
+            ["absent", "absent", "absent", "selected", "absent"]),
         Fixture(`<head><link rel="canonical" href="https://[2001:db8::1]/">
             <meta property="og:url" content="https://fallback.test/ipv6"></head>`,
-            ["", "", "", "https://fallback.test/ipv6"],
-            ["absent", "absent", "absent", "selected"]),
+            ["", "", "", "https://fallback.test/ipv6", ""],
+            ["absent", "absent", "absent", "selected", "absent"]),
         Fixture(`<head><link rel="canonical" href="https://[:]/"></head>`,
-            ["", "", "", ""], ["absent", "absent", "absent", "invalid"]),
+            ["", "", "", "", ""], ["absent", "absent", "absent", "invalid", "absent"]),
+        // rights: link:license (priority 0) wins over dc.rights/copyright when all present.
+        Fixture(`<head><link rel="license" href="https://example.org/license">
+            <meta name="dc.rights" content="Some Rights A"><meta name="copyright" content="Copyright Text B"></head>`,
+            ["", "", "", "", "https://example.org/license"],
+            ["absent", "absent", "absent", "absent", "selected"]),
+        // rights: dc.rights (priority 1) wins over copyright (priority 2) when link:license absent.
+        Fixture(`<head><meta name="dc.rights" content="Rights Two"><meta name="copyright" content="Copyright Two"></head>`,
+            ["", "", "", "", "Rights Two"], ["absent", "absent", "absent", "absent", "selected"]),
+        // rights: identical values at the winning priority dedupe for selection; both remain candidates.
+        Fixture(`<head><link rel="license" href="https://example.org/dup">
+            <link rel="license" href="https://example.org/dup"></head>`,
+            ["", "", "", "", "https://example.org/dup"],
+            ["absent", "absent", "absent", "absent", "selected"]),
+        // rights: distinct values at the winning priority are ambiguous.
+        Fixture(`<head><link rel="license" href="https://example.org/one">
+            <link rel="license" href="https://example.org/two"></head>`,
+            ["", "", "", "", ""], ["absent", "absent", "absent", "absent", "ambiguous"]),
+        // rights: relative link:license href abstains; copyright fallback still wins.
+        Fixture(`<head><link rel="license" href="/relative-license">
+            <meta name="copyright" content="Fallback Copyright A"></head>`,
+            ["", "", "", "", "Fallback Copyright A"],
+            ["absent", "absent", "absent", "absent", "selected"]),
+        // rights: userinfo-bearing link:license href abstains; copyright fallback still wins.
+        Fixture(`<head><link rel="license" href="https://user@example.org/license">
+            <meta name="copyright" content="Fallback Copyright B"></head>`,
+            ["", "", "", "", "Fallback Copyright B"],
+            ["absent", "absent", "absent", "absent", "selected"]),
+        // rights: malformed-port link:license href abstains; copyright fallback still wins.
+        Fixture(`<head><link rel="license" href="https://example.test:bad/license">
+            <meta name="copyright" content="Fallback Copyright C"></head>`,
+            ["", "", "", "", "Fallback Copyright C"],
+            ["absent", "absent", "absent", "absent", "selected"]),
+        // rights: bracketed IPv6-literal link:license href abstains; copyright fallback still wins.
+        Fixture(`<head><link rel="license" href="https://[2001:db8::1]/license">
+            <meta name="copyright" content="Fallback Copyright D"></head>`,
+            ["", "", "", "", "Fallback Copyright D"],
+            ["absent", "absent", "absent", "absent", "selected"]),
+        // rights: whitespace-only dc.rights content sets invalidEvidence and no other evidence yields invalid.
+        Fixture(`<head><meta name="dc.rights" content=" "></head>`,
+            ["", "", "", "", ""], ["absent", "absent", "absent", "absent", "invalid"]),
     ];
     auto document = Document(SourceLocator("fixture:v1", "/PRIVATE/secret", "record"),
         OutputName("record.metadata.json"));
@@ -98,13 +138,38 @@ void main() {
         HtmlNode(HtmlNodeKind.element, 0, "meta", "",
             [HtmlAttribute("property", "og:title"), HtmlAttribute("content", "X")])
     ];
-    auto exact = `{"version":"metadata-json:v1","documentId":"` ~ document.id.text ~
+    auto exact = `{"version":"metadata-json:v2","documentId":"` ~ document.id.text ~
         `","fields":{"title":{"status":"selected","value":"X","rule":"og:title","node":1,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[{"value":"X","rule":"og:title","node":1}]},` ~
         `"author":{"status":"absent","value":null,"rule":null,"node":null,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]},` ~
         `"date":{"status":"absent","value":null,"rule":null,"node":null,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]},` ~
-        `"url":{"status":"absent","value":null,"rule":null,"node":null,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]}}}` ~ "\n";
+        `"url":{"status":"absent","value":null,"rule":null,"node":null,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]},` ~
+        `"rights":{"status":"absent","value":null,"rule":null,"node":null,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]}}}` ~ "\n";
     check(serializeHtmlMetadata(document.id, extractHtmlMetadata(wireTree)) == exact,
         "exact canonical wire mismatch");
+    // A hand-built five-field fixture where every field selects, pinning the
+    // exact metadata-json:v2 wire bytes including the appended rights shape.
+    HtmlTree fullTree;
+    fullTree.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "head"),
+        HtmlNode(HtmlNodeKind.element, 0, "meta", "",
+            [HtmlAttribute("property", "og:title"), HtmlAttribute("content", "X")]),
+        HtmlNode(HtmlNodeKind.element, 0, "meta", "",
+            [HtmlAttribute("name", "author"), HtmlAttribute("content", "Y")]),
+        HtmlNode(HtmlNodeKind.element, 0, "meta", "",
+            [HtmlAttribute("name", "date"), HtmlAttribute("content", "2024-01-01")]),
+        HtmlNode(HtmlNodeKind.element, 0, "link", "",
+            [HtmlAttribute("rel", "canonical"), HtmlAttribute("href", "https://example.test/")]),
+        HtmlNode(HtmlNodeKind.element, 0, "link", "",
+            [HtmlAttribute("rel", "license"), HtmlAttribute("href", "https://example.test/license")]),
+    ];
+    auto fullExact = `{"version":"metadata-json:v2","documentId":"` ~ document.id.text ~
+        `","fields":{"title":{"status":"selected","value":"X","rule":"og:title","node":1,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[{"value":"X","rule":"og:title","node":1}]},` ~
+        `"author":{"status":"selected","value":"Y","rule":"author","node":2,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[{"value":"Y","rule":"author","node":2}]},` ~
+        `"date":{"status":"selected","value":"2024-01-01","rule":"date","node":3,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[{"value":"2024-01-01","rule":"date","node":3}]},` ~
+        `"url":{"status":"selected","value":"https://example.test/","rule":"link:canonical","node":4,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[{"value":"https://example.test/","rule":"link:canonical","node":4}]},` ~
+        `"rights":{"status":"selected","value":"https://example.test/license","rule":"link:license","node":5,"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[{"value":"https://example.test/license","rule":"link:license","node":5}]}}}` ~ "\n";
+    check(serializeHtmlMetadata(document.id, extractHtmlMetadata(fullTree)) == fullExact,
+        "exact five-field canonical wire mismatch");
     HtmlMetadata ordinalMetadata;
     ordinalMetadata.title.status = "selected";
     ordinalMetadata.title.value = "X";
@@ -115,7 +180,8 @@ void main() {
     ordinalMetadata.author.status = "absent";
     ordinalMetadata.date.status = "absent";
     ordinalMetadata.url.status = "absent";
-    auto ordinalExact = `{"version":"metadata-json:v1","documentId":"` ~
+    ordinalMetadata.rights.status = "absent";
+    auto ordinalExact = `{"version":"metadata-json:v2","documentId":"` ~
         document.id.text ~ `","fields":{"title":{"status":"selected","value":"X",` ~
         `"rule":"r","node":8191,"conflict":false,"invalidEvidence":false,` ~
         `"overflow":false,"candidates":[{"value":"X","rule":"r","node":0},` ~
@@ -127,6 +193,8 @@ void main() {
         `"date":{"status":"absent","value":null,"rule":null,"node":null,` ~
         `"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]},` ~
         `"url":{"status":"absent","value":null,"rule":null,"node":null,` ~
+        `"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]},` ~
+        `"rights":{"status":"absent","value":null,"rule":null,"node":null,` ~
         `"conflict":false,"invalidEvidence":false,"overflow":false,"candidates":[]}}}` ~
         "\n";
     auto ordinalWire = serializeHtmlMetadata(document.id, ordinalMetadata);
@@ -136,7 +204,7 @@ void main() {
     auto plan = compileJob(metadataSpec);
     check(plan.stages.length == 1 && plan.stages[0].declaration.key == "html-metadata",
         "stage not registered");
-    size_t[4] selected, correct, abstained;
+    size_t[5] selected, correct, abstained;
     foreach (fixtureIndex, fixture; heldOut) {
         auto parsed = parseHtml(cast(const(ubyte)[]) fixture.html);
         check(parsed.isParsed, "fixture parse failed");
@@ -156,7 +224,7 @@ void main() {
         check(direct.indexOf("/PRIVATE/secret") < 0 && direct.indexOf("record.metadata.json") < 0,
             "source or path leaked");
         auto json = parseJSON(direct);
-        check(json["version"].str == "metadata-json:v1" &&
+        check(json["version"].str == "metadata-json:v2" &&
             json["documentId"].str == document.id.text, "wire header mismatch");
         if (fixtureIndex == 0) {
             check(json["fields"]["title"]["rule"].str == "og:title" &&
@@ -208,7 +276,37 @@ void main() {
                 json["fields"]["url"]["candidates"].array.length == 1 &&
                 json["fields"]["url"]["invalidEvidence"].boolean,
                 "invalid canonical did not fall back");
-        foreach (i, key; ["title", "author", "date", "url"]) {
+        if (fixtureIndex == 10) {
+            auto rights = json["fields"]["rights"];
+            check(rights["rule"].str == "link:license" &&
+                rights["candidates"].array.length == 3 && rights["conflict"].boolean,
+                "link:license did not win over dc.rights/copyright");
+            bool[string] seen;
+            foreach (candidate; rights["candidates"].array)
+                seen[candidate["rule"].str ~ "=" ~ candidate["value"].str] = true;
+            check(("link:license=https://example.org/license" in seen) !is null &&
+                ("dc.rights=Some Rights A" in seen) !is null &&
+                ("copyright=Copyright Text B" in seen) !is null,
+                "rights candidates missing an evidence source");
+        }
+        if (fixtureIndex == 11) {
+            auto rights = json["fields"]["rights"];
+            check(rights["rule"].str == "dc.rights" &&
+                rights["candidates"].array.length == 2 && rights["conflict"].boolean,
+                "dc.rights did not win over copyright");
+        }
+        if (fixtureIndex == 12)
+            check(!json["fields"]["rights"]["conflict"].boolean &&
+                json["fields"]["rights"]["candidates"].array.length == 2,
+                "identical winning-priority rights values did not dedupe for selection");
+        if (fixtureIndex >= 14 && fixtureIndex <= 17) {
+            auto rights = json["fields"]["rights"];
+            check(rights["rule"].str == "copyright" &&
+                rights["candidates"].array.length == 1 &&
+                rights["invalidEvidence"].boolean,
+                "invalid link:license href did not fall back to copyright");
+        }
+        foreach (i, key; ["title", "author", "date", "url", "rights"]) {
             auto field = json["fields"][key];
             check(field["status"].str == fixture.status[i], key ~ " status mismatch");
             if (fixture.status[i] == "selected") {
@@ -239,6 +337,20 @@ void main() {
         check(field["candidates"].array.length == 16 &&
             field["status"].str == (count == 16 ? "selected" : "overflow") &&
             field["overflow"].boolean == (count == 17), "16/17 cap mismatch");
+    }
+    foreach (count; [16, 17]) {
+        string html = "<head>";
+        foreach (_; 0 .. count) html ~= `<meta name="copyright" content="Same">`;
+        html ~= "</head>";
+        auto capped = StageDocument(document,
+            new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
+        auto result = runCompiledStage([capped], plan.stages[0]);
+        check(result.events.length == 1 && result.events[0].payload.document.id == document.id,
+            "capped stage identity mismatch");
+        auto field = parseJSON(bytes(result.events[0].payload.content))["fields"]["rights"];
+        check(field["candidates"].array.length == 16 &&
+            field["status"].str == (count == 16 ? "selected" : "overflow") &&
+            field["overflow"].boolean == (count == 17), "rights 16/17 cap mismatch");
     }
     string slashes;
     foreach (_; 0 .. 512) slashes ~= "\\";
@@ -275,7 +387,7 @@ void main() {
     auto unsupportedTransform = unsupported.stages[0].transform;
     check(unsupportedTransform(small).kind == DecisionKind.quarantine,
         "unsupported charset accepted");
-    foreach (i, key; ["title", "author", "date", "url"])
+    foreach (i, key; ["title", "author", "date", "url", "rights"])
         writeln(key, " precision=", correct[i], "/", selected[i],
             " abstention=", abstained[i], "/", heldOut.length,
             " (small pinned corpus; not a live-web estimate)");

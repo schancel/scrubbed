@@ -32,7 +32,7 @@ struct MetadataField {
 }
 
 struct HtmlMetadata {
-    MetadataField title, author, date, url;
+    MetadataField title, author, date, url, rights;
 }
 
 private string normalized(string input) pure {
@@ -214,8 +214,12 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
             foreach (child; tree.nodes) if (child.parentIndex == i && child.kind == HtmlNodeKind.text)
                 title ~= child.text;
             offer(result.title, title, "title", i, 1);
-        } else if (node.name == "link" && attribute(node, "rel") == "canonical") {
-            offer(result.url, attribute(node, "href"), "link:canonical", i, 0, false, true);
+        } else if (node.name == "link") {
+            auto rel = attribute(node, "rel");
+            if (rel == "canonical")
+                offer(result.url, attribute(node, "href"), "link:canonical", i, 0, false, true);
+            if (rel == "license")
+                offer(result.rights, attribute(node, "href"), "link:license", i, 0, false, true);
         } else if (node.name == "meta") {
             auto property = attribute(node, "property");
             auto name = attribute(node, "name");
@@ -229,9 +233,12 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
             if (name == "date") offer(result.date, content, "date", i, 1, true);
             if (property == "og:url")
                 offer(result.url, content, "og:url", i, 1, false, true);
+            if (name == "dc.rights") offer(result.rights, content, "dc.rights", i, 1);
+            if (name == "copyright") offer(result.rights, content, "copyright", i, 2);
         }
     }
     decide(result.title); decide(result.author); decide(result.date); decide(result.url);
+    decide(result.rights);
     return result;
 }
 
@@ -351,10 +358,10 @@ private void putField(ref Writer writer, const ref MetadataField field) pure {
     writer.put("]}");
 }
 
-/// Fixed key order and one LF are metadata-json:v1's canonical wire.
+/// Fixed key order and one LF are metadata-json:v2's canonical wire.
 string serializeHtmlMetadata(DocumentId id, const HtmlMetadata metadata) pure {
     Writer writer;
-    writer.put(`{"version":"metadata-json:v1","documentId":`);
+    writer.put(`{"version":"metadata-json:v2","documentId":`);
     writer.quoted(id.text);
     writer.put(`,"fields":{"title":`);
     writer.putField(metadata.title);
@@ -364,6 +371,8 @@ string serializeHtmlMetadata(DocumentId id, const HtmlMetadata metadata) pure {
     writer.putField(metadata.date);
     writer.put(`,"url":`);
     writer.putField(metadata.url);
+    writer.put(`,"rights":`);
+    writer.putField(metadata.rights);
     writer.put("}}\n");
     return writer.bytes.idup;
 }

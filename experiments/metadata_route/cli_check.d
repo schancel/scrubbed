@@ -158,7 +158,7 @@ void main(string[] args) {
     auto expectedId = Document(SourceLocator("local-html:v1", input,
         "PRIVATE_SOURCE_CANARY.html"), OutputName("PRIVATE_SOURCE_CANARY.html")).id.text;
     need(json["documentId"].str == expectedId &&
-        json["version"].str == "metadata-json:v1", "typed metadata identity");
+        json["version"].str == "metadata-json:v2", "typed metadata identity");
     foreach (field, expected; ["title": "Primary", "author": "Ada",
             "date": "2024-02-29", "url": "https://example.test/page"])
         need(json["fields"][field]["value"].str == expected, "stage field " ~ field);

@@ -49,9 +49,11 @@ The self-test runs in release mode. It rejects missing required metadata,
 partial or zero samples, a false quality claim, a temporary path in the
 report, incorrect output bytes, an extra output file, an unproven restart,
 a false post-restart skip, and swapped retry/skip statuses between two files.
-The checked-in
-`cli_baseline.d --self-test` separately rejects prefix-collision ftfy and
-wcwidth versions. `experiments/content/bench.d` now checks equality with a
+The checked-in `cli_baseline.d --self-test` covers only `normalization` and
+`normalization/tree` cases (schema `scrubbed-cli-baseline-v2`). Separately,
+`external_comparator.d`/`external_comparator_check.d` own ftfy/wcwidth
+acquisition, pinning, and prefix-collision rejection.
+`experiments/content/bench.d` now checks equality with a
 runtime throw, even when assertions are disabled by `-release`.
 The separate release snapshot self-test copies dos2unix into an owned
 disposable path, atomically replaces that original path with an invalid
@@ -471,9 +473,10 @@ report, bridge mode, and these docs; no production source depends on them.
 
 ## Comparator boundary
 
-The existing [CLI baseline](../benchmarks/README.md) pins `ftfy==6.3.1` and
-`wcwidth==0.8.4` and compares the observed ftfy CLI against scrubbed only on
-the exact-output-matched mojibake file task. A *separate* restricted
+The existing [external comparator](../benchmarks/README.md)
+(`external_comparator.d`) pins `ftfy==6.3.1` and `wcwidth==0.8.4` and compares
+the observed ftfy CLI against scrubbed only on the exact-output-matched
+mojibake file task. A *separate* restricted
 single-file CRLF-only task can compare scrubbed's `normalize-line-endings`
 filter against independently sourced dos2unix. It does **not** compare the
 combined normalization/control-stripping tree task. On this host we fetched

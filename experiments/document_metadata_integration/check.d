@@ -9,10 +9,18 @@
 /// the compiler still rejects two terminal-capable stages in one job. No
 /// filesystem or network reachability beyond what the stages themselves
 /// already legitimately declare (HTML parsing is in-memory only).
+///
+/// Extended for issue #26's v3-stage-registration next-slice contract with
+/// Proof D: the full four-stage chain `[text-transform (fix-mojibake),
+/// html-metadata-annotate, html-main-content, pii-four-class (terminal,
+/// last)]`, and a fifth proof that main-content abstention quarantines the
+/// whole document -- including any metadata `html-metadata-annotate`
+/// already wrote -- before `pii-four-class` ever runs (the owner's "drop
+/// together" decision, https://github.com/schancel/scrubbed/issues/26).
 module experiments.document_metadata_integration.check;
 
 import composition.compiler : compileJob;
-import composition.job_executor : runCompiledJob;
+import composition.job_executor : CompiledJobFailure, runCompiledJob;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, OutputName, SourceLocator;
 import domain.document_metadata : DocumentMetadata, StandardMetadataKey,
@@ -20,6 +28,7 @@ import domain.document_metadata : DocumentMetadata, StandardMetadataKey,
 import domain.pii_patterns : scanPii;
 import domain.pii_policy : applyPiiPolicy, PiiPolicy;
 import effects.document_metadata_publish_stage : documentMetadataPublishSchemaV1;
+import effects.html_main_content : extractMainContent, MainContentStatus;
 import effects.html_metadata : extractHtmlMetadata;
 import effects.html_metadata_annotate_stage : htmlMetadataAnnotateStageKeyV1;
 import effects.html_tree : parseHtml;
@@ -28,6 +37,7 @@ import job.json : parseJobJson;
 import stages.contract : EventKind, StageDocument;
 import stages.registry : availableStages, StageCardinality, StageRegistration,
     StageRegistry;
+import std.algorithm.searching : canFind;
 import std.exception : collectException;
 import std.stdio : writeln;
 
@@ -38,6 +48,7 @@ import stages.text_transform;
 import stages.pii_four_class;
 import effects.html_metadata_annotate_stage;
 import effects.document_metadata_publish_stage;
+import effects.html_main_content_stage;
 
 private int failures;
 
@@ -90,6 +101,12 @@ private StageRegistry integrationRegistry() {
         *availableStages().find("html-metadata-annotate"));
     registry.add(cast(StageRegistration)
         *availableStages().find("document-metadata-publish"));
+    // `html-main-content` (issue #26 next-slice) is already correctly
+    // registered `StageCardinality.oneToOne`/`SideOutputCapability.none` in
+    // production, so it is copied unmodified -- no cardinality-correction
+    // workaround needed for this one, unlike `text-transform` above.
+    registry.add(cast(StageRegistration)
+        *availableStages().find("html-main-content"));
     registry.add(cast(StageRegistration)
         *availableStages().find("pii-four-class"));
     return registry;
@@ -185,6 +202,182 @@ private void proveProofA(ref StageRegistry registry) {
         "against annotate's own independently-computed output)");
 }
 
+/// Proof D (issue #26 next-slice): `[text-transform(fix-mojibake),
+/// html-metadata-annotate, html-main-content, pii-four-class(terminal,
+/// last)]`. Extends Proof A with `html-main-content` inserted in its
+/// contract-required position -- after metadata-annotation, since
+/// annotation reads `<head>` evidence that main-content-extraction's
+/// content-replacing map would otherwise have already discarded.
+private void proveProofD(ref StageRegistry registry) {
+    string sentence = `SchÃ¶n weather today. `;
+    string articleBody;
+    foreach (_; 0 .. 15) articleBody ~= sentence;
+    articleBody ~= `Contact alice@example.com for details.`;
+    enum boilerplate = "Home About Contact";
+    string rawHtml = `<html><head><title>CafÃ© Culture</title>` ~
+        `<meta name="author" content="RenÃ© GarcÃ­a"></head>` ~
+        `<body><nav>` ~ boilerplate ~ `</nav>` ~
+        `<article><p>` ~ articleBody ~ `</p></article></body></html>`;
+
+    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"repair","implementation":"text-transform",` ~
+        `"filters":[{"name":"fix-mojibake"}]},` ~
+        `{"id":"annotate","implementation":"html-metadata-annotate"},` ~
+        `{"id":"maincontent","implementation":"html-main-content"},` ~
+        `{"id":"pii","implementation":"pii-four-class",` ~
+        `"options":{"policy":"mask"}}]}`);
+    auto plan = compileJob(spec, &registry);
+    expect(plan.stages.length == 4, "proof D: job compiles with all four stages");
+
+    auto document = Document(SourceLocator("document-metadata-integration",
+        "proof-d", "fixture"), OutputName("out"));
+    auto events = runCompiledJob(StageDocument(document, owned(rawHtml)), plan);
+    expect(events.length == 1 && events[0].kind == EventKind.emitted,
+        "proof D: exactly one emitted event");
+    auto event = events[0];
+
+    auto repaired = fixMojibake(rawHtml);
+    expect(repaired != rawHtml,
+        "proof D: fixture actually needs mojibake repair (sanity check)");
+
+    // Independently recompute the expected final content: parse the
+    // *repaired* HTML (html-main-content runs after text-transform, so it
+    // only ever observes repaired bytes), select main content, then apply
+    // PII policy to the selected text -- exactly the stage chain's own
+    // order, computed here with no shared code path.
+    auto repairedOutcome = parseHtml(cast(const(ubyte)[]) repaired, null,
+        document.source.recordKey);
+    expect(repairedOutcome.isParsed, "proof D: repaired HTML parses");
+    auto selection = extractMainContent(repairedOutcome.tree);
+    expect(selection.status == MainContentStatus.selected,
+        "proof D: fixture sanity -- main content is confidently selected");
+    expect(!selection.text.canFind(boilerplate),
+        "proof D: fixture sanity -- selected text excludes nav boilerplate");
+
+    auto selectedBytes = cast(const(ubyte)[]) selection.text;
+    auto selectedFindings = scanPii(selectedBytes, "US");
+    auto expectedOutput = applyPiiPolicy(selectedBytes, selectedFindings,
+        PiiPolicy.mask, false).output;
+    expect(event.payload.content.copy() == expectedOutput,
+        "proof D: final content is PII's output over the mojibake-repaired, " ~
+        "main-content-only text");
+
+    auto rawArticleBytes = cast(const(ubyte)[]) rawHtml;
+    auto rawFindings = scanPii(rawArticleBytes, "US");
+    auto rawBasedOutput = applyPiiPolicy(rawArticleBytes, rawFindings,
+        PiiPolicy.mask, false).output;
+    expect(event.payload.content.copy() != rawBasedOutput,
+        "proof D: final content is NOT what PII would have produced from raw HTML");
+
+    expect(event.sideOutputs.length == 1 &&
+        event.sideOutputs[0].schema == "scrubbed-pii-audit-v1",
+        "proof D: exactly one TerminalSideOutput, PII's own unchanged schema");
+
+    auto expectedMetadata = expectedAnnotateMetadata(repaired,
+        document.source.recordKey);
+    expect(expectedMetadata.hasStandardField(StandardMetadataKey.title) &&
+        expectedMetadata.hasStandardField(StandardMetadataKey.author),
+        "proof D: fixture sanity -- title/author selected");
+    expect(event.payload.metadata == expectedMetadata,
+        "proof D: payload.metadata still carries what html-metadata-annotate " ~
+        "wrote, surviving both html-main-content's content replacement and " ~
+        "pii-four-class's own stage, unchanged");
+}
+
+/// Owner decision proof (issue #26): when `html-main-content` abstains, the
+/// whole document is quarantined together -- any metadata
+/// `html-metadata-annotate` already wrote is discarded along with it, and
+/// `pii-four-class` never runs. Proven structurally as well as by absence of
+/// output: `composition.job_executor.runCompiledJob` only ever re-invokes a
+/// later stage's transform on an `EventKind.emitted` event -- a quarantined
+/// event is carried through unchanged -- so this also confirms no
+/// `TerminalSideOutput` (and therefore no publish point) is ever reached.
+private void proveMainContentAbstentionDropsMetadataTogether(
+        ref StageRegistry registry) {
+    // Head metadata is real and would be written by html-metadata-annotate,
+    // but the body is nav-only chrome: html-main-content abstains
+    // (abstainedBelowThreshold).
+    string html = `<html><head><title>CafÃ© Culture</title>` ~
+        `<meta name="author" content="RenÃ© GarcÃ­a"></head>` ~
+        `<body><nav>Home About Contact</nav></body></html>`;
+    auto document = Document(SourceLocator("document-metadata-integration",
+        "proof-abstain-drop", "fixture"), OutputName("out"));
+
+    // First, the three-stage prefix alone (no terminal stage in this job):
+    // proves cleanly, with no exception involved, that the whole document
+    // quarantines together with a bounded status-name reason and produces
+    // no side output.
+    auto prefixSpec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"repair","implementation":"text-transform",` ~
+        `"filters":[{"name":"fix-mojibake"}]},` ~
+        `{"id":"annotate","implementation":"html-metadata-annotate"},` ~
+        `{"id":"maincontent","implementation":"html-main-content"}]}`);
+    auto prefixPlan = compileJob(prefixSpec, &registry);
+    auto prefixEvents = runCompiledJob(StageDocument(document, owned(html)),
+        prefixPlan);
+    expect(prefixEvents.length == 1 &&
+        prefixEvents[0].kind == EventKind.quarantined,
+        "abstention (no terminal stage in job): the whole document is " ~
+        "quarantined, not emitted");
+    expect(prefixEvents.length == 1 &&
+        prefixEvents[0].reason == "abstainedBelowThreshold",
+        "abstention (no terminal stage in job): quarantined with the exact " ~
+        "status-name reason");
+    expect(prefixEvents.length == 1 && prefixEvents[0].sideOutputs.length == 0,
+        "abstention (no terminal stage in job): no side output exists");
+
+    // Second, the full four-stage chain ending in the terminal
+    // pii-four-class stage. **Disclosed finding**: `runCompiledJob`
+    // (`source/composition/job_executor.d`, out of this slice's allowed
+    // scope -- prohibited, not just unmodified) requires that *any* job
+    // containing a `SideOutputCapability.terminal` stage anywhere end with
+    // exactly one side output, regardless of whether that terminal stage
+    // ever actually ran; it does not special-case a job whose sole event
+    // already quarantined upstream. So appending `pii-four-class` to this
+    // exact prefix does not yield a graceful quarantined event -- it throws
+    // `CompiledJobFailure` instead (attributed to the "pii" stage id, since
+    // that is `job.executor`'s own producer-tracking, even though
+    // pii-four-class's transform never actually ran). This is a real,
+    // pre-existing gap in the executor's post-loop invariant, orthogonal to
+    // this slice's own stage logic and not exercised by any prior checker
+    // (#285's own Proofs A/B never quarantine upstream of a terminal
+    // stage); it is disclosed here, not patched around, since the executor
+    // is out of allowed scope. Either way -- clean quarantine above, or this
+    // hard failure here -- `pii-four-class` categorically never produces a
+    // side output for this document, so no metadata ever reaches a later
+    // stage or publish point.
+    auto fullSpec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"repair","implementation":"text-transform",` ~
+        `"filters":[{"name":"fix-mojibake"}]},` ~
+        `{"id":"annotate","implementation":"html-metadata-annotate"},` ~
+        `{"id":"maincontent","implementation":"html-main-content"},` ~
+        `{"id":"pii","implementation":"pii-four-class",` ~
+        `"options":{"policy":"mask"}}]}`);
+    auto fullPlan = compileJob(fullSpec, &registry);
+    auto failure = collectException!CompiledJobFailure(
+        runCompiledJob(StageDocument(document, owned(html)), fullPlan));
+    expect(failure !is null,
+        "abstention (terminal stage present): the pre-existing executor " ~
+        "invariant raises CompiledJobFailure rather than silently " ~
+        "publishing anything -- pii-four-class never emits a side output " ~
+        "for this document either way");
+    if (failure !is null)
+        expect(failure.stageId == "pii",
+            "abstention (terminal stage present): CompiledJobFailure is " ~
+            "attributed to the terminal stage, consistent with " ~
+            "job_executor's own producer-tracking");
+
+    // Sanity: this fixture's head really would have produced metadata had
+    // annotation's write ever reached a later stage or publish point.
+    auto repaired = fixMojibake(html);
+    auto wouldHaveWritten = expectedAnnotateMetadata(repaired,
+        document.source.recordKey);
+    expect(wouldHaveWritten.hasStandardField(StandardMetadataKey.title) &&
+        wouldHaveWritten.hasStandardField(StandardMetadataKey.author),
+        "abstention: fixture sanity -- annotate would have written real " ~
+        "metadata fields had the document not been dropped together with them");
+}
+
 /// Proof B: `[text-transform(fix-mojibake), html-metadata-annotate,
 /// document-metadata-publish(terminal, last)]`.
 private void proveProofB(ref StageRegistry registry) {
@@ -269,6 +462,8 @@ void main() {
     proveProofB(registry);
     provePublishWithNoMetadataWritten(registry);
     proveDualTerminalStillRejected(registry);
+    proveProofD(registry);
+    proveMainContentAbstentionDropsMetadataTogether(registry);
 
     if (failures) {
         writeln(failures, " check(s) failed");

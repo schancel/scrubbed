@@ -204,22 +204,155 @@ placed into the report or into any exception/diagnostic, in either the
 shell script or the driver it compiles: only bounded counts, status/reason
 names, node tag names, and numeric scores.
 
+## v3 stage registration
+
+`source/effects/html_main_content_stage.d` (issue #26's next-slice) is a v3
+self-registering stage, `"html-main-content"`, mirroring
+`html_markdown_stage.d`'s existing pattern: it enforces a raw-byte cap
+(`quarantine("rawLimit")`), calls `parseHtml`, and on a parse failure
+quarantines using the same `HtmlFailureReason.to!string` convention as
+`html-metadata`/`html-markdown`. On a successful parse it calls
+`extractMainContent(outcome.tree)` (this module's own frozen, unmodified
+scoring function). On `MainContentStatus.selected` it replaces
+`input.content` with the selected subtree's plain text and maps —
+`input.metadata` (written by any prior stage) passes through completely
+untouched, since this stage never reads or writes it. On any abstention
+status it quarantines with the exact status-name string
+(`result.status.to!string`) — a single, undifferentiated code path for all
+three statuses. On `HtmlMainContentOutputLimit` (the 4 MiB cap) it
+quarantines `"outputLimit"`. It carries no `TerminalSideOutput` and stays
+`SideOutputCapability.none` so it remains freely composable before a later
+terminal stage; options match `html-markdown-stage`'s `charset`/
+`max-html-bytes` shape.
+
+Per an explicit owner decision (issue #26), an abstention quarantines the
+*whole* document, including any metadata an earlier stage already wrote —
+matching quarantine's existing all-or-nothing semantics elsewhere, rather
+than a hard `.reject`.
+
+The stage is registered with **explicit** `StageCardinality.oneToOne` and
+explicit `SideOutputCapability.none` — not left at their unspecified
+defaults — matching its real, always-map-or-quarantine, never-split
+behavior (the same reasoning as `html-metadata-annotate`'s own registration,
+#285). `composition/compiler.d`'s admission rule requires every stage
+preceding a terminal stage to be *registered* `oneToOne`; this stage
+precedes the terminal `pii-four-class` stage in its required chain
+(`[text-transform] -> [html-metadata-annotate] -> [html-main-content] ->
+[pii-four-class]`), so leaving it at the default `maySplit` would make that
+chain fail to compile. Metadata-annotation runs *before* main-content
+extraction because it reads `<head>` evidence, and main-content extraction's
+successful map fully replaces `content` with the selected body subtree's
+plain text, discarding `<head>` entirely; `html-metadata-annotate` returns
+`content` completely unmodified, so running it first costs nothing.
+
+`experiments/html_main_content_stage/check.d` proves, through the compiled
+stage boundary (`composition.compiler`/`composition.executor`): successful
+selection replaces content and preserves any prior `.metadata`; both
+reachable abstention statuses (`abstainedBelowThreshold`, `abstainedTie`)
+quarantine with the exact status-name reason; a parse failure quarantines
+with a nonempty reason; the raw-byte cap quarantines `"rawLimit"`; a document
+large enough to approach the 4 MiB collected-text cap quarantines
+`"observationLimit"`, not `"outputLimit"` -- see the disclosed finding below.
+`abstainedNoCandidate` is not exercised there either, for the same reason
+noted below: it is unreachable through real parsed HTML, and the stage's
+quarantine branch has no per-status code path for it to diverge from.
+
+**Disclosed finding**: unlike `html-markdown-stage`'s own `"outputLimit"`,
+this stage's `"outputLimit"` handling (`HtmlMainContentOutputLimit`, item 6
+of the contract) is implemented exactly as specified but is **not reachable
+through any real byte input**. `html_tree.d`'s native-observation accounting
+(`maxObservationBytes`, a fixed 1 MiB cap on total bytes observed while
+building the parsed tree, independent of and unaffected by this stage's own
+configurable `max-html-bytes` option) always binds first for any document
+large enough to approach `maxMainContentTextBytes` (4 MiB), failing parse
+with `HtmlFailureReason.observationLimit` before `extractMainContent` ever
+runs — confirmed experimentally while building the acceptance fixture.
+Markdown rendering can structurally *amplify* a small parsed tree past 4 MiB
+(for example, nested-list indentation duplicated per output line), which is
+why `html-markdown-stage`'s own output cap genuinely is reachable; main-
+content's plain-text collection only concatenates and whitespace-collapses
+already-observed text, so it can never produce more output bytes than were
+observed as input, and 1 MiB always fits under 4 MiB. `html_tree.d` is out
+of this slice's allowed scope to change, so this is disclosed here rather
+than patched around — the same class of documented, out-of-scope-to-fix
+unreachability `abstainedNoCandidate` already has for the underlying pure
+function. The code path is retained (not deleted) because it is correct,
+matches the contract's explicit instruction, and would become reachable if
+a future, separately-scoped change ever raised `maxObservationBytes` past
+4 MiB.
+
+`experiments/document_metadata_integration/check.d` (#285's own integration
+checker) is extended with two more proofs: Proof D chains
+`[text-transform(fix-mojibake), html-metadata-annotate, html-main-content,
+pii-four-class(terminal, last)]` end to end, confirming the final content is
+`pii-four-class`'s output over the mojibake-repaired, main-content-only text
+while `payload.metadata` still carries exactly what `html-metadata-annotate`
+wrote; a second proof confirms that when `html-main-content` abstains, the
+whole document is quarantined, no `TerminalSideOutput` is ever produced, and
+`pii-four-class` never runs -- checked two ways. With the three-stage prefix
+alone (no terminal stage in that job), `runCompiledJob` gracefully returns a
+single quarantined event with no side output, as expected. Appending the
+terminal `pii-four-class` stage to the same prefix, however, surfaces a
+**second disclosed finding**: `composition/job_executor.d`'s post-loop
+invariant requires *any* job containing a `SideOutputCapability.terminal`
+stage anywhere to end with exactly one side output, regardless of whether
+that terminal stage ever actually ran, so it does not special-case a job
+whose sole event already quarantined upstream -- it raises
+`CompiledJobFailure` (attributed to the terminal stage's id) instead of a
+graceful quarantined event. This is a real, pre-existing gap in the
+executor's own invariant, orthogonal to this slice's stage logic and never
+previously exercised (#285's own Proofs A/B never quarantine upstream of a
+terminal stage); the executor is out of this slice's allowed scope
+(prohibited, not merely unmodified), so it is disclosed here rather than
+patched around. Either way, `pii-four-class` categorically never produces a
+side output for this document, so no metadata ever reaches a later stage or
+publish point -- both proofs confirm the owner's "drop together" decision.
+Both proofs use the same local `StageRegistry` workaround #285 established
+for `text-transform`'s own separate, pre-existing cardinality gap (issue
+#293, not fixed here); `html-main-content`
+itself needs no such workaround, since it is already correctly registered in
+production.
+
+Run the new stage checker (from the repository root, after DUB has built the
+native Lexbor library):
+
+```sh
+ldc2 -O3 -release -preview=dip1000 -i -Isource \
+  experiments/html_main_content_stage/check.d \
+  .dub/lexbor/liblexbor_static.a -of=.dub/html-main-content-stage-check
+.dub/html-main-content-stage-check
+```
+
+The extended integration checker is run exactly as #285's own command
+(`docs/document-metadata.md`), unchanged:
+
+```sh
+ldc2 -O3 -release -preview=dip1000 -i -Isource \
+  experiments/document_metadata_integration/check.d \
+  .dub/lexbor/liblexbor_static.a \
+  -of=.dub/document-metadata-integration-check
+.dub/document-metadata-integration-check
+```
+
 ## Non-goals
 
-No v3/v4 stage or extractor registration of any kind; no `cli.d`/`app.d`
-change; no `benchmarks/external_comparator.d` change; no network fetch
-inside the release-active checker itself; no trafilatura-parity claim; no
-Mozilla-Readability/jusText/readability-library port; no model/LLM
-extraction; no change to `html_metadata.d`, `html_markdown.d`, `html_tree.d`,
-or `html_tree_export.d` or their stages. The `abstainedNoCandidate` status is
-exercised only by `source/effects/html_main_content.d`'s own unit test
-against an empty `HtmlTree`, not by an authored HTML fixture, since real
-parsed HTML always yields at least one element candidate. Script/style
-hidden-text exclusion during scoring checks only the immediate parent tag
-(correct for script/style, which are HTML5 RAWTEXT elements); template/head
-exclusion during scoring is a one-level-deep simplification, unlike the full
-ancestor walk `html_markdown.d` uses and that this module's own final
-text-extraction step also uses. This is a first slice: the v3-vs-v4
-registration/wiring decision, CLI/comparator reachability, and the pinned
-trafilatura quality comparison itself remain for later, separately-scoped
-work.
+No v4 extractor registration; no `cli.d`/`app.d` change beyond automatic
+self-registration reachability; no `benchmarks/external_comparator.d`
+change; no network fetch inside any release-active checker; no
+trafilatura-parity claim; no Mozilla-Readability/jusText/readability-library
+port; no model/LLM extraction; no change to `html_main_content.d`'s own
+scoring/selection algorithm (frozen), or to `html_metadata.d`,
+`html_metadata_annotate_stage.d`, `html_markdown.d`, `html_tree.d`,
+`html_tree_export.d`, `pii_four_class.d`, the compiler, or the executor. The
+`abstainedNoCandidate` status is exercised only by
+`source/effects/html_main_content.d`'s own unit test against an empty
+`HtmlTree`, not by an authored HTML fixture (through the pure function or
+through the stage), since real parsed HTML always yields at least one
+element candidate. Script/style hidden-text exclusion during scoring checks
+only the immediate parent tag (correct for script/style, which are HTML5
+RAWTEXT elements); template/head exclusion during scoring is a
+one-level-deep simplification, unlike the full ancestor walk
+`html_markdown.d` uses and that this module's own final text-extraction step
+also uses. No structured candidate-audit side output (flagged, deferred to a
+future terminal publish stage); `text-transform`'s own registration
+cardinality gap (issue #293) remains unfixed and out of scope here.

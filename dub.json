@@ -15,6 +15,7 @@
 	],
 	"sourceFiles": ["third_party/sqlite/sqlite3.o", ".dub/lexbor/liblexbor_static.a", ".dub/zstd/libzstd_decompress.a"],
 	"dflags": ["-g", "-preview=dip1000"],
+	"libs": ["curl"],
 	"buildTypes": {
 		"release": {
 			"buildOptions": ["releaseMode", "optimize", "inline"]

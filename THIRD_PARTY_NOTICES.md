@@ -63,6 +63,34 @@ per-file hashes, and static build flags are recorded in
 [`third_party/sqlite/README.md`](third_party/sqlite/README.md). No system
 `libsqlite3` is linked for this API.
 
+## libcurl
+
+`source/effects/curl_ffi.d`/`source/effects/http_fetch.d` dynamically link
+the host-provided `/usr/lib/libcurl.4.dylib` via `-lcurl` (a `libs` entry in
+`dub.json`); no libcurl source is vendored or statically linked, and no
+OpenSSL/TLS/compression library is bundled by this project. This follows the
+`ADOPT_DYNAMIC` verdict of the loopback capability/licensing/packaging
+evaluation in [`docs/http-fetch-evaluation.md`](docs/http-fetch-evaluation.md)
+(`experiments/http_fetch/check.d`), which recorded provenance on the
+supported macOS 26.6.2 arm64 build host: the linked library reports
+`libcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.68.1`
+via `curl_version()`, and `otool -L` on the built binary shows only
+`/usr/lib/libcurl.4.dylib`, `/usr/lib/libSystem.B.dylib`, and
+`/usr/lib/libobjc.A.dylib` as direct runtime links.
+
+The Command Line Tools SDK's installed `curl/curl.h` header attributes
+copyright to "Daniel Stenberg, `<daniel@haxx.se>`, et al.", states the
+software "is licensed as described in the file COPYING", and declares
+`SPDX-License-Identifier: curl`; that `COPYING` file is not present beside
+the installed SDK header on this host, and this project does not reproduce
+its full text here for that reason. The `curl` SPDX identifier corresponds
+to a short, permissive (MIT/X11-style) license; the authoritative text is
+published at https://curl.se/docs/copyright.html. This is a license/
+provenance inventory, matching the evaluation's own posture, not independent
+legal clearance or proof of the complete source corresponding to Apple's
+binary; see `docs/http-fetch-evaluation.md` for the fuller recorded
+provenance, including exact header/`.tbd` SHA-256 values.
+
 ## argparse
 
 The shipping `scrubbed` executable uses `argparse` version 2.0.2 by Andrey

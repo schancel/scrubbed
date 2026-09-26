@@ -401,29 +401,35 @@ tags identity checks). [`experiments/text/compare_cli.d` and
 this new shape.
 
 `external_comparator_check.d` (release-active D-only checker, own copies of
-the gating primitives rather than an import of the runner) exercises eleven
+the gating primitives rather than an import of the runner) exercises twelve
 negative controls end to end: version-prefix collision, executable mutation
 after snapshot, fixture drift, independently authored expectation drift,
 output drift, zero samples, missing case, duplicate case, nonzero exit,
 timeout (a command that outlives its declared bound is sent SIGTERM, then
 SIGKILL after a bounded grace period, and the run fails closed with no
-partial sample retained), and resource refusal (a peak RSS above the
-declared bound fails the case). Its `--check <report.json>` mode also
-structurally validates a real run's report and confirms the migrated
+partial sample retained), process-group timeout (a synthetic command that
+backgrounds a long-running grandchild is timed out, and the grandchild's
+PID is confirmed gone, not just the direct child's), and resource refusal
+(a peak RSS above the declared bound fails the case). Its
+`--check <report.json>` mode also structurally validates a real run's
+report and confirms the migrated
 `mojibake/scrubbed-vs-ftfy` case reproduces `cli_baseline.d`'s prior
 correctness result for that case: the same fixture/expected SHA-256 pair and
 the same exact-output gate, even though the report format itself
 intentionally is not backward-compatible.
 
-Known limitation: the timeout kill only signals the direct `/usr/bin/time`
-child, matching `cli_baseline.d`'s and `pipeline.d`'s existing use of that
-wrapper for wall/CPU/RSS. `/usr/bin/time` does not forward signals to the
-command it launches, so a genuinely hung comparator process (its
-grandchild) may keep running until it exits on its own after the harness
-has already failed the case closed; this is a best-effort kill, not a
-process-group reaper. `benchmarks/pipeline.d`'s `coordination_profile.d`
-solves that fully with a dedicated launcher and process-group ownership,
-which is out of scope for this shared comparator's first slice.
+The timed sample child (`/usr/bin/time` and the command it wraps) owns its
+own process group: `runBoundedSample` forks, the child calls `setpgid(0, 0)`
+before `dup2`-redirecting stdin/stdout/stderr and `execvp`-ing into
+`/usr/bin/time`, mirroring the in-process fork+setpgid+dup2+execvp pattern
+already used by `experiments/document_adapters/run_limited.d` and
+`experiments/embedding_clusters/run_evaluation.d`'s `startServer`. A command
+that outlives its declared timeout has its whole process group signaled
+(`kill(-pid, SIGTERM)`, then `kill(-pid, SIGKILL)` after the existing
+bounded grace period), so a grandchild the wrapped command spawned is
+terminated along with it instead of surviving as an orphan. This closes the
+prior best-effort, direct-child-only kill limitation without a new compiled
+launcher binary or build-recipe change.
 
 ## Pre-refactor full-CLI baseline (A00)
 

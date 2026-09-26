@@ -11,6 +11,9 @@ module external_comparator;
 
 import core.sys.posix.signal : kill, SIGKILL, SIGTERM;
 import core.sys.posix.sys.stat : chmod, S_IRUSR, S_IXUSR;
+import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WNOHANG, WTERMSIG,
+    waitpid;
+import core.sys.posix.unistd : _exit, dup2, execvp, fork, setpgid;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds;
 import std.algorithm.searching : canFind, endsWith, startsWith;
@@ -21,7 +24,7 @@ import std.file : copy, exists, mkdirRecurse, read, readText, remove,
     rmdirRecurse, tempDir, write;
 import std.json : JSONValue;
 import std.path : buildPath, dirName, dirSeparator, relativePath;
-import std.process : execute, spawnProcess, tryWait, wait;
+import std.process : execute;
 import std.stdio : File, stderr, writeln;
 import std.string : split, splitLines, strip, toStringz;
 import std.uuid : randomUUID;
@@ -164,14 +167,62 @@ private JSONValue parseTimedMetrics(string output, bool darwin, int status) {
     return sample;
 }
 
+// ---- Whole-process-group ownership for the timed sample child (behavioral
+// model: experiments/document_adapters/run_limited.d and
+// experiments/embedding_clusters/run_evaluation.d's startServer). The
+// direct /usr/bin/time child is forked, made its own process-group leader
+// via setpgid(0, 0) before exec, and its stdin/stdout/stderr are
+// dup2'd from devNull/captureFile. A timeout signals the whole group
+// (kill(-pid, ...)), not just the direct child, so a grandchild the
+// wrapped command spawned is also terminated instead of orphaned. ----
+
+private struct GroupWaitResult {
+    bool terminated;
+    int status;
+}
+
+private int exitStatusOf(int rawStatus) {
+    return WIFEXITED(rawStatus) ? WEXITSTATUS(rawStatus) : -WTERMSIG(rawStatus);
+}
+
+private int spawnGroupLeader(string[] wrapper, File stdinFile, File stdoutFile,
+                             File stderrFile) {
+    auto pid = fork();
+    require(pid >= 0, "cannot fork timed sample process");
+    if (pid == 0) {
+        if (setpgid(0, 0) != 0) _exit(126);
+        if (dup2(stdinFile.fileno, 0) < 0) _exit(126);
+        if (dup2(stdoutFile.fileno, 1) < 0) _exit(126);
+        if (dup2(stderrFile.fileno, 2) < 0) _exit(126);
+        auto argv = new const(char)*[wrapper.length + 1];
+        foreach (index, argument; wrapper) argv[index] = argument.toStringz;
+        argv[$ - 1] = null;
+        execvp(argv[0], argv.ptr);
+        _exit(127);
+    }
+    return pid;
+}
+
+private GroupWaitResult tryWaitGroupLeader(int pid) {
+    int rawStatus;
+    auto waited = waitpid(pid, &rawStatus, WNOHANG);
+    if (waited == 0) return GroupWaitResult(false, 0);
+    require(waited == pid, "waitpid failed for timed sample process");
+    return GroupWaitResult(true, exitStatusOf(rawStatus));
+}
+
+private void reapGroupLeader(int pid) {
+    int rawStatus;
+    waitpid(pid, &rawStatus, 0);
+}
+
 // Runs `command` under BSD/GNU /usr/bin/time with a declared wall-clock
-// timeout. A process that outlives the timeout is sent SIGTERM, then
-// SIGKILL after a bounded grace period, and the run fails closed with an
-// exception (no partial sample is ever returned for a timed-out run).
-// Limitation: only the direct /usr/bin/time child is signaled; a slower
-// grandchild process it spawned may continue running until it exits on
-// its own. This matches the bounded, best-effort scope of this comparator
-// (see benchmarks/README.md); it is not a process-group reaper.
+// timeout. The direct /usr/bin/time child is its own process-group leader;
+// a process that outlives the timeout has its whole process group sent
+// SIGTERM, then SIGKILL after a bounded grace period, and the run fails
+// closed with an exception (no partial sample is ever returned for a
+// timed-out run). A grandchild the wrapped command spawned is terminated
+// along with it, not left running as an orphan.
 private JSONValue runBoundedSample(string[] command, bool darwin,
                                    double timeoutSeconds) {
     require(timeoutSeconds > 0, "declared timeout must be positive");
@@ -182,23 +233,23 @@ private JSONValue runBoundedSample(string[] command, bool darwin,
     auto devNull = File("/dev/null", "r");
     auto captureFile = File(capturePath, "wb");
     scope(exit) if (exists(capturePath)) remove(capturePath);
-    auto pid = spawnProcess(wrapper, devNull, captureFile, captureFile);
+    auto pid = spawnGroupLeader(wrapper, devNull, captureFile, captureFile);
     auto deadline = MonoTime.currTime + msecs(cast(long)(timeoutSeconds * 1000));
-    auto waitResult = tryWait(pid);
+    auto waitResult = tryWaitGroupLeader(pid);
     while (!waitResult.terminated && MonoTime.currTime < deadline) {
         Thread.sleep(msecs(10));
-        waitResult = tryWait(pid);
+        waitResult = tryWaitGroupLeader(pid);
     }
     if (!waitResult.terminated) {
-        require(kill(pid.processID, SIGTERM) == 0, "cannot signal timed-out process");
+        require(kill(-pid, SIGTERM) == 0, "cannot signal timed-out process");
         auto grace = MonoTime.currTime + seconds(1);
         while (!waitResult.terminated && MonoTime.currTime < grace) {
             Thread.sleep(msecs(10));
-            waitResult = tryWait(pid);
+            waitResult = tryWaitGroupLeader(pid);
         }
         if (!waitResult.terminated) {
-            kill(pid.processID, SIGKILL);
-            wait(pid);
+            kill(-pid, SIGKILL);
+            reapGroupLeader(pid);
             waitResult.terminated = true;
         }
         captureFile.close();

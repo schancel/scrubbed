@@ -12,7 +12,11 @@
 // broke compatibility with the old A00 shape.
 module external_comparator_check;
 
+import core.stdc.errno : errno, ESRCH;
 import core.sys.posix.signal : kill, SIGKILL, SIGTERM;
+import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WNOHANG, WTERMSIG,
+    waitpid;
+import core.sys.posix.unistd : _exit, dup2, execvp, fork, setpgid;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds;
 import std.algorithm.searching : endsWith, startsWith;
@@ -22,9 +26,9 @@ import std.digest.sha : sha256Of;
 import std.file : exists, read, readText, remove, tempDir, write;
 import std.json : JSONValue, parseJSON;
 import std.path : buildPath;
-import std.process : execute, spawnProcess, tryWait, wait;
+import std.process : execute;
 import std.stdio : File, stderr, writeln;
-import std.string : split, splitLines, strip;
+import std.string : split, splitLines, strip, toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string message) {
@@ -245,6 +249,55 @@ private JSONValue parseTimedMetrics(string output, bool darwin, int status) {
     return sample;
 }
 
+// ---- Independent copy of the whole-process-group ownership for the timed
+// sample child (behavioral model:
+// experiments/document_adapters/run_limited.d and
+// experiments/embedding_clusters/run_evaluation.d's startServer). The
+// direct /usr/bin/time child is forked, made its own process-group leader
+// via setpgid(0, 0) before exec, and its stdin/stdout/stderr are dup2'd
+// from devNull/captureFile. A timeout signals the whole group
+// (kill(-pid, ...)), not just the direct child. ----
+
+private struct GroupWaitResult {
+    bool terminated;
+    int status;
+}
+
+private int exitStatusOf(int rawStatus) {
+    return WIFEXITED(rawStatus) ? WEXITSTATUS(rawStatus) : -WTERMSIG(rawStatus);
+}
+
+private int spawnGroupLeader(string[] wrapper, File stdinFile, File stdoutFile,
+                             File stderrFile) {
+    auto pid = fork();
+    require(pid >= 0, "cannot fork timed sample process");
+    if (pid == 0) {
+        if (setpgid(0, 0) != 0) _exit(126);
+        if (dup2(stdinFile.fileno, 0) < 0) _exit(126);
+        if (dup2(stdoutFile.fileno, 1) < 0) _exit(126);
+        if (dup2(stderrFile.fileno, 2) < 0) _exit(126);
+        auto argv = new const(char)*[wrapper.length + 1];
+        foreach (index, argument; wrapper) argv[index] = argument.toStringz;
+        argv[$ - 1] = null;
+        execvp(argv[0], argv.ptr);
+        _exit(127);
+    }
+    return pid;
+}
+
+private GroupWaitResult tryWaitGroupLeader(int pid) {
+    int rawStatus;
+    auto waited = waitpid(pid, &rawStatus, WNOHANG);
+    if (waited == 0) return GroupWaitResult(false, 0);
+    require(waited == pid, "waitpid failed for timed sample process");
+    return GroupWaitResult(true, exitStatusOf(rawStatus));
+}
+
+private void reapGroupLeader(int pid) {
+    int rawStatus;
+    waitpid(pid, &rawStatus, 0);
+}
+
 private JSONValue runBoundedSample(string[] command, bool darwin, double timeoutSeconds) {
     string[] wrapper = (darwin ? ["/usr/bin/time", "-l", "-p"] :
         ["/usr/bin/time", "-v"]) ~ command;
@@ -252,23 +305,23 @@ private JSONValue runBoundedSample(string[] command, bool darwin, double timeout
     auto devNull = File("/dev/null", "r");
     auto captureFile = File(capturePath, "wb");
     scope(exit) if (exists(capturePath)) remove(capturePath);
-    auto pid = spawnProcess(wrapper, devNull, captureFile, captureFile);
+    auto pid = spawnGroupLeader(wrapper, devNull, captureFile, captureFile);
     auto deadline = MonoTime.currTime + msecs(cast(long)(timeoutSeconds * 1000));
-    auto waitResult = tryWait(pid);
+    auto waitResult = tryWaitGroupLeader(pid);
     while (!waitResult.terminated && MonoTime.currTime < deadline) {
         Thread.sleep(msecs(10));
-        waitResult = tryWait(pid);
+        waitResult = tryWaitGroupLeader(pid);
     }
     if (!waitResult.terminated) {
-        kill(pid.processID, SIGTERM);
+        kill(-pid, SIGTERM);
         auto grace = MonoTime.currTime + seconds(1);
         while (!waitResult.terminated && MonoTime.currTime < grace) {
             Thread.sleep(msecs(10));
-            waitResult = tryWait(pid);
+            waitResult = tryWaitGroupLeader(pid);
         }
         if (!waitResult.terminated) {
-            kill(pid.processID, SIGKILL);
-            wait(pid);
+            kill(-pid, SIGKILL);
+            reapGroupLeader(pid);
             waitResult.terminated = true;
         }
         captureFile.close();
@@ -299,6 +352,42 @@ private void checkTimeout() {
     require(rejected, "a command that exceeded its declared timeout was not rejected");
 }
 
+// Proves the whole process group -- not just the direct child -- is
+// terminated on timeout. The synthetic /bin/sh command backgrounds a long
+// sleep as a grandchild, records that grandchild's PID to a known temp
+// file, then itself sleeps well past the declared timeout so the direct
+// child is still running when runBoundedSample's deadline fires. After the
+// call throws, the grandchild's PID must go away (ESRCH on kill(pid, 0)):
+// if only the direct /usr/bin/time child were signaled (the pre-fix
+// behavior), the backgrounded grandchild would survive as an orphan.
+private void checkProcessGroupTimeout() {
+    auto darwin = darwinHost();
+    auto pidFile = scratchFile("grandchild-pid");
+    scope(exit) if (exists(pidFile)) remove(pidFile);
+    auto script = "sleep 30 & echo $! > " ~ pidFile ~ "; sleep 30";
+
+    bool rejected;
+    try runBoundedSample(["/bin/sh", "-c", script], darwin, 0.4);
+    catch (Exception) rejected = true;
+    require(rejected, "a process-group timeout command was not rejected");
+
+    auto pidDeadline = MonoTime.currTime + seconds(1);
+    while (!exists(pidFile) && MonoTime.currTime < pidDeadline)
+        Thread.sleep(msecs(10));
+    require(exists(pidFile), "grandchild PID file was never written");
+    auto grandchildPid = readText(pidFile).strip.to!int;
+
+    bool gone;
+    auto goneDeadline = MonoTime.currTime + seconds(1);
+    while (MonoTime.currTime < goneDeadline) {
+        errno = 0;
+        if (kill(grandchildPid, 0) != 0 && errno == ESRCH) { gone = true; break; }
+        Thread.sleep(msecs(10));
+    }
+    require(gone, "the backgrounded grandchild survived the declared timeout: " ~
+        "only the direct child was signaled, not its whole process group");
+}
+
 private void checkResourceRefusal() {
     auto darwin = darwinHost();
     auto sample = runBoundedSample(["/bin/echo", "hi"], darwin, 10.0);
@@ -320,11 +409,13 @@ private void selfTest() {
     checkZeroSamplesMissingAndDuplicateCase();
     checkNonzeroExit();
     checkTimeout();
+    checkProcessGroupTimeout();
     checkResourceRefusal();
     writeln("external comparator negative-control self-test passed: ",
         "version-prefix-collision, executable-mutation, fixture-drift, ",
         "expectation-drift, output-drift, zero-samples, missing-case, ",
-        "duplicate-case, nonzero-exit, timeout, resource-refusal");
+        "duplicate-case, nonzero-exit, timeout, process-group-timeout, ",
+        "resource-refusal");
 }
 
 // ---- Report validation: proves a real external_comparator run reproduces

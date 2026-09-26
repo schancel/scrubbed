@@ -10,8 +10,8 @@ import effects.html_metadata : extractHtmlMetadata, HtmlMetadata,
 import effects.html_metadata_stage;
 import effects.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree,
     maxRawBytes, parseHtml;
-import stages.contract : DecisionKind, ResourceDeclaration, StageDeclaration,
-    StageDocument;
+import stages.contract : DecisionKind, EventKind, ResourceDeclaration,
+    StageDeclaration, StageDocument;
 import job.json : parseJobJson;
 import std.conv : to;
 import std.json : JSONType, JSONValue, parseJSON;
@@ -220,7 +220,12 @@ void main() {
         auto output = runCompiledStage([input], plan.stages[0]);
         check(output.events.length == 1 && output.events[0].payload.document.id == document.id,
             "DocumentId changed");
-        check(bytes(output.events[0].payload.content) == direct, "stage wire differs");
+        check(bytes(output.events[0].payload.content) == fixture.html,
+            "content must stay untouched, not overwritten with metadata");
+        check(output.events[0].sideOutputs.length == 1,
+            "exactly one side output expected on a successful map");
+        check(cast(string) output.events[0].sideOutputs[0].bytes() == direct,
+            "side-output wire differs");
         check(direct.indexOf("/PRIVATE/secret") < 0 && direct.indexOf("record.metadata.json") < 0,
             "source or path leaked");
         auto json = parseJSON(direct);
@@ -333,7 +338,11 @@ void main() {
         auto result = runCompiledStage([capped], plan.stages[0]);
         check(result.events.length == 1 && result.events[0].payload.document.id == document.id,
             "capped stage identity mismatch");
-        auto field = parseJSON(bytes(result.events[0].payload.content))["fields"]["author"];
+        check(bytes(result.events[0].payload.content) == html,
+            "capped content must stay untouched");
+        check(result.events[0].sideOutputs.length == 1, "capped side output missing");
+        auto field = parseJSON(cast(string) result.events[0].sideOutputs[0].bytes())
+            ["fields"]["author"];
         check(field["candidates"].array.length == 16 &&
             field["status"].str == (count == 16 ? "selected" : "overflow") &&
             field["overflow"].boolean == (count == 17), "16/17 cap mismatch");
@@ -347,7 +356,11 @@ void main() {
         auto result = runCompiledStage([capped], plan.stages[0]);
         check(result.events.length == 1 && result.events[0].payload.document.id == document.id,
             "capped stage identity mismatch");
-        auto field = parseJSON(bytes(result.events[0].payload.content))["fields"]["rights"];
+        check(bytes(result.events[0].payload.content) == html,
+            "capped content must stay untouched");
+        check(result.events[0].sideOutputs.length == 1, "capped side output missing");
+        auto field = parseJSON(cast(string) result.events[0].sideOutputs[0].bytes())
+            ["fields"]["rights"];
         check(field["candidates"].array.length == 16 &&
             field["status"].str == (count == 16 ? "selected" : "overflow") &&
             field["overflow"].boolean == (count == 17), "rights 16/17 cap mismatch");
@@ -366,6 +379,16 @@ void main() {
     auto largeDecision = transform(largeInput);
     check(largeDecision.kind == DecisionKind.quarantine &&
         largeDecision.reason == "outputLimit", "metadata output cap failed");
+    // Quarantine must also survive the full runCompiledStage path: the
+    // SideOutputCapability.terminal registration requires every event --
+    // quarantined ones included -- to carry exactly one TerminalSideOutput,
+    // or composition.executor.validateCapabilities throws instead of
+    // quarantining. The reason string must be unaffected.
+    auto largeViaStage = runCompiledStage([largeInput], plan.stages[0]);
+    check(largeViaStage.events.length == 1 &&
+        largeViaStage.events[0].kind == EventKind.quarantined &&
+        largeViaStage.events[0].reason == "outputLimit",
+        "outputLimit quarantine broke under the terminal side-output capability");
     auto malformed = parseHtml([cast(ubyte) 0xff]);
     check(!malformed.isParsed, "invalid UTF-8 accepted");
     auto badInput = StageDocument(document,

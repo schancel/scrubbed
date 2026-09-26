@@ -1,11 +1,19 @@
 # Deterministic HTML metadata slice
 
 Import `effects.html_metadata_stage` to register the opt-in `html-metadata`
-stage, then select it in a canonical version-3 job. It accepts HTML `Content`
-and maps the same typed `DocumentId` to UTF-8 `metadata-json:v2` `Content`; it
-does not need a paired file, output sink, network fetch, or model. The input
-follows the existing restricted `HtmlTree` boundary and its 64 KiB raw/decoded,
-node, depth, attribute, and observation limits.
+stage, then select it in a canonical version-3 job. It accepts HTML `Content`,
+maps the same typed `DocumentId` with its input `Content` left untouched, and
+carries the extracted UTF-8 `metadata-json:v2` bytes as a single
+`TerminalSideOutput` (schema `metadata-json-v2`) instead of overwriting the
+document; it does not need a paired file, output sink, network fetch, or
+model. The stage registers `StageCardinality.oneToOne` and
+`SideOutputCapability.terminal`, so a quarantined or rejected event also
+carries a (payload-empty) side output to satisfy that capability's per-event
+invariant -- callers branch on quarantine/reject before reading it, the same
+as before this change. `route-metadata` reads that side output's bytes for
+the metadata-output sink; it no longer reads the stage's document content.
+The input follows the existing restricted `HtmlTree` boundary and its 64 KiB
+raw/decoded, node, depth, attribute, and observation limits.
 
 Only `<head>` evidence is considered. The five fields are `title`, `author`, `date`, `url`, and `rights`, in that wire order. Rules and priority (lower number wins):
 

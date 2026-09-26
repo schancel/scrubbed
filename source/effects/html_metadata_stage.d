@@ -6,15 +6,31 @@ import effects.html_metadata : HtmlMetadataOutputLimit, extractHtmlMetadata,
     serializeHtmlMetadata;
 import effects.html_tree : HtmlFailureReason, maxRawBytes, parseHtml;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
-    StageDeclaration, StageDocument;
-import stages.registry : ConfiguredStageTransform, OptionDeclaration, OptionType,
+    StageDeclaration, StageDocument, TerminalSideOutput;
+import stages.registry : ConfiguredStageTransform, FilterPlacement,
+    OptionDeclaration, OptionType, SideOutputCapability, StageCardinality,
     StageConfiguration, StageOptions, StageRegistration, registerStage;
 import std.conv : to;
 import std.exception : enforce;
 
+enum htmlMetadataSideOutputKeyV2 = "html-metadata";
+enum htmlMetadataSideOutputSchemaV2 = "metadata-json-v2";
+enum htmlMetadataSideOutputSuffixV2 = ".metadata.json";
+
 private class HtmlMetadataConfiguration : StageConfiguration {
     string charset;
     this(string charset) immutable { this.charset = charset; }
+}
+
+/// A quarantined/rejected decision carries no extracted metadata, but this
+/// stage's `SideOutputCapability.terminal` registration requires every event
+/// -- quarantined ones included -- to carry exactly one `TerminalSideOutput`
+/// (`composition.executor.validateCapabilities` enforces this unconditionally).
+/// This placeholder is never read by `metadata_route_cli.runMetadataRoute`,
+/// which branches on quarantine/reject before touching side outputs.
+private TerminalSideOutput quarantinedMetadataSideOutput() pure {
+    return TerminalSideOutput(htmlMetadataSideOutputKeyV2,
+        htmlMetadataSideOutputSchemaV2, htmlMetadataSideOutputSuffixV2, null);
 }
 
 private StageDecision applyHtmlMetadata(StageDocument input,
@@ -23,7 +39,7 @@ private StageDecision applyHtmlMetadata(StageDocument input,
     enforce(configured !is null, "invalid html-metadata configuration");
     auto charset = configured.charset;
     if (input.content.size > maxRawBytes)
-        return StageDecision.quarantine("rawLimit");
+        return StageDecision.quarantine("rawLimit", [quarantinedMetadataSideOutput()]);
     auto raw = input.content.copy();
     auto outcome = parseHtml(raw, charset, input.document.source.recordKey);
     if (!outcome.isParsed) {
@@ -34,14 +50,17 @@ private StageDecision applyHtmlMetadata(StageDocument input,
             if (failure.hasOffendingOffset)
                 reason ~= "@" ~ failure.offendingOffset.to!string;
         }
-        return StageDecision.quarantine(reason);
+        return StageDecision.quarantine(reason, [quarantinedMetadataSideOutput()]);
     }
     string serialized;
     try serialized = serializeHtmlMetadata(input.document.id,
         extractHtmlMetadata(outcome.tree));
-    catch (HtmlMetadataOutputLimit) return StageDecision.quarantine("outputLimit");
-    input.content = new Content([ContentPiece.own(cast(const(ubyte)[]) serialized)]);
-    return StageDecision.map(input);
+    catch (HtmlMetadataOutputLimit)
+        return StageDecision.quarantine("outputLimit", [quarantinedMetadataSideOutput()]);
+    auto sideOutput = TerminalSideOutput(htmlMetadataSideOutputKeyV2,
+        htmlMetadataSideOutputSchemaV2, htmlMetadataSideOutputSuffixV2,
+        cast(const(ubyte)[]) serialized);
+    return StageDecision.map(input, [sideOutput]);
 }
 
 private ConfiguredStageTransform factory(const ref StageOptions options) {
@@ -54,5 +73,97 @@ private ConfiguredStageTransform factory(const ref StageOptions options) {
 static this() {
     registerStage(StageRegistration(StageDeclaration("html-metadata",
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
-        [OptionDeclaration("charset", OptionType.text)], null, null, &factory));
+        [OptionDeclaration("charset", OptionType.text)], null, null, &factory,
+        FilterPlacement.none, StageCardinality.oneToOne,
+        SideOutputCapability.terminal));
+}
+
+unittest {
+    import composition.compiler : compileJob;
+    import composition.executor : runCompiledStage;
+    import domain.document : Document, OutputName, SourceLocator;
+    import job.json : parseJobJson;
+    import stages.contract : DecisionKind, EventKind;
+
+    auto spec = parseJobJson(`{"version":3,"stages":[{"id":"metadata",` ~
+        `"implementation":"html-metadata","options":{},"filters":[]}]}`);
+    auto plan = compileJob(spec);
+    auto document = Document(SourceLocator("fixture:v1", "/PRIVATE/secret", "record"),
+        OutputName("record.html"));
+
+    // Successful map: content stays the raw input HTML (the bug destroyed it by
+    // overwriting content with the metadata JSON); exactly one TerminalSideOutput
+    // carries the same bytes that used to overwrite content.
+    string html = `<head><title>Fallback</title>` ~
+        `<meta property="og:title" content="Primary">` ~
+        `<meta name="author" content="Ada">` ~
+        `<meta name="date" content="2024-02-29">` ~
+        `<link rel="canonical" href="https://example.test/page"></head>`;
+    auto parsed = parseHtml(cast(const(ubyte)[]) html);
+    assert(parsed.isParsed);
+    auto expectedJson = serializeHtmlMetadata(document.id,
+        extractHtmlMetadata(parsed.tree));
+
+    auto mapInput = StageDocument(document,
+        new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
+    auto mapped = runCompiledStage([mapInput], plan.stages[0]);
+    assert(mapped.events.length == 1 && mapped.events[0].kind == EventKind.emitted &&
+        mapped.events[0].payload.document.id == document.id,
+        "successful html-metadata run must map, preserving document identity");
+    auto emitted = mapped.events[0];
+    assert(cast(string) emitted.payload.content.copy() == html,
+        "content must be left untouched on success, not overwritten with metadata");
+    assert(emitted.sideOutputs.length == 1,
+        "exactly one TerminalSideOutput must be emitted on success");
+    assert(cast(string) emitted.sideOutputs[0].bytes() == expectedJson,
+        "side output bytes must equal the prior content-overwrite bytes");
+    assert(emitted.sideOutputs[0].schema == htmlMetadataSideOutputSchemaV2 &&
+        emitted.sideOutputs[0].key == htmlMetadataSideOutputKeyV2 &&
+        emitted.sideOutputs[0].suffix == htmlMetadataSideOutputSuffixV2,
+        "side output identity mismatch");
+
+    // Quarantine: rawLimit. Same trigger condition (content.size > maxRawBytes)
+    // and same reason string as before this change, now proven through the full
+    // runCompiledStage path (exercising the SideOutputCapability.terminal
+    // invariant, not just the bare transform).
+    auto oversized = StageDocument(document,
+        new Content([ContentPiece.own(new ubyte[maxRawBytes + 1])]));
+    auto rawLimited = runCompiledStage([oversized], plan.stages[0]);
+    assert(rawLimited.events.length == 1 &&
+        rawLimited.events[0].kind == EventKind.quarantined &&
+        rawLimited.events[0].reason == "rawLimit",
+        "rawLimit quarantine trigger/reason changed");
+
+    // Quarantine: HTML decode failure (invalid UTF-8). Compare the reason
+    // produced through runCompiledStage against the reason the bare transform
+    // produces, proving runCompiledStage does not alter or suppress it.
+    auto badUtf8 = StageDocument(document,
+        new Content([ContentPiece.own([cast(ubyte) 0xff])]));
+    auto transform = plan.stages[0].transform;
+    auto directDecision = transform(badUtf8);
+    assert(directDecision.kind == DecisionKind.quarantine);
+    auto decodeFailed = runCompiledStage([badUtf8], plan.stages[0]);
+    assert(decodeFailed.events.length == 1 &&
+        decodeFailed.events[0].kind == EventKind.quarantined &&
+        decodeFailed.events[0].reason == directDecision.reason &&
+        decodeFailed.events[0].reason.length != 0,
+        "HTML decode-failure quarantine trigger/reason changed");
+
+    // Quarantine: outputLimit (metadata JSON exceeds its cap). Same fixture
+    // shape as the pre-existing experiments/metadata/check.d golden.
+    string slashes;
+    foreach (_; 0 .. 512) slashes ~= "\\";
+    string large = "<head>";
+    foreach (_; 0 .. 16) {
+        large ~= `<meta property="og:title" content="` ~ slashes ~ `">`;
+        large ~= `<meta name="author" content="` ~ slashes ~ `">`;
+    }
+    large ~= "</head>";
+    auto largeDoc = StageDocument(document,
+        new Content([ContentPiece.own(cast(const(ubyte)[]) large)]));
+    auto overflowed = runCompiledStage([largeDoc], plan.stages[0]);
+    assert(overflowed.events.length == 1 &&
+        overflowed.events[0].kind == EventKind.quarantined &&
+        overflowed.events[0].reason == "outputLimit",
+        "outputLimit quarantine trigger/reason changed");
 }

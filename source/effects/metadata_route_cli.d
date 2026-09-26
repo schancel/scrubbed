@@ -323,6 +323,8 @@ int runMetadataRoute(const string[] args) {
             }
             if (event.kind != EventKind.emitted || event.payload.document.id != document.id)
                 throw new Exception("metadata stage identity changed");
+            if (event.sideOutputs.length != 1)
+                throw new Exception("metadata stage side-output count changed");
             auto contentResult = runCompiledStage([StageDocument(document,
                 new Content([ContentPiece.own(raw.dup)]))], contentJob.stages[0]);
             if (contentResult.events.length != 1 ||
@@ -330,7 +332,8 @@ int runMetadataRoute(const string[] args) {
                     contentResult.events[0].payload.document.id != document.id)
                 throw new Exception("content stage identity changed");
             auto content = contentResult.events[0].payload.content;
-            auto metadata = event.payload.content;
+            auto metadata = new Content([ContentPiece.own(
+                cast(const(ubyte)[]) event.sideOutputs[0].bytes())]);
             checkedTarget(o.contentRoot, file.name, true);
             checkedTarget(o.metadataRoot, file.name, true);
             auto digest = inputDigest(raw);

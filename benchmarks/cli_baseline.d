@@ -9,7 +9,7 @@ import std.digest.sha : sha256Of;
 import std.file : SpanMode, dirEntries, exists, mkdirRecurse, read, readText,
     remove, rmdirRecurse, tempDir, write;
 import std.json : JSONValue;
-import std.path : buildPath, dirName, dirSeparator, relativePath;
+import std.path : buildPath, dirSeparator, relativePath;
 import std.process : execute;
 import std.string : split, splitLines, strip;
 import std.uuid : randomUUID;
@@ -32,33 +32,6 @@ private JSONValue strings(string[] values) {
     JSONValue[] result;
     foreach (value; values) result ~= JSONValue(value);
     return JSONValue(result);
-}
-
-private string[string] parseFreeze(string output) {
-    string[string] versions;
-    foreach (line; output.splitLines) {
-        auto row = line.strip;
-        if (row.startsWith("Using Python ")) continue; // uv environment notice
-        auto fields = row.split("==");
-        if (fields.length != 2 || fields[0].length == 0 || fields[1].length == 0 ||
-            fields[0] in versions)
-            throw new Exception("unparseable or duplicate uv freeze row: " ~ row);
-        versions[fields[0]] = fields[1];
-    }
-    return versions;
-}
-
-private JSONValue pinnedPackages(string output) {
-    auto versions = parseFreeze(output);
-    auto ftfy = "ftfy" in versions;
-    auto wcwidth = "wcwidth" in versions;
-    if (ftfy is null || wcwidth is null || *ftfy != "6.3.1" || *wcwidth != "0.8.4")
-        throw new Exception("expected ftfy==6.3.1 and wcwidth==0.8.4 exactly");
-    string[] observed;
-    foreach (name, packageVersion; versions)
-        observed ~= name ~ "==" ~ packageVersion;
-    observed.sort();
-    return strings(observed);
 }
 
 private string cpuModelFromProc(string cpuinfo) {
@@ -87,17 +60,6 @@ private string cpuModel(bool darwin) {
 }
 
 private void selfTest() {
-    auto valid = pinnedPackages("Using Python 3 at: /tmp/example\nftfy==6.3.1\nwcwidth==0.8.4\n");
-    if (valid.array.length != 2 || valid.array[0].str != "ftfy==6.3.1" ||
-        valid.array[1].str != "wcwidth==0.8.4")
-        throw new Exception("exact package parse regression");
-    foreach (bad; ["ftfy==6.3.10\nwcwidth==0.8.4",
-                   "ftfy==6.3.1\nwcwidth==0.8.40",
-                   "ftfy==6.3.1\nftfy==6.3.10\nwcwidth==0.8.4"]) {
-        bool rejected;
-        try { pinnedPackages(bad); } catch (Exception) { rejected = true; }
-        if (!rejected) throw new Exception("version prefix or duplicate accepted");
-    }
     if (cpuModelFromProc("model name : Example CPU\n") != "Example CPU" ||
         cpuModelFromProc("Hardware : Example SoC\n") != "Example SoC" ||
         !cpuModelFromProc("processor : 0\n").startsWith("unavailable"))
@@ -106,12 +68,11 @@ private void selfTest() {
 
 // Commands in a shareable report must be reproducible without publishing the
 // current machine's checkout, account, or temporary-directory names.
-private JSONValue publicCommand(string[] command, string binary, string ftfy,
+private JSONValue publicCommand(string[] command, string binary,
                                 string fixtureRoot) {
     string[] safe;
     foreach (arg; command) {
         if (arg == binary) safe ~= "<scrubbed-binary>";
-        else if (arg == ftfy) safe ~= "<ftfy-cli>";
         else if (arg.startsWith(fixtureRoot ~ dirSeparator))
             safe ~= "<fixture-root>/" ~ relativePath(arg, fixtureRoot);
         else safe ~= arg;
@@ -256,8 +217,8 @@ int main(string[] args) {
             writeln("version and CPU-model parsers passed");
             return 0;
         }
-        if (args.length != 3)
-            throw new Exception("usage: cli_baseline SCRUBBED_BINARY FTFY_BINARY");
+        if (args.length != 2)
+            throw new Exception("usage: cli_baseline SCRUBBED_BINARY");
         auto os = checked(["uname", "-s"]);
         bool darwin = os == "Darwin";
         if (!darwin && os != "Linux") throw new Exception("BSD/GNU time only");
@@ -265,32 +226,19 @@ int main(string[] args) {
         mkdirRecurse(root);
         scope(exit) rmdirRecurse(root);
 
-        auto mojibake = buildPath(root, "mojibake.txt");
-        auto repaired = buildPath(root, "repaired.txt");
         auto normalization = buildPath(root, "normalization.txt");
         auto normalized = buildPath(root, "normalized.txt");
         // Deterministic generated fixtures: no third-party bytes are redistributed.
-        string damaged, clean, raw, canonical;
-        foreach (i; 0 .. 4096) {
-            damaged ~= "CafÃ© at noon; the sign said rÃ©sumÃ©.\n";
-            clean ~= "Café at noon; the sign said résumé.\n";
-        }
+        string raw, canonical;
         foreach (i; 0 .. 262_144) {
             raw ~= "alpha\r\nbeta\rgamma\x01delta\n";
             canonical ~= "alpha\nbeta\ngammadelta\n";
         }
-        write(mojibake, damaged);
-        write(repaired, clean);
         write(normalization, raw);
         write(normalized, canonical);
 
         JSONValue[] cases;
         auto outputPath = buildPath(root, "out.txt");
-        cases ~= runCase("mojibake/scrubbed", [args[1], "--input", mojibake,
-            "--output", outputPath, "--filters", "fix-mojibake", "--threads", "1"],
-            mojibake, outputPath, repaired, darwin, 5);
-        cases ~= runCase("mojibake/ftfy", [args[2], "--preserve-entities", "-n",
-            "none", "-o", outputPath, mojibake], mojibake, outputPath, repaired, darwin, 5);
         cases ~= runCase("normalization/scrubbed", [args[1], "--input",
             normalization, "--output", outputPath, "--filters",
             "normalize-line-endings,strip-control", "--threads", "1"],
@@ -300,10 +248,10 @@ int main(string[] args) {
         foreach (ref result; cases) {
             string[] command;
             foreach (arg; result["command"].array) command ~= arg.str;
-            result["command"] = publicCommand(command, args[1], args[2], root);
+            result["command"] = publicCommand(command, args[1], root);
         }
 
-        JSONValue report = JSONValue(["schema": JSONValue("scrubbed-cli-baseline-v1")]);
+        JSONValue report = JSONValue(["schema": JSONValue("scrubbed-cli-baseline-v2")]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["fixture_policy"] = "generated deterministic UTF-8; exact byte equality required";
         report["os"] = JSONValue([
@@ -313,33 +261,22 @@ int main(string[] args) {
         report["cpu_model"] = cpuModel(darwin);
         if (darwin) report["hardware_model"] = checked(["sysctl", "-n", "hw.model"]);
         report["compiler"] = checked(["ldc2", "--version"]).splitLines[0];
-        foreach (line; checked([args[2], "--help"]).splitLines)
-            if (line.startsWith("ftfy (fixes text for you)"))
-                report["ftfy_version"] = line;
-        if ("ftfy_version" !in report.object)
-            throw new Exception("ftfy CLI version was not discoverable");
         report["scrubbed_binary_sha256"] = digest(args[1]);
-        report["ftfy_binary_sha256"] = digest(args[2]);
         report["harness_sha256"] = digest("benchmarks/cli_baseline.d");
         report["binary_build_command"] = "dub build --build=release --compiler=ldc2";
         report["harness_build_command"] =
             "ldc2 -O -release benchmarks/cli_baseline.d -of=<path>";
-        auto python = buildPath(dirName(args[2]), "python");
-        report["python_version"] = checked([python, "--version"]);
-        report["python_packages"] = pinnedPackages(
-            checked(["uv", "pip", "freeze", "--python", python]));
         report["unsupported"] = strings([
-            "ftfy CLI has no recursive tree input/output mode; no process-equivalent tree baseline",
+            "no independently sourced recursive-tree executable comparator; no process-equivalent tree baseline",
             "trafilatura HTML extraction: scrubbed html2md is unimplemented; #59 owns future pipeline comparison",
             "no independently sourced executable matches current normalize-line-endings plus strip-control semantics",
-            "no independently verified quality-matched executable for current quote/entity semantics",
-            "no independently verified additional mojibake repair executable beyond ftfy"]);
+            "no independently verified quality-matched executable for current quote/entity semantics"]);
         report["time_variant"] = darwin ? "BSD time -l -p; RSS bytes" :
             "GNU time -v; RSS KiB converted to bytes";
         report["cases"] = JSONValue(cases);
         auto published = report.toString;
         if (published.canFind(root) || published.canFind(args[1]) ||
-            published.canFind(args[2]) || published.canFind(checked(["uname", "-n"])))
+            published.canFind(checked(["uname", "-n"])))
             throw new Exception("result contains a private run path or hostname");
         writeln(published);
         return 0;

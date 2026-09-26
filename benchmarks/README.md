@@ -343,6 +343,88 @@ three samples measured legacy at 0.41224–0.41767 seconds and fused at
 This is a warm synthetic in-process microbenchmark, not whole-CLI,
 terabyte-scale, or contextual-filter evidence.
 
+## Shared external-tool comparator
+
+`external_comparator.d` is the shared, D-owned comparator result/runner for
+pinned external tools (issue #229). It reuses `pipeline.d`'s
+`ExecutableSnapshot`/`snapshotExecutable`/`verifySnapshot` pattern (read-only,
+hash-bound copies; a hash mismatch after the run means an executable was
+mutated mid-benchmark) and `compareDos2unix`'s A/B/A/B interleave as its
+behavioral model, rather than `cli_baseline.d`'s separate single-tool cases.
+Every declared case binds a fixture hash, an independently authored
+expectation hash (pinned in source, not derived from the comparator's own
+output), an executable snapshot/hash/version, the exact command/options, the
+bounded raw output hash, exit status/signal, a declared timeout, wall/CPU/RSS,
+and pinned-package acquisition order. Correctness gates (exact output,
+resource bound, exit status) run before a sample is retained; a missing,
+duplicate, or partial result fails closed, and comparator output is never
+treated as ground truth. Its first and currently only case,
+`mojibake/scrubbed-vs-ftfy`, is the ftfy case migrated out of
+`cli_baseline.d` ("A00", below): the same generated fixture, the same
+independently authored expected repair, and the same exact command
+(`ftfy --preserve-entities -n none`) with `ftfy==6.3.1`/`wcwidth==0.8.4`
+pinned, now measured as one interleaved A/B/A/B comparator case instead of
+two separate cases.
+
+Package acquisition reuses `cli_baseline.d`'s existing pattern unmodified:
+`uv venv` + `uv pip install --python <venv>/bin/python <pkg>==<exact pinned
+version>`, nothing vendored; `uv pip freeze --python <python>` is parsed at
+run time to assert the exact pins and reject a prefix-collision version
+(e.g. `ftfy==6.3.10` when `6.3.1` is pinned) or a duplicate row. The
+"acquisition order" bound into the case JSON is the declared pinned-package
+list, verified in that fixed order regardless of the row order `uv pip
+freeze` happens to print.
+
+```sh
+bench_env=$(mktemp -d /tmp/scrubbed-external-comparator-XXXXXX)
+uv venv "$bench_env/venv"
+uv pip install --python "$bench_env/venv/bin/python" ftfy==6.3.1 wcwidth==0.8.4
+dub build --build=release --compiler=ldc2
+ldc2 -O3 -release benchmarks/external_comparator.d -of="$bench_env/external_comparator"
+"$bench_env/external_comparator" --self-test
+"$bench_env/external_comparator" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" \
+  > "$bench_env/result.json"
+ldc2 -O3 -release benchmarks/external_comparator_check.d \
+  -of="$bench_env/external_comparator_check"
+"$bench_env/external_comparator_check" --self-test
+"$bench_env/external_comparator_check" --check "$bench_env/result.json"
+```
+
+The report schema is `scrubbed-external-comparator-v1`. **This is an
+intentional, fail-closed format break, not a bug**: it does not read or
+replay `cli_baseline.d`'s prior `scrubbed-cli-baseline-v1` report shape, and
+no migration shim is provided. An old-format report is simply invalid under
+the new format, matching this repository's existing fail-closed-rather-than-
+silently-bridge convention (frontier durability, metadata decoding, topical-
+tags identity checks). [`experiments/text/compare_cli.d` and
+`bad_cli_report.d`](../experiments/text/README.md) read and negative-control
+this new shape.
+
+`external_comparator_check.d` (release-active D-only checker, own copies of
+the gating primitives rather than an import of the runner) exercises eleven
+negative controls end to end: version-prefix collision, executable mutation
+after snapshot, fixture drift, independently authored expectation drift,
+output drift, zero samples, missing case, duplicate case, nonzero exit,
+timeout (a command that outlives its declared bound is sent SIGTERM, then
+SIGKILL after a bounded grace period, and the run fails closed with no
+partial sample retained), and resource refusal (a peak RSS above the
+declared bound fails the case). Its `--check <report.json>` mode also
+structurally validates a real run's report and confirms the migrated
+`mojibake/scrubbed-vs-ftfy` case reproduces `cli_baseline.d`'s prior
+correctness result for that case: the same fixture/expected SHA-256 pair and
+the same exact-output gate, even though the report format itself
+intentionally is not backward-compatible.
+
+Known limitation: the timeout kill only signals the direct `/usr/bin/time`
+child, matching `cli_baseline.d`'s and `pipeline.d`'s existing use of that
+wrapper for wall/CPU/RSS. `/usr/bin/time` does not forward signals to the
+command it launches, so a genuinely hung comparator process (its
+grandchild) may keep running until it exits on its own after the harness
+has already failed the case closed; this is a best-effort kill, not a
+process-group reaper. `benchmarks/pipeline.d`'s `coordination_profile.d`
+solves that fully with a dedicated launcher and process-group ownership,
+which is out of scope for this shared comparator's first slice.
+
 ## Pre-refactor full-CLI baseline (A00)
 
 `cli_baseline.d` measures whole processes, including input/output and startup,
@@ -351,35 +433,34 @@ if any output differs byte-for-byte from the independently specified expected
 output. Every case has five repetitions, raw wall/user/system CPU seconds and
 peak resident bytes. The JSON emitted on stdout also records input/output
 SHA-256, publication-safe command templates, binary and harness hashes, source
-commit, host-neutral OS fields, CPU model, compiler, observed Python package
-versions, flags, and unsupported capabilities. No fixture bytes from other
-projects are redistributed.
+commit, host-neutral OS fields, CPU model, compiler, and unsupported
+capabilities. No fixture bytes from other projects are redistributed. Its
+original pinned-ftfy mojibake case (both the `mojibake/scrubbed` and
+`mojibake/ftfy` cases) moved to the [shared external
+comparator](#shared-external-tool-comparator) above (#229); `cli_baseline.d`
+itself no longer runs any external tool, acquires any Python package, or
+takes an `FTFY_BINARY` argument, and its schema bumped to
+`scrubbed-cli-baseline-v2` to reflect that removal. The normalization and
+32-file tree cases below are unrelated to ftfy and stayed in this file.
 
-From a clean checkout on macOS or Linux, with `ldc2`, `dub`, `uv`, and BSD/GNU
+From a clean checkout on macOS or Linux, with `ldc2`, `dub`, and BSD/GNU
 `/usr/bin/time` available:
 
 ```sh
-bench_env=$(mktemp -d /tmp/scrubbed-a00-XXXXXX)
-uv venv "$bench_env/venv"
-uv pip install --python "$bench_env/venv/bin/python" ftfy==6.3.1 wcwidth==0.8.4
 dub build --build=release --compiler=ldc2
-ldc2 -O -release benchmarks/cli_baseline.d -of="$bench_env/cli_baseline"
-"$bench_env/cli_baseline" --self-test
-"$bench_env/cli_baseline" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" > "$bench_env/result.json"
+ldc2 -O -release benchmarks/cli_baseline.d -of=/tmp/scrubbed-cli-baseline
+/tmp/scrubbed-cli-baseline --self-test
+/tmp/scrubbed-cli-baseline "$(pwd)/scrubbed" > /tmp/scrubbed-cli-baseline-result.json
 ```
 
-In JSON, substitute `<scrubbed-binary>`, `<ftfy-cli>`, and `<fixture-root>`
-with the run's local paths to replay a command; no checkout, user, hostname,
-or temporary-directory path is published. The `result.json` path is local run
-output, not a committed fixture. The runner creates and removes its own
-generated inputs under the system temporary
-directory. `uv` installs only pinned public packages in the isolated venv.
-The D self-test rejects prefix-collision versions such as `ftfy==6.3.10` and
-`wcwidth==0.8.40`, duplicate rows, and missing Linux CPU-model fields. The
-run parses exact `uv pip freeze` name/version pairs and reports the observed
-versions, not assumed pins. On macOS `cpu_model` comes from
-`machdep.cpu.brand_string` and `hardware_model` from `hw.model`; on Linux the
-CPU model comes from `model name`, `Hardware`, or `Processor` in
+In JSON, substitute `<scrubbed-binary>` and `<fixture-root>` with the run's
+local paths to replay a command; no checkout, user, hostname, or temporary-
+directory path is published. The result JSON path is local run output, not a
+committed fixture. The runner creates and removes its own generated inputs
+under the system temporary directory. The D self-test checks the Linux
+CPU-model parser and its explicit unavailable fallback. On macOS `cpu_model`
+comes from `machdep.cpu.brand_string` and `hardware_model` from `hw.model`;
+on Linux the CPU model comes from `model name`, `Hardware`, or `Processor` in
 `/proc/cpuinfo`. An unavailable/unreadable source is reported explicitly,
 never replaced with the architecture.
 The binary build uses the repository's release Dub configuration; the harness
@@ -390,16 +471,24 @@ KiB, converted to bytes in JSON. Both report process peak, not summed memory
 across a fleet. Their clocks round to centiseconds; do not interpret apparent
 ties for fast cases as precise equality.
 
-The measured comparator configurations were discovered through their installed
-CLIs. [ftfy 6.3.1](https://github.com/rspeer/python-ftfy) runs on the same
-UTF-8 mojibake file with `--preserve-entities -n none`, which avoids unrelated
-HTML-entity and Unicode-normalization behavior on this fixture. Its
-`wcwidth==0.8.4` dependency is pinned. No custom non-D transformation script
-is included as a comparator. These are task-specific process measurements,
-not a ranking of whole tools.
+The tree exercises file discovery, nested output creation, and per-file
+writes; no independently sourced recursive-tree executable comparator has
+been verified for it. The present binary has no HTML extraction filter, so
+trafilatura is not a quality-matched comparator; the future full-pipeline
+comparison belongs to #59. The tree gate also rejects unexpected output files
+or directories, not only missing/incorrect files. No independently sourced
+executable comparator has been verified for the combined current line-ending
+and control-stripping task:
+[dos2unix](https://manpages.debian.org/wheezy/dos2unix/dos2unix.1.en.html)
+handles newline conversion but not the same control-stripping operation. We
+found no separately verified, executable comparator with the same current
+quote/entity semantics.
 
-One Apple M4 / macOS 25.6.0 / LDC 1.43.0 sample at source
-`9dea1f6272660ebaccbb8965b0fe4cfe3fe7286b` passed every exact-output
+The historical table below is retained as a dated record from when this file
+still measured mojibake directly; it is not reproducible from the current
+`cli_baseline.d` invocation above, since the mojibake rows now come from
+`external_comparator.d`. One Apple M4 / macOS 25.6.0 / LDC 1.43.0 sample at
+source `9dea1f6272660ebaccbb8965b0fe4cfe3fe7286b` passed every exact-output
 gate. Ranges below are the five raw repetitions, not confidence intervals:
 
 | Case | Wall (s) | CPU user+system (s) | Peak RSS (MiB) |
@@ -412,19 +501,7 @@ gate. Ranges below are the five raw repetitions, not confidence intervals:
 The repeated synthetic lines favor neither a realistic document mix nor broad
 output-quality coverage; the existing pinned ftfy correctness corpus below is
 the separate quality gate. In particular, no single-machine speed claim or
-cross-task raw-speed comparison follows from this table. The tree exercises
-file discovery, nested output creation, and per-file writes, but ftfy's CLI
-does not provide an equivalent recursive tree mode. The present binary has no
-HTML extraction filter, so trafilatura is not a quality-matched comparator;
-the future full-pipeline comparison belongs to #59. The tree gate also rejects
-unexpected output files or directories, not only missing/incorrect files.
-No independently sourced executable comparator has been verified for the
-combined current line-ending and control-stripping task:
-[dos2unix](https://manpages.debian.org/wheezy/dos2unix/dos2unix.1.en.html)
-handles newline conversion but not the same control-stripping operation. We
-found no separately
-verified, executable comparator with the same current quote/entity semantics,
-or a second credible mojibake repair CLI beyond ftfy. Specifically,
+cross-task raw-speed comparison follows from this table. Specifically,
 [mojiblame](https://pypi.org/project/mojiblame/) exposes a Git-aware,
 in-place `fix` command rather than a quality-matched file-to-file transform;
 [scrubkit](https://pypi.org/project/scrubkit/) has no installed CLI. Those

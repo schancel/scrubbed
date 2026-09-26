@@ -187,11 +187,18 @@ void main() {
     recordRejection(atFieldCount.withExtensionField("overflow", cast(immutable(ubyte)[]) [1], "s"),
         "cap extension field count: one over limit rejected");
 
-    // Aggregate maxTotalEncodedBytes cap: the per-field caps above bound any
-    // legitimately constructible value's wire form to well under 64 KiB, so
-    // this boundary is proven at decode's own upfront length gate directly,
-    // the same way `effects.html_metadata`'s Writer unittest proves its cap
-    // in isolation rather than via a maximal semantic document.
+    // Aggregate maxTotalEncodedBytes cap, decode side: `decodeDocumentMetadataV1`
+    // has its own independent upfront raw-buffer-length gate, proven here in
+    // isolation with raw byte buffers, the same way `effects.html_metadata`'s
+    // Writer unittest proves its cap in isolation rather than via a maximal
+    // semantic document. This does NOT prove the cap is unreachable through
+    // the public API: `Writer.quoted()` (used for standard values, extension
+    // keys, and every `sourceStage`) escapes any byte outside
+    // 0x20..0x7E/`"`/`\` as a 6-byte `\u00XX` sequence, so escape-heavy
+    // content in max-length fields can legitimately drive the mutator-side
+    // eager `encodeBody` check past this cap through ordinary public-API
+    // calls alone, well before the naive additive per-field-cap estimate
+    // would suggest — see the escape-heavy case below.
     auto exactSizeBuffer = new ubyte[maxTotalEncodedBytes];
     exactSizeBuffer[] = cast(ubyte) 'x'; // valid ASCII/UTF-8, but not valid wire syntax
     auto exactSizeMessage = messageOf(decodeDocumentMetadataV1(id, cast(string) exactSizeBuffer));
@@ -203,6 +210,41 @@ void main() {
     auto overSizeMessage = messageOf(decodeDocumentMetadataV1(id, cast(string) overSizeBuffer));
     expect(overSizeMessage !is null && overSizeMessage.canFind("exceeds size limit"),
         "cap total encoded bytes: one over limit rejected at the size gate");
+
+    // Aggregate maxTotalEncodedBytes cap, mutator side: escape-heavy
+    // (non-printable filler) content in max-length extension keys/values/
+    // sourceStages, added only through the public `withExtensionField` API,
+    // drives the mutator's own eager `encodeBody` call past the aggregate
+    // cap well before `maxExtensionFields` (32) is reached — proving the cap
+    // is reachable through ordinary public-API calls alone, and that the
+    // rejection comes from the mutator itself, not from decode. No existing
+    // case above drives this: `exactSizeBuffer`/`overSizeBuffer` only feed
+    // raw wire buffers straight to `decodeDocumentMetadataV1`.
+    enum ubyte escapeFillerByte = 0x01; // outside 0x20..0x7E and not '"'/'\\': forces `\u00XX` escaping
+    auto escapeHeavyKeyBase =
+        cast(string) replicate(cast(immutable(ubyte)[]) [escapeFillerByte], maxExtensionKeyBytes - 2);
+    auto escapeHeavySourceStage =
+        cast(string) replicate(cast(immutable(ubyte)[]) [escapeFillerByte], maxSourceStageBytes);
+    immutable(ubyte)[] escapeHeavyValue =
+        replicate(cast(immutable(ubyte)[]) [escapeFillerByte], maxExtensionValueBytes);
+
+    auto escapeHeavy = DocumentMetadata.empty();
+    size_t fieldsAddedBeforeLimit;
+    DocumentMetadataOutputLimit thrownFromMutator;
+    foreach (i; 0 .. maxExtensionFields) {
+        auto key = escapeHeavyKeyBase ~ to!string(i);
+        try {
+            escapeHeavy = escapeHeavy.withExtensionField(key, escapeHeavyValue, escapeHeavySourceStage);
+            fieldsAddedBeforeLimit = i + 1;
+        } catch (DocumentMetadataOutputLimit e) {
+            thrownFromMutator = e;
+            break;
+        }
+    }
+    expect(thrownFromMutator !is null,
+        "cap total encoded bytes: escape-heavy content crosses the cap from withExtensionField itself (mutator, not decode)");
+    expect(fieldsAddedBeforeLimit < maxExtensionFields,
+        "cap total encoded bytes: escape-heavy overflow fires before the field-count cap, proving it is the aggregate byte cap");
 
     // --- Content-free diagnostics: no rejection message leaks the canary. -
     bool anyLeak;

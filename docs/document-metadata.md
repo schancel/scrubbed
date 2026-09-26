@@ -64,15 +64,25 @@ not-yet-bound `DocumentId`) through the same bounded `Writer` used by
 `encodeDocumentMetadataV1`, so the aggregate `maxTotalEncodedBytes` cap is
 also checked eagerly at construction time, not only at encode.
 
-In practice, the combination of the five per-field caps already bounds any
-legitimately constructible value's wire form to well under 64 KiB (roughly
-44 KiB at 32 maximally-sized extension fields plus 4 maximally-sized
-standard fields), so `maxTotalEncodedBytes` cannot be driven to its own
-boundary through the public API alone. The checker proves this cap's
-exactly-at/one-over boundary at `decodeDocumentMetadataV1`'s own upfront
-length gate instead, using raw byte buffers, the same way
-`effects.html_metadata`'s `Writer` unittest proves its cap in isolation
-rather than via a maximal semantic document.
+The naive additive estimate above (roughly 44 KiB at 32 maximally-sized
+extension fields plus 4 maximally-sized standard fields) assumes plain
+printable-ASCII content. It understates the real encoded size for
+legitimately constructible values: `withStandardField`/`withExtensionField`
+render standard values, extension keys, and every entry's `sourceStage`
+through the same `Writer.quoted()` used by `encodeDocumentMetadataV1`, which
+JSON-escapes any byte outside `0x20..0x7E`/`"`/`\` as a 6-byte `\u00XX`
+sequence. Escape-heavy content (e.g. non-printable filler bytes) in
+max-length fields can inflate the encoded size well past the naive estimate
+and legitimately drive `maxTotalEncodedBytes` to its own boundary through
+ordinary public-API calls alone. In that case it is the mutator-side eager
+`encodeBody` check inside `withStandardField`/`withExtensionField` — not
+`decodeDocumentMetadataV1`'s upfront length gate — that enforces the cap,
+and it does so correctly (rejecting cleanly, no corruption). The checker
+proves both: a mutator-driven rejection via escape-heavy content, and
+decode's independent upfront length gate at the exactly-at/one-over
+boundary using raw byte buffers, the same way `effects.html_metadata`'s
+`Writer` unittest proves its cap in isolation rather than via a maximal
+semantic document.
 
 ## Encode/decode and identity binding
 

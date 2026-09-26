@@ -327,25 +327,22 @@ private void proveMainContentAbstentionDropsMetadataTogether(
         "abstention (no terminal stage in job): no side output exists");
 
     // Second, the full four-stage chain ending in the terminal
-    // pii-four-class stage. **Disclosed finding**: `runCompiledJob`
+    // pii-four-class stage. **Test-oracle correction (issue #295 fix)**:
+    // this case previously asserted that `runCompiledJob`
     // (`source/composition/job_executor.d`, out of this slice's allowed
-    // scope -- prohibited, not just unmodified) requires that *any* job
-    // containing a `SideOutputCapability.terminal` stage anywhere end with
-    // exactly one side output, regardless of whether that terminal stage
-    // ever actually ran; it does not special-case a job whose sole event
-    // already quarantined upstream. So appending `pii-four-class` to this
-    // exact prefix does not yield a graceful quarantined event -- it throws
-    // `CompiledJobFailure` instead (attributed to the "pii" stage id, since
-    // that is `job.executor`'s own producer-tracking, even though
-    // pii-four-class's transform never actually ran). This is a real,
-    // pre-existing gap in the executor's post-loop invariant, orthogonal to
-    // this slice's own stage logic and not exercised by any prior checker
-    // (#285's own Proofs A/B never quarantine upstream of a terminal
-    // stage); it is disclosed here, not patched around, since the executor
-    // is out of allowed scope. Either way -- clean quarantine above, or this
-    // hard failure here -- `pii-four-class` categorically never produces a
-    // side output for this document, so no metadata ever reaches a later
-    // stage or publish point.
+    // scope) threw `CompiledJobFailure` here -- a disclosed, pre-existing
+    // gap in the executor's post-loop invariant, which required *any* job
+    // containing a `SideOutputCapability.terminal` stage anywhere to end
+    // with exactly one side output, even when that terminal stage's
+    // transform never actually ran because an earlier stage already
+    // quarantined the document. Issue #295 fixed that gap: the invariant
+    // now exempts exactly the case where the single terminal event's kind
+    // is `EventKind.quarantined`, so this exact prefix now returns a clean
+    // quarantined event instead of throwing. Either way -- clean
+    // quarantine now, or the hard failure this case previously asserted --
+    // `pii-four-class` categorically never produces a side output for
+    // this document, so no metadata ever reaches a later stage or
+    // publish point.
     auto fullSpec = parseJobJson(`{"version":3,"stages":[` ~
         `{"id":"repair","implementation":"text-transform",` ~
         `"filters":[{"name":"fix-mojibake"}]},` ~
@@ -354,18 +351,15 @@ private void proveMainContentAbstentionDropsMetadataTogether(
         `{"id":"pii","implementation":"pii-four-class",` ~
         `"options":{"policy":"mask"}}]}`);
     auto fullPlan = compileJob(fullSpec, &registry);
-    auto failure = collectException!CompiledJobFailure(
-        runCompiledJob(StageDocument(document, owned(html)), fullPlan));
-    expect(failure !is null,
-        "abstention (terminal stage present): the pre-existing executor " ~
-        "invariant raises CompiledJobFailure rather than silently " ~
-        "publishing anything -- pii-four-class never emits a side output " ~
+    auto fullEvents = runCompiledJob(StageDocument(document, owned(html)), fullPlan);
+    expect(fullEvents.length == 1 && fullEvents[0].kind == EventKind.quarantined,
+        "abstention (terminal stage present): the corrected executor " ~
+        "invariant returns a clean quarantined event instead of raising " ~
+        "CompiledJobFailure -- pii-four-class never emits a side output " ~
         "for this document either way");
-    if (failure !is null)
-        expect(failure.stageId == "pii",
-            "abstention (terminal stage present): CompiledJobFailure is " ~
-            "attributed to the terminal stage, consistent with " ~
-            "job_executor's own producer-tracking");
+    expect(fullEvents.length == 1 && fullEvents[0].sideOutputs.length == 0,
+        "abstention (terminal stage present): no side output exists, " ~
+        "consistent with the terminal stage's transform never running");
 
     // Sanity: this fixture's head really would have produced metadata had
     // annotation's write ever reached a later stage or publish point.

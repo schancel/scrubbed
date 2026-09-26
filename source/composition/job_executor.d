@@ -83,7 +83,11 @@ StageEvent[] runCompiledJob(StageDocument input, const ref CompiledJob job) {
         }
         events = next;
     }
-    if (producerOrdinal != size_t.max &&
+    if (producerOrdinal != size_t.max && events.length == 1 &&
+            events[0].kind == EventKind.quarantined) {
+        // An earlier stage quarantined the document before the declared
+        // terminal stage ever ran; no side output is owed.
+    } else if (producerOrdinal != size_t.max &&
             (events.length != 1 || events[0].sideOutputs.length != 1))
         throw new CompiledJobFailure(job.identity, producerId,
             producerOrdinal, new Exception(
@@ -101,10 +105,10 @@ version (unittest) {
     import job.legacy : lowerLegacyNames;
     import pipeline : Filter, FilterRegistry;
     import stages.contract : PassMode, ResourceDeclaration, StageDecision,
-        StageDeclaration;
+        StageDeclaration, TerminalSideOutput;
     import stages.registry : ConfiguredStageTransform, FilterPlacement,
-        OptionDeclaration, OptionType, StageConfiguration, StageFactory,
-        StageOptions, StageRegistration, StageRegistry;
+        OptionDeclaration, OptionType, StageCardinality, StageConfiguration,
+        StageFactory, StageOptions, StageRegistration, StageRegistry;
     import std.exception : assertThrown;
 
     private Content ownedText(string text) pure {
@@ -125,14 +129,17 @@ version (unittest) {
     private StageRegistration registration(string key,
             StageFactory factory,
             FilterPlacement placement = FilterPlacement.none,
-            OptionDeclaration[] options = null) {
+            OptionDeclaration[] options = null,
+            StageCardinality cardinality = StageCardinality.maySplit,
+            SideOutputCapability sideOutputCapability = SideOutputCapability.none) {
         return StageRegistration(StageDeclaration(key, PassMode.singlePass,
-            ResourceDeclaration(1, 0)), options, null, null, factory, placement);
+            ResourceDeclaration(1, 0)), options, null, null, factory, placement,
+            cardinality, sideOutputCapability);
     }
 
     private enum TestOperation {
         append, map, split, route, nestedSplit, reject, quarantine,
-        invalidUtf8, rename, explode,
+        invalidUtf8, rename, explode, sideOutput,
     }
 
     private class TestStageConfiguration : StageConfiguration {
@@ -185,6 +192,10 @@ version (unittest) {
             return StageDecision.map(input);
         case TestOperation.explode:
             throw new Exception("exploded");
+        case TestOperation.sideOutput:
+            return StageDecision.map(input,
+                [TerminalSideOutput("result", "test-schema", ".bin",
+                    cast(const(ubyte)[]) "payload")]);
         }
     }
 
@@ -237,6 +248,11 @@ version (unittest) {
         return configured(TestOperation.explode);
     }
 
+    private ConfiguredStageTransform sideOutputFactory(
+            const ref StageOptions options) {
+        return configured(TestOperation.sideOutput);
+    }
+
     private StageRegistry testStages() {
         StageRegistry stages;
         auto suffix = [OptionDeclaration("suffix", OptionType.text, true)];
@@ -255,6 +271,15 @@ version (unittest) {
         stages.add(registration("invalid-utf8", &invalidUtf8Factory));
         stages.add(registration("rename", &renameFactory));
         stages.add(registration("explode", &explodeFactory));
+        // #295 regression fixtures: a non-splitting quarantine stage that may
+        // legally precede a declared terminal side-output producer, and a
+        // terminal producer itself (compiler.d requires every stage ahead of
+        // a terminal producer, and the producer itself, to be oneToOne).
+        stages.add(registration("quarantine-before-terminal", &quarantineFactory,
+            FilterPlacement.none, null, StageCardinality.oneToOne));
+        stages.add(registration("side-output-terminal", &sideOutputFactory,
+            FilterPlacement.none, null, StageCardinality.oneToOne,
+            SideOutputCapability.terminal));
         return stages;
     }
 
@@ -455,4 +480,41 @@ unittest {
     assert(outputs == ["a!", "b!"]);
     assert(materializedText(runCompiledJob(testDocument("c", "repeat"),
         plan)[0].payload.content) == "c!");
+}
+
+// #295 regression: an upstream stage quarantining a document ahead of a
+// declared terminal side-output producer must itself be returned as a clean
+// quarantine, not misreported as a CompiledJobFailure -- the terminal
+// stage's transform never ran, so no side output is ever owed for it.
+unittest {
+    auto stages = testStages;
+    auto filters = testFilters;
+
+    // Without a terminal stage in the job at all: this already passes today
+    // and must keep passing unchanged.
+    auto quarantineOnly = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"review","implementation":"quarantine-before-terminal",` ~
+        `"options":{},"filters":[]}]}`);
+    auto quarantineOnlyPlan = compileJob(quarantineOnly, &stages, &filters);
+    auto quarantineOnlyEvents = runCompiledJob(testDocument("x"), quarantineOnlyPlan);
+    assert(quarantineOnlyEvents.length == 1 &&
+        quarantineOnlyEvents[0].kind == EventKind.quarantined &&
+        quarantineOnlyEvents[0].sideOutputs.length == 0);
+
+    // The identical quarantining prefix, but compiled with a terminal stage
+    // appended as the job's final stage. The terminal stage's transform
+    // never runs (the document is already quarantined), so no side output
+    // is owed and this must return the same clean quarantine, not throw.
+    auto quarantineBeforeTerminal = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"review","implementation":"quarantine-before-terminal",` ~
+        `"options":{},"filters":[]},` ~
+        `{"id":"produce","implementation":"side-output-terminal",` ~
+        `"options":{},"filters":[]}]}`);
+    auto quarantineBeforeTerminalPlan = compileJob(quarantineBeforeTerminal,
+        &stages, &filters);
+    auto quarantineBeforeTerminalEvents = runCompiledJob(testDocument("x"),
+        quarantineBeforeTerminalPlan);
+    assert(quarantineBeforeTerminalEvents.length == 1 &&
+        quarantineBeforeTerminalEvents[0].kind == EventKind.quarantined &&
+        quarantineBeforeTerminalEvents[0].sideOutputs.length == 0);
 }

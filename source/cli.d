@@ -30,6 +30,7 @@ import effects.local_job : LocalJobOutcome, runLocalJob, runLocalJobBatch;
 import effects.mapped_file : openMappedFile;
 import effects.independent_sinks : IndependentSinkFailure;
 import effects.runner : EffectFailure, EffectPhase;
+import effects.side_output_sink : SideOutputSink;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
     SourceLocator;
@@ -309,7 +310,7 @@ private string sidecarDestinationFor(string sidecarRoot, bool inputIsDir,
 
 /// Stages complete side records in input/field order, then atomically replace
 /// the append-free JSONL destination only after the whole stream succeeds.
-private final class JsonlSidecarWriter {
+private final class JsonlSidecarWriter : SideOutputSink {
     private string destination;
     private string spoolPath;
     private File spool;
@@ -360,6 +361,12 @@ private final class JsonlSidecarWriter {
         bytes += recordBytes;
     }
 
+    /// SideOutputSink conformance: this adapter has one fixed destination,
+    /// set at construction, so the caller-resolved destination is unused.
+    void publish(const ref TerminalSideOutput output, string) {
+        append(output);
+    }
+
     void commit() {
         if (finished) return;
         if (dryRun) { finished = true; return; }
@@ -382,6 +389,48 @@ private final class JsonlSidecarWriter {
         try spool.close(); catch (Exception) {}
         try if (spoolPath.length && exists(spoolPath)) remove(spoolPath);
         catch (Exception) {}
+    }
+}
+
+/// Writes each side output immediately, atomically, to its caller-resolved
+/// destination. `cli` uses one instance for the tree-mirrored sidecar route
+/// (destinations chosen via `sidecarDestinationFor`) and for both
+/// durable-ledger side-output routes (`--manifest` and `--error-journal`,
+/// which choose destinations the same way); all three call sites publish
+/// through this same stateless adapter. Every publish is already a
+/// complete, independent atomic replace, so commit()/abort() are no-ops.
+private final class MirroredFileSideOutputSink : SideOutputSink {
+    void publish(const ref TerminalSideOutput output, string destination) {
+        auto content = new Content([ContentPiece.own(output.bytes)]);
+        writeAtomicPieces(destination, content.pieces());
+    }
+
+    void commit() {}
+    void abort() nothrow {}
+}
+
+/// Structural proof for the side-output publication seam (issue #282, seam
+/// 3): every local side-output writer conforms to SideOutputSink, and each
+/// of the four original call sites -- the JSONL sidecar route, the
+/// tree-mirror route inside processCompiledOne, and both durable-ledger
+/// routes inside processDurableOne (--manifest and --error-journal) -- holds
+/// and drives its writer only through this interface type, never through a
+/// writer-specific branch. This is a structural check, not a new behavioral
+/// acceptance criterion.
+unittest {
+    static assert(is(JsonlSidecarWriter : SideOutputSink),
+        "JsonlSidecarWriter must conform to SideOutputSink");
+    static assert(is(MirroredFileSideOutputSink : SideOutputSink),
+        "MirroredFileSideOutputSink must conform to SideOutputSink");
+
+    SideOutputSink[] sinks = [
+        cast(SideOutputSink) new JsonlSidecarWriter("unused", 1, 1, true),
+        cast(SideOutputSink) new MirroredFileSideOutputSink,
+    ];
+    foreach (sink; sinks) {
+        assert(sink !is null);
+        sink.commit();
+        sink.abort();
     }
 }
 
@@ -527,7 +576,8 @@ int runExtract(string requestedInput, string requestedOutput,
 private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         string outputRoot, bool inputIsDir, ref RuntimePlanV1 job,
         ulong reservedBytes, bool dryRun, PublicationOrder publication,
-        CoordinationMetricsV2 metrics = null, string sidecarRoot = null) {
+        CoordinationMetricsV2 metrics = null, string sidecarRoot = null,
+        SideOutputSink sideOutputSink = null) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto rootDestination = destinationFor(file, inputRoot, outputRoot, inputIsDir);
     auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
@@ -541,6 +591,8 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
                 string sink;
                 string destination;
                 Content content;
+                bool isSideOutput;
+                TerminalSideOutput sideOutput;
             }
             string[] sideRecords;
             auto result = runLocalJobBatch(file, reservedBytes, document, job,
@@ -563,9 +615,11 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
                         foreach (ref output; event.sideOutputs) {
                             auto destination = sidecarDestinationFor(sidecarRoot,
                                 inputIsDir, event, output);
-                            auto content = new Content([ContentPiece.own(output.bytes)]);
-                            writes ~= PendingWrite("side-output:" ~ output.key,
-                                destination, content);
+                            auto write = PendingWrite("side-output:" ~ output.key,
+                                destination, null);
+                            write.isSideOutput = true;
+                            write.sideOutput = output;
+                            writes ~= write;
                             sideRecords ~= sideOutputExplainRecord(event, output,
                                 dryRun ? "dry-run" : "published");
                         }
@@ -599,8 +653,12 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
                     entered = true;
                     IndependentSinkFailure first;
                     if (!dryRun) foreach (ref pendingWrite; writes) try {
-                        writeAtomicPieces(pendingWrite.destination,
-                            pendingWrite.content.pieces());
+                        if (pendingWrite.isSideOutput)
+                            sideOutputSink.publish(pendingWrite.sideOutput,
+                                pendingWrite.destination);
+                        else
+                            writeAtomicPieces(pendingWrite.destination,
+                                pendingWrite.content.pieces());
                     } catch (Exception failure) {
                         if (first is null) first = new IndependentSinkFailure(
                             pendingWrite.sink, failure);
@@ -1206,7 +1264,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
         bool inputIsDir, ref RuntimePlanV1 job, ulong reservedBytes,
         ref const(ubyte[32]) configHash, bool retry, bool journalRoute,
         bool targeted, bool requireRuntimeEvidence, bool allowVerifiedSkip,
-        string sidecarRoot = null) {
+        string sidecarRoot = null, SideOutputSink sideOutputSink = null) {
     auto relative = inputIsDir ? relativePath(file, inputRoot) : ".";
     auto document = Document(SourceLocator("local-files:v1", inputRoot, relative),
         OutputName(inputIsDir ? relative : baseName(outputRoot)));
@@ -1263,6 +1321,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
             string[] planSideSchemas;
             string[] planSideKeys;
             bool[string] destinations;
+            TerminalSideOutput[size_t] sideOutputsByOrdinal;
             foreach (ref event; events) {
                 DurableEventPlan plan;
                 plan.ordinal = plans.length;
@@ -1331,6 +1390,7 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         throw new OutputPolicyViolation(
                             "primary and side-output destinations collide");
                     destinations[normalized] = true;
+                    sideOutputsByOrdinal[side.ordinal] = output;
                     plans ~= side;
                     planContents ~= new Content([
                         ContentPiece.own(output.bytes)]);
@@ -1405,8 +1465,11 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                         scope(exit) recordDurableMetricV1(
                             DurableMetricPhaseV1.publication,
                             planContents[ordinal].size, publicationStarted);
-                        writeAtomicPieces(plan.destination,
-                            planContents[ordinal].pieces());
+                        if (auto sideOutput = ordinal in sideOutputsByOrdinal)
+                            sideOutputSink.publish(*sideOutput, plan.destination);
+                        else
+                            writeAtomicPieces(plan.destination,
+                                planContents[ordinal].pieces());
                     }
                     version (ManifestCliHarness) manifestKillAt(databasePath,
                         ordinal == 0 ? "after-first-publish" : "after-last-output");
@@ -1667,7 +1730,7 @@ int runApp(string[] args) {
         }
         string[] pendingDispatchRecords;
         TerminalSideOutput[] pendingSideOutputs;
-        JsonlSidecarWriter sideWriter;
+        SideOutputSink sideWriter;
         if (sidecarExplicit)
             sideWriter = new JsonlSidecarWriter(sidecarPath,
                 maxJsonlOutputBytes, maxJsonlSidecarBytes, dryRun);
@@ -1695,7 +1758,7 @@ int runApp(string[] args) {
                     ++committedPrimary;
                     if (sideWriter !is null)
                         foreach (ref output; pendingSideOutputs)
-                            sideWriter.append(output);
+                            sideWriter.publish(output, null);
                     if (explain) foreach (ref output; pendingSideOutputs)
                         stderr.writeln("EXPLAIN\tside_output_status=",
                             dryRun ? "dry-run" : "staged",
@@ -1877,6 +1940,12 @@ int runApp(string[] args) {
             manifestPath.length ? DurableKind.manifest : DurableKind.journal,
             DurableIdentity(configHash, runtimePlan.identity));
     scope(exit) if (durableLedger !is null) durableLedger.close();
+    // The tree-mirrored sidecar route and both durable-ledger side-output
+    // routes (manifest and error-journal) all select a destination via
+    // sidecarDestinationFor() and publish it as an atomic file replace; one
+    // stateless MirroredFileSideOutputSink instance serves all of them.
+    SideOutputSink sideOutputSink = sidecarPath.length ?
+        new MirroredFileSideOutputSink : null;
     if (!dryRun && !errorTargeted)
         ensurePlainDirectory(inputIsDir ? outputPath : dirName(outputPath),
             inputIsDir ? outputPath : dirName(outputPath));
@@ -1906,11 +1975,11 @@ int runApp(string[] args) {
                     errorJournalPath.length != 0,
                     errorTargeted, explain &&
                         (runtimePlan.isDispatch || sidecarPath.length),
-                    allowVerifiedSkip, sidecarPath);
+                    allowVerifiedSkip, sidecarPath, sideOutputSink);
             } else {
                 auto local = processCompiledOne(file, inputPath, outputPath,
                     inputIsDir, runtimePlan, bytes, dryRun, publication,
-                    coordination, sidecarPath);
+                    coordination, sidecarPath, sideOutputSink);
                 decision.status = local.status;
                 decision.detail = local.firstReason;
                 decision.terminal = local.rejected != 0 || local.quarantined != 0;

@@ -113,10 +113,11 @@ exactly these 10 code points, and `wordsOf`'s per-codepoint test becomes
 `isAlpha(c) || isWordInternalJoiner(c)`; a joiner is appended to the current
 word exactly like a letter (case-folding via `toLower` is a no-op for these
 code points), so it never terminates a word and is never dropped. See the
-"virama/nukta word-internal-joiner" unit test in `source/domain/
-language_id.d` (all 6 scripts' virama cases and all 4 scripts' nukta cases,
-tested directly against the private `wordsOf`) and the corresponding golden
-in `experiments/language_id/check.d` (proven through the public
+"virama/nukta word-internal-joiner" unit test in
+`source/domain/language_id.d` (all 6 scripts' virama cases and all 4
+scripts' nukta cases, tested directly against the private `wordsOf`) and the
+corresponding golden in `experiments/language_id/check.d` (proven through
+the public
 `totalNgramCount` instead, since `wordsOf` itself is private).
 
 The out-of-place distance from a document to a language profile sums, for
@@ -273,8 +274,8 @@ uncalibrated confidence described above; if `abstained`, one typed reason:
   Vietnamese, in addition to the original Basic Latin, Latin-1 Supplement,
   and Latin Extended-A/B (many of Vietnamese's precomposed tone-marked
   vowels, e.g. `ệ`, `ọ`, `ữ`, `ả`, `ạ`, `ỹ`, live in that block — see the
-  "Vietnamese diacritic density" golden in `experiments/language_id/
-  check.d`).
+  "Vietnamese diacritic density" golden in
+  `experiments/language_id/check.d`).
 
   **This slice's required second code fix (found during grooming, beyond
   the original ticket's ask).** The virama/nukta word-boundary fix above is
@@ -306,9 +307,10 @@ uncalibrated confidence described above; if `abstained`, one typed reason:
 - `mixedOrAmbiguous` — the best and second-best language's out-of-place
   distances are within `mixedMarginBound` (2% of the worst-case distance) of
   each other; the two top candidates are too close to call. This slice adds
-  a mixed-*script* golden (`mixedScriptGolden` in `experiments/language_id/
-  check.d`) alongside the existing mixed-*language* (English/Spanish)
-  golden: an authored sentence blending an English clause with a roughly
+  a mixed-*script* golden (`mixedScriptGolden` in
+  `experiments/language_id/check.d`) alongside the existing mixed-*language*
+  (English/Spanish) golden: an authored sentence blending an English clause
+  with a roughly
   balanced Hindi/Devanagari clause abstains via `mixedOrAmbiguous`, proving
   the existing mixed-language mechanism generalizes to mixed-script text
   without a bespoke new mechanism.
@@ -476,14 +478,14 @@ single-byte corruption anywhere in the record are all rejected.
   proven via the public `totalNgramCount` to round-trip as one 6-codepoint
   word (26 total n-grams), not the 3-fragment pre-fix count (22). All 6
   scripts' virama cases and all 4 scripts' nukta cases are additionally
-  tested directly against the private `wordsOf` in `source/domain/
-  language_id.d`'s own unit test.
+  tested directly against the private `wordsOf` in
+  `source/domain/language_id.d`'s own unit test.
 - **Brahmic script-gate widening golden** (this slice's required fix #2,
   found during grooming) — a plain, ordinary-length Devanagari sentence must
   not abstain via `unsupportedScript` and must reach scoring, classifying
   correctly as Hindi (`brahmicScriptGateGolden`). `isBrahmicLetter`'s own
-  Oriya/Kannada boundary-codepoint unit test lives in `source/domain/
-  language_id.d` (private helper).
+  Oriya/Kannada boundary-codepoint unit test lives in
+  `source/domain/language_id.d` (private helper).
 - **Mixed-language golden** — an authored English/Spanish blend abstains via
   `mixedOrAmbiguous`.
 - **Mixed-script golden** (new territory this slice adds) — an authored

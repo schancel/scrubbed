@@ -1,18 +1,28 @@
 # Topical tags: pure annotation and controlled-vocabulary inference (v1)
 
-**Status: first slice of issue #167.** This is a pure, repository-local seam,
-not a completion of #167. It adds a bounded canonical topical-annotation
-value plus a deterministic controlled-vocabulary inference API and
-release-active evidence. It accepts already-extracted source observations
-and canonical UTF-8 text. It does **not** parse HTML, register a pipeline
-stage, expose CLI/config, or publish local/JSONL/durable output. Tags never
-alter `DocumentId`, canonical text bytes, stage decisions, or extraction
-provenance. `domain.topical_tags` is self-contained: nothing else in
-`source/` imports it, and the ordinary shipping binary has no topical
-stage/CLI/config reachability. The parent issue #167 stays open; source
-extraction and shipping/publication integration are separately groomed
-successor work, mutexed with or dependent on the then-integrated #180/#28
-shapes.
+**Status: two landed slices of issue #167, neither a completion of it.**
+
+- **First slice** — `domain.topical_tags`: a pure, repository-local value
+  type plus a deterministic controlled-vocabulary inference API and
+  release-active evidence. It accepts already-extracted source observations
+  and canonical UTF-8 text; it does not parse HTML itself, and does not
+  publish local/JSONL/durable output on its own. Tags never alter
+  `DocumentId`, canonical text bytes, stage decisions, or extraction
+  provenance.
+- **Next slice** — `topical-tags-extract` (see below): a real,
+  self-registering, terminal v3 stage that parses a document's HTML,
+  extracts declared candidates, and calls into `domain.topical_tags` to
+  build and publish the annotation. This gives the ordinary shipping binary
+  real reachability today, via `run --stage id=topical-tags-extract` — the
+  same generic stage-composition mechanism every other stage uses. As of
+  this slice, `domain.topical_tags` is no longer import-free: this stage is
+  its one caller in `source/`.
+
+Controlled-vocabulary inference is not wired into the shipped stage (see
+"Reused, frozen `buildAnnotation`, deliberately inert" below) — the stage is
+declared-extraction only. The parent issue #167 stays open for that and for
+further shipping/publication integration, separately groomed and mutexed
+with or dependent on the then-integrated #180/#28 shapes.
 
 ## Files
 
@@ -204,14 +214,16 @@ canonicalization, inference, and encode/decode/corruption paths as fast
 in-process regression coverage; the release-active checker above is the
 pinned, release/O3-built proof with the benchmark matrix and privacy scan.
 
-## What this is not
+## What `domain.topical_tags` itself is not
 
 Not an ontology, ranking, quality score, or author-intent signal. Not a
 statement about web-scale precision/recall — the held-out split above is a
-handful of authored sentences. Not HTML parsing, a pipeline stage, CLI/config
-surface, or any local/JSONL/durable publication path; those are explicitly
-out of scope for this slice and belong to a separately groomed successor
-that must re-groom against the integrated #180 generic side-output shape.
+handful of authored sentences. The value type itself does not parse HTML or
+publish output; `topical-tags-extract`, documented next, is the stage that
+does both. Controlled-vocabulary inference and a durable/local/JSONL
+publication path beyond the one terminal side output below remain
+explicitly out of scope, dependent on the integrated #180 generic
+side-output shape.
 
 ## `topical-tags-extract`: declared-extraction stage (next-slice, additive)
 

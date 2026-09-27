@@ -64,9 +64,9 @@ intentional and is proven directly by a dedicated fixture in
   itself is withheld.
 - The **only** quarantine this stage ever raises is `rawLimit`, from the
   `max-input-bytes` option below -- a resource/DoS bound, not a
-  "compressibility could not be computed" case. `source
-  /effects/compressibility_annotate_stage.d`'s own unittests prove this
-  directly: an exactly-63-byte input (one byte under the ratio floor) still
+  "compressibility could not be computed" case.
+  `source/effects/compressibility_annotate_stage.d`'s own unittests prove
+  this directly: an exactly-63-byte input (one byte under the ratio floor) still
   emits a normal, non-quarantined annotation with `belowFloor` status.
 
 ## `max-input-bytes`
@@ -95,10 +95,11 @@ compression status, `compressedToRawRatio` (`null` unless `computed`),
 `rawBytes`, `compressedBytes`, compressor name/version/level; and a sha256
 digest of the exact raw content bytes this stage measured
 (`contentRevisionSha256`), binding the whole annotation to that specific
-content revision. `source/effects/compressibility_annotate_stage
-.encodeCompressibilityV1`/`decodeCompressibilityV1` are the encode/decode
-pair (decode is test-only -- the field is opaque to every other module,
-`document-metadata-publish` included, which never interprets it). A
+content revision.
+`source/effects/compressibility_annotate_stage.encodeCompressibilityV1`/
+`decodeCompressibilityV1` are the encode/decode pair (decode is test-only --
+the field is opaque to every other module, `document-metadata-publish`
+included, which never interprets it). A
 dedicated unittest pins the worst-case encoded length (longest status names,
 maximal digit counts at the 8 MiB configurable ceiling) under
 `domain.document_metadata.maxExtensionValueBytes` (512 bytes).

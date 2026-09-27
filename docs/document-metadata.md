@@ -1,23 +1,25 @@
 # Document metadata: bounded standard + extension fields (v1)
 
-**Status: first slice, plus #285's integration slice.** `domain
-.document_metadata` itself (the value type, its functional mutators, and the
-`document-metadata:v1` encode/decode pair) is a frozen v1 type from the
-first slice and is unchanged here. The integration slice wires it into
-`stages.contract.StageDocument` and adds two self-registering stages so a
-document can carry accumulated metadata across multiple stages in one
-compiled job: `effects.html_metadata_annotate_stage` (`html-metadata-
-annotate`, non-terminal — reuses `parseHtml`/`extractHtmlMetadata` exactly
-as `effects.html_metadata_stage` does, but writes each "selected" standard
-field into `StageDocument.metadata` instead of producing a side output) and
-`effects.document_metadata_publish_stage` (`document-metadata-publish`,
-terminal — encodes whatever metadata a job accumulated by that point into a
-single `TerminalSideOutput`). No compiler or executor change was needed:
-`composition/compiler.d`'s terminal-stage rule only ever prevented two
-stages from both being terminal in one job; it never prevented a plain
-non-terminal stage from running earlier in a chain before a terminal one.
-See "Integration slice: wiring into `StageDocument`" below for the two
-required proofs.
+**Status: first slice, plus #285's integration slice.** `domain.document_metadata`
+itself (the value type, its functional mutators, and the `document-metadata:v1`
+encode/decode pair) is a frozen v1 type from the first slice, unchanged here.
+The integration slice wires it into `stages.contract.StageDocument` and adds
+two self-registering stages so a document can carry accumulated metadata
+across multiple stages in one compiled job:
+
+- `effects.html_metadata_annotate_stage` (`html-metadata-annotate`,
+  non-terminal) reuses `parseHtml`/`extractHtmlMetadata` exactly as
+  `effects.html_metadata_stage` does, but writes each "selected" standard
+  field into `StageDocument.metadata` instead of producing a side output.
+- `effects.document_metadata_publish_stage` (`document-metadata-publish`,
+  terminal) encodes whatever metadata a job accumulated by that point into a
+  single `TerminalSideOutput`.
+
+No compiler or executor change was needed: `composition/compiler.d`'s
+terminal-stage rule only ever prevented two stages from both being terminal
+in one job; it never prevented a plain non-terminal stage from running
+earlier in a chain before a terminal one. See "Integration slice: wiring
+into `StageDocument`" below for the two required proofs.
 
 ## Files
 
@@ -29,10 +31,10 @@ required proofs.
   leak scan, and a synthetic (non-`StageDocument`) stage-chain harness.
 - `source/stages/contract.d` — adds `DocumentMetadata metadata;` as a new
   trailing field on `StageDocument` (integration slice).
-- `source/effects/html_metadata_annotate_stage.d` — the `html-metadata-
-  annotate` stage (integration slice).
-- `source/effects/document_metadata_publish_stage.d` — the `document-
-  metadata-publish` terminal stage (integration slice).
+- `source/effects/html_metadata_annotate_stage.d` — the
+  `html-metadata-annotate` stage (integration slice).
+- `source/effects/document_metadata_publish_stage.d` — the
+  `document-metadata-publish` terminal stage (integration slice).
 - `experiments/document_metadata_integration/check.d` — focused D checker
   for the integration slice's two required proofs (below).
 - This document.

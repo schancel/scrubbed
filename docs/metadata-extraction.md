@@ -1,36 +1,111 @@
-# Deterministic HTML metadata slice
+# Deterministic HTML metadata (`html-metadata`)
 
-Import `effects.html_metadata_stage` to register the opt-in `html-metadata`
-stage, then select it in a canonical version-3 job. It accepts HTML `Content`,
-maps the same typed `DocumentId` with its input `Content` left untouched, and
-carries the extracted UTF-8 `metadata-json:v2` bytes as a single
-`TerminalSideOutput` (schema `metadata-json-v2`) instead of overwriting the
-document; it does not need a paired file, output sink, network fetch, or
-model. The stage registers `StageCardinality.oneToOne` and
-`SideOutputCapability.terminal`, so a quarantined or rejected event also
-carries a (payload-empty) side output to satisfy that capability's per-event
-invariant -- callers branch on quarantine/reject before reading it, the same
-as before this change. `route-metadata` reads that side output's bytes for
-the metadata-output sink; it no longer reads the stage's document content.
-The input follows the existing restricted `HtmlTree` boundary and its 64 KiB
-raw/decoded, node, depth, attribute, and observation limits.
+Opt-in v3 stage that extracts `<head>` metadata from an HTML document and
+publishes it as a side output, without touching the document's content.
 
-Only `<head>` evidence is considered. The five fields are `title`, `author`, `date`, `url`, and `rights`, in that wire order. Rules and priority (lower number wins):
+## Usage
+
+Import `effects.html_metadata_stage` to register the stage, then select
+`html-metadata` in a job. It:
+
+- Maps the same typed `DocumentId`; input `Content` passes through
+  unmodified.
+- Carries the extracted UTF-8 `metadata-json:v2` bytes as a single
+  `TerminalSideOutput` (schema `metadata-json-v2`) — it does not overwrite
+  the document, and needs no paired file, output sink, network fetch, or
+  model.
+- Registers `StageCardinality.oneToOne` and `SideOutputCapability.terminal`,
+  so a quarantined/rejected event still carries a (payload-empty) side
+  output to satisfy that capability's per-event invariant. Callers branch on
+  quarantine/reject before reading it, same as any other terminal stage.
+- Reads through the existing restricted `HtmlTree` boundary: 64 KiB
+  raw/decoded, plus its node, depth, and attribute limits.
+
+`route-metadata` (see [docs/metadata-route.md](metadata-route.md)) reads
+this side output's bytes for its metadata sink; it no longer reads the
+stage's document content.
+
+## Fields and priority
+
+Only `<head>` evidence is considered, in this fixed wire order. Lower
+priority number wins:
 
 | Field | Priority 0 | Priority 1 | Priority 2 |
 | --- | --- | --- | --- |
-| title | `meta property=og:title` | `<title>` text | |
-| author | `meta name=author` | `meta property=article:author` | |
-| date | `meta property=article:published_time` | `meta name=date` | |
-| url | `link rel=canonical` | `meta property=og:url` | |
-| rights | `link rel=license` | `meta name=dc.rights` | `meta name=copyright` |
+| `title` | `meta property=og:title` | `<title>` text | |
+| `author` | `meta name=author` | `meta property=article:author` | |
+| `date` | `meta property=article:published_time` | `meta name=date` | |
+| `url` | `link rel=canonical` | `meta property=og:url` | |
+| `rights` | `link rel=license` | `meta name=dc.rights` | `meta name=copyright` |
 
-Names, attribute kinds, and values are matched exactly as selected by the HTML tree: `property=og:title` does not mean `name=og:title`. There is no permissive token, case, or schema.org interpretation. Within a priority, identical values deduplicate for selection but every observation remains a candidate. Distinct values at the winning priority make the field `ambiguous` and abstain. A lower-priority disagreement sets `conflict: true` while the higher-priority value wins. Candidates remain in tree order, capped at 16 per field; further evidence makes that field `overflow` and abstain. Nothing is inferred from a local path or `SourceLocator`.
+Matching is exact — attribute name and kind both matter (`property=og:title`
+never matches `name=og:title`), with no permissive token, case, or
+schema.org interpretation.
 
-Values collapse Unicode whitespace and trim the edges, with a 512-byte UTF-8 cap. Dates must be a valid calendar `YYYY-MM-DD` or an ISO-style timestamp with seconds and explicit `Z` or numeric offset; timestamps emit their written date portion, without timezone conversion. URLs require an absolute `http://` or `https://` authority with a nonempty non-bracketed host and, if present, a numeric port from 1 to 65535. Bracketed IP-literal authorities, including valid IPv6, are unsupported and abstain in this slice; a valid lower-priority `og:url` can then win. URLs also reject whitespace, userinfo, quotes, and backslashes; relative URLs abstain. These are deliberately narrow validation rules, not a general URL canonicalizer. Empty or invalid observations set `invalidEvidence`; if no valid candidates remain, status is `invalid` for nonempty rejected evidence or `absent` otherwise. Malformed or unsupported-charset documents, invalid UTF-8, and parser/resource limit failures quarantine the whole document with bounded reason codes; an invalid field does not quarantine other fields. Reasons never include source bytes or paths.
+Within one priority, identical values deduplicate for selection, but every
+observation stays a candidate. Distinct values at the winning priority make
+the field `ambiguous` (abstains). A lower-priority disagreement sets
+`conflict: true` while the higher-priority value still wins. Candidates keep
+tree order and are capped at 16 per field; more evidence makes the field
+`overflow` (abstains). Nothing is inferred from a local path or
+`SourceLocator`.
 
-`rights`'s priority-0 evidence, `link rel=license`'s `href`, is validated with the exact same absolute-URL rule as `url`'s `link rel=canonical` (including the same relative/userinfo/malformed-port/bracketed-IP-literal abstention behavior), so an invalid `link:license` href abstains and a valid lower-priority `dc.rights` or `copyright` value can still win. `dc.rights` and `copyright` are free text: they are validated only by the same whitespace-collapse-plus-512-byte-cap rule as the other free-text fields, with no URL shape requirement, since both conventions are typically prose (for example "© 2024 Example Corp. All rights reserved.") rather than a link. `rights` stores the declared value or link as-is; this slice does not fetch, interpret, or classify license terms, and an absent declaration stays `absent`, never defaulted.
+## Validation
 
-`metadata-json:v2` has a fixed key order, no insignificant spaces, and one trailing LF. Top-level keys are `version`, `documentId`, `fields`. Each field has `status`, `value`, `rule`, `node`, `conflict`, `invalidEvidence`, `overflow`, `candidates`; a candidate has `value`, `rule`, `node`. `value`, `rule`, and `node` are null unless selected. Nodes are selected-tree preorder ordinals and are evidence pointers, not source offsets. The complete output is capped at 32 KiB; exceeding it quarantines as `outputLimit`. The payload omits source locator and output name. `metadata-json:v1` had four fields (no `rights`); `v2` is additive at the field level, appending `rights` after `url`, with the other four fields' semantics, priority, and JSON shape unchanged. Later fields require a versioned format; JSON-LD/`schema.org` evidence, rights enforcement, and model-based inference are explicitly out of scope for this format.
+- **Text fields** (`title`, `author`): Unicode whitespace collapsed and
+  trimmed, capped at 512 UTF-8 bytes.
+- **`date`**: a valid calendar `YYYY-MM-DD`, or an ISO-style timestamp with
+  seconds and an explicit `Z`/numeric offset. Timestamps emit only their
+  date portion — no timezone conversion.
+- **`url`**: absolute `http://`/`https://` only, nonempty non-bracketed
+  host, numeric port 1–65535 if present. No whitespace, userinfo, quotes, or
+  backslashes; relative URLs abstain. Bracketed IP-literal authorities
+  (including valid IPv6) are unsupported and abstain in this slice — a
+  valid lower-priority `og:url` can still win. This is a deliberately narrow
+  rule, not a general URL canonicalizer.
+- **`rights`**: `link rel=license`'s `href` uses the exact same absolute-URL
+  rule as `url` (same abstention behavior on relative/userinfo/malformed
+  port/bracketed-IP-literal), so an invalid `link:license` href abstains and
+  a valid lower-priority `dc.rights`/`copyright` can still win. `dc.rights`
+  and `copyright` are free text — same whitespace/512-byte rule as the other
+  text fields, no URL shape requirement, since both are typically prose
+  (e.g. `"© 2024 Example Corp. All rights reserved."`). `rights` stores the
+  declared value or link as-is; this slice does not fetch, interpret, or
+  classify license terms, and an absent declaration stays `absent`, never
+  defaulted.
 
-The D-only checker is `experiments/metadata/check.d`. Compile with an optimized release LDC build linked to the existing Lexbor static library after project dependencies are built. Its small, pinned synthetic hold-out reports field precision among selected values and abstention; that report is a regression fixture, not a live-web quality estimate. Rollback is removal of this opt-in module and its registration; no persisted record or existing CLI behavior changes.
+Empty or invalid observations set `invalidEvidence`. If no valid candidate
+remains, status is `invalid` (rejected evidence was present) or `absent`
+(none was). Malformed/unsupported-charset documents, invalid UTF-8, and
+parser/resource-limit failures quarantine the whole document with bounded
+reason codes; one invalid field does not quarantine the others. Reasons
+never include source bytes or paths.
+
+## Wire format: `metadata-json:v2`
+
+Fixed key order, no insignificant spaces, one trailing LF. Top-level keys:
+`version`, `documentId`, `fields`. Each field has `status`, `value`, `rule`,
+`node`, `conflict`, `invalidEvidence`, `overflow`, `candidates`; a candidate
+has `value`, `rule`, `node`. `value`/`rule`/`node` are null unless selected.
+Nodes are selected-tree preorder ordinals — evidence pointers, not source
+offsets. The payload omits source locator and output name.
+
+The complete output is capped at 32 KiB; exceeding it quarantines as
+`outputLimit`.
+
+`metadata-json:v1` had four fields (no `rights`). `v2` is additive at the
+field level: `rights` appends after `url`; the other four fields' semantics,
+priority, and JSON shape are unchanged. A later format needs its own
+version — JSON-LD/schema.org evidence, rights enforcement, and model-based
+inference are explicitly out of scope for `v2`.
+
+## Testing
+
+`experiments/metadata/check.d` is the D-only checker. Compile with an
+optimized release LDC build linked to the existing Lexbor static library
+after project dependencies are built. Its small, pinned synthetic hold-out
+reports field precision among selected values and abstention — a regression
+fixture, not a live-web quality estimate.
+
+Rollback is removing this opt-in module and its registration; no persisted
+record or existing CLI behavior changes.

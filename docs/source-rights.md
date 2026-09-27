@@ -2,19 +2,19 @@
 
 `domain.source_rights` is the version-1, effect-free boundary for recording
 caller-supplied source-rights evidence and deciding what a later integration
-must do. It neither discovers rights nor performs quarantine or removal.
+must do. It neither discovers rights nor performs quarantine or removal — it
+is a policy and graph-closure contract, not legal advice.
 
 ## Scope
 
-The module accepts already-stable identifiers and typed evidence. It returns a
-deterministic decision containing the resolved state, required action, reason,
-affected artifact identifiers, and provenance identifiers. It does not read
-document content, locators, manifests, the network, or the filesystem.
+The module accepts already-stable identifiers and typed evidence, and returns
+a deterministic decision: resolved state, required action, reason, affected
+artifact identifiers, and provenance identifiers. It never reads document
+content, locators, manifests, the network, or the filesystem.
 
-This is a policy and graph-closure contract, not legal advice. Callers remain
-responsible for establishing evidence outside this module. In particular,
-missing evidence is `unknown`; `unknown` always produces `denyUse` and can
-never be interpreted as permission.
+Callers are responsible for establishing evidence outside this module.
+Missing evidence is `unknown`, which always produces `denyUse` — it can never
+be interpreted as permission.
 
 ## Version-1 values
 
@@ -92,32 +92,34 @@ input item. Wall time is not used as the complexity oracle.
 
 ## Deferred integration
 
-Stage 2a proved the frozen `evaluateSourceRights` graph and closure logic
-against real, on-disk C01 document-shard and overlay data, not only synthetic
-in-memory graphs. `effects.source_rights_overlay` is strictly read-only:
-discovery and decision only, with no quarantine/removal effect, no filesystem
-mutation, and no CLI surface. `documentArtifact` trivially wraps a
-`DocumentId` as `RightsArtifactId`. `annotationArtifact(analyzerKey, owner)`
-derives a deterministic, domain-separated `annotation:v1:` canonical ID from a
-fixed domain tag and length-prefixed `(owner, analyzerKey)` fields under
-SHA-256, mirroring the same idiom as `DocumentId.childOf` and
-`RightsAuditId.fromDecisionBytes`. `joinCorpusForRights(root, shardPath,
-overlayPaths, evidence)` calls the existing, unmodified
-`effects.document_shards.joinShards` over one shard and only its two accepted
-overlay analyzer keys, `quality.decisions` and `exact-dedup`; any other
-analyzer key present among `overlayPaths` fails closed with a fixed,
-content-free diagnostic instead of being silently dropped. Every document the
-join visits other than `root` becomes a derived child of `root`, and every
-present accepted-overlay annotation on a visited document becomes a derived
-child of that document. The resulting real `DerivedArtifactRelation`s are
-passed, unmodified, to `evaluateSourceRights`, and its `RightsDecision` is
-returned unchanged. Evidence remains entirely caller/fixture-supplied; this
-facade neither reads nor writes an evidence store.
+Stage 2a (`effects.source_rights_overlay`) proved the frozen
+`evaluateSourceRights` graph and closure logic against real, on-disk C01
+document-shard and overlay data, not only synthetic in-memory graphs. It is
+strictly read-only: discovery and decision only, no quarantine/removal
+effect, no filesystem mutation, no CLI surface.
+
+- `documentArtifact` trivially wraps a `DocumentId` as `RightsArtifactId`.
+- `annotationArtifact(analyzerKey, owner)` derives a deterministic,
+  domain-separated `annotation:v1:` canonical ID from a fixed domain tag and
+  length-prefixed `(owner, analyzerKey)` fields under SHA-256, mirroring the
+  same idiom as `DocumentId.childOf` and `RightsAuditId.fromDecisionBytes`.
+- `joinCorpusForRights(root, shardPath, overlayPaths, evidence)` calls the
+  existing, unmodified `effects.document_shards.joinShards` over one shard
+  and only its two accepted overlay analyzer keys, `quality.decisions` and
+  `exact-dedup`; any other analyzer key present among `overlayPaths` fails
+  closed with a fixed, content-free diagnostic rather than being silently
+  dropped. Every document the join visits other than `root` becomes a
+  derived child of `root`, and every present accepted-overlay annotation on a
+  visited document becomes a derived child of that document. The resulting
+  real `DerivedArtifactRelation`s pass unmodified to `evaluateSourceRights`,
+  and its `RightsDecision` returns unchanged. Evidence remains entirely
+  caller/fixture-supplied — this facade neither reads nor writes an evidence
+  store.
 
 The release-active checker (`experiments/source_rights/overlay_check.d`)
 builds a real on-disk C01 shard holding a root document and a real
-shard-resident child derived with the unmodified `Document.derivedChild`, plus
-a genuinely separate sibling document in its own shard, absent from the
+shard-resident child derived with the unmodified `Document.derivedChild`,
+plus a genuinely separate sibling document in its own shard, absent from the
 root's family corpus. It joins two real overlay files over the family shard,
 one present on both documents and one present only on the child, and proves
 an exact `affectedIds()` match — root, child, and every present annotation
@@ -138,14 +140,15 @@ ldc2 -O3 -release -i -I=source \
 .dub/source-rights-overlay-check
 ```
 
-This join does not discover real parent/child structure from shard bytes: a
-shard's caller must already scope it to the family whose closure is being
-decided. Recognizing that structure from a real corpus (a persisted
-parent-pointer field, or a job-execution-time-supplied relation set), where
-durable rights evidence is captured and stored, and how a rights closure
-interacts with an already-published export are separate, later design
-questions. Stage 2 must still bind these decisions to a real effect boundary:
+This join does not discover real parent/child structure from shard bytes —
+a shard's caller must already scope it to the family whose closure is being
+decided. Separate, later design questions: recognizing that structure from a
+real corpus (a persisted parent-pointer field, or a job-execution-time-
+supplied relation set), where durable rights evidence gets captured and
+stored, and how a rights closure interacts with an already-published export.
+
+Stage 2 must still bind these decisions to a real effect boundary:
 complete affected-ID discovery over a real corpus, idempotent
 quarantine/removal behavior, restart safety, authorization, and
 operator-visible auditing. `quarantineRequired` and `removalRequired` remain
-policy results only; no production path consumes them.
+policy results only — no production path consumes them yet.

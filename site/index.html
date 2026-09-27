@@ -134,14 +134,19 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             <p>Exact parity on email/card/IP (5/5 each). Phone: 5/6 vs. Presidio's 6/6 &mdash; the one place it's behind, disclosed not hidden. Zero false positives from scrubbed on any category.</p>
         </div>
         <div class="stat-card">
-            <span class="big">12/20 pages</span>
+            <span class="big">18/20 pages</span>
             <span class="label">vs. trafilatura, extraction</span>
-            <p>Matches trafilatura's gold answers on pages it parses; a known, ticketed parser gap explains the rest &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</p>
+            <p>Precision 0.918 / recall 0.746 on pages it parses. Was 12/20 until a real parser gap got fixed &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</p>
+        </div>
+        <div class="stat-card">
+            <span class="big">~139x</span>
+            <span class="label">whole pipeline vs. the equivalent Python chain</span>
+            <p>Over a real, checked-in 20-page corpus: scrubbed's <code>clean-web-document</code> mean 0.2075s vs. ftfy&rarr;trafilatura&rarr;langdetect&rarr;Presidio chained, mean 28.76s. Clone and run it yourself: <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">examples/pipeline-benchmark</a>.</p>
         </div>
         <div class="stat-card">
             <span class="big">~25x</span>
-            <span class="label">vs. ftfy, whole-process wall time</span>
-            <p>On a 131,072-line (5.9MB) repetitive mojibake file: 0.152&ndash;0.156s vs. ftfy's 3.698&ndash;4.076s. Whole-process timing including startup, exact output verified every run &mdash; one specific workload, not a general throughput claim. Trafilatura/langdetect/Presidio timing isn't published yet, only correctness above.</p>
+            <span class="label">vs. ftfy alone, whole-process wall time</span>
+            <p>On a 131,072-line (5.9MB) repetitive mojibake file: 0.152&ndash;0.156s vs. ftfy's 3.698&ndash;4.076s. Whole-process timing including startup, exact output verified every run &mdash; one specific workload, not a general throughput claim. Per-tool timing for trafilatura/langdetect/Presidio individually isn't published yet, only the whole-pipeline number above and correctness per tool.</p>
         </div>
     </div>
 

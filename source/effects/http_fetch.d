@@ -40,14 +40,6 @@ enum size_t defaultMaxConcurrentFetches = 8;
 /// derive from without expanding scope.
 enum string userAgent = "scrubbed/0.1 (+https://github.com/schancel/scrubbed)";
 
-/// `CURLOPT_USERAGENT` (include/curl/curl.h: `CURLOPTTYPE_STRINGPOINT` (10 000)
-/// + 18). Declared here rather than in `effects.curl_ffi` because that
-/// module's declared `CURLOPT_*` set is scoped to exactly what the
-/// ADOPT_DYNAMIC evaluation probe exercised, and this fix's allowed files
-/// are limited to this one; `curl_easy_setopt`'s `int option, ...` signature
-/// accepts the raw numeric option regardless of where it's declared.
-private enum int curloptUserAgent = 10_018;
-
 /// Typed connection/total-time/redirect/header/encoded-body/decoded-body/
 /// concurrency caps. Every cap is enforced as a content-free rejection: no
 /// captured header, body byte, or URL ever appears in a `FetchFailure`.
@@ -452,7 +444,7 @@ FetchOutcome fetchHttp(FetchRequest request) {
     setOption(curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 2L));
     setOption(curl_easy_setopt(easy, CURLOPT_ACCEPT_ENCODING, encoding));
     auto userAgentz = userAgent.toStringz;
-    setOption(curl_easy_setopt(easy, curloptUserAgent, userAgentz));
+    setOption(curl_easy_setopt(easy, CURLOPT_USERAGENT, userAgentz));
     setOption(curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &fetchBodyCallback));
     setOption(curl_easy_setopt(easy, CURLOPT_WRITEDATA, &state));
     setOption(curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &fetchHeaderCallback));

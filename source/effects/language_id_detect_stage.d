@@ -1,5 +1,5 @@
-/// Self-registering, terminal v3 stage (`language-id-detect`, issue #311's
-/// accepted contract): wires the existing, unmodified, frozen
+/// Self-registering, annotate-only v3 stage (`language-id-detect`, issue
+/// #300 Slice 2's accepted contract): wires the existing, unmodified, frozen
 /// `domain.language_id` classifier into the generic `--stage id=` reachable
 /// composition path used by `html-main-content`/`pii-four-class`/
 /// `topical-tags-extract` -- giving `domain.language_id` its first real
@@ -10,13 +10,17 @@
 /// `const(ubyte)[] text` signature. Calls the existing
 /// `buildLanguageIdentity(documentId, content)` to get a
 /// `LanguageIdentityRecord`, then `encodeLanguageIdentity(record)` for the
-/// wire bytes, and emits those bytes as this job's own single
-/// `TerminalSideOutput`, mirroring `stages.pii_four_class`'s and
-/// `effects.document_metadata_publish_stage`'s raw-bytes-in,
-/// content-passthrough, single-terminal-side-output shape. `content` passes
+/// wire bytes, and writes those bytes into `StageDocument.metadata` as an
+/// extension field, mirroring `effects.html_metadata_annotate_stage`'s and
+/// `effects.compressibility_annotate_stage`'s exact
+/// `SideOutputCapability.none`, write-into-the-shared-accumulator,
+/// content-passthrough shape, to be published later by the existing,
+/// unmodified `document-metadata-publish` terminal stage. `content` passes
 /// through completely unmodified. No new domain logic: schema/versioning
 /// (`languageIdSchema`/`algorithmVersion`/`profileTableIdentity`) is already
-/// fully owned by `domain.language_id` itself.
+/// fully owned by `domain.language_id` itself, and the encoded record fits
+/// comfortably inside `document-metadata:v1`'s frozen 512-byte scalar
+/// extension-value cap.
 ///
 /// **Abstention is not an error.** `detectLanguage`'s own typed
 /// `LanguageAbstentionReason` values (`emptyText`, `oversizeText`,
@@ -24,7 +28,7 @@
 /// `belowConfidenceThreshold`) are returned as ordinary data inside a
 /// successfully built and encoded `LanguageIdentityRecord` -- via
 /// `buildLanguageIdentity`, which calls `detectLanguage` internally -- so
-/// this stage emits that record normally for every one of these routine
+/// this stage writes that record normally for every one of these routine
 /// cases; it never quarantines for them. This stage only quarantines on a
 /// genuine defensive-invariant failure inside `domain.language_id` itself
 /// (a `checkLanguageIdentity` rejection surfaced through
@@ -40,15 +44,13 @@ import domain.document : DocumentId;
 import domain.language_id : LanguageIdentityRecord, buildLanguageIdentity,
     encodeLanguageIdentity;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
-    StageDeclaration, StageDocument, TerminalSideOutput;
+    StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
     SideOutputCapability, StageCardinality, StageConfiguration, StageOptions,
     StageRegistration, registerStage;
 
 enum languageIdDetectStageKeyV1 = "language-id-detect";
-enum languageIdDetectSideOutputKeyV1 = "language-id";
-enum languageIdDetectSideOutputSchemaV1 = "scrubbed-language-id-v1";
-enum languageIdDetectSideOutputSuffixV1 = ".language-id.bin";
+enum languageIdDetectExtensionKeyV1 = "language-id";
 
 // ---------------------------------------------------------------------------
 // `domain.language_id` predates the configured-stage pure function boundary
@@ -85,11 +87,10 @@ private StageDecision applyLanguageIdDetect(StageDocument input,
         // carried as ordinary, successfully encoded data, above.
         return StageDecision.quarantine("language-id-detect: internal invariant failure");
     }
-    auto sideOutput = TerminalSideOutput(languageIdDetectSideOutputKeyV1,
-        languageIdDetectSideOutputSchemaV1, languageIdDetectSideOutputSuffixV1,
-        encoded);
+    input.metadata = input.metadata.withExtensionField(languageIdDetectExtensionKeyV1,
+        encoded.idup, languageIdDetectStageKeyV1);
     // `content` passes through unchanged.
-    return StageDecision.map(input, [sideOutput]);
+    return StageDecision.map(input);
 }
 
 private ConfiguredStageTransform factory(const ref StageOptions options) {
@@ -100,7 +101,7 @@ static this() {
     registerStage(StageRegistration(StageDeclaration(languageIdDetectStageKeyV1,
         PassMode.singlePass, ResourceDeclaration(1, 1024 * 1024)),
         null, null, null, &factory, FilterPlacement.none,
-        StageCardinality.oneToOne, SideOutputCapability.terminal));
+        StageCardinality.oneToOne, SideOutputCapability.none));
 }
 
 // ---------------------------------------------------------------------------
@@ -110,10 +111,13 @@ static this() {
 version (unittest) {
     import composition.compiler : compileJob;
     import composition.executor : runCompiledStage;
+    import composition.job_executor : runCompiledJob;
     import content.pieces : Content, ContentPiece;
     import domain.document : Document, OutputName, SourceLocator;
+    import domain.document_metadata : decodeDocumentMetadataV1;
     import domain.language_id : LanguageAbstentionReason, LanguageDetectionStatus,
         decodeLanguageIdentity, maxLanguageIdTextBytes;
+    import effects.document_metadata_publish_stage : documentMetadataPublishKeyV1;
     import job.json : parseJobJson;
     import stages.contract : EventKind, StageEvent;
 
@@ -135,15 +139,16 @@ version (unittest) {
         return result.events[0];
     }
 
+    /// Reads the extension field this stage writes into `StageDocument
+    /// .metadata` (no more standalone `TerminalSideOutput`) and decodes it.
     private LanguageIdentityRecord decodedRecord(StageEvent event, const(ubyte)[] content) {
         assert(event.kind == EventKind.emitted);
-        assert(event.sideOutputs.length == 1);
-        auto sideOutput = event.sideOutputs[0];
-        assert(sideOutput.key == languageIdDetectSideOutputKeyV1);
-        assert(sideOutput.schema == languageIdDetectSideOutputSchemaV1);
-        assert(sideOutput.suffix == languageIdDetectSideOutputSuffixV1);
+        auto fields = event.payload.metadata.extensionFields;
+        assert(fields.length == 1);
+        assert(fields[0].key == languageIdDetectExtensionKeyV1);
+        assert(fields[0].sourceStage == languageIdDetectStageKeyV1);
         import crypto.sha256 : sha256Of;
-        return decodeLanguageIdentity(sideOutput.bytes, fixtureDocument().id, sha256Of(content));
+        return decodeLanguageIdentity(fields[0].value, fixtureDocument().id, sha256Of(content));
     }
 }
 
@@ -158,7 +163,7 @@ unittest {
     assert(record.result.reason == LanguageAbstentionReason.none);
     // Matches a direct in-process call on the same input, byte-for-byte.
     auto direct = encodeLanguageIdentity(buildLanguageIdentity(fixtureDocument().id, text));
-    assert(event.sideOutputs[0].bytes == direct);
+    assert(event.payload.metadata.extensionFields[0].value == direct);
 }
 
 // Empty content abstains cleanly (never quarantines) with the exact typed
@@ -215,17 +220,63 @@ unittest {
 }
 
 // Reachability: the stage is genuinely self-registering (importing this
-// module is enough) and a job consisting of only this terminal stage
-// compiles and runs.
+// module is enough), registers `SideOutputCapability.none` (not `.terminal`
+// -- issue #300 Slice 2), and a job consisting of only this annotate-only
+// stage compiles and runs.
 unittest {
     auto spec = parseJobJson(`{"version":3,"stages":[{"id":"detect",` ~
         `"implementation":"` ~ languageIdDetectStageKeyV1 ~ `","options":{},"filters":[]}]}`);
     auto plan = compileJob(spec);
     assert(plan.stages.length == 1);
-    assert(plan.stages[0].sideOutputCapability == SideOutputCapability.terminal);
+    assert(plan.stages[0].sideOutputCapability == SideOutputCapability.none);
     auto text = cast(const(ubyte)[]) "Solo reachability fixture sentence for the stage itself.";
     auto input = StageDocument(fixtureDocument(),
         new Content([ContentPiece.own(text)]));
     auto result = runCompiledStage([input], plan.stages[0]);
     assert(result.events.length == 1 && result.events[0].kind == EventKind.emitted);
+}
+
+// Regression proof (issue #300 Slice 2's core acceptance criterion):
+// `[language-id-detect, document-metadata-publish]` compiles and runs as one
+// job via `compileJob`/`runCompiledJob`, and the terminal `document-metadata
+// :v1` side output's decoded metadata carries exactly the `language-id`
+// extension field this stage wrote -- which, decoded, equals exactly the
+// `LanguageIdentityRecord` the old standalone terminal stage would have
+// produced for the same input.
+unittest {
+    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"detect","implementation":"` ~ languageIdDetectStageKeyV1 ~
+        `","options":{},"filters":[]},` ~
+        `{"id":"publish","implementation":"document-metadata-publish",` ~
+        `"options":{},"filters":[]}]}`);
+    auto plan = compileJob(spec);
+    auto text = cast(const(ubyte)[])
+        "A chained regression fixture sentence proving the accumulator path end to end.";
+    auto document = fixtureDocument();
+    auto input = StageDocument(document, new Content([ContentPiece.own(text)]));
+    auto events = runCompiledJob(input, plan);
+    assert(events.length == 1 && events[0].kind == EventKind.emitted);
+    assert(events[0].sideOutputs.length == 1);
+    auto sideOutput = events[0].sideOutputs[0];
+    assert(sideOutput.key == documentMetadataPublishKeyV1);
+    // `content` passed through both stages unmodified.
+    assert(events[0].payload.content.copy() == text);
+
+    auto decodedMetadata = decodeDocumentMetadataV1(document.id, cast(string) sideOutput.bytes());
+    assert(decodedMetadata.extensionFieldCount == 1);
+    auto field = decodedMetadata.extensionFields[0];
+    assert(field.key == languageIdDetectExtensionKeyV1);
+    assert(field.sourceStage == languageIdDetectStageKeyV1);
+
+    import crypto.sha256 : sha256Of;
+    auto chainedRecord = decodeLanguageIdentity(field.value, document.id, sha256Of(text));
+
+    // Exactly the same `LanguageIdentityRecord` the old standalone
+    // `language-id-detect` terminal stage would have produced for the same
+    // input, via a direct in-process call.
+    auto direct = buildLanguageIdentity(document.id, text);
+    auto directEncoded = encodeLanguageIdentity(direct);
+    auto directRecord = decodeLanguageIdentity(directEncoded, document.id, sha256Of(text));
+    assert(chainedRecord == directRecord);
+    assert(field.value == directEncoded);
 }

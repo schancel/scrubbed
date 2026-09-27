@@ -183,8 +183,10 @@ paths and an output tree nested in the input tree.
   remain significant: no case-folding, slash cleanup, absolute-path
   resolution, or provider-specific source interpretation occurs here. This
   leaves annotation joins and shard reassignment stable without defining
-  S3/WARC identity policy. `OutputName` is separate and does not enter the
-  key.
+  S3/WARC identity policy (tracked: does not yet separate URL identity,
+  fetch identity, and content identity for a raw artifact -- see
+  [issue #337](https://github.com/schancel/scrubbed/issues/337)).
+  `OutputName` is separate and does not enter the key.
 - Beyond `domain.document`, the `domain` layer also holds independent,
   effects-free value types and pure logic for later stages/overlays to
   consume -- among them `pii_patterns`/`pii_policy`, `quality_features`,

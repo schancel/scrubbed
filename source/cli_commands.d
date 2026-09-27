@@ -4,6 +4,7 @@ module cli_commands;
 import argparse;
 import cli : runApp, runExtract;
 import composition.compiler : compileJob;
+import effects.crawl_cli : runCrawl;
 import effects.error_cli : runErrorCommand;
 import effects.metadata_route_cli : runMetadataRoute;
 import job.json : canonicalJobJson;
@@ -136,6 +137,38 @@ struct CleanWebDocument {
     bool emitConfig;
 }
 
+@(Command("crawl").Description(
+    "Fetch, discover links, and save raw HTML with a concurrent, resumable " ~
+    "frontier. Fetch + discover + save raw only: no mojibake repair, no " ~
+    "metadata/main-content/PII stages. Use 'clean-web-document' as a " ~
+    "separate later pass over the raw output."))
+struct Crawl {
+    @(NamedArgument("seeds").Description("Newline-delimited seed URL file (repeatable)"))
+    string[] seeds;
+    @(NamedArgument("seed").Description("Individual seed URL (repeatable)"))
+    string[] seed;
+    @(NamedArgument("corpus-dir").Description("Output directory for raw/, manifest.jsonl, and (unless --in-memory) frontier.sqlite3 (required)"))
+    string corpusDir;
+    @(NamedArgument("db").Description("SQLite frontier DB path (default: <corpus-dir>/frontier.sqlite3)"))
+    string db;
+    @(NamedArgument("in-memory").Description("Use a non-durable in-memory frontier instead of SQLite (explicit opt-out of resumability)"))
+    bool inMemory;
+    @(NamedArgument("max-pages").Description("Maximum distinct admitted pages (default 200)"))
+    size_t maxPages = 200;
+    @(NamedArgument("max-pages-per-host").Description("Maximum pages per host (default 50)"))
+    size_t maxPagesPerHost = 50;
+    @(NamedArgument("max-depth").Description("Maximum discovery depth from a seed (default 3)"))
+    size_t maxDepth = 3;
+    @(NamedArgument("concurrency").Description("Concurrent worker OS threads and max active frontier leases (default 4)"))
+    size_t concurrency = 4;
+    @(NamedArgument("min-host-delay-ms").Description("Minimum delay between requests to the same host, in ms (default 3000)"))
+    long minHostDelayMs = 3000;
+    @(NamedArgument("scope").Description("Discovery scope: allowed-domain (default), same-origin, or one-hop-external"))
+    string discoveryScope = "allowed-domain";
+    @(NamedArgument("allowed-origin").Description("Extra allowed/core origin for allowed-domain or one-hop-external scope (repeatable; default: seed origins)"))
+    string[] allowedOrigin;
+}
+
 @(Command("completion").Description("Generate shell setup or command/option-name candidates; use completion init --bash, --zsh or --fish."))
 struct Completion {}
 
@@ -178,7 +211,7 @@ struct RouteMetadata {
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
     SubCommand!(Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
-        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument,
+        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl,
         Default!Run) command;
 }
 
@@ -529,6 +562,16 @@ int runCommands(string[] argv) {
             }
         return runCleanWebDocument(argv[2 .. $]);
     }
+    if (argv.length > 1 && argv[1] == "crawl") {
+        foreach (arg; argv[2 .. $])
+            if (arg == "--help" || arg == "-h") {
+                Commands help;
+                auto result = CLI!(parserConfig, Commands).parseArgs(help,
+                    [argv[1], "--help"]);
+                return result.exitCode;
+            }
+        return runCrawl(argv[2 .. $]);
+    }
     if (argv.length > 1 && (argv[1] == "errors-init" ||
         argv[1] == "errors-copy" || argv[1] == "errors-export" ||
         argv[1] == "errors-verify")) {
@@ -586,7 +629,7 @@ int runCommands(string[] argv) {
         } else static if (is(typeof(cmd) == ErrorsInit) ||
             is(typeof(cmd) == ErrorsCopy) || is(typeof(cmd) == ErrorsExport) ||
             is(typeof(cmd) == ErrorsVerify) || is(typeof(cmd) == RouteMetadata) ||
-            is(typeof(cmd) == CleanWebDocument)) {
+            is(typeof(cmd) == CleanWebDocument) || is(typeof(cmd) == Crawl)) {
             assert(0, "management verbs dispatched before argparse");
             return 2;
         } else {

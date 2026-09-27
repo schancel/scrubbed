@@ -1,8 +1,8 @@
 /// Narrow ABI for the host-provided dynamic libcurl (`/usr/lib/libcurl.4.dylib`
 /// on macOS arm64), evaluated in `experiments/http_fetch/check.d` and recorded
-/// in `docs/http-fetch-evaluation.md` (verdict ADOPT_DYNAMIC). Declares exactly
-/// the easy/multi handle lifecycle, option, and info entry points that
-/// evaluation probe exercised. No native pointer or `CURL*`/`CURLM*` handle is
+/// in `docs/http-fetch-evaluation.md` (verdict ADOPT_DYNAMIC). Declares the
+/// easy/multi handle lifecycle, option, and info entry points this codebase
+/// currently uses. No native pointer or `CURL*`/`CURLM*` handle is
 /// part of any public result type in `effects.http_fetch`.
 module effects.curl_ffi;
 
@@ -68,8 +68,8 @@ enum : int {
     CURLMSG_DONE = 1,
     CURLM_OK = 0,
 
-    // CURLoption values, include/curl/curl.h. Only the options the evaluation
-    // probe set are declared.
+    // CURLoption values, include/curl/curl.h. Only the options this codebase
+    // currently uses are declared.
     CURLOPT_WRITEDATA = 10_001,
     CURLOPT_URL = 10_002,
     CURLOPT_PROXY = 10_004,

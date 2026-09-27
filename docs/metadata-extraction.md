@@ -16,8 +16,16 @@ Import `effects.html_metadata_stage` to register the stage, then select
   model.
 - Registers `StageCardinality.oneToOne` and `SideOutputCapability.terminal`,
   so a quarantined/rejected event still carries a (payload-empty) side
-  output to satisfy that capability's per-event invariant. Callers branch on
-  quarantine/reject before reading it, same as any other terminal stage.
+  output internally, to satisfy that capability's per-event invariant
+  (`composition/executor.d`'s `validateCapabilities`, unconditional over
+  every event regardless of kind). That placeholder is not filtered out
+  automatically — each publication path is responsible for gating on
+  `event.kind == EventKind.emitted` before publishing a side output.
+  `metadata_route_cli.d` does this for its own quarantine handling, and
+  `cli.d`'s general `run`-command publication loop does the same (fixed in
+  #294; before that fix, the general `run` command published the
+  placeholder as a spurious empty sidecar file for quarantined/rejected
+  events).
 - Reads through the existing restricted `HtmlTree` boundary: 64 KiB
   raw/decoded, plus its node, depth, and attribute limits.
 

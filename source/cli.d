@@ -612,16 +612,18 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
                             writes ~= PendingWrite("local-primary:v1",
                                 destination, event.payload.content);
                         }
-                        foreach (ref output; event.sideOutputs) {
-                            auto destination = sidecarDestinationFor(sidecarRoot,
-                                inputIsDir, event, output);
-                            auto write = PendingWrite("side-output:" ~ output.key,
-                                destination, null);
-                            write.isSideOutput = true;
-                            write.sideOutput = output;
-                            writes ~= write;
-                            sideRecords ~= sideOutputExplainRecord(event, output,
-                                dryRun ? "dry-run" : "published");
+                        if (event.kind == EventKind.emitted) {
+                            foreach (ref output; event.sideOutputs) {
+                                auto destination = sidecarDestinationFor(sidecarRoot,
+                                    inputIsDir, event, output);
+                                auto write = PendingWrite("side-output:" ~ output.key,
+                                    destination, null);
+                                write.isSideOutput = true;
+                                write.sideOutput = output;
+                                writes ~= write;
+                                sideRecords ~= sideOutputExplainRecord(event, output,
+                                    dryRun ? "dry-run" : "published");
+                            }
                         }
                     }
                     // Resolve and reserve the complete destination set before
@@ -2389,6 +2391,78 @@ unittest {
         symlink(external, treeLink);
         assertThrown(runApp(["scrubbed", "--input", inputDir,
             "--output", buildPath(root, "tree-output"), "--threads", "1"]));
+    }
+}
+
+// Regression for #294: the side-output publication loop above must not
+// publish a side output for a quarantined/rejected event, only for an
+// emitted one -- mirroring the primary-content-write gate immediately
+// preceding it in the same loop. Exercised through the real `run` command
+// (runApp), not a local test copy of the registry/executor.
+unittest {
+    import effects.html_tree : maxDepth;
+    import std.file : rmdirRecurse, tempDir;
+
+    auto root = buildPath(tempDir, "scrubbed-side-output-gate-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdir(root);
+
+    // Negative case: a genuine HtmlTree depth-limit quarantine trigger (the
+    // ticket's own cited repro). html-metadata's SideOutputCapability.terminal
+    // registration requires composition.executor.validateCapabilities to
+    // attach an empty-payload placeholder TerminalSideOutput to this
+    // quarantined event; before the #294 fix, cli.d's unconditional
+    // side-output loop published that placeholder as a spurious 0-byte
+    // sidecar file on disk.
+    {
+        auto inputDir = buildPath(root, "in");
+        auto outputDir = buildPath(root, "out");
+        auto sidecarDir = buildPath(root, "sidecar");
+        mkdir(inputDir);
+        string deepBody;
+        foreach (i; 0 .. maxDepth + 40) deepBody ~= "<div>";
+        foreach (i; 0 .. maxDepth + 40) deepBody ~= "</div>";
+        write(buildPath(inputDir, "depth.html"),
+            "<html><head><title>Depth</title></head><body>" ~ deepBody ~
+            "</body></html>");
+        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+            "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
+            "--threads", "1"]) == 1,
+            "a quarantined document must report a nonzero terminal status");
+        assert(!exists(buildPath(outputDir, "depth.html")),
+            "a quarantined document must not publish primary content");
+        assert(!exists(buildPath(sidecarDir, "depth.html.metadata.json")),
+            "a quarantined document must not publish its placeholder side " ~
+            "output as a spurious sidecar file (#294)");
+    }
+
+    // Positive case: an *emitted* html-metadata event's side output is
+    // still published -- proves the #294 gate did not also suppress the
+    // working path.
+    {
+        auto inputDir = buildPath(root, "in2");
+        auto outputDir = buildPath(root, "out2");
+        auto sidecarDir = buildPath(root, "sidecar2");
+        mkdir(inputDir);
+        string html = `<html><head><title>Emitted Case</title>` ~
+            `<meta name="author" content="Ada"></head><body>` ~
+            `<p>hello</p></body></html>`;
+        write(buildPath(inputDir, "ok.html"), html);
+        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+            "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
+            "--threads", "1"]) == 0,
+            "an emitted document must report success");
+        assert(readText(buildPath(outputDir, "ok.html")) == html,
+            "an emitted event's content must pass through unmodified");
+        auto sidecarPath = buildPath(sidecarDir, "ok.html.metadata.json");
+        assert(exists(sidecarPath),
+            "an emitted event's side output must still be published " ~
+            "(#294 regression check)");
+        auto parsed = parseJSON(readText(sidecarPath));
+        assert(parsed["version"].str == "metadata-json:v2");
+        assert(parsed["fields"]["title"]["status"].str == "selected" &&
+            parsed["fields"]["title"]["value"].str == "Emitted Case",
+            "published side output must still carry real extracted metadata");
     }
 }
 

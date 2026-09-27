@@ -474,6 +474,7 @@ private void checkReport(string path) {
         "scrubbed-external-comparator-v1 report format");
 
     checkMainContentTrafilaturaCase(report);
+    checkLanguageIdLangdetectCase(report);
 }
 
 // ---- main-content/scrubbed-vs-trafilatura case validation (issue #229's
@@ -576,6 +577,110 @@ private void checkMainContentTrafilaturaCase(JSONValue report) {
         "case has the required provenance, reproducibility, and precision/recall scoring ",
         "shape (", expectedHeldOutFixtureCount, "/", expectedHeldOutFixtureCount,
         " held-out fixtures accounted for)");
+}
+
+// ---- language-id/scrubbed-vs-langdetect case validation (issue #301's
+// accepted next-slice contract). Classification agreement/accuracy against
+// each fixture's own authored gold label is reported, not gated -- there is
+// no accepted numeric target -- so this structurally validates required
+// fields/shape (provenance, A/B/A/B interleave, both tools' output
+// reproducibility, and the scoring object's shape restricted to exactly the
+// 11 original languages) rather than recomputing the scores itself. ----
+
+private enum expectedOriginalLanguageIdLanguages = ["en", "es", "fr", "de", "pt", "it",
+    "nl", "tr", "vi", "pl", "id"];
+
+private void checkLanguageIdLangdetectCase(JSONValue report) {
+    JSONValue found;
+    bool hasCase;
+    foreach (c; report["cases"].array)
+        if (c["name"].str == "language-id/scrubbed-vs-langdetect") { found = c; hasCase = true; }
+    require(hasCase, "missing language-id/scrubbed-vs-langdetect case");
+
+    require(found["scrubbed_binary_sha256"].str.length == 64,
+        "scrubbed_binary_sha256 is not a SHA-256 hex digest");
+    require(found["langdetect_driver_sha256"].str.length == 64,
+        "langdetect_driver_sha256 is not a SHA-256 hex digest");
+    require(found["python_packages_acquisition_order"].array.length == 1 &&
+        found["python_packages_acquisition_order"].array[0].str == "langdetect==1.0.9",
+        "unexpected langdetect package acquisition order");
+    require(found["detector_factory_seed"].integer == 0,
+        "DetectorFactory.seed must be pinned to 0 for reproducibility");
+    require(found["timeout_seconds"].floating > 0, "missing declared timeout");
+    require(found["max_rss_bytes"].integer > 0, "missing declared resource bound");
+
+    auto originalLanguages = found["original_languages"].array;
+    require(originalLanguages.length == expectedOriginalLanguageIdLanguages.length,
+        "original_languages must list exactly the 11 originally-supported languages");
+    bool[string] seenOriginal;
+    foreach (entry; originalLanguages) seenOriginal[entry.str] = true;
+    foreach (lang; expectedOriginalLanguageIdLanguages)
+        require((lang in seenOriginal) !is null, "original_languages is missing " ~ lang);
+    foreach (excluded; ["hi", "bn", "ta", "te", "gu", "pa"])
+        require(excluded !in seenOriginal,
+            "original_languages must not include issue #299's Devanagari-family addition: " ~
+            excluded);
+
+    auto samples = found["samples"].array;
+    require(samples.length == 4, "expected four A/B/A/B samples");
+    require(samples[0]["tool"].str == "scrubbed" && samples[1]["tool"].str == "langdetect" &&
+        samples[2]["tool"].str == "scrubbed" && samples[3]["tool"].str == "langdetect",
+        "samples lost their A/B/A/B interleave order");
+    foreach (sample; samples) {
+        require(sample["status"].integer == 0,
+            "a sample exited nonzero or was signaled");
+        foreach (metric; ["wall_seconds", "user_seconds", "system_seconds", "peak_rss_bytes"])
+            require((metric in sample.object) !is null, "sample missing " ~ metric);
+    }
+
+    require(found["reproducibility"]["scrubbed"].boolean &&
+        found["reproducibility"]["langdetect"].boolean,
+        "a tool's output-reproducibility check did not pass");
+
+    auto scoring = found["scoring"];
+    require(scoring["language_count"].integer == expectedOriginalLanguageIdLanguages.length,
+        "unexpected scored language count");
+    requireUnitInterval(scoring["agreement_rate"].floating, "agreement_rate");
+    require(scoring["agreement_count"].integer >= 0 &&
+        scoring["agreement_count"].integer <= expectedOriginalLanguageIdLanguages.length,
+        "agreement_count out of range");
+
+    foreach (toolName; ["scrubbed", "langdetect"]) {
+        auto summary = scoring[toolName];
+        require(summary["correctCount"].integer >= 0 &&
+            summary["correctCount"].integer <= expectedOriginalLanguageIdLanguages.length,
+            toolName ~ " correctCount out of range");
+        requireUnitInterval(summary["accuracy"].floating, toolName ~ " accuracy");
+    }
+    require(scoring["scrubbed"]["abstainedCount"].integer >= 0,
+        "scrubbed abstainedCount must be non-negative");
+    require(scoring["langdetect"]["errorCount"].integer >= 0,
+        "langdetect errorCount must be non-negative");
+
+    auto languages = scoring["languages"].array;
+    require(languages.length == expectedOriginalLanguageIdLanguages.length,
+        "scoring languages array does not cover all 11 original languages");
+    bool[string] seenScoredLanguage;
+    foreach (entry; languages) {
+        auto lang = entry["language"].str;
+        require(lang !in seenScoredLanguage, "duplicate scoring language: " ~ lang);
+        seenScoredLanguage[lang] = true;
+        require((lang in seenOriginal) !is null, "scored a language outside the original 11: " ~ lang);
+        foreach (toolName; ["scrubbed", "langdetect"]) {
+            auto outcome = entry[toolName];
+            auto status = outcome["status"].str;
+            require(status == "produced" || status == "abstained",
+                toolName ~ " outcome status must be 'produced' or 'abstained': " ~ status);
+            require(outcome["predicted"].str.length != 0,
+                toolName ~ " outcome is missing a predicted label");
+        }
+        entry["agreement"].boolean; // throws unless this is a genuine JSON boolean
+    }
+    writeln("external comparator report check passed: language-id/scrubbed-vs-langdetect ",
+        "case has the required provenance, reproducibility, and classification-agreement ",
+        "scoring shape (", expectedOriginalLanguageIdLanguages.length, "/",
+        expectedOriginalLanguageIdLanguages.length, " original-language fixtures accounted ",
+        "for, #299's six Devanagari-family languages correctly excluded)");
 }
 
 int main(string[] args) {

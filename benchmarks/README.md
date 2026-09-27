@@ -381,12 +381,15 @@ uv venv "$bench_env/venv"
 uv pip install --python "$bench_env/venv/bin/python" ftfy==6.3.1 wcwidth==0.8.4
 uv venv "$bench_env/trafilatura-venv"
 uv pip install --python "$bench_env/trafilatura-venv/bin/python" trafilatura==2.2.0
+uv venv "$bench_env/langdetect-venv"
+uv pip install --python "$bench_env/langdetect-venv/bin/python" langdetect==1.0.9
 dub build --build=release --compiler=ldc2
-ldc2 -O3 -release -I. benchmarks/external_comparator.d \
+ldc2 -O3 -release -preview=dip1000 -i -Isource -I. benchmarks/external_comparator.d \
   experiments/html_main_content/token_overlap.d -of="$bench_env/external_comparator"
 "$bench_env/external_comparator" --self-test
 "$bench_env/external_comparator" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" \
-  "$bench_env/trafilatura-venv/bin/trafilatura" > "$bench_env/result.json"
+  "$bench_env/trafilatura-venv/bin/trafilatura" "$bench_env/langdetect-venv/bin/python" \
+  > "$bench_env/result.json"
 ldc2 -O3 -release benchmarks/external_comparator_check.d \
   -of="$bench_env/external_comparator_check"
 "$bench_env/external_comparator_check" --self-test
@@ -457,6 +460,50 @@ names, counts, and numeric scores) -- `gold.json` itself, which legitimately
 holds that text for the two subprocesses to consume, lives only in the
 private corpus directory and is never read into the published report.
 
+Its third case, `language-id/scrubbed-vs-langdetect` (issue #301's next-slice
+contract), exercises the real, shipped `language-id-detect` v3 stage (issue
+#311) end to end through `scrubbed run --input FILE --output FILE
+--sidecar-output FILE --stage id=language-id-detect --threads 1` -- the same
+single-file invocation shape #311's own review proved -- against the real
+pinned `langdetect==1.0.9`. Like the trafilatura case, correctness here is
+scored by classification agreement against authored gold labels rather than
+exact-byte equality, but the gold label is the fixture's own filename
+language, not a probe-phrase corpus: it reuses `domain.language_id`'s own
+held-out fixture set (`experiments/language_id/fixtures/heldout/<lang>.txt`)
+unmodified, strictly scoped to the 11 original Latin-script languages the
+domain module supported before issue #299's six-language Devanagari-family
+addition (en/es/fr/de/pt/it/nl/tr/vi/pl/id) -- #299's six added languages
+(hi/bn/ta/te/gu/pa) are out of scope here in both directions. Neither tool's
+output is ever treated as the other's ground truth: both are scored
+independently against each fixture's own authored language label, and their
+agreement with each other is reported purely descriptively.
+
+`langdetect==1.0.9` is a pure-Python library with no CLI of its own, so a
+thin, pinned Python driver script,
+[`benchmarks/langdetect_driver.py`](langdetect_driver.py), substitutes for
+one -- mirroring this file's own precedent (the trafilatura case's shell
+wrapper above) for authoring a wrapper when the pinned tool has no suitable
+CLI. It sets `DetectorFactory.seed = 0` (required: langdetect's algorithm is
+not otherwise deterministic run to run) and prints `detect_langs()`'s
+top-ranked language code and probability for one input file. Its checked-in
+bytes are pinned by SHA-256 in `external_comparator.d`, in the same fixture/
+expectation-drift idiom as the mojibake case's own pinned hashes: a silently
+edited driver is caught before any subprocess runs. On the scrubbed side,
+`decodeLanguageIdentity` (imported directly from `domain.language_id`, never
+modified) decodes each real `TerminalSideOutput` sidecar; its `expectedId`
+is reconstructed by independently reproducing `cli.d`'s own `realpath`-based
+`--input` path resolution, so this never requires importing or changing
+`cli.d` itself. Each A/B/A/B timed sample is one full pass over all 11
+fixtures (one single-file `scrubbed run` or driver invocation per fixture,
+looped by a small shell wrapper under the existing, unmodified
+`runBoundedSample` machinery), and both tools' output must reproduce
+byte-identical results between their own two timed samples. Per-language and
+aggregate agreement/accuracy are reported, never gated: there is no accepted
+numeric target. A live run with both tools' real, pinned installs classified
+all 11/11 fixtures correctly for both scrubbed and langdetect, with 11/11
+mutual agreement -- a small authored-fixture observation, not a
+calibrated-accuracy or web-scale claim.
+
 The report schema is `scrubbed-external-comparator-v1`. **This is an
 intentional, fail-closed format break, not a bug**: it does not read or
 replay `cli_baseline.d`'s prior `scrubbed-cli-baseline-v1` report shape, and
@@ -491,7 +538,16 @@ interleave and per-sample timing fields, both tools' output-reproducibility
 flags, and the scoring object's shape (per-tool extracted/abstained counts
 that add up to 20, precision/recall within `[0,1]`, and one scored entry per
 held-out fixture) -- it does not recompute precision/recall itself, since
-those are reported, not gated.
+those are reported, not gated. It likewise validates
+`language-id/scrubbed-vs-langdetect`'s required provenance (executable and
+pinned-driver hashes, package acquisition order, the pinned
+`DetectorFactory.seed=0`), its four-sample A/B/A/B interleave, both tools'
+output-reproducibility flags, that `original_languages` names exactly the 11
+original languages and excludes issue #299's six added ones, and the scoring
+object's shape (per-tool correct/abstained-or-error counts and accuracy
+within `[0,1]`, an agreement rate within `[0,1]`, and one scored entry per
+original-language fixture) -- again without recomputing the agreement/
+accuracy scores itself, since those are reported, not gated.
 
 The timed sample child (`/usr/bin/time` and the command it wraps) owns its
 own process group: `runBoundedSample` forks, the child calls `setpgid(0, 0)`

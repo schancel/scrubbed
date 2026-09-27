@@ -9,13 +9,17 @@
 // authored expected file, not against the comparator's own output.
 module external_comparator;
 
+import core.stdc.stdlib : free;
 import core.sys.posix.signal : kill, SIGKILL, SIGTERM;
+import core.sys.posix.stdlib : realpath;
 import core.sys.posix.sys.stat : chmod, S_IRUSR, S_IXUSR;
 import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WNOHANG, WTERMSIG,
     waitpid;
 import core.sys.posix.unistd : _exit, dup2, execvp, fork, setpgid;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds;
+import domain.document : DocumentId, SourceLocator;
+import domain.language_id : LanguageDetectionStatus, decodeLanguageIdentity;
 import experiments.html_main_content.token_overlap : containsNormalized,
     mergeTokenCounts, normalized, scoreTokenOverlap, tokenCounts;
 import std.algorithm.iteration : map;
@@ -31,7 +35,7 @@ import std.json : JSONValue, parseJSON;
 import std.path : buildPath, dirName, dirSeparator, relativePath;
 import std.process : execute;
 import std.stdio : File, stderr, writeln;
-import std.string : split, splitLines, strip, toStringz;
+import std.string : fromStringz, split, splitLines, strip, toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string message) {
@@ -699,6 +703,258 @@ private JSONValue compareMainContentTrafilatura(string scrubbedBinary,
     return result;
 }
 
+// ---- The language-id/scrubbed-vs-langdetect case (issue #301's accepted
+// next-slice contract). Like the trafilatura case above (and unlike
+// mojibake's exact-byte gate), correctness here is scored by classification
+// agreement against the fixture's own authored language label -- for BOTH
+// tools symmetrically, never treating either tool's own output as the
+// other's ground truth. Strictly scoped to the 11 original Latin-script
+// languages `domain.language_id` shipped before issue #299's six-language
+// Devanagari-family expansion (en/es/fr/de/pt/it/nl/tr/vi/pl/id); #299's
+// added languages (hi/bn/ta/te/gu/pa) are out of scope here in both
+// directions. Reuses `domain.language_id`'s own held-out fixture set
+// (`experiments/language_id/fixtures/heldout/<lang>.txt`, disjoint from its
+// seed corpus) unmodified -- no new fixtures are authored. ----
+
+private enum originalLanguageIdLanguages = ["en", "es", "fr", "de", "pt", "it",
+    "nl", "tr", "vi", "pl", "id"];
+
+// langdetect==1.0.9 is a pure-Python library with no CLI of its own, so a
+// thin driver script substitutes for one -- mirroring this file's own
+// precedent (the trafilatura case's shell wrapper above) for authoring a
+// pinned wrapper when the pinned tool has no suitable CLI. Its checked-in
+// bytes are pinned by SHA-256 here, in the same fixture/expectation-drift
+// idiom as `mojibakeFixtureSha256` above: a silently edited driver is caught
+// before any subprocess runs.
+private enum langdetectDriverPath = "benchmarks/langdetect_driver.py";
+private enum langdetectDriverSha256 =
+    "D6080AA5C1E1A83081EC83438570DD7C744719F1D2E25A6ACFC0F3B1B8575E8E";
+
+// `scrubbed run`'s own `resolveExistingPrefix` (cli.d) calls POSIX
+// `realpath` on an existing `--input` path before deriving that document's
+// `DocumentId`; this reproduces that exact resolution so
+// `decodeLanguageIdentity`'s `expectedId` binds to byte-identical
+// provenance below, without importing or modifying `cli.d` itself. The
+// raw, unresolved relative fixture path (never this resolved absolute one)
+// is what actually gets passed as `--input` and published in the report's
+// command fields, so no local checkout path is ever published.
+private string resolveRealPath(string path) {
+    auto resolved = realpath(path.toStringz, null);
+    require(resolved !is null, "cannot resolve fixture path: " ~ path);
+    scope(exit) free(resolved);
+    return fromStringz(resolved).idup;
+}
+
+private ubyte[32] fileTextRevision(string path) {
+    return sha256Of(read(path));
+}
+
+/// One tool's outcome for one fixture: `produced` is false only for a
+/// genuine abstention (scrubbed) or driver-reported error (langdetect) --
+/// never scored as a match, and never treated as the other tool's ground
+/// truth. `predicted` is either a language code or an "abstain:"/"error:"
+/// label, kept for the published per-language detail either way.
+private struct LangIdOutcome {
+    bool produced;
+    string predicted;
+    bool correct;
+}
+
+private JSONValue langIdOutcomeJson(const ref LangIdOutcome outcome) {
+    return JSONValue([
+        "status": JSONValue(outcome.produced ? "produced" : "abstained"),
+        "predicted": JSONValue(outcome.predicted),
+        "correct": JSONValue(outcome.correct),
+    ]);
+}
+
+private LangIdOutcome scoreScrubbedLanguageId(string sidecarPath, string fixturePath,
+                                              string goldLanguage) {
+    auto expectedId = DocumentId.from(SourceLocator("local-files:v1",
+        resolveRealPath(fixturePath), "."));
+    auto record = decodeLanguageIdentity(cast(ubyte[]) read(sidecarPath), expectedId,
+        fileTextRevision(fixturePath));
+    if (record.result.status != LanguageDetectionStatus.detected)
+        return LangIdOutcome(false, "abstain:" ~ record.result.reason.to!string, false);
+    auto predicted = record.result.language.to!string;
+    return LangIdOutcome(true, predicted, predicted == goldLanguage);
+}
+
+private LangIdOutcome scoreLangdetectLanguageId(string outputPath, string goldLanguage) {
+    auto line = readText(outputPath).strip;
+    auto fields = line.split(" ");
+    require(fields.length >= 1 && fields[0].length != 0,
+        "langdetect driver produced an empty or malformed result line: " ~ line);
+    if (fields[0].startsWith("error:"))
+        return LangIdOutcome(false, fields[0], false);
+    return LangIdOutcome(true, fields[0], fields[0] == goldLanguage);
+}
+
+// One shell-loop sample = one full pass over all 11 held-out fixtures,
+// wrapping single-file invocations that match issue #311's own proven
+// `scrubbed run --input FILE --output FILE --sidecar-output FILE --stage
+// id=language-id-detect --threads 1` shape exactly. `/usr/bin/time` (added
+// by the caller via runBoundedSample) wraps this whole shell process, so one
+// timed sample still times one full pass over every fixture, matching the
+// mojibake/trafilatura cases' own methodology.
+private string languageIdScrubbedBatchScript() {
+    return "scrubbed=\"$1\"; outdir=\"$2\"; sidecardir=\"$3\"; shift 3; status=0; " ~
+        "for f in \"$@\"; do base=$(basename \"$f\"); stem=${base%.txt}; " ~
+        "\"$scrubbed\" run --input \"$f\" --output \"$outdir/$stem.out\" " ~
+        "--sidecar-output \"$sidecardir/$stem.sidecar\" " ~
+        "--stage id=language-id-detect --threads 1 || status=$?; done; exit \"$status\"";
+}
+
+// The langdetect-side equivalent: one full pass over the same 11 fixtures,
+// one `langdetect_driver.py` invocation per file (its only supported
+// single-file shape -- it has no batch mode of its own).
+private string languageIdLangdetectBatchScript() {
+    return "python=\"$1\"; driver=\"$2\"; outdir=\"$3\"; shift 3; status=0; " ~
+        "for f in \"$@\"; do base=$(basename \"$f\"); stem=${base%.txt}; " ~
+        "\"$python\" \"$driver\" \"$f\" > \"$outdir/$stem.out\" || status=$?; done; " ~
+        "exit \"$status\"";
+}
+
+private JSONValue compareLanguageIdLangdetect(string scrubbedBinary,
+        string langdetectPython, string root, bool darwin, double timeoutSeconds,
+        long maxRssBytes) {
+    auto scrubbedSnapshot = snapshotExecutable(scrubbedBinary, root, "scrubbed-langid-snapshot");
+
+    auto acquisitionOrder = verifyPinnedPackages(
+        checked(["uv", "pip", "freeze", "--python", langdetectPython]),
+        [PinnedPackage("langdetect", "1.0.9")]);
+
+    require(digest(langdetectDriverPath) == langdetectDriverSha256,
+        "langdetect driver script drift: on-disk bytes no longer match the pinned hash");
+
+    // Deliberately relative paths (never realpath-resolved here): these are
+    // what is actually passed as `--input` and published in the report's
+    // command fields below, so no local checkout path is ever published.
+    // `scoreScrubbedLanguageId` independently resolves each one via
+    // `resolveRealPath` only for `DocumentId` reconstruction, matching
+    // `cli.d`'s own internal resolution exactly without publishing it.
+    string[] fixturePaths;
+    foreach (lang; originalLanguageIdLanguages)
+        fixturePaths ~= buildPath("experiments", "language_id", "fixtures", "heldout",
+            lang ~ ".txt");
+
+    JSONValue[] samples;
+    string[2] scrubbedSidecarDirs, langdetectOutDirs;
+    size_t scrubbedSampleIndex, langdetectSampleIndex;
+    string[] scrubbedCommand, langdetectCommand;
+
+    foreach (index; 0 .. 4) {
+        bool useScrubbed = index % 2 == 0;
+        auto tool = useScrubbed ? "scrubbed" : "langdetect";
+        JSONValue sample;
+        if (useScrubbed) {
+            auto outDir = buildPath(root, "langid-scrubbed-out-" ~ index.to!string);
+            auto sidecarDir = buildPath(root, "langid-scrubbed-sidecar-" ~ index.to!string);
+            mkdirRecurse(outDir);
+            mkdirRecurse(sidecarDir);
+            scrubbedCommand = ["/bin/sh", "-c", languageIdScrubbedBatchScript(), "sh",
+                scrubbedSnapshot.path, outDir, sidecarDir] ~ fixturePaths;
+            sample = runBoundedSample(scrubbedCommand, darwin, timeoutSeconds);
+            require(sample["status"].integer == 0,
+                "scrubbed exited nonzero across the language-id held-out batch: " ~
+                sample["status"].integer.to!string);
+            scrubbedSidecarDirs[scrubbedSampleIndex++] = sidecarDir;
+        } else {
+            auto outDir = buildPath(root, "langid-langdetect-out-" ~ index.to!string);
+            mkdirRecurse(outDir);
+            langdetectCommand = ["/bin/sh", "-c", languageIdLangdetectBatchScript(), "sh",
+                langdetectPython, langdetectDriverPath, outDir] ~ fixturePaths;
+            sample = runBoundedSample(langdetectCommand, darwin, timeoutSeconds);
+            require(sample["status"].integer == 0,
+                "langdetect driver exited nonzero across the held-out batch: " ~
+                sample["status"].integer.to!string);
+            langdetectOutDirs[langdetectSampleIndex++] = outDir;
+        }
+        auto peakRss = sample["peak_rss_bytes"].integer;
+        require(peakRss <= maxRssBytes,
+            tool ~ " exceeded the declared resource bound: " ~ peakRss.to!string ~
+            " > " ~ maxRssBytes.to!string ~ " bytes");
+        sample["tool"] = tool;
+        samples ~= sample;
+    }
+    verifySnapshot(scrubbedSnapshot);
+    require(samples.length == 4 && samples[0]["tool"].str == "scrubbed" &&
+        samples[1]["tool"].str == "langdetect" && samples[2]["tool"].str == "scrubbed" &&
+        samples[3]["tool"].str == "langdetect",
+        "language-id comparator lost its A/B/A/B interleave order");
+
+    string[] scrubbedSidecarNames, langdetectOutputNames;
+    foreach (lang; originalLanguageIdLanguages) {
+        scrubbedSidecarNames ~= lang ~ ".sidecar";
+        langdetectOutputNames ~= lang ~ ".out";
+    }
+    auto scrubbedSignatureA = directorySignature(scrubbedSidecarDirs[0], scrubbedSidecarNames);
+    auto scrubbedSignatureB = directorySignature(scrubbedSidecarDirs[1], scrubbedSidecarNames);
+    require(scrubbedSignatureA == scrubbedSignatureB,
+        "scrubbed produced non-reproducible language-id output between its own two timed samples");
+    auto langdetectSignatureA = directorySignature(langdetectOutDirs[0], langdetectOutputNames);
+    auto langdetectSignatureB = directorySignature(langdetectOutDirs[1], langdetectOutputNames);
+    require(langdetectSignatureA == langdetectSignatureB,
+        "langdetect driver produced non-reproducible output between its own two timed " ~
+        "samples (DetectorFactory.seed=0 should make this fully deterministic)");
+
+    JSONValue[] languageEntries;
+    size_t scrubbedCorrect, scrubbedAbstained, langdetectCorrect, langdetectError, agreementCount;
+    foreach (i, lang; originalLanguageIdLanguages) {
+        auto sidecarPath = buildPath(scrubbedSidecarDirs[0], lang ~ ".sidecar");
+        auto scrubbedOutcome = scoreScrubbedLanguageId(sidecarPath, fixturePaths[i], lang);
+        auto langdetectOutcome = scoreLangdetectLanguageId(
+            buildPath(langdetectOutDirs[0], lang ~ ".out"), lang);
+        if (scrubbedOutcome.correct) ++scrubbedCorrect;
+        if (!scrubbedOutcome.produced) ++scrubbedAbstained;
+        if (langdetectOutcome.correct) ++langdetectCorrect;
+        if (!langdetectOutcome.produced) ++langdetectError;
+        auto agree = scrubbedOutcome.predicted == langdetectOutcome.predicted;
+        if (agree) ++agreementCount;
+        JSONValue entry = JSONValue(["language": JSONValue(lang)]);
+        entry["scrubbed"] = langIdOutcomeJson(scrubbedOutcome);
+        entry["langdetect"] = langIdOutcomeJson(langdetectOutcome);
+        entry["agreement"] = JSONValue(agree);
+        languageEntries ~= entry;
+    }
+
+    auto totalLanguages = originalLanguageIdLanguages.length;
+    JSONValue scoring = JSONValue(["language_count": JSONValue(totalLanguages)]);
+    scoring["agreement_count"] = JSONValue(agreementCount);
+    scoring["agreement_rate"] = JSONValue(cast(double) agreementCount / totalLanguages);
+    scoring["scrubbed"] = JSONValue([
+        "correctCount": JSONValue(scrubbedCorrect),
+        "abstainedCount": JSONValue(scrubbedAbstained),
+        "accuracy": JSONValue(cast(double) scrubbedCorrect / totalLanguages),
+    ]);
+    scoring["langdetect"] = JSONValue([
+        "correctCount": JSONValue(langdetectCorrect),
+        "errorCount": JSONValue(langdetectError),
+        "accuracy": JSONValue(cast(double) langdetectCorrect / totalLanguages),
+    ]);
+    scoring["languages"] = JSONValue(languageEntries);
+
+    JSONValue result = JSONValue(["name": JSONValue("language-id/scrubbed-vs-langdetect")]);
+    result["scrubbed_binary_sha256"] = scrubbedSnapshot.sha256;
+    result["langdetect_driver_sha256"] = langdetectDriverSha256;
+    result["python_packages_acquisition_order"] = acquisitionOrder;
+    result["scrubbed_command"] = publicCommandGeneric(scrubbedCommand,
+        [scrubbedSnapshot.path: "<scrubbed-binary>"], root);
+    result["langdetect_command"] = publicCommandGeneric(langdetectCommand,
+        [langdetectPython: "<langdetect-python>"], root);
+    result["timeout_seconds"] = timeoutSeconds;
+    result["max_rss_bytes"] = maxRssBytes;
+    result["samples"] = JSONValue(samples);
+    result["reproducibility"] = JSONValue([
+        "scrubbed": JSONValue(true),
+        "langdetect": JSONValue(true),
+    ]);
+    result["detector_factory_seed"] = JSONValue(0);
+    result["original_languages"] = strings(originalLanguageIdLanguages.dup);
+    result["scoring"] = scoring;
+    return result;
+}
+
 // ---- Report assembly: fails closed on a duplicate declared case name or a
 // required case that never produced a result. ----
 
@@ -750,9 +1006,10 @@ int main(string[] args) {
             selfTest();
             return 0;
         }
-        if (args.length != 4)
+        if (args.length != 5)
             throw new Exception(
-                "usage: external_comparator SCRUBBED_BINARY FTFY_BINARY TRAFILATURA_BINARY");
+                "usage: external_comparator SCRUBBED_BINARY FTFY_BINARY TRAFILATURA_BINARY " ~
+                "LANGDETECT_PYTHON");
         auto os = checked(["uname", "-s"]);
         bool darwin = os == "Darwin";
         require(darwin || os == "Linux", "BSD/GNU time only");
@@ -762,13 +1019,17 @@ int main(string[] args) {
         auto python = buildPath(dirName(args[2]), "python");
         auto pythonVersion = checked([python, "--version"]);
         auto trafilaturaPython = buildPath(dirName(args[3]), "python");
+        auto langdetectPython = args[4];
 
         auto mojibake = compareFtfyMojibake(args[1], args[2], python, root, darwin,
             60.0, 512L * 1024 * 1024);
         auto mainContent = compareMainContentTrafilatura(args[1], args[3],
             trafilaturaPython, root, darwin, 180.0, 512L * 1024 * 1024);
-        auto report = assembleReport([mojibake, mainContent],
-            ["mojibake/scrubbed-vs-ftfy", "main-content/scrubbed-vs-trafilatura"]);
+        auto languageId = compareLanguageIdLangdetect(args[1], langdetectPython, root,
+            darwin, 60.0, 512L * 1024 * 1024);
+        auto report = assembleReport([mojibake, mainContent, languageId],
+            ["mojibake/scrubbed-vs-ftfy", "main-content/scrubbed-vs-trafilatura",
+             "language-id/scrubbed-vs-langdetect"]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["harness_sha256"] = digest("benchmarks/external_comparator.d");
         report["harness_build_command"] =
@@ -789,6 +1050,7 @@ int main(string[] args) {
         auto published = report.toString;
         require(!published.canFind(root) && !published.canFind(args[1]) &&
             !published.canFind(args[2]) && !published.canFind(args[3]) &&
+            !published.canFind(args[4]) &&
             !published.canFind(checked(["uname", "-n"])),
             "result contains a private run path or hostname");
         writeln(published);

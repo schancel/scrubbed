@@ -1,0 +1,335 @@
+{
+  "schema": "scrubbed.pipeline-benchmark-corpus.v1",
+  "noticeFile": "examples/pipeline-benchmark/NOTICE.md",
+  "sourceSelection": {
+    "description": "The 20 URLs below are the identical, unmodified pinned-URL list already checked into experiments/html_main_content/fetch_held_out.sh (issue #229/#26's trafilatura held-out corpus), pinned at trafilatura commit 1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6. That script never vendors page bytes into git; it fetches transiently for test-only comparator use. This corpus is a SEPARATE, new, permanently-checked-in mechanism (issue #315's own owner-accepted redistribution risk), reusing only the same URL list as its source of what to fetch -- not fetch_held_out.sh's transient-fetch mechanism itself, and fetch_held_out.sh is unmodified by this change.",
+    "trafilaturaPinnedCommit": "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6",
+    "fetchDate": "2026-09-27",
+    "fetchMethods": {
+      "live": "Direct HTTP(S) GET of the live URL (curl, one request per page, a generic browser-identifying User-Agent, redirects followed), performed once on the fetch date above. Byte content reflects each page's live state on the fetch date.",
+      "trafilatura-pinned-cache": "The live URL no longer resolves to the original page as of the fetch date (link rot: HTTP 404, DNS failure, or a TLS certificate now issued to an unrelated host -- see 'linkRotFindings' below). For these pages only, the bytes instead come from adbar/trafilatura's own bundled test corpus at the exact pinned commit above -- the SAME trust/provenance source experiments/html_main_content/fetch_held_out.sh already relies on for these same URLs, just read as a stored file instead of a live request. Each such artifact entry below cites the exact repository path (tests/eval/<file> or tests/cache/<file>) the bytes came from. This is still real, unmodified, third-party page content; it is simply an older, archived copy (trafilatura's own eval-corpus snapshot) rather than the page's current live state."
+    }
+  },
+  "claims": {
+    "mainContentExtraction": false,
+    "trainingReady": false,
+    "canonicalBenchmarkStandard": false
+  },
+  "fetchOutcomeSummary": {
+    "pinnedUrlCount": 20,
+    "artifactCount": 20,
+    "liveFetchCount": 14,
+    "trafilaturaCacheBackfillCount": 6,
+    "note": "All 20 originally pinned URLs are represented in this corpus. 14 were fetched live from their original URL on the fetch date above. The other 6 have suffered real link rot since trafilatura's own eval corpus was assembled (dead pages, a dead domain, and a domain now serving an unrelated TLS certificate -- named plainly, not euphemized) and were instead backfilled from adbar/trafilatura's own pinned-commit test corpus, the same source experiments/html_main_content/fetch_held_out.sh already trusts for these exact URLs. Every artifact entry below states which of the two fetch methods produced it; see 'linkRotFindings' for the exact link-rot evidence recorded for each of the 6."
+  },
+  "linkRotFindings": [
+    {
+      "url": "https://appen.com/blog/artificial-intelligence-and-machine-learning-industry-news-ai-in-patient-care-and-operations-ai-as-a-preventive-tool-and-how-major-hospitals-are-already-using-ai/",
+      "httpStatus": 404,
+      "reason": "Page no longer exists at this URL (confirmed with two different User-Agent strings) as of the fetch date.",
+      "backfilledFrom": "examples/pipeline-benchmark/corpus/appen-com.html"
+    },
+    {
+      "url": "https://deleuze.enacademic.com/104/micropolitics",
+      "httpStatus": 404,
+      "reason": "Page no longer exists at this URL (confirmed with two different User-Agent strings) as of the fetch date.",
+      "backfilledFrom": "examples/pipeline-benchmark/corpus/deleuze-enacademic-com.html"
+    },
+    {
+      "url": "https://neubau.wsl.ch/de/index.html",
+      "httpStatus": null,
+      "reason": "DNS resolution failure: 'Could not resolve host: neubau.wsl.ch'. The domain no longer resolves at all as of the fetch date.",
+      "backfilledFrom": "examples/pipeline-benchmark/corpus/neubau-wsl-ch.html"
+    },
+    {
+      "url": "https://utopia.de/news/was-haben-bhs-mit-eisbergen-zu-tun-kim-kardashian-polarisiert-mit-werbung-nippel/",
+      "httpStatus": 404,
+      "reason": "Page no longer exists at this URL (confirmed with two different User-Agent strings) as of the fetch date.",
+      "backfilledFrom": "examples/pipeline-benchmark/corpus/utopia-de.html"
+    },
+    {
+      "url": "https://www.dvgw.de/blog/gas/welche-heizung-ist-klimafreundlich-und-zukunftstauglich",
+      "httpStatus": 404,
+      "reason": "Page no longer exists at this URL (confirmed with two different User-Agent strings) as of the fetch date.",
+      "backfilledFrom": "examples/pipeline-benchmark/corpus/www-dvgw-de.html"
+    },
+    {
+      "url": "https://www.munich2022.com/de/europas-topathleten-fit-fur-munchen-2022",
+      "httpStatus": null,
+      "reason": "TLS certificate mismatch: 'SSL: no alternative certificate subject name matches target host name www.munich2022.com'. The domain now serves a certificate for a different host, so live content authenticity could not be verified.",
+      "backfilledFrom": "examples/pipeline-benchmark/corpus/www-munich2022-com.html"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "examples/pipeline-benchmark/corpus/archiv-krimiblog-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "http://archiv.krimiblog.de/?p=2895",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "6b511f543fc67a2cb9d90f318b949930186a4c580e618f2c182305f770d35d6e",
+      "sizeBytes": 13070
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/jobsnhire-com.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "http://www.jobsnhire.com/articles/35030/20160214/need-know-cvs-health.htm",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "e7a21f1b4fe1aef4c0a1968038e6510b2253475c5d90668981f496068faf3b49",
+      "sizeBytes": 175208
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/france-attac-org.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://france.attac.org/actus-et-medias/dans-les-medias/article/les-privatisations-sont-au-profit-d-interets-prives-financiers-des",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "1dc78ab1199fc0873ab4a2e74b4b219f16655a76633c09b6c1a106e9d8f463af",
+      "sizeBytes": 77628
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/kleinegruenemonster-wordpress-com.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://kleinegruenemonster.wordpress.com/2016/01/01/ein-entspannter-start-ins-neue-jahr-2016-be-happy/",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "2b2aa41bef4e1706db7bee32109df7a0d2b55a6ad0bcb8d554478ec0ab63a5bd",
+      "sizeBytes": 178522
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/scienceblogs-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://scienceblogs.de/mathlog/2023/11/06/muenzwuerfe-sind-nicht-zufaellig/",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "1fddb5f84b63d02f237fa3689bcbd4fe72b082c241ca96a2405a5554a709e2fb",
+      "sizeBytes": 397702
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/world-kbs-co-kr.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://world.kbs.co.kr/service/news_view.htm?lang=e&Seq_Code=181595",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "dad84c84d5c2e0cb2ffc3b40b4e85a7498256f2270da29c5af471c1ae8276fc2",
+      "sizeBytes": 68190
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-be-ch.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.be.ch/de/start/dienstleistungen/medien/medienmitteilungen.html?newsID=c3aa546f-24d3-4b47-9c0c-59db58b2f725",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page (Swiss cantonal government press release), fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright/rights are held by the original publisher (Canton of Bern), not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "ca3ee4b70aeffde2652cca1b6f3dc20a2988692a09c1d2966d2216834ef34376",
+      "sizeBytes": 105734
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-chemietechnik-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.chemietechnik.de/sicherheit-umwelt/covestro-startet-neue-forschungsgruppe-fuer-biotechnologie-843.html",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "5387ed966a2289189b8ddc44b9c9c2c6ff6d6d6aad34047b791c0839e122e5fa",
+      "sizeBytes": 150764
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-for-me-online-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.for-me-online.de/familie/kinder/tochter-pubertaet",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "23dec625f7102ec4f66d46b2782ba99e80862aba7c030021bf0d4fe115cb959c",
+      "sizeBytes": 223059
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-homify-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.homify.de/diy/20546/wie-man-eine-runde-tischdecke-in-nur-7-schritten-herstellt",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "67d8e855e33c5fdd4cb564958fbb0d27da3d19f4c9282a7842f5653e9195fb8b",
+      "sizeBytes": 136157
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-laweekly-com.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.laweekly.com/meet-cultural-cultivation-artist-alexandria-douziech/",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "6032685b1ae205a3db1764606e658c15c25dbaf2dbcdee021a861ef825c0a3a1",
+      "sizeBytes": 501786
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-pronats-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.pronats.de/informationen/kindheit-und-arbeit/kinder-und-arbeit/",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "33ce0df73b08e9b5e03f286f3598560fb32af63ab21afb287ae5a7582710c360",
+      "sizeBytes": 69493
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-spdfraktion-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.spdfraktion.de/themen/aydan-oezoguz-vizepraesidentin",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page (political party parliamentary group site), fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "827407350701dcba6bb4038fbd14a7a3ca395a69dc5f60fdfe8d3d0473ae4f58",
+      "sizeBytes": 29898
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-tofugu-com.html",
+      "mediaType": "text/html",
+      "fetchMethod": "live",
+      "sourceUrl": "https://www.tofugu.com/travel/dezuka-suisan/",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 200,
+      "provenance": "Unmodified third-party web page, fetched live from the source URL above on the fetch date above. Not authored by this project.",
+      "license": "No license grant from the original publisher is known to exist for redistribution. Copyright is held by the original publisher/author of this page, not by this project. This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "f47f9da436c06b2a74e0c7003bc9f08f313456eae5589353bf9a6135cb188de4",
+      "sizeBytes": 42140
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/appen-com.html",
+      "mediaType": "text/html",
+      "fetchMethod": "trafilatura-pinned-cache",
+      "sourceUrl": "https://appen.com/blog/artificial-intelligence-and-machine-learning-industry-news-ai-in-patient-care-and-operations-ai-as-a-preventive-tool-and-how-major-hospitals-are-already-using-ai/",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 404,
+      "cacheSource": {
+        "repository": "https://github.com/adbar/trafilatura.git",
+        "commit": "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6",
+        "path": "tests/eval/d44c5ef50718437984dca47627dee96b.html"
+      },
+      "provenance": "Unmodified third-party web page. The live URL above returned HTTP 404 on the fetch date (link rot, not fetched live); these bytes are instead adbar/trafilatura's own bundled eval-corpus snapshot of this same URL at the pinned commit above (Apache-2.0-licensed test-data repository; the snapshot itself is an unmodified copy of the original third-party page). This is the same trust/provenance source experiments/html_main_content/fetch_held_out.sh already relies on for this URL. Not authored by this project.",
+      "license": "No license grant from the original page's publisher is known to exist for redistribution. Copyright in the page content is held by the original publisher, not by this project and not by the trafilatura project (whose own Apache-2.0 license covers its code and test harness, not the third-party page text bundled as test data). This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "b3446a2d58ce79103d33c2041ca43a90b3552561960c113a8a75dd8ee6e644bc",
+      "sizeBytes": 81918
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/deleuze-enacademic-com.html",
+      "mediaType": "text/html",
+      "fetchMethod": "trafilatura-pinned-cache",
+      "sourceUrl": "https://deleuze.enacademic.com/104/micropolitics",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 404,
+      "cacheSource": {
+        "repository": "https://github.com/adbar/trafilatura.git",
+        "commit": "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6",
+        "path": "tests/eval/deleuze.enacademic.com.micropolitics.html"
+      },
+      "provenance": "Unmodified third-party web page. The live URL above returned HTTP 404 on the fetch date (link rot, not fetched live); these bytes are instead adbar/trafilatura's own bundled eval-corpus snapshot of this same URL at the pinned commit above (Apache-2.0-licensed test-data repository; the snapshot itself is an unmodified copy of the original third-party page). This is the same trust/provenance source experiments/html_main_content/fetch_held_out.sh already relies on for this URL. Not authored by this project.",
+      "license": "No license grant from the original page's publisher is known to exist for redistribution. Copyright in the page content is held by the original publisher, not by this project and not by the trafilatura project (whose own Apache-2.0 license covers its code and test harness, not the third-party page text bundled as test data). This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "851566100e64354ab7190f89888137f2250adc54492f78c17d905977fddf9a2a",
+      "sizeBytes": 43994
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/neubau-wsl-ch.html",
+      "mediaType": "text/html",
+      "fetchMethod": "trafilatura-pinned-cache",
+      "sourceUrl": "https://neubau.wsl.ch/de/index.html",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": null,
+      "cacheSource": {
+        "repository": "https://github.com/adbar/trafilatura.git",
+        "commit": "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6",
+        "path": "tests/eval/wsl.ch-neubeau.html"
+      },
+      "provenance": "Unmodified third-party web page. The live URL's domain no longer resolves in DNS as of the fetch date (link rot, not fetched live); these bytes are instead adbar/trafilatura's own bundled eval-corpus snapshot of this same URL at the pinned commit above (Apache-2.0-licensed test-data repository; the snapshot itself is an unmodified copy of the original third-party page). This is the same trust/provenance source experiments/html_main_content/fetch_held_out.sh already relies on for this URL. Not authored by this project.",
+      "license": "No license grant from the original page's publisher is known to exist for redistribution. Copyright in the page content is held by the original publisher, not by this project and not by the trafilatura project (whose own Apache-2.0 license covers its code and test harness, not the third-party page text bundled as test data). This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "8d124eafc1faf763ef92e57d03045bddb85df89e46e51692dff19b286d106fc8",
+      "sizeBytes": 19745
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/utopia-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "trafilatura-pinned-cache",
+      "sourceUrl": "https://utopia.de/news/was-haben-bhs-mit-eisbergen-zu-tun-kim-kardashian-polarisiert-mit-werbung-nippel/",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 404,
+      "cacheSource": {
+        "repository": "https://github.com/adbar/trafilatura.git",
+        "commit": "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6",
+        "path": "tests/eval/utopia.de-Werbung.html"
+      },
+      "provenance": "Unmodified third-party web page. The live URL above returned HTTP 404 on the fetch date (link rot, not fetched live); these bytes are instead adbar/trafilatura's own bundled eval-corpus snapshot of this same URL at the pinned commit above (Apache-2.0-licensed test-data repository; the snapshot itself is an unmodified copy of the original third-party page). This is the same trust/provenance source experiments/html_main_content/fetch_held_out.sh already relies on for this URL. Not authored by this project.",
+      "license": "No license grant from the original page's publisher is known to exist for redistribution. Copyright in the page content is held by the original publisher, not by this project and not by the trafilatura project (whose own Apache-2.0 license covers its code and test harness, not the third-party page text bundled as test data). This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "adc3b931c02049f0db80508c56464181282a01b2e2fcda670caf233a5ebbd84f",
+      "sizeBytes": 175755
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-dvgw-de.html",
+      "mediaType": "text/html",
+      "fetchMethod": "trafilatura-pinned-cache",
+      "sourceUrl": "https://www.dvgw.de/blog/gas/welche-heizung-ist-klimafreundlich-und-zukunftstauglich",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": 404,
+      "cacheSource": {
+        "repository": "https://github.com/adbar/trafilatura.git",
+        "commit": "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6",
+        "path": "tests/eval/dvgw.de.heizug.html"
+      },
+      "provenance": "Unmodified third-party web page. The live URL above returned HTTP 404 on the fetch date (link rot, not fetched live); these bytes are instead adbar/trafilatura's own bundled eval-corpus snapshot of this same URL at the pinned commit above (Apache-2.0-licensed test-data repository; the snapshot itself is an unmodified copy of the original third-party page). This is the same trust/provenance source experiments/html_main_content/fetch_held_out.sh already relies on for this URL. Not authored by this project.",
+      "license": "No license grant from the original page's publisher is known to exist for redistribution. Copyright in the page content is held by the original publisher, not by this project and not by the trafilatura project (whose own Apache-2.0 license covers its code and test harness, not the third-party page text bundled as test data). This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "120dec187c70c6860ecd66bdd0a40343691144854a4b85e6732e043dabc64b2d",
+      "sizeBytes": 82069
+    },
+    {
+      "path": "examples/pipeline-benchmark/corpus/www-munich2022-com.html",
+      "mediaType": "text/html",
+      "fetchMethod": "trafilatura-pinned-cache",
+      "sourceUrl": "https://www.munich2022.com/de/europas-topathleten-fit-fur-munchen-2022",
+      "fetchedAt": "2026-09-27",
+      "httpStatus": null,
+      "cacheSource": {
+        "repository": "https://github.com/adbar/trafilatura.git",
+        "commit": "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6",
+        "path": "tests/eval/munich2022.com-topathleten.html"
+      },
+      "provenance": "Unmodified third-party web page. The live domain now serves a TLS certificate for an unrelated host as of the fetch date (link rot, not fetched live); these bytes are instead adbar/trafilatura's own bundled eval-corpus snapshot of this same URL at the pinned commit above (Apache-2.0-licensed test-data repository; the snapshot itself is an unmodified copy of the original third-party page). This is the same trust/provenance source experiments/html_main_content/fetch_held_out.sh already relies on for this URL. Not authored by this project.",
+      "license": "No license grant from the original page's publisher is known to exist for redistribution. Copyright in the page content is held by the original publisher, not by this project and not by the trafilatura project (whose own Apache-2.0 license covers its code and test harness, not the third-party page text bundled as test data). This file is redistributed here only under this repository's issue #315 owner-accepted redistribution-risk decision (see examples/pipeline-benchmark/NOTICE.md); this entry does not assert or fabricate any license.",
+      "sha256": "feb19268ac5b4bc225bd2939c981176008bcbdde54b4d711fd5ca712cd33bd8b",
+      "sizeBytes": 149288
+    }
+  ]
+}

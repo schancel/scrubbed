@@ -1,63 +1,92 @@
 # Standalone document shards (binary v1)
 
-This is an internal D artifact API, not a CLI or SQLite schema. `domain.shard_format`
-owns the exact bytes; `effects.document_shards` owns bounded POSIX file I/O and
-publication. Future incompatible formats require new magic bytes. Neither
-document IDs nor source text are reconstructed from overlay data.
+An internal D artifact API for immutable per-document shards and analyzer
+overlays — not a CLI, not a SQLite schema. `domain.shard_format` owns the
+exact bytes; `effects.document_shards` owns bounded POSIX file I/O and
+publication. Neither document IDs nor source text are reconstructed from
+overlay data. A future incompatible format needs new magic bytes.
 
-All lengths and counts are unsigned big-endian. Strings are nonempty, NUL-free,
-valid UTF-8 in NFC; a reader rejects noncanonical bytes instead of normalizing
-them silently. Values and document content are opaque bytes, including invalid
-UTF-8. A document frame payload is four u16-length-prefixed fields (dataset
-namespace, source key, record key, presentation output name), then a u32 content
-length and exact content bytes. `SourceLocator` derives the typed source-only
-`DocumentId`; output name and revision do not affect identity. IDs must be
-strictly increasing. Each file starts with `SCRBDOC1`, followed by zero or
-more frames. A frame is u32 payload length, payload, and 32 raw SHA-256 bytes
-of the payload. Maximum document payload is 1 MiB. EOF is legal only at a
-frame boundary; empty files, truncated frames, extra bytes, bad digests,
-noncanonical metadata, oversize, and duplicate/unsorted IDs fail.
-Writers preflight complete encoded lengths before copying opaque content or
-field values, so an oversized caller buffer does not become a transient frame.
+## Byte-level rules
 
-Overlay header bytes are exactly `SCRBANN1 || u16BE(H) || H metadata bytes ||
-SHA256(all preceding header bytes)`. H is at most 4096. Metadata is u16-key
-length/key, u16-version length/version, then 32 raw SHA-256 bytes of the exact
-source-shard file. A reader validates magic, H, metadata canonicality and
-header digest before yielding a frame. Overlay frames use the same u32/SHA-256
-envelope, capped at 64 KiB. Payload is u16 canonical ASCII source `doc:v1:` ID,
-32-byte SHA-256 of that document's opaque content, u16 field count, then sorted
-unique fields (u16 NFC key length/key, u32 opaque value length/value). Empty
-value is present; a missing key is absent.
+- All lengths and counts are unsigned big-endian.
+- Strings are nonempty, NUL-free, valid UTF-8 in NFC; a reader rejects
+  noncanonical bytes instead of normalizing them.
+- Values and document content are opaque bytes, including invalid UTF-8.
+- `SourceLocator` derives the typed source-only `DocumentId`; output name
+  and revision do not affect identity.
+- IDs must be strictly increasing within a shard.
 
-`joinShards` hashes the document shard and opens at most 32 overlays, then
-walks the document file and one record per overlay at a time. Distinct analyzer
-keys coexist. A repeated key, whether its version matches or differs, is an
-error; there is no last-wins rule. Missing annotation is returned as
-`present=false` with no invented fields. Wrong source-shard digest, unknown
-document ID, and stale content revision are errors. The file reader has
-configurable chunk size for boundary-invariant tests; production defaults to
-64 KiB. Memory is bounded by one document frame and one frame per overlay,
-plus the small header/lookahead structures; it never reads a whole shard.
+## Document shard
 
-`DocumentShardWriter` publishes a same-directory temporary file after file
-fsync using POSIX hard-link creation. The link succeeds only when the target
-name is absent; a concurrent loser cannot replace the winner's inode or bytes.
-`OverlayWriter` holds the source shard open read-only while writing and hashes
-that open descriptor. It fsyncs a same-directory temporary and atomically
-renames it over a regular single-link overlay target. It refuses symlink and
-hardlink targets, any destination with the source shard's device/inode
-(including alternate path spellings), and a symlink parent at inspection time. Writers expose
-`abort`; publication/append failures also clean their temporary files.
-Injected pre-publication failures preserve the prior overlay. Neither path
-fsyncs the parent directory, so neither promises power-loss durability of the
-directory entry. Concurrent hostile path replacement after overlay target
-inspection is not serialized by this standalone API; callers must use a
-trusted, exclusively controlled output directory.
+- File starts with magic `SCRBDOC1`, followed by zero or more frames.
+- A frame is `u32` payload length, payload, and 32 raw SHA-256 bytes of the
+  payload.
+- A document frame payload is four `u16`-length-prefixed fields (dataset
+  namespace, source key, record key, presentation output name), then a
+  `u32` content length and exact content bytes.
+- Maximum document payload: 1 MiB.
+- EOF is legal only at a frame boundary. Empty files, truncated frames,
+  extra bytes, bad digests, noncanonical metadata, oversize payloads, and
+  duplicate/unsorted IDs all fail.
+- Writers preflight the complete encoded length before copying opaque
+  content or field values, so an oversized caller buffer never becomes a
+  transient frame.
 
-The D release checker `experiments/shards/check.d` fixes these complete-file
-goldens (hex, no whitespace). The overlay header binds the document golden's
-full-file SHA-256:
+## Overlay shard
+
+- Header bytes: `SCRBANN1 || u16BE(H) || H metadata bytes ||
+  SHA256(all preceding header bytes)`. `H` is at most 4096.
+- Metadata: `u16` key length/key, `u16` version length/version, then 32 raw
+  SHA-256 bytes of the exact source-shard file.
+- A reader validates magic, `H`, metadata canonicality, and the header
+  digest before yielding any frame.
+- Overlay frames use the same `u32`/SHA-256 envelope as document frames,
+  capped at 64 KiB.
+- Overlay payload: `u16` canonical ASCII source `doc:v1:` ID, 32-byte
+  SHA-256 of that document's opaque content, `u16` field count, then sorted
+  unique fields (`u16` NFC key length/key, `u32` opaque value length/value).
+  An empty value is present; a missing key is absent.
+
+## Reading (`joinShards`)
+
+- Hashes the document shard, opens at most 32 overlays, then walks the
+  document file and one record per overlay at a time.
+- Distinct analyzer keys coexist. A repeated key — whether its version
+  matches or differs — is an error; there is no last-wins rule.
+- A missing annotation returns `present=false` with no invented fields.
+- Errors: wrong source-shard digest, unknown document ID, stale content
+  revision.
+- Memory is bounded by one document frame plus one frame per overlay, plus
+  small header/lookahead structures — it never reads a whole shard.
+- The file reader has a configurable chunk size for boundary-invariant
+  tests; production defaults to 64 KiB.
+
+## Writing (atomicity)
+
+- `DocumentShardWriter` publishes a same-directory temporary file, after
+  fsync, using POSIX hard-link creation. The link succeeds only when the
+  target name is absent, so a concurrent loser can never replace the
+  winner's inode or bytes.
+- `OverlayWriter` holds the source shard open read-only while writing and
+  hashes that open descriptor. It fsyncs a same-directory temporary and
+  atomically renames it over a regular, single-link overlay target.
+- `OverlayWriter` refuses symlink and hardlink targets, any destination
+  sharing the source shard's device/inode (including alternate path
+  spellings), and a symlink parent directory at inspection time.
+- Both writers expose `abort()`; publication/append failures also clean up
+  their temporary files. Injected pre-publication failures preserve the
+  prior overlay.
+- Neither writer fsyncs the parent directory, so neither promises
+  power-loss durability of the directory entry.
+- Concurrent hostile path replacement after target inspection is not
+  serialized by this API — callers must use a trusted, exclusively
+  controlled output directory.
+
+## Proof
+
+`experiments/shards/check.d` fixes these complete-file goldens (hex, no
+whitespace). The overlay header binds the document golden's full-file
+SHA-256.
 
 Document:
 
@@ -72,6 +101,9 @@ Overlay:
 ```
 
 These are tiny deterministic fixtures, not a throughput or TB-scale claim.
-No CLI, analyzer algorithm, manifest checkpoint, JSONL interchange, or schema
-migration is included. Rollback removes the standalone modules and artifacts;
-no production durable state has been migrated.
+
+## Non-goals
+
+No CLI, analyzer algorithm, manifest checkpoint, JSONL interchange, or
+schema migration. Rollback removes the standalone modules and artifacts; no
+production durable state has been migrated.

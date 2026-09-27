@@ -11,33 +11,36 @@
         main { max-width: 700px; margin: 0 auto; padding: 3rem 1.5rem 4rem; }
         header { margin-bottom: 2.5rem; border-bottom: 2px solid #1a1a1a; padding-bottom: 1.25rem; }
         header h1 { font-family: monospace; font-size: 2.4rem; letter-spacing: -1px; }
-        header p.tagline { color: #444; margin-top: 0.5rem; font-size: 1.05rem; }
+        header p.tagline { color: #666; margin-top: 0.5rem; font-size: 1.05rem; }
         .links { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.25rem; }
         .links a { display: inline-block; padding: 0.35rem 0.85rem; border: 1px solid #444; color: #1a1a1a; text-decoration: none; font-family: monospace; font-size: 0.8rem; }
         .links a:hover { border-color: #000; background: #f5f5f5; }
-        h2 { font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; color: #777; margin: 2.75rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; font-family: monospace; }
+        h2 { font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; color: #666; margin: 2.75rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; font-family: monospace; }
         ul { padding-left: 1.25rem; }
         li { margin-bottom: 0.6rem; }
         p { margin-bottom: 1rem; }
         p:last-child { margin-bottom: 0; }
         code { background: #f4f4f4; padding: 0.1rem 0.35rem; font-size: 0.9em; }
         pre { background: #1a1a1a; color: #eee; padding: 1rem; overflow-x: auto; font-size: 0.82rem; }
+        /* #666 is the one muted tone for all secondary/meta text on this page:
+           notes, captions, labels, footer, stat-card prose. Primary content
+           stays the body color (#1a1a1a); borders are a separate concern. */
         p.note { color: #666; font-size: 0.92rem; }
-        .honesty { border-left: 3px solid #ccc; padding-left: 1rem; color: #444; }
-        footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid #eee; color: #888; font-family: monospace; font-size: 0.8rem; }
-        footer a { color: #888; }
+        footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid #eee; color: #666; font-family: monospace; font-size: 0.8rem; }
+        footer a { color: #666; }
         .stats { display: flex; flex-wrap: wrap; gap: 1rem; }
         .stat-card { flex: 1 1 180px; border: 1px solid #ddd; padding: 1rem; }
         .stat-card .big { font-family: monospace; font-size: 1.7rem; font-weight: bold; display: block; }
         .stat-card .label { font-size: 0.8rem; color: #666; display: block; margin-top: 0.15rem; }
-        .stat-card p { font-size: 0.85rem; color: #444; margin-top: 0.5rem; }
+        .stat-card p { font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
         .pipeline-steps { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.4rem; margin: 1rem 0; }
         .pipeline-steps .step { flex: 1 1 130px; border: 1px solid #ddd; padding: 0.75rem 0.6rem; text-align: center; font-size: 0.85rem; }
         .pipeline-steps .step.here { border-color: #1a1a1a; border-width: 2px; background: #f7f7f7; font-weight: bold; }
-        .pipeline-steps .arrow { display: flex; align-items: center; justify-content: center; color: #999; font-family: monospace; flex: 0 0 auto; }
+        .pipeline-steps .step .outside { color: #666; font-size: 0.78rem; }
+        .pipeline-steps .arrow { display: flex; align-items: center; justify-content: center; color: #666; font-family: monospace; flex: 0 0 auto; }
         .demo-pair { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
         .demo-pair > div { flex: 1 1 260px; }
-        .demo-pair .demo-label { font-family: monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 0.35rem; display: block; }
+        .demo-pair .demo-label { font-family: monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 0.35rem; display: block; }
         .demo-pair pre { margin: 0; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; }
         .demo-pair .after pre { background: #0e2a17; }
     </style>
@@ -58,7 +61,7 @@
     <p>Bad corpus cleaning quietly costs more than it looks like it does: mojibake nobody caught, nav/ad/footer boilerplate mixed into "content," PII nobody scrubbed, near-duplicate pages nobody deduped — none of it throws an error, it just degrades whatever gets trained on it. Doing this step correctly, and fast enough to run over a real corpus rather than a sample, is table stakes for everything downstream.</p>
 
     <h2>The problem</h2>
-    <p>Most corpus-cleaning pipelines today are a chain of separate Python tools glued together with intermediate files: <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> to fix encodings, <a href="https://github.com/adbar/trafilatura" target="_blank" rel="noopener">trafilatura</a> to pull the article out of the page, langdetect to tag the language, Presidio to find PII, a separate dedup pass — each one its own interpreter startup, its own read/write of the whole document, its own copy of the string. None of them were built to compose with each other, so both correctness and performance leak out at the seams between tools.</p>
+    <p>Most corpus-cleaning pipelines today are a chain of separate Python tools glued together with intermediate files: <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> to fix encodings, <a href="https://github.com/adbar/trafilatura" target="_blank" rel="noopener">trafilatura</a> to pull the article out of the page, langdetect to tag the language, Presidio to find PII, a separate dedup pass — each one its own interpreter startup, its own read/write of the whole document, its own set of heap allocations and garbage collection sweeps. None of them were built to compose with each other, so both correctness and performance leak out at the seams between tools.</p>
     <p>scrubbed replaces that chain with one native binary and one shared pipeline instead of five separate tools each with their own interpreter startup and intermediate files. <code>clean-web-document</code> bundles mojibake repair, HTML main-content extraction, and PII scanning into a single pass per document today; dedup and language ID run as separate stages on the same underlying machinery rather than in that same pass yet — see the usage examples below for exactly what's bundled versus separate right now. Where a case is covered, it's built and verified to match the reference tool's output, not just approximate it — see the numbers below. Coverage is still growing (more encodings, more scripts, more languages, more of the pipeline unified into one pass), but the bar for anything shipped is drop-in correctness on what it claims to cover.</p>
 
     <h2>Where this fits in a training pipeline</h2>
@@ -68,9 +71,9 @@
         <div class="arrow">&rarr;</div>
         <div class="step here">Clean &amp; curate<br><span style="font-size:0.78rem;font-weight:normal;">scrubbed</span></div>
         <div class="arrow">&rarr;</div>
-        <div class="step">Package<br><span style="color:#888;font-size:0.78rem;">shards, tokenizer</span></div>
+        <div class="step">Package<br><span class="outside">shards, tokenizer</span></div>
         <div class="arrow">&rarr;</div>
-        <div class="step">Train</div>
+        <div class="step">Train<br><span class="outside">your training run</span></div>
     </div>
     <p class="note">scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. Collection is now a real shipped command too: <code>scrubbed crawl</code> is a local, multithreaded, resumable crawler (durable SQLite-backed frontier, bounded polite fetch, link discovery) &mdash; single-machine only, no distributed/sharded crawling yet. It writes raw pages only, no cleaning inline; run <code>clean-web-document</code> over its output as a separate pass, or point scrubbed straight at pages you already have.</p>
 

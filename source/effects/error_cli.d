@@ -1,11 +1,11 @@
 /// Fixed-diagnostic boundary for explicit, opt-in v2 journal commands.
 module effects.error_cli;
 
+import effects.cli_option_parsing : nextOption;
 import effects.failure_journal : createV2, copyV1ToV2;
 import effects.durable_job : createJournalV3;
 import effects.error_export : exportV2, verifyV2Export;
 import std.stdio : stderr;
-import std.string : indexOf, startsWith;
 
 private struct Options {
     string journal, fromV1, errorsJsonl, outstandingJsonl;
@@ -13,18 +13,11 @@ private struct Options {
 }
 
 private bool parseOptions(const string[] args, ref Options options) {
-    for (size_t i; i < args.length; ++i) {
-        string flag = args[i];
-        string value;
-        auto equal = flag.indexOf('=');
-        if (equal >= 0) {
-            value = flag[equal + 1 .. $];
-            flag = flag[0 .. equal];
-        } else {
-            if (i + 1 >= args.length || args[i + 1].startsWith("--")) return false;
-            value = args[++i];
-        }
-        if (!value.length) return false;
+    for (size_t i; i < args.length; ) {
+        auto parsed = nextOption(args, i);
+        if (!parsed.ok) return false;
+        string flag = parsed.flag;
+        string value = parsed.value;
         switch (flag) {
         case "--journal":
             if (options.hasJournal) return false;
@@ -92,4 +85,43 @@ int runErrorCommand(string verb, const string[] args) {
         return 2;
     }
     return 0;
+}
+
+unittest {
+    // A valid flag set, mixing the `--flag value` and `--flag=value`
+    // spellings, still parses exactly as before this file's `parseOptions`
+    // switched to the shared `effects.cli_option_parsing.nextOption` helper.
+    string[] args = ["--journal", "/tmp/journal.v3", "--from-v1=/tmp/v1.jsonl"];
+    Options options;
+    assert(parseOptions(args, options), "a valid flag set was rejected");
+    assert(options.journal == "/tmp/journal.v3" && options.hasJournal);
+    assert(options.fromV1 == "/tmp/v1.jsonl" && options.hasFromV1);
+}
+
+unittest {
+    // Regression for issue #351: before the shared `cli_option_parsing`
+    // helper, this file's hand-rolled `parseOptions` was the one of the
+    // three copies missing the NUL-byte/empty-value check, and so silently
+    // accepted a NUL byte embedded in an option value that
+    // `crawl_cli.d`/`metadata_route_cli.d` already rejected. It must now be
+    // rejected here too, in both flag spellings.
+    string[] spaceForm = ["--journal", "bad\0value"];
+    Options rejectedSpaceForm;
+    assert(!parseOptions(spaceForm, rejectedSpaceForm),
+        "error_cli.d parseOptions accepted a NUL-byte-containing value (--flag value form)");
+
+    string[] equalsForm = ["--journal=bad\0value"];
+    Options rejectedEqualsForm;
+    assert(!parseOptions(equalsForm, rejectedEqualsForm),
+        "error_cli.d parseOptions accepted a NUL-byte-containing value (--flag=value form)");
+}
+
+unittest {
+    // Empty values were already rejected before this fix (error_cli.d had
+    // this half of the check, just not the NUL-byte half); confirm the
+    // switch to the shared helper didn't lose it.
+    string[] emptyValue = ["--journal="];
+    Options rejected;
+    assert(!parseOptions(emptyValue, rejected),
+        "error_cli.d parseOptions accepted an empty option value");
 }

@@ -1,7 +1,7 @@
 /// Deterministic main-content-vs-boilerplate selection over the selected HTML tree.
 module effects.html_main_content;
 
-import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
+import effects.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree;
 import std.uni : isControl, isFormat, isWhite;
 import std.utf : UseReplacementDchar, decode, encode;
 
@@ -70,6 +70,20 @@ class HtmlMainContentOutputLimit : Exception {
 
 private bool hiddenTag(string name) pure nothrow @nogc {
     return name == "script" || name == "style" || name == "template" || name == "head";
+}
+
+// Same block-tag idiom html_markdown.d's renderNode already established
+// (`heading || name == "p" || name == "div" || name == "li" || name ==
+// "table"`), extended with `blockquote` per issue #335's own examples --
+// html_markdown.d treats blockquote as block-level too (it calls
+// `writer.block()` around its own dedicated quoting branch), it's just
+// handled in a separate code path there because of its "> " line-prefix
+// formatting, which has no bearing on this boundary-detection use.
+private bool blockTag(string name) pure nothrow @nogc {
+    bool heading = name.length == 2 && name[0] == 'h' &&
+        name[1] >= '1' && name[1] <= '6';
+    return heading || name == "p" || name == "div" || name == "li" ||
+        name == "table" || name == "blockquote";
 }
 
 private string attributeValue(const ref HtmlNode node, string name) pure {
@@ -179,11 +193,29 @@ private struct Writer {
 // Collapses whitespace runs (including across text-node boundaries) to a
 // single space, dropping leading/trailing whitespace and control/format
 // characters, while enforcing the bounded output cap before any partial
-// text can be observed by the caller.
+// text can be observed by the caller. `paragraphBreak` marks a block-level
+// boundary the same way ordinary whitespace marks a word boundary: it's
+// deferred (`pendingParagraphBreak`) rather than written immediately, and
+// only flushed -- as "\n\n" in place of the ordinary single-space collapse
+// -- once real (non-whitespace) content is next fed. That mirrors
+// `pendingSpace`'s own deferred-flush idiom and, for the same reason,
+// guarantees no break before the first real content and no doubled/trailing
+// blank lines: a boundary into or out of an empty/whitespace-only block
+// never itself emits anything, it only ever sets a flag that a later real
+// character may or may not go on to flush.
 private struct CollapsingWriter {
     Writer writer;
     private bool pendingSpace;
+    private bool pendingParagraphBreak;
     private bool any;
+
+    // Called once per detected change of nearest block-level ancestor
+    // between consecutive text nodes. A no-op before any real content has
+    // been written (`any` is still false), so the very first block never
+    // produces a leading break.
+    void paragraphBreak() pure nothrow @nogc {
+        if (any) pendingParagraphBreak = true;
+    }
 
     void feed(string chunk) pure {
         size_t at;
@@ -191,7 +223,14 @@ private struct CollapsingWriter {
             dchar ch = decode!(UseReplacementDchar.yes)(chunk, at);
             if (isControl(ch) || isFormat(ch)) continue;
             if (isWhite(ch)) { if (any) pendingSpace = true; continue; }
-            if (pendingSpace) { writer.put(" "); pendingSpace = false; }
+            if (pendingParagraphBreak) {
+                writer.put("\n\n");
+                pendingParagraphBreak = false;
+                pendingSpace = false;
+            } else if (pendingSpace) {
+                writer.put(" ");
+                pendingSpace = false;
+            }
             char[4] encoded;
             writer.put(cast(string) encoded[0 .. encode(encoded, ch)]);
             any = true;
@@ -201,17 +240,35 @@ private struct CollapsingWriter {
 
 // Visible text of one selected subtree, skipping the non-visible
 // script/style/template/head descendants exactly as html_markdown.d's
-// nodeText does (a bounded ancestor walk, not recursion).
+// nodeText does (a bounded ancestor walk, not recursion). Also tracks each
+// text node's nearest block-level ancestor (same walk, same bound) so a
+// change of block ancestor between one text node and the next -- e.g. an
+// `</h1>` followed by a `<p>`, or one `<li>` followed by the next -- emits
+// an explicit paragraph break instead of the ordinary whitespace collapse.
+// `blockAncestor` defaults to `index` itself (the selected subtree root)
+// when no block-tag ancestor is found closer than the root, so two text
+// nodes that are both direct, unwrapped children of the root (or of the
+// same non-block wrapper) still group as one paragraph.
 private void collectText(const ref HtmlTree tree, size_t index, ref CollapsingWriter cw) pure {
+    size_t lastBlockAncestor = size_t.max; // unset: index is always < size_t.max
     foreach (i; index + 1 .. endOf(tree, index)) {
         if (tree.nodes[i].kind != HtmlNodeKind.text) continue;
         bool hidden;
+        size_t blockAncestor = index;
+        bool foundBlock;
         for (size_t parent = tree.nodes[i].parentIndex;
              parent != index && parent != size_t.max && parent < i;
              parent = tree.nodes[parent].parentIndex) {
             if (hiddenTag(tree.nodes[parent].name)) { hidden = true; break; }
+            if (!foundBlock && blockTag(tree.nodes[parent].name)) {
+                blockAncestor = parent;
+                foundBlock = true;
+            }
         }
-        if (!hidden) cw.feed(tree.nodes[i].text);
+        if (hidden) continue;
+        if (blockAncestor != lastBlockAncestor) cw.paragraphBreak();
+        cw.feed(tree.nodes[i].text);
+        lastBlockAncestor = blockAncestor;
     }
 }
 
@@ -451,4 +508,117 @@ unittest {
     assert(foundSelectCandidate, "the <select> should still be a scored candidate");
     assert(selectScore < 50.0,
         "whitespace-only text must not inflate the <select>'s score (was pure formatting)");
+}
+
+// Issue #335 Slice 1: block-level boundaries in the selected subtree must
+// produce an explicit paragraph break ("\n\n") in `.text` instead of
+// collapsing to an ordinary single space, while scoring/selection itself
+// (which candidate wins, and why) stays exactly as tested above.
+unittest {
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+    // `CollapsingWriter` never flushes a trailing pending space with nothing
+    // after it, so a lone paragraph's own trailing space never appears in
+    // `.text` either -- this is the same content minus that final space.
+    string paragraph = longParagraph[0 .. $ - 1];
+
+    // The ticket's own cited repro, verbatim: a heading immediately followed
+    // by a paragraph must land on separate lines in the final output.
+    HtmlTree headingThenParagraph;
+    headingThenParagraph.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null,
+            [HtmlAttribute("class", "content")]),
+        HtmlNode(HtmlNodeKind.element, 0, "h1", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, "Field notes from the delta survey"),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 3, null,
+            "The survey team spent three weeks mapping the river delta's shifting " ~
+            "sandbars, recording water depth every two hundred meters along six " ~
+            "transects. The main channel has migrated nearly forty meters east " ~
+            "since the last survey."),
+    ];
+    auto headingResult = extractMainContent(headingThenParagraph);
+    assert(headingResult.status == MainContentStatus.selected);
+    assert(headingResult.node == 0, "the article wrapper should win, same as other fixtures");
+    assert(headingResult.text ==
+        "Field notes from the delta survey\n\n" ~
+        "The survey team spent three weeks mapping the river delta's shifting " ~
+        "sandbars, recording water depth every two hundred meters along six " ~
+        "transects. The main channel has migrated nearly forty meters east " ~
+        "since the last survey.",
+        "heading and following paragraph must land on separate lines");
+
+    // paragraph-then-paragraph: a plain <p><p> boundary also gets a break.
+    HtmlTree paragraphThenParagraph;
+    paragraphThenParagraph.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null,
+            [HtmlAttribute("class", "content")]),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, longParagraph),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 3, null, longParagraph),
+    ];
+    auto ppResult = extractMainContent(paragraphThenParagraph);
+    assert(ppResult.status == MainContentStatus.selected);
+    assert(ppResult.node == 0);
+    assert(ppResult.text == paragraph ~ "\n\n" ~ paragraph,
+        "two sibling <p>s must be separated by exactly one blank line");
+
+    // Nested block elements: each <li> is its own block, so consecutive
+    // items break, and the following sibling <p> also breaks from the list.
+    HtmlTree listItems;
+    listItems.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null,
+            [HtmlAttribute("class", "content")]),
+        HtmlNode(HtmlNodeKind.element, 0, "ul", null, null),
+        HtmlNode(HtmlNodeKind.element, 1, "li", null, null),
+        HtmlNode(HtmlNodeKind.text, 2, null, "First item"),
+        HtmlNode(HtmlNodeKind.element, 1, "li", null, null),
+        HtmlNode(HtmlNodeKind.text, 4, null, "Second item"),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 6, null, longParagraph),
+    ];
+    auto listResult = extractMainContent(listItems);
+    assert(listResult.status == MainContentStatus.selected);
+    assert(listResult.node == 0);
+    assert(listResult.text == "First item\n\nSecond item\n\n" ~ paragraph,
+        "nested <li>s and the following <p> must each be their own paragraph");
+
+    // A <div> boundary also breaks, same as the other block tags.
+    HtmlTree divBoundary;
+    divBoundary.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null,
+            [HtmlAttribute("class", "content")]),
+        HtmlNode(HtmlNodeKind.element, 0, "div", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, "Notice inside a div."),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 3, null, longParagraph),
+    ];
+    auto divResult = extractMainContent(divBoundary);
+    assert(divResult.status == MainContentStatus.selected);
+    assert(divResult.node == 0);
+    assert(divResult.text == "Notice inside a div.\n\n" ~ paragraph,
+        "a <div> boundary must break the same as other block tags");
+
+    // Edge case: a whitespace-only block sandwiched between two real ones
+    // (e.g. pretty-printed indentation living directly in a <div>) must not
+    // produce a double blank line, and the very first/last block must never
+    // produce a leading/trailing blank line.
+    HtmlTree blankBoundary;
+    blankBoundary.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null,
+            [HtmlAttribute("class", "content")]),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, longParagraph),
+        HtmlNode(HtmlNodeKind.element, 0, "div", null, null),
+        HtmlNode(HtmlNodeKind.text, 3, null, "   \n   "),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 5, null, longParagraph),
+    ];
+    auto blankResult = extractMainContent(blankBoundary);
+    assert(blankResult.status == MainContentStatus.selected);
+    assert(blankResult.node == 0);
+    assert(blankResult.text == paragraph ~ "\n\n" ~ paragraph,
+        "a whitespace-only block between two real ones must not double the blank line, " ~
+        "and there must be no leading/trailing blank line either");
 }

@@ -159,7 +159,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <li>HTML entity decoding (all 2,231 WHATWG named references), smart-quote and line-ending normalization, and a JSONL streaming mode for corpus pipelines that only need specific text fields touched.</li>
         <li>Real parallelism across files (OS threads, not green threads), zero-copy input reads, atomic output writes, and an opt-in error journal/manifest for resuming interrupted runs.</li>
         <li>A bounded WARC/1.1 reader (plain, gzip, and zstd-compressed) for reading existing archives.</li>
-        <li><code>scrubbed crawl</code>: a local, multithreaded, resumable crawler &mdash; durable SQLite-backed frontier with permanent duplicate-rejection, bounded polite HTTP fetch, HTML link discovery, real OS-thread concurrency with correct per-host throttling under concurrency. Single machine only; no distributed or sharded crawling. Kill it mid-run and it recovers cleanly on restart, no duplicate fetches.</li>
+        <li><code>scrubbed crawl</code>: a local, multithreaded, resumable crawler &mdash; durable SQLite-backed frontier with permanent duplicate-rejection, bounded polite HTTP fetch via libcurl, HTML link discovery, real OS-thread concurrency with correct per-host throttling under concurrency. Single machine only; no distributed or sharded crawling. Kill it mid-run and it recovers cleanly on restart, no duplicate fetches.</li>
         <li>Declared topical-tag extraction, a source-rights policy engine for permission/takedown decisions across derived artifacts, and structured chunking with stable, content-addressed chunk IDs for downstream corpus formats.</li>
     </ul>
 

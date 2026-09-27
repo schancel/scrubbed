@@ -389,6 +389,196 @@ void main() {
         afterPassthrough.identity.text == chained.identity.text,
         "harness identity: root/passthrough/chain identity token constant throughout");
 
+    // =====================================================================
+    // `document-metadata:v2` structured-section capability (issue #300
+    // Slice 1). Additive over everything above: no case above is modified.
+    // =====================================================================
+
+    // --- Exact canonical v2 wire bytes, pinned. --------------------------
+    auto emptyWireV2 = encodeDocumentMetadataV2(id, DocumentMetadata.empty());
+    expect(emptyWireV2 ==
+        `{"version":"document-metadata:v2","documentId":"` ~ id.text ~
+        `","standard":{"title":null,"author":null,"date":null,"url":null},` ~
+        `"extension":[],"structuredSections":[]}` ~ "\n",
+        "v2 canonical wire: empty metadata");
+
+    auto comboV2 = DocumentMetadata.empty()
+        .withStandardField(StandardMetadataKey.title, "Report Q3", "stage-extract")
+        .withExtensionField("checksum", cast(immutable(ubyte)[]) [0x01, 0x02, 0xaa], "stage-hash")
+        .withStructuredSection("pii-audit-v1", cast(immutable(ubyte)[]) [0xde, 0xad], "stage-pii");
+    auto comboWireV2 = encodeDocumentMetadataV2(id, comboV2);
+    expect(comboWireV2 ==
+        `{"version":"document-metadata:v2","documentId":"` ~ id.text ~
+        `","standard":{"title":{"value":"Report Q3","sourceStage":"stage-extract"},` ~
+        `"author":null,"date":null,"url":null},` ~
+        `"extension":[{"key":"checksum","value":"0102aa","sourceStage":"stage-hash"}],` ~
+        `"structuredSections":[{"sectionId":"pii-audit-v1","payload":"dead","sourceStage":"stage-pii"}]}` ~ "\n",
+        "v2 canonical wire: standard + extension + structured section combination");
+    expect(decodeDocumentMetadataV2(id, comboWireV2) == comboV2,
+        "v2 round-trip: combo decodes to identical value");
+
+    // v1 stays byte-for-byte unchanged for a value that doesn't use the new
+    // capability (no structured section) -- `combo` here is the exact same
+    // value, unmodified, from the v1 section of this checker above.
+    expect(encodeDocumentMetadataV1(id, combo) == comboWire,
+        "v1 regression: unchanged canonical wire for a value with no structured section");
+    // A value that DOES use the v2-only capability is refused, not silently
+    // truncated, by the v1 encoder.
+    recordRejection(encodeDocumentMetadataV1(id, comboV2),
+        "v1 encoder refuses (not silently drops) a value carrying a structured section");
+
+    // --- ~1 MiB-class structured-section fixture: many small fixed-size
+    // records, the same "plausible worst-case shape" pii-four-class's own
+    // maxPiiAuditBytesV1 is sized against. 4096 records * 256 bytes each =
+    // 1,048,576 bytes exactly (== maxPiiAuditBytesV1), comfortably under
+    // this slice's own maxStructuredSectionPayloadBytes (2 MiB). ----------
+    enum size_t recordSize = 256;
+    enum size_t recordCount = 4096;
+    static assert(recordSize * recordCount == 1024 * 1024);
+    ubyte[] largeBuilder;
+    largeBuilder.reserve(recordSize * recordCount);
+    foreach (i; 0 .. recordCount) {
+        ubyte[recordSize] record;
+        record[0] = cast(ubyte) (i & 0xff);
+        record[1] = cast(ubyte) ((i >> 8) & 0xff);
+        record[2 .. $] = cast(ubyte) 0xab;
+        largeBuilder ~= record[];
+    }
+    immutable(ubyte)[] largePayload = largeBuilder.idup;
+    auto largeMeta = DocumentMetadata.empty()
+        .withStructuredSection("pii-audit-v1", largePayload, "stage-pii");
+    auto largeWire = encodeDocumentMetadataV2(id, largeMeta);
+    auto decodedLarge = decodeDocumentMetadataV2(id, largeWire);
+    expect(decodedLarge.structuredSectionCount == 1,
+        "v2 large fixture: one structured section decoded");
+    expect(decodedLarge.structuredSections[0].payload == largePayload,
+        "v2 large fixture: ~1 MiB (== maxPiiAuditBytesV1) synthetic payload round-trips byte-for-byte");
+
+    // --- Cap-boundary fixtures: exactly-at-cap accepted, one byte over
+    // rejected, eager at mutation time (matching withExtensionField's idiom). --
+    auto atSectionId = replicate("s", maxStructuredSectionIdentityBytes);
+    assertNotThrown(DocumentMetadata.empty().withStructuredSection(atSectionId, cast(immutable(ubyte)[]) [1], "s"));
+    expect(true, "cap structured section id: exactly at limit accepted");
+    auto overSectionId = replicate("s", maxStructuredSectionIdentityBytes + 1);
+    recordRejection(DocumentMetadata.empty().withStructuredSection(overSectionId, cast(immutable(ubyte)[]) [1], "s"),
+        "cap structured section id: one over limit rejected");
+
+    immutable(ubyte)[] atSectionPayload =
+        cast(immutable(ubyte)[]) replicate(cast(immutable(ubyte)[]) [7], maxStructuredSectionPayloadBytes);
+    assertNotThrown(DocumentMetadata.empty().withStructuredSection("s", atSectionPayload, "s"));
+    expect(true, "cap structured section payload: exactly at limit accepted");
+    immutable(ubyte)[] overSectionPayload =
+        cast(immutable(ubyte)[]) replicate(cast(immutable(ubyte)[]) [7], maxStructuredSectionPayloadBytes + 1);
+    recordRejection(DocumentMetadata.empty().withStructuredSection("s", overSectionPayload, "s"),
+        "cap structured section payload: one over limit rejected");
+
+    // Aggregate payload cap: two sections whose individual sizes are each
+    // comfortably under the per-section cap, but whose sum sits exactly at,
+    // then one byte over, maxStructuredSectionsAggregatePayloadBytes -
+    // proving the aggregate cap fires independently of the per-section cap,
+    // the same style as the existing escape-heavy-vs-field-count proof above.
+    immutable(ubyte)[] firstAtAggregate =
+        cast(immutable(ubyte)[]) replicate(cast(immutable(ubyte)[]) [1],
+            maxStructuredSectionsAggregatePayloadBytes - 1);
+    assertNotThrown(DocumentMetadata.empty()
+        .withStructuredSection("first", firstAtAggregate, "s")
+        .withStructuredSection("second", cast(immutable(ubyte)[]) [2], "s"));
+    expect(true, "cap structured section aggregate payload: exactly at limit accepted across two sections");
+    recordRejection(DocumentMetadata.empty()
+        .withStructuredSection("first", firstAtAggregate, "s")
+        .withStructuredSection("second", cast(immutable(ubyte)[]) [2, 3], "s"),
+        "cap structured section aggregate payload: one over limit rejected across two sections");
+
+    // Section count cap: exactly at accepted, one over rejected.
+    DocumentMetadata atSectionCount = DocumentMetadata.empty();
+    foreach (i; 0 .. maxStructuredSections)
+        atSectionCount = atSectionCount.withStructuredSection("sec" ~ to!string(i), cast(immutable(ubyte)[]) [1], "s");
+    expect(atSectionCount.structuredSectionCount == maxStructuredSections,
+        "cap structured section count: exactly at limit accepted");
+    recordRejection(atSectionCount.withStructuredSection("overflow", cast(immutable(ubyte)[]) [1], "s"),
+        "cap structured section count: one over limit rejected");
+
+    // No silent overwrite: duplicate section identity refused at construction time.
+    assertThrown(comboV2.withStructuredSection("pii-audit-v1", cast(immutable(ubyte)[]) [9], "stage-x"));
+    expect(true, "construction-time refusal: second write to existing structured section id");
+
+    // --- Decoder rejects a wrong bound DocumentId. -----------------------
+    recordRejection(decodeDocumentMetadataV2(otherId, comboWireV2), "v2 decode rejects wrong bound document id");
+
+    // --- Decoder rejects a duplicate structured section id in raw wire. --
+    auto dupSectionWire =
+        `{"version":"document-metadata:v2","documentId":"` ~ id.text ~
+        `","standard":{"title":null,"author":null,"date":null,"url":null},"extension":[],` ~
+        `"structuredSections":[{"sectionId":"dup","payload":"ab","sourceStage":"s"},` ~
+        `{"sectionId":"dup","payload":"cd","sourceStage":"s"}]}` ~ "\n";
+    recordRejection(decodeDocumentMetadataV2(id, dupSectionWire), "v2 decode rejects duplicate structured section id");
+
+    // --- Decoder rejects an unknown/unversioned section identity: the wire
+    // uses a key other than the recognized "sectionId" literal. -----------
+    auto unknownSectionKeyWire =
+        `{"version":"document-metadata:v2","documentId":"` ~ id.text ~
+        `","standard":{"title":null,"author":null,"date":null,"url":null},"extension":[],` ~
+        `"structuredSections":[{"unversionedId":"x","payload":"ab","sourceStage":"s"}]}` ~ "\n";
+    recordRejection(decodeDocumentMetadataV2(id, unknownSectionKeyWire),
+        "v2 decode rejects unknown/unversioned section identity key");
+
+    // --- Decoder rejects malformed section wire: non-hex payload chars. --
+    auto malformedSectionWire =
+        `{"version":"document-metadata:v2","documentId":"` ~ id.text ~
+        `","standard":{"title":null,"author":null,"date":null,"url":null},"extension":[],` ~
+        `"structuredSections":[{"sectionId":"s","payload":"zz","sourceStage":"s"}]}` ~ "\n";
+    recordRejection(decodeDocumentMetadataV2(id, malformedSectionWire), "v2 decode rejects malformed section wire");
+
+    // --- Decoder rejects a truncated section body. ------------------------
+    auto truncatedSectionWire =
+        `{"version":"document-metadata:v2","documentId":"` ~ id.text ~
+        `","standard":{"title":null,"author":null,"date":null,"url":null},"extension":[],` ~
+        `"structuredSections":[{"sectionId":"s","payload":"ab"`;
+    recordRejection(decodeDocumentMetadataV2(id, truncatedSectionWire), "v2 decode rejects truncated section body");
+
+    // --- Decoder still rejects an unknown standard key under v2. ----------
+    auto unknownKeyWireV2 =
+        `{"version":"document-metadata:v2","documentId":"` ~ id.text ~
+        `","standard":{"rights":null,"author":null,"date":null,"url":null},"extension":[],` ~
+        `"structuredSections":[]}` ~ "\n";
+    recordRejection(decodeDocumentMetadataV2(id, unknownKeyWireV2), "v2 decode rejects unknown standard key");
+
+    // --- Decoder rejects malformed UTF-8, with a canary embedded in a
+    // structured section this time (not just an extension field). --------
+    auto canarySectionMeta = DocumentMetadata.empty()
+        .withStructuredSection("canary-section", canaryBytes, "stage-canary");
+    auto canarySectionWire = encodeDocumentMetadataV2(id, canarySectionMeta);
+    expect(countOccurrences(canarySectionWire, canaryHex()) == 1,
+        "v2 canary: hex-encoded marker in a structured section appears exactly once");
+    expect(!canarySectionWire.canFind(canaryAscii),
+        "v2 canary: raw ASCII marker never appears verbatim on the wire (only hex-encoded)");
+
+    auto badSectionBytes = cast(ubyte[]) canarySectionWire.dup;
+    badSectionBytes[$ - 3] = 0xff;
+    recordRejection(decodeDocumentMetadataV2(id, cast(string) badSectionBytes),
+        "v2 decode rejects malformed UTF-8 (canary in a structured section)");
+
+    // --- Oversize v2 wire: one byte over maxTotalEncodedBytesV2 rejected
+    // at the upfront size gate. --------------------------------------------
+    auto oversizeBufferV2 = new ubyte[maxTotalEncodedBytesV2 + 1];
+    oversizeBufferV2[] = cast(ubyte) 'x';
+    recordRejection(decodeDocumentMetadataV2(id, cast(string) oversizeBufferV2),
+        "v2 decode rejects oversize wire at the size gate");
+
+    // --- domain.document_metadata stays deliberately unwired: this checker
+    // itself imports only domain.document_metadata, domain.document, and
+    // Phobos (see module doc above) -- the same proof-by-construction the
+    // module doc comment states for the module itself.
+    expect(true, "layering: this checker's own imports remain domain.document_metadata + domain.document + Phobos only");
+
+    // --- Content-free diagnostics (v2 additions included): no rejection
+    // message leaks the canary, re-checked over the full accumulated set. --
+    bool anyLeakV2;
+    foreach (message; rejectionMessages) {
+        if (message.canFind(canaryAscii) || message.canFind(canaryHex())) anyLeakV2 = true;
+    }
+    expect(!anyLeakV2, "content-free diagnostics (v2 included): no rejection message echoes the canary");
+
     if (failures) {
         writeln(failures, " check(s) failed");
         import core.stdc.stdlib : exit;

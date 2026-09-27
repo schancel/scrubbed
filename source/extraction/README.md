@@ -28,6 +28,17 @@ it performs no file, process, network, CLI, or adapter I/O.
   names; entry bytes remain behind scoped, read-only logical windows capped at
   64 KiB. Retained windows never alias a reusable buffer, while borrowed
   backing stays caller-owned and closing its owner invalidates access.
+- `ooxml_document.d` walks already-decompressed `word/document.xml` bytes
+  (via `dxml`, a pure-D, Boost-1.0, range-based XML 1.0 parser) into
+  paragraphs, runs, plain text, and basic table structure, with
+  `w:br`/`w:tab` folded in as text separators. It resolves element names
+  against the namespace scope actually declared in the document rather than
+  matching a literal `"w:"` prefix, and rejects ill-formed or truncated XML
+  outright instead of repairing it (see its module doc for why `dxml` was
+  chosen over the vendored `lexbor` HTML5 parser for this). It has no ZIP,
+  FFI, or file-I/O awareness of its own; a caller resolves the real bytes
+  first (e.g. via `container.d`'s admitted ZIP entries plus an injected
+  `effects`-layer DEFLATE decompressor).
 - `refinement.d` admits only a strong generic-ZIP detection to one bounded
   container inspection, maps the closed refusal vocabulary to normalized
   policy outcomes, and retains the inspector's complete accounting and

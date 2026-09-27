@@ -44,6 +44,7 @@ A tier is blast radius, not diff size. When two look defensible, pick the lower 
 - DO name an external dependency that blocks progress.
 - DO record it, rather than accumulate ceremony, if evidence shows the outcome cannot be delivered under accepted constraints.
 - DO compress before `$review`: remove duplication, speculative abstractions, and tests that merely mirror the implementation. Prefer a coherent result over a mechanically small diff.
+- DO emit the separately versioned [boundary-load evidence](../../references/boundary-load.md) requested by the packet when the consuming repository has opted in. Derive modified paths from Git. Preserve inspected-path coverage as `not_observed` or `partial` when the harness cannot establish completeness; neither means zero escapes.
 - DO NOT [flatten a named seam](../../references/engineering-judgment.md) during compression.
 - DO file incidental dead code as its own deletion ticket — it does not widen this change.
 - DO NOT mix a required refactor or migration into the feature. Stack: tests that pin behavior, then the refactor/migration, then the feature. Each lands. Staged replacements use create / switch / delete with an owner and removal trigger.
@@ -52,5 +53,5 @@ A tier is blast radius, not diff size. When two look defensible, pick the lower 
 ## Hand off
 
 - DO NOT merge because the tests are green — `$review` is the only skill that lands.
-- DO report the exact commit, gates, remaining risks, requested lane, model actually selected, and next action.
+- DO report the exact commit, gates, remaining risks, requested lane, model actually selected, requested boundary-load record when applicable, and next action.
 - Sibling coordination belongs to `$coordinate`.

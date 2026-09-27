@@ -482,3 +482,71 @@ string renderMarkdown(const ref HtmlTree tree) pure {
     // Do not retain the growable buffer's spare capacity in the public result.
     return writer.bytes.idup;
 }
+
+/// Same finalization as `renderMarkdown`, but rooted at a single caller-chosen
+/// node instead of iterating every root -- lets a caller (e.g. main-content
+/// selection) render Markdown for just one selected subtree. `renderNode`
+/// itself is untouched; this only changes which node(s) it is invoked from.
+string renderMarkdownFrom(const ref HtmlTree tree, size_t startIndex) pure {
+    Writer writer;
+    renderNode(tree, startIndex, writer, 0);
+    writer.trim();
+    if (writer.bytes.length) writer.put("\n");
+    // Do not retain the growable buffer's spare capacity in the public result.
+    return writer.bytes.idup;
+}
+
+unittest {
+    // Regression proof: for a tree with exactly one root, rendering from
+    // that root via `renderMarkdownFrom` must be byte-identical to
+    // `renderMarkdown`'s own whole-document iteration -- proving the
+    // extraction changed neither `renderNode`'s behavior nor the shared
+    // finalization (trim + trailing newline).
+    import effects.html_tree : parseHtml;
+
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<article><h1>Field notes from the delta survey</h1>" ~
+        "<p>The survey team spent three weeks mapping the delta.</p></article>"));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    size_t rootIndex = size_t.max;
+    size_t rootCount;
+    foreach (i, node; tree.nodes)
+        if (node.parentIndex == size_t.max) { rootIndex = i; ++rootCount; }
+    assert(rootCount == 1, "fixture must have exactly one root for this proof");
+
+    auto whole = renderMarkdown(tree);
+    auto fromRoot = renderMarkdownFrom(tree, rootIndex);
+    assert(fromRoot == whole);
+    // `renderNode` escapes literal `.` as `\.` (its ordinary Markdown-source
+    // escaping, unrelated to this slice) -- the exact same escaping applies
+    // whether reached via `renderMarkdown` or `renderMarkdownFrom`.
+    assert(whole == "# Field notes from the delta survey\n\n" ~
+        "The survey team spent three weeks mapping the delta\\.\n");
+}
+
+unittest {
+    // `renderMarkdownFrom` scoped to a non-root subtree renders only that
+    // subtree's real Markdown structure, not sibling/boilerplate content
+    // that sits outside it.
+    import effects.html_tree : parseHtml;
+
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<nav>Home About</nav>" ~
+        "<article><h1>Delta survey</h1><p>Three weeks of fieldwork.</p></article>" ~
+        "<footer>Copyright</footer>"));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    size_t articleIndex = size_t.max;
+    foreach (i, node; tree.nodes)
+        if (node.name == "article") articleIndex = i;
+    assert(articleIndex != size_t.max);
+
+    auto scoped = renderMarkdownFrom(tree, articleIndex);
+    assert(scoped == "# Delta survey\n\nThree weeks of fieldwork\\.\n");
+    import std.algorithm.searching : canFind;
+    assert(!scoped.canFind("Home"));
+    assert(!scoped.canFind("Copyright"));
+}

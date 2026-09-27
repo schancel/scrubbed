@@ -179,12 +179,16 @@ for explicitly supported document formats are tracked separately (#67, #156).
       view, full-tree transaction, or durable manifest.
 - [x] Integrate pinned D `argparse` 2.0.2 for generated root/subcommand help
       and command/option-name completion. `run` and `repair` preserve the
-      implemented filter pipeline and old no-verb flags; `extract` now accepts
-      the separately reviewed `--format=tree-json` and `--format=markdown` routes.
-      Release-active CLI tests cover help, errors,
-      exits and a real queued-cancellation `--explain` path. Value/path/filter
-      completion is not supported; parser startup/size observations are not
-      per-document throughput evidence (`docs/cli-commands.md`).
+      implemented filter pipeline; `extract` accepts the separately reviewed
+      `--format=tree-json` and `--format=markdown` routes. Release-active CLI
+      tests cover help, errors, exits and a real queued-cancellation
+      `--explain` path. Value/path/filter completion is not supported;
+      parser startup/size observations are not per-document throughput
+      evidence (`docs/cli-commands.md`). #336 (`91aefe5`) dropped the bare,
+      no-verb form of pipeline execution (`scrubbed --input X --output Y`
+      with no recognized verb) in favor of printing help with usage
+      examples; `run`/`repair`/`extract` remain, unchanged, as the only ways
+      to actually execute a pipeline.
 - [~] Compile presets and custom workflows into one canonical plan (#240).
       The original contract proposed a generic `source/workflow/*.d` facade
       (spec/JSON/presets/CLI-token compiler) for arbitrary crawl workflows;
@@ -200,12 +204,35 @@ for explicitly supported document formats are tracked separately (#67, #156).
       filters, options, or routes exits 2 before I/O, naming `run` as the
       escape hatch. `run`, `repair`, and `extract` remain the configurable,
       general-purpose pipeline path; presets are friendly top-level commands
-      built on that same canonical plan. The full generic-workflow ambition
-      (a `crawl`/`web-corpus` command compiling arbitrary source/frontier/
-      fetcher/pipeline/sink/publisher selections into one canonical,
-      `--explain`-inspectable plan) remains open, natively blocked by
-      #238/#239's still-open crawl/frontier work for any broader dispatch
-      beyond this one narrow slice.
+      built on that same canonical plan. #240's own remaining ambition -- a
+      `crawl`/`web-corpus` command compiled through this same canonical-plan
+      machinery, selecting arbitrary source/frontier/fetcher/pipeline/sink/
+      publisher combinations -- remains open and is still natively blocked by
+      #238/#239's still-open crawl/frontier work. This is narrower than it
+      sounds: a real, separate, shipped `scrubbed crawl` top-level command
+      now exists (#329, next item) -- but it was built directly, not through
+      #240's canonical-plan compiler, so it does not close this remaining
+      ambition.
+- [x] Ship a local, multithreaded `scrubbed crawl` command (#329, CLOSED).
+      Real OS-thread (`std.parallelism`/`TaskPool`-style) concurrent fetch +
+      link-discovery + save-raw-only, promoting the proven
+      `experiments/corpus_crawl` (#305) building blocks into a real
+      top-level command (`source/effects/crawl_orchestrator.d`,
+      `source/effects/crawl_cli.d`; commit `be26768`). No document
+      processing runs inline -- no mojibake/metadata/main-content/PII, no
+      `StageDocument` involvement; cleaning stays a separate
+      `clean-web-document` pass over the crawl's raw output. The durable
+      SQLite frontier backend is the resumable default; CLI flags cover max
+      pages, max pages per host, max depth, concurrency, per-host minimum
+      delay, and discovery scope (allowed-domain / same-origin /
+      one-hop-external), with per-host throttling and frontier lease
+      admission correctly serialized across worker threads. #332
+      (`8dbf74f`) adds flag-parsing and one-hop-external discovery-gating
+      test coverage; #333 (`c80e14b`) documents the command in
+      `docs/cli-commands.md`. Single machine, single process only -- no
+      distributed/multi-machine/sharded crawling, no JS rendering. This is
+      fetch/discover/save-raw only, not #240's canonical-plan-compiled
+      `crawl` ambition described above.
 
 ## Phase 4 — HTML->Markdown (mechanical CLI route exists)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
@@ -300,6 +327,22 @@ for explicitly supported document formats are tracked separately (#67, #156).
       OS-cold, FD/GC/syscall-byte peaks, source-to-binary attestation,
       changed-executable timing, HTML extraction parity and broad speed claims
       remain unproved.
+- [x] Publish a reproducible, external-user-runnable whole-pipeline
+      benchmark (#315, CLOSED). `examples/pipeline-benchmark/` (commit
+      `6866219`) is distinct from the internal, non-shipped `experiments/`
+      tree: a checked-in, fixed 20-page real-web corpus (the same pages
+      `experiments/html_main_content/fetch_held_out.sh` already pins, fetched
+      once and permanently vendored here under this ticket's own explicit,
+      owner-accepted redistribution risk and honest per-page
+      source/license/provenance attribution in `manifest.json`/`NOTICE.md`,
+      not reused silently from the test-fixture-only precedent), plus
+      `run.sh`/`run_throughput.sh` that run the real `scrubbed
+      clean-web-document` O3/release binary against it and an equivalent
+      pinned Python chain (ftfy -> trafilatura -> langdetect -> Presidio, no
+      dedup step) over the same corpus, interleaved A/B/A/B, reusing
+      `external_comparator.d`'s existing scoring idioms rather than
+      inventing new metrics. A README walks an external user through
+      cloning and running it with no repo-internal context required.
 - [~] Allocation benchmark: `benchmarks/mojibake_ranges.d` compares the
       reconstructed eager implementation, eager plus the clean-input guard,
       and lazy candidates using GC allocation counters. The independent guard
@@ -315,6 +358,28 @@ for explicitly supported document formats are tracked separately (#67, #156).
 These are release gates for claiming terabyte-scale support. Whole-file mmap
 is useful, but it is not sufficient on its own.
 
+- [x] Decide the terabyte-scale execution shape (#338, accepted 2026-09-27,
+      relayed directly by the owner): scrubbed ships as three bounded,
+      independently-invocable subcommands -- `crawl` (shipped, #329, see
+      Phase 3 above), `transform/extract` (the already-shipped
+      document-local pipeline: encoding repair, HTML extraction, PII,
+      quality, language ID), and a future `cluster` corpus-global
+      dedup/near-dup subcommand (the local algorithm exists, C05/#36 and
+      C14/#37 above; not yet its own CLI subcommand) -- chained by an
+      external distributed orchestrator (Ray/Spark/Beam/Airflow, etc.) that
+      owns partitioning, scheduling, retries, and multi-machine
+      coordination. Scrubbed does not build or operate its own pub/sub or
+      distributed job coordinator. #51-#57 (D01-D06/S06: partition stable
+      logical shards, claim machine slots, run assigned shards on multiple
+      machines, finalize only complete distributed runs, reassign
+      unfinished shards in a new epoch, distribute signature/dedup jobs,
+      publish complete distributed plans) are CLOSED as superseded under
+      this direction -- that multi-machine coordination role now belongs to
+      the external orchestrator, not to scrubbed. This does not change any
+      of this Phase 5A section's other gates below (windowed input,
+      backpressure, atomic output, local manifest/journal, S3 staging):
+      those are single-machine, single-process terabyte-readiness concerns
+      and remain fully in scope.
 - [x] Replace eager collection of every input pathname with an incremental,
       bounded local producer/consumer walk. Independent queued-file,
       reserved-input-byte, and file-work callback limits are tested at low
@@ -418,7 +483,15 @@ is useful, but it is not sufficient on its own.
       standard and extension fields (#285) now carries this data across
       stages via `StageDocument.metadata`, consumed by
       `document-metadata-publish` and by the new `compressibility-annotate`
-      stage below.
+      stage below. #300 Slice 1 (`3192c77`) added an additive
+      `document-metadata:v2` structured-section capability to this same
+      domain value (domain-only, proven via synthetic fixtures, byte-
+      identical v1 regression preserved); it stays deliberately unwired --
+      no stage/CLI consumes it yet. #300's broader goal (letting
+      `pii-four-class`, `document-metadata-publish`, and
+      `topical-tags-extract` coexist as terminal outputs in one job, instead
+      of each being exclusively terminal today) remains open at later,
+      unaccepted slices.
 - [~] Add provenance-bearing topical tags (#167) after the common extracted
       text-document boundary. Source-declared tags/categories and inferred
       tags must remain distinct candidates; inferred values carry a named
@@ -475,8 +548,27 @@ is useful, but it is not sufficient on its own.
       skew-capped candidate buckets and persists them as a durable C01
       overlay analyzer, bounding memory with deterministic keys across
       restart/shard order. It does not read C01 shards itself, compute
-      signatures, or decide duplicates/representatives; final duplicate
-      clustering remains #37's separate, still-unspecified scope.
+      signatures, or decide duplicates/representatives; deciding duplicates
+      from those candidates is #37's separate scope (see next item).
+- [~] Decide near-duplicates from candidate buckets (C14/#37). A pure
+      `source/domain/near_dedup_decision.d` module (commit `fe6a5a8`)
+      resolves one C05/#36 similarity bucket's `SimilarityBucketMember`
+      candidates into real decisions: pairwise Jaccard estimate from the
+      original `SimilaritySignature` (matching lanes / 64), a documented
+      `nearDuplicateThreshold = 0.8` default (real margin above this
+      codebase's LSH b=16/r=4 banding's ~50% collision point, not
+      empirically tuned against labeled data -- none exists yet), connected
+      components over above-threshold edges within the bucket, and the
+      representative rule already shipped for exact duplicates
+      (`exact_dedup_overlay.d`'s lexicographically-smallest canonical
+      `DocumentId` wins), reused verbatim rather than inventing a second
+      policy. Authored synthetic fixtures at known Jaccard distances prove
+      above/below-threshold linking, transitive-chain clustering via
+      connected components, and worker-order/restart invariance via
+      manually permuted input. No I/O and no C01 overlay wiring in this
+      slice (matching #36's own "no duplicate decision happens here"
+      boundary); cross-bucket/full-corpus graph closure and CLI/C01 wiring
+      remain #37's open scope.
 - [~] Extract baseline main content from saved HTML (W03/#26). A pure,
       deterministic scoring/selection algorithm,
       `effects.html_main_content.extractMainContent`
@@ -493,7 +585,46 @@ is useful, but it is not sufficient on its own.
       them. In practice, this means main-content selection work has already
       begun ahead of the Phase 6 "begin only after Phase 5A gates are
       complete" framing below, though full trafilatura parity is still
-      gated as described there.
+      gated as described there. Two real quality bugs found by #303's
+      held-out diagnostic are now fixed: #308 (`ffbf167`) stopped
+      `html_tree.d` from aborting the *entire* parse on any foreign-
+      namespace element (inline `<svg>`/`<math>`) -- it now prunes just that
+      element's subtree and continues; this was the exact cause of the
+      8/20 (40%) `parseFailed`/`unsupportedNamespace` held-out failures the
+      diagnostic found, not a scoring defect. #309 (`464677f`) stopped
+      whitespace-only text nodes from inflating a parent's score; this is
+      the exact fix for this file's own named `france.attac.org` failure
+      case (a `<select>` picker outscoring the real article purely on
+      pretty-printed whitespace). `docs/html-main-content.md`'s own corpus
+      report (mean recall ~=0.78, 8/20 parse failures) predates both fixes
+      and has not been regenerated against them yet -- its numbers are
+      pre-fix, not current. #335 Slice 1 (`7f333a4`) separately gave the
+      stage's flattened output real paragraph/heading structure (breaks at
+      block-element boundaries) instead of one run-on line; #335 stays open
+      for fuller Markdown-style structure and a composed
+      main-content-plus-structure output path.
+- [~] Learn repeated site templates for multi-page chrome removal (#244).
+      An evaluation slice (`experiments/template_profiles/`, PR #260)
+      proved a frozen, provenance-bearing profile model -- grouping by
+      origin+family, `minimumPages = 3` plus path/fixture-digest diversity,
+      a `recurrenceThreshold = 0.66` structural-recurrence signal, a
+      `removalScoreThreshold = 3` role/position/link-density/text-density
+      score, a content-variation penalty, and a semantic-preservation veto
+      for article/table/infobox/citation/caption/code/list roles -- against
+      14 authored train/held-out fixtures across four page families, all
+      mutation-tested. #244's production slice (commit `1bc26b0`) ports
+      that exact, unmodified evidence -- same thresholds, reused verbatim
+      rather than re-derived -- into a real, pure
+      `source/domain/template_profiles.d` seam (`TemplateProfile` type plus
+      `trainProfile`/`classifyBlock`), regression-tested byte-identical
+      against the evaluation's own fixture decisions. It operates on
+      `HtmlTree` node indices and is designed to prune only inside an
+      already-#26-selected subtree's children, never re-selecting or
+      overriding #26's own winning node -- but that integration (wiring
+      classification into `html_main_content.d`'s `collectText` before it
+      flattens the subtree) has not happened yet, nor has profile
+      persistence to disk or stage/CLI wiring. #244 stays open for all
+      three.
 - [~] Propagate source-rights and takedown policy (C11/#43). Stage 1,
       `source/domain/source_rights.d` (#161), is a pure, effect-free
       policy/closure boundary: given typed evidence it returns a
@@ -512,8 +643,9 @@ is useful, but it is not sufficient on its own.
       (`docs/document-shards.md`; C01/#32 complete). Opt-in quality-decision
       and exact-byte dedup effects overlays now consume the C01 API
       (`docs/quality-annotations.md`, `docs/exact-dedup.md`); CLI wiring,
-      interchange exports, near-duplicate decisions, and corpus-scale storage
-      proof remain open.
+      interchange exports, and corpus-scale storage proof remain open.
+      Near-duplicate decisions now have a first slice (C14/#37, above), not
+      yet wired into this overlay API.
 - [x] Scan deterministic PII patterns (C06/#38). A bounded pure D scanner
       reports ordered byte spans for email, phone, card, and IPv4 under
       documented locale and confidence rules (`docs/pii-patterns.md`). An
@@ -537,14 +669,27 @@ is useful, but it is not sufficient on its own.
       validates C02/C04 analyzer versions and source revisions, then streams
       typed decisions and fixed-size counts (`docs/mix-policy.md`). Durable
       versioned export remains open; no output artifact is published yet.
-- [x] Add bounded JSONL selected-field stdin/stdout CLI mode. The effects
-      adapter and explicit paired-dash `run`/`repair` mode preserve untouched
-      JSON values semantically, derive stable caller-key/line IDs, cap records,
-      and distinguish malformed JSON, invalid selected text and reader/writer
-      failures in release-active live-pipe tests (`docs/jsonl-stream.md`). Raw
-      formatting/key order is not preserved. No graceful signal cancellation,
-      checkpoint or resumability is promised; F12's file/manifest failure
-      policy does not cover JSONL stdin/stdout.
+- [x] Add bounded JSONL selected-field stdin/stdout CLI mode (C09/#41,
+      CLOSED). The effects adapter and explicit paired-dash `run`/`repair`
+      mode preserve untouched JSON values semantically, derive stable
+      caller-key/line IDs, cap records, and distinguish malformed JSON,
+      invalid selected text and reader/writer failures in release-active
+      live-pipe tests (`docs/jsonl-stream.md`). Raw formatting/key order is
+      not preserved. No graceful signal cancellation, checkpoint or
+      resumability is promised; F12's file/manifest failure policy does not
+      cover JSONL stdin/stdout. #41's finalization slice (`d66b46d`) added
+      the fixture-based test coverage this mode's own acceptance bar
+      required and had never gotten (stable IDs, null preservation, Unicode
+      round-trip, schema-version field, streaming memory-boundedness) --
+      previously unproven, not unmet. #41's Parquet/Arrow half is a real,
+      evidence-based deferral, not an oversight: no lightweight,
+      permissively-licensed C library exists to vendor for writing Parquet
+      the way zstd/Lexbor/dxml are vendored for their own formats; the
+      realistic option (Arrow's own C++ implementation) is heavier than
+      anything currently vendored, hits the same zero-network-build
+      conflict #297's PDFium evaluation found, and has no equivalent small,
+      license-clean prebuilt escape hatch. JSONL export is proven and
+      tested; Parquet/Arrow stays out until a lighter option turns up.
 - [~] Evaluate compressed WARC/WET input. A D-only evidence probe covers
       authored WARC 1.1 records in independent gzip members and proposed
       zstd-WARC frames with explicit byte/ratio caps and negative fixtures
@@ -564,17 +709,35 @@ is useful, but it is not sufficient on its own.
       selected adapters must enforce input/expansion/output/time/concurrency
       limits and retain extractor/version/provenance. This does not claim
       wholesale Tika, Docling, Pandoc, or OCR ecosystem parity, and no model or
-      service may be downloaded or contacted implicitly. Two evidence/adapter
-      slices have landed: an opt-in `effects.pdf_execve` fallback that
-      execve's a user-already-installed Poppler `pdftotext` under a bounded
-      subprocess (RLIMIT_CPU/RLIMIT_FSIZE, wall-timeout, process-group kill)
-      to extract PDF text, with no CLI/dispatch wiring and no MuPDF support
-      yet (#296, `docs/pdf-execve-fallback.md`); and a container-inspection
-      fix admitting DEFLATE-compressed ZIP entries via an injected
+      service may be downloaded or contacted implicitly. PDF has moved from
+      "not evaluated" to a real, evidence-backed evaluation plus a first FFI
+      slice: #297 (`75821c9`, `docs/pdfium-evaluation.md`) found PDFium's
+      license/API clean but its from-source build in conflict with this
+      codebase's zero-network-build rule, and accepted prebuilt binaries
+      (`bblanchon/pdfium-binaries`) as a new, third dependency-trust pattern
+      (alongside "vendor+build locally" and "OS-provided system library").
+      `source/effects/pdfium_ffi.d` (`cabb2e1`) is a bounded `dlopen` FFI
+      binding and text-extraction slice built on that evaluation, with an
+      operator-facing `--pdfium-library PATH`-style flag convention decided
+      for its future CLI wiring. This sits alongside the earlier, separate
+      opt-in `effects.pdf_execve` fallback that execve's a user-already-
+      installed Poppler `pdftotext` under a bounded subprocess
+      (RLIMIT_CPU/RLIMIT_FSIZE, wall-timeout, process-group kill; #296,
+      `docs/pdf-execve-fallback.md`) -- two independent PDF text-extraction
+      paths now exist, neither wired into a stage or CLI dispatch yet.
+      DOCX has similarly moved past its container-only fix: an earlier
+      #156 slice admitted DEFLATE-compressed ZIP entries via an injected
       system-zlib decompressor, closing the gap that refused essentially
-      every real .docx/.xlsx/.pptx entry (#156 slice) -- still no OOXML/XML
-      text walking or CLI-visible behavior change. Wiring either into a
-      production extraction path, and OCR/image adapters, remain open.
+      every real .docx/.xlsx/.pptx entry; #298 (`186308b`) adds a minimal,
+      dxml-based OOXML text-walker (`source/extraction/ooxml_document.d`)
+      over the resulting `word/document.xml` bytes -- paragraphs, runs,
+      plain text, and basic table structure, with real namespace-URI
+      resolution (not literal-prefix matching) and dxml's own outright
+      refusal of ill-formed XML rather than silent repair. Headers/footers/
+      footnotes, fields, track changes, embedded objects, and legacy `.doc`
+      are explicit non-goals. Wiring either family's adapters into a
+      production extraction stage/CLI path, and OCR/image adapters, remain
+      open.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

@@ -132,6 +132,119 @@ dub build --compiler=ldc2 --build=release
 ldc2 -O -of=.dub/cli-command-check examples/cli/check.d
 .dub/cli-command-check ./scrubbed
 ```
+
+## `crawl`
+
+`crawl` is a top-level command, not a `run`/`repair`/`extract` pipeline
+variant: it dispatches straight to its own hand-rolled parser
+(`source/effects/crawl_cli.d`) the same way `clean-web-document` dispatches
+to its own preset path, before argparse's `run`/`repair`/`extract` machinery
+is ever involved. It fetches pages over HTTP, discovers further same-crawl
+links in each fetched HTML page, and saves the raw bytes to disk with a
+concurrent, resumable frontier. **It is not a document-processing pipeline.**
+No mojibake repair, no metadata/main-content extraction, no PII detection,
+no `StageDocument` involvement anywhere in this command -- cleaning the raw
+output it produces is a separate, later pass, e.g. `clean-web-document`
+pointed at the `raw/` directory `crawl` wrote.
+
+```sh
+scrubbed crawl --seed https://example.com/ --corpus-dir ./corpus
+scrubbed crawl --seeds seeds.txt --corpus-dir ./corpus \
+  --concurrency 8 --max-pages 500 --scope same-origin
+```
+
+It accepts:
+
+- `--seed <url>` -- an individual seed URL; repeatable.
+- `--seeds <path>` -- a newline-delimited file of seed URLs; repeatable.
+  Blank lines and lines starting with `#` are skipped; every remaining line
+  must parse as an absolute URL. At least one `--seed` or `--seeds` is
+  required.
+- `--corpus-dir <path>` -- **required.** Output directory: `raw/` (fetched
+  bodies), `manifest.jsonl` (one record per finished fetch attempt), and,
+  unless `--in-memory` is given, `frontier.sqlite3` (the durable frontier
+  database).
+- `--db <path>` -- SQLite frontier database path. Default
+  `<corpus-dir>/frontier.sqlite3`. Mutually exclusive with `--in-memory`.
+- `--in-memory` -- use a non-durable in-memory frontier instead of SQLite.
+  This is an explicit opt-out of resumability (see below); there is no
+  database file to resume from afterward.
+- `--max-pages <n>` -- maximum distinct admitted pages. Default `200`.
+- `--max-pages-per-host <n>` -- maximum pages admitted per host. Default `50`.
+- `--max-depth <n>` -- maximum discovery depth from a seed (a seed is depth
+  `0`). Default `3`.
+- `--concurrency <n>` -- number of concurrent worker OS threads, and the
+  frontier's `maxActiveLeases` ceiling. Default `4`.
+- `--min-host-delay-ms <n>` -- minimum delay, in milliseconds, between two
+  requests to the same host. Default `3000`.
+- `--scope <allowed-domain|same-origin|one-hop-external>` -- discovery scope
+  policy. Default `allowed-domain`.
+  - `allowed-domain`: a discovered link is only followed if its origin is an
+    exact match (scheme + host + port; no suffix or subdomain matching)
+    against the core origin set -- every seed's origin, plus any
+    `--allowed-origin` values.
+  - `same-origin`: a discovered link is only followed if its origin exactly
+    equals the referring page's own origin.
+  - `one-hop-external`: any discovered link is fetched and saved regardless
+    of origin, but a page outside the core origin set is never itself a
+    source of further discoveries -- external pages are reached at most one
+    hop away from an in-scope page, never chained.
+- `--allowed-origin <origin>` -- an extra origin added to the core origin set
+  used by `allowed-domain` and `one-hop-external` scope; repeatable. Default:
+  just the seeds' own origins.
+
+**Resumability is real, not just "the command can be re-run."** By default
+(no `--in-memory`) the frontier is a SQLite database at
+`<corpus-dir>/frontier.sqlite3` (or `--db`'s path). If a crawl is killed --
+including a hard `kill -9` mid-fetch -- and the same command is run again
+against the same corpus directory (or `--db` path), it resumes rather than
+restarting:
+
+- Seeds that were already admitted come back `duplicate` on re-admission and
+  are silently skipped; they are never re-fetched.
+- Any candidate that was `leased` (fetch in flight) at the moment of the kill
+  is durably stuck in that state in the database -- nothing else ever times
+  a lease out on its own. Every `crawl` run therefore recovers orphaned
+  leases before any worker starts, reclaiming every candidate still marked
+  `leased` from a prior run so it becomes leasable again. Without this step,
+  enough kills over time would eventually exhaust `--concurrency`'s active-
+  lease ceiling and stall the crawl permanently.
+- The frontier is deliberately never sealed at the end of a run, so a later
+  invocation against the same database can keep expanding a crawl that
+  merely ran out of `--max-pages` or was interrupted, not one the frontier
+  considers exhausted.
+
+`--in-memory` opts out of all of this on purpose: there is no database to
+resume from, and a killed or restarted `--in-memory` crawl starts over from
+its seeds.
+
+**Failed fetches are recorded, never silently dropped.** Every finished
+fetch attempt -- success or failure -- appends exactly one line to
+`<corpus-dir>/manifest.jsonl`, opened in append mode so a resumed run keeps
+prior history instead of truncating it. A successful line carries `url`,
+`depth`, `discoveredFrom`, `fetchedAtUtc`, `finalUrl`, `httpStatus`,
+`contentSha256`, `bodyBytes`, `contentType`, and `shardPath` (where the raw
+body was written under `raw/`). A failed line carries `url`, `depth`,
+`discoveredFrom`, `fetchedAtUtc`, `httpStatus`, `failureReason`, and
+`failureCategory` -- inspect this file directly to see every page `crawl`
+tried and failed on, rather than inferring failures from what's missing on
+disk.
+
+`crawl` exits `0` on a normal run, including one that resumes into an
+already-fully-drained frontier and does no new work. Invalid or malformed
+arguments (missing `--corpus-dir`, no seeds, an unknown flag, or
+`--in-memory` combined with `--db`) exit `2` with `scrubbed:
+crawl-invalid-arguments` on stderr, before any I/O. A run-fatal failure
+(an unparsable seed URL, or a frontier that fails to open) exits `2` with
+`scrubbed: crawl-refused`. There is no per-document exit-code signal like
+`clean-web-document`'s `1`: individual fetch failures are recorded in the
+manifest, not surfaced through the process exit code.
+
+**Non-goals.** `crawl` is single-machine only -- there is no distributed or
+sharded crawling across multiple processes or hosts against one frontier.
+It does not render JavaScript or drive a headless browser; it fetches raw
+HTTP responses and parses the HTML it gets back, nothing more.
+
 ## Dispatch v4
 
 `run` and `repair` accept explicit dispatch v4 either through a version-4

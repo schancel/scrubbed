@@ -183,9 +183,13 @@ paths and an output tree nested in the input tree.
   remain significant: no case-folding, slash cleanup, absolute-path
   resolution, or provider-specific source interpretation occurs here. This
   leaves annotation joins and shard reassignment stable without defining
-  S3/WARC identity policy (tracked: does not yet separate URL identity,
-  fetch identity, and content identity for a raw artifact -- see
-  [issue #337](https://github.com/schancel/scrubbed/issues/337)).
+  S3/WARC identity policy. `DocumentId` itself stays source/record-key
+  based, not content-hash based -- separate URL/fetch/content identity for
+  a raw fetched artifact is handled one layer down instead, in
+  `effects.http_fetch`'s `FetchEvidence` (`requestedUrl`/`finalUrl` vs.
+  `bodyDigest`/`shardPath`) and `persistContentAddressed`'s hash-addressed,
+  cross-URL dedup (issue #337, closed as resolved by #329's landed crawl
+  work).
   `OutputName` is separate and does not enter the key.
 - Beyond `domain.document`, the `domain` layer also holds independent,
   effects-free value types and pure logic for later stages/overlays to

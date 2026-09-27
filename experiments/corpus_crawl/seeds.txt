@@ -1,0 +1,9 @@
+# Owner-approved seed list for issue #305 (see the issue body's "Owner
+# decision: seed list confirmed" note). Do not add or substitute any seed
+# without a corresponding owner decision on the issue.
+https://en.wikipedia.org/wiki/Web_scraping
+https://en.wikipedia.org/wiki/Unicode
+https://en.wikipedia.org/wiki/D_(programming_language)
+https://en.wikipedia.org/wiki/Python_(programming_language)
+https://news.ycombinator.com/
+https://docs.python.org/3/tutorial/index.html

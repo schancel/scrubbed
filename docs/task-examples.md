@@ -47,12 +47,14 @@ Headers, navigation, and footers are deliberately visible in the golden
 output. Unsafe link and image destinations become inert, but that behavior is
 not a general web-page sanitizer, browser, or boilerplate-removal algorithm.
 
-Raw and decoded HTML default to a 1 MiB cap; the supported configured maximum
-is 8 MiB. Raising that cap does not raise the independent selected-tree,
-Markdown-output, depth, node, attribute, or observation caps. Each accepted
-file is atomically replaced at its destination, but the output tree is not a
-multi-file transaction. `extract` has no manifest, checkpoint, or restart
-mode, so rerunning starts the requested tree operation again.
+- Raw and decoded HTML default to a 1 MiB cap; the supported configured
+  maximum is 8 MiB. Raising that cap does not raise the independent
+  selected-tree, Markdown-output, depth, node, attribute, or observation
+  caps.
+- Each accepted file is atomically replaced at its destination, but the
+  output tree is not a multi-file transaction.
+- `extract` has no manifest, checkpoint, or restart mode, so rerunning starts
+  the requested tree operation again.
 
 ## Text repair
 

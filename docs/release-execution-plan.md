@@ -91,6 +91,11 @@ combined-order tests proving that fusion and barriers preserve exact results.
    bounded specialist adapters for the explicitly supported Office/PDF/image
    routes. Container/binary extraction occurs before Unicode/mojibake repair;
    unsupported families remain explicit rather than falling through as text.
+   A first PDF capability slice (#296, `effects.pdf_execve`) execves a
+   user-installed Poppler `pdftotext` under a bounded subprocess (CPU/size/
+   wall-clock limits); it is callable but not yet wired into `cli`,
+   `composition`, `stages`, or `extraction` — CLI/config wiring and any
+   document-type dispatch integration are separate, later work.
 2. [#26](https://github.com/schancel/scrubbed/issues/26): baseline saved-HTML
    main-content versus boilerplate extraction with human-reviewed fixtures.
 3. [#27](https://github.com/schancel/scrubbed/issues/27): difficult-page and
@@ -99,19 +104,30 @@ combined-order tests proving that fusion and barriers preserve exact results.
    [#65](https://github.com/schancel/scrubbed/issues/65): deterministic
    metadata first; optional `llama-server` primary and explicit local-GGUF
    backend behind the same schema/provenance contract.
-5. Add optional, separately identified metadata enrichments: provenance-bearing
-   source/inferred tags under [#167](https://github.com/schancel/scrubbed/issues/167),
-   per-document compressor-specific measurements under
-   [#168](https://github.com/schancel/scrubbed/issues/168), and an evidence-only
-   embedding-space intrinsic-dimension evaluation under
-   [#169](https://github.com/schancel/scrubbed/issues/169). #169's
-   repository-only TwoNN evaluation is complete, but production exposure would
-   require a separate accepted ticket. Exact Kolmogorov complexity, exact
-   Hausdorff dimension, and a universal quality score are not claimed. These
-   optional enrichments do not delay the first package once the core metadata
-   schema can carry their versioned annotations.
+5. Add optional, separately identified metadata enrichments under
+   [#167](https://github.com/schancel/scrubbed/issues/167),
+   [#168](https://github.com/schancel/scrubbed/issues/168), and
+   [#169](https://github.com/schancel/scrubbed/issues/169). Status:
+   - **#167** (topical tags): the declared-extraction slice
+     (`topical-tags-extract`, reading `<meta name="keywords">`, `rel="tag"`,
+     and JSON-LD `Article` keywords/about) is a wired, self-registering v3
+     stage. Controlled-vocabulary inference exists in `domain.topical_tags`
+     but is not wired to real vocabulary data yet; #167 stays open for that.
+   - **#168** (compressibility): the opt-in `compressibility-annotate` stage
+     (order-0 token entropy plus zstd-19 compressed/raw ratio) is wired and
+     shipped; it is not a quality gate and computes nothing corpus-wide.
+   - **#169** (embedding-space intrinsic dimension): the repository-only
+     TwoNN evaluation is complete, but production exposure would require a
+     separate accepted ticket.
+   Exact Kolmogorov complexity, exact Hausdorff dimension, and a universal
+   quality score are not claimed by any of the three. These enrichments do
+   not delay the first package once the core metadata schema can carry their
+   versioned annotations.
 6. [#34](https://github.com/schancel/scrubbed/issues/34): language with
-   confidence and abstention.
+   confidence and abstention. A deterministic character-n-gram classifier
+   (17 languages: 11 Latin-script plus 6 Brahmic-family) with a typed
+   result/abstention value is wired as the `language-id-detect` v3 stage
+   (#311); #34 stays open for further language/script coverage.
 7. [#36](https://github.com/schancel/scrubbed/issues/36) then
    [#37](https://github.com/schancel/scrubbed/issues/37): disk-backed
    similarity candidates and near-duplicate decisions. Optional embeddings
@@ -150,9 +166,11 @@ evidence. Prove a safely provisioned 1-TiB local run under #60 before using
    pipeline gallery and small redistributable demonstration corpus from only
    supported commands. Repair, saved HTML, and JSONL can land in the first
    reviewed slice; add each later route only after its production owner lands.
-   In particular, the PII report/mask/redact example waits for #180. CLI and
-   JSON examples must describe equivalent plans, and unsupported modes stay
-   explicit rather than appearing as successful demos.
+   PII report/mask/redact (#180) has shipped and has a ready synthetic
+   handoff packet, but it is deliberately not yet copied into `examples/**`
+   pending this ticket. CLI and JSON examples must describe equivalent plans,
+   and unsupported modes stay explicit rather than appearing as successful
+   demos.
 3. Publish signed/checksummed GitHub release artifacts and the package-manager
    manifests justified by the proven platform matrix. Publish benchmark raw
    data and limitations with the release.

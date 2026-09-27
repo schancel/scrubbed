@@ -3,10 +3,13 @@ module cli_commands;
 
 import argparse;
 import cli : runApp, runExtract;
+import composition.compiler : compileJob;
 import effects.error_cli : runErrorCommand;
 import effects.metadata_route_cli : runMetadataRoute;
+import job.json : canonicalJobJson;
+import job.presets : cleanWebDocumentTokensV1, expandCleanWebDocumentPresetV1;
 import std.conv : to;
-import std.file : thisExePath;
+import std.file : FileException, exists, isDir, isSymlink, thisExePath;
 import std.stdio : stderr, writeln;
 import std.string : indexOf, startsWith;
 
@@ -102,6 +105,37 @@ struct Extract {
     string config;
 }
 
+@(Command("clean-web-document").Description(
+    "Run the sealed clean-web-document/v1 preset: text-transform's " ~
+    "fix-mojibake filter, then html-metadata-annotate, html-main-content, " ~
+    "and terminal pii-four-class. No --stage/--filter overrides; use 'run' " ~
+    "for custom composition. Automatically writes a PII-audit sidecar " ~
+    "beside --output (see --output help); fails before touching anything " ~
+    "if that derived path already exists."))
+struct CleanWebDocument {
+    @(NamedArgument("input", "i").Description("Input file or directory tree"))
+    string input;
+    @(NamedArgument("output", "o").Description(
+        "Output path. Also fixes the automatic PII-audit sidecar path: " ~
+        "'<output>.pii-audit.json' for a file, or '<output>.pii-audit/' " ~
+        "(mirroring the input tree) for a directory. That derived path " ~
+        "must not already exist."))
+    string output;
+    @(NamedArgument.Description("Worker thread count"))
+    size_t threads;
+    @(NamedArgument("max-queued-docs").Description("Maximum queued documents"))
+    size_t maxQueuedDocs = 64;
+    @(NamedArgument("max-input-bytes").Description("Maximum reserved input bytes"))
+    ulong maxInputBytes = 256UL * 1024 * 1024;
+    @(NamedArgument("max-open-inputs").Description("Maximum worker-held input descriptors"))
+    size_t maxOpenInputs;
+    @(NamedArgument("emit-config").Description(
+        "Print the compiled canonical v3 job JSON for clean-web-document/v1 " ~
+        "and exit 0; touches no input, output, or sidecar path (no " ~
+        "filesystem or network mutation of any kind)."))
+    bool emitConfig;
+}
+
 @(Command("completion").Description("Generate shell setup or command/option-name candidates; use completion init --bash, --zsh or --fish."))
 struct Completion {}
 
@@ -144,7 +178,8 @@ struct RouteMetadata {
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
     SubCommand!(Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
-        ErrorsExport, ErrorsVerify, RouteMetadata, Default!Run) command;
+        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument,
+        Default!Run) command;
 }
 
 enum Config parserConfig = { errorExitCode: 2 };
@@ -327,6 +362,133 @@ private int runPublicCompletion(const string[] argv) {
     return completionError("unknown completion operation: " ~ argv[2]);
 }
 
+private int cleanWebDocumentError(string message) {
+    stderr.writeln("scrubbed: ", message);
+    stderr.writeln("scrubbed: clean-web-document is a sealed preset (no " ~
+        "--stage/--filter/--stage-option/--filter-option overrides); use " ~
+        "'run' for custom stage/filter composition.");
+    stderr.writeln("Try 'scrubbed clean-web-document --help' for usage.");
+    return 2;
+}
+
+private bool cleanWebDocumentKnownValueFlag(string flag) {
+    foreach (candidate; ["--input", "-i", "--output", "-o", "--threads",
+            "--max-queued-docs", "--max-input-bytes", "--max-open-inputs"])
+        if (flag == candidate) return true;
+    return false;
+}
+
+/// The automatic PII-audit sidecar path derived from `--output`. A file
+/// output gets a sibling `.pii-audit.json` file (matching `pii-four-class`'s
+/// own per-document suffix); a directory (tree) output gets a sibling
+/// `.pii-audit` directory that mirrors the input tree, exactly like a
+/// hand-written `--sidecar-output` directory root would.
+private string cleanWebDocumentSidecarPath(string output, bool inputIsDir) {
+    return output ~ (inputIsDir ? ".pii-audit" : ".pii-audit.json");
+}
+
+private bool cleanWebDocumentPathOccupied(string path) {
+    // `isSymlink` (unlike `exists`) throws `FileException` for a path that
+    // simply does not exist yet -- the ordinary, expected case here.
+    bool link;
+    try link = isSymlink(path);
+    catch (FileException failure) { if (exists(path)) throw failure; }
+    return link || exists(path);
+}
+
+/// Real dispatch for the sealed `clean-web-document/v1` preset, called
+/// before argparse ever sees `argv[2 .. $]` so every rejection below (a
+/// sealed composition-flag attempt, an unknown/malformed option, or an
+/// occupied derived sidecar path) happens before any I/O.
+private int runCleanWebDocument(const string[] rawArgs) {
+    string input;
+    string output;
+    string threadsText;
+    string maxQueuedDocsText;
+    string maxInputBytesText;
+    string maxOpenInputsText;
+    bool emitConfig;
+
+    size_t index;
+    while (index < rawArgs.length) {
+        auto token = rawArgs[index];
+        string flag = token;
+        string value;
+        bool hasInline;
+        auto separator = token.indexOf('=');
+        if (separator > 0) {
+            flag = token[0 .. separator];
+            value = token[separator + 1 .. $];
+            hasInline = true;
+        }
+        if (compositionFlag(flag))
+            return cleanWebDocumentError(
+                "clean-web-document does not accept composition overrides (" ~
+                flag ~ ")");
+        if (flag == "--emit-config") {
+            if (hasInline)
+                return cleanWebDocumentError("--emit-config does not take a value");
+            emitConfig = true;
+            ++index;
+            continue;
+        }
+        if (!cleanWebDocumentKnownValueFlag(flag))
+            return cleanWebDocumentError("unknown clean-web-document option: " ~ flag);
+        if (!hasInline) {
+            if (index + 1 >= rawArgs.length)
+                return cleanWebDocumentError("missing value for " ~ flag);
+            value = rawArgs[++index];
+        }
+        if (flag == "--input" || flag == "-i") input = value;
+        else if (flag == "--output" || flag == "-o") output = value;
+        else if (flag == "--threads") threadsText = value;
+        else if (flag == "--max-queued-docs") maxQueuedDocsText = value;
+        else if (flag == "--max-input-bytes") maxInputBytesText = value;
+        else if (flag == "--max-open-inputs") maxOpenInputsText = value;
+        ++index;
+    }
+
+    if (emitConfig) {
+        // Pure job-layer expansion plus the existing, unmodified
+        // composition-layer compiler and job-layer canonical serializer
+        // only. scripts/check_modules.d already forbids both the job and
+        // composition layers from importing effects or any concrete I/O
+        // module (std.file/std.stdio/std.socket/std.net/std.process), so
+        // this whole branch is structurally incapable of reaching the
+        // filesystem or network -- and, distinctly from that layering
+        // proof, it also never references `input`, `output`, or any of the
+        // sidecar path machinery below at all.
+        auto spec = expandCleanWebDocumentPresetV1();
+        cast(void) compileJob(spec);
+        writeln(canonicalJobJson(spec));
+        return 0;
+    }
+
+    if (!input.length || !output.length)
+        return cleanWebDocumentError("clean-web-document requires --input and --output");
+
+    const inputIsDir = exists(input) && isDir(input);
+    auto sidecarPath = cleanWebDocumentSidecarPath(output, inputIsDir);
+    if (cleanWebDocumentPathOccupied(sidecarPath))
+        return cleanWebDocumentError(
+            "derived PII-audit sidecar path already exists: " ~ sidecarPath ~
+            " (clean-web-document writes it automatically beside --output " ~
+            "and refuses to overwrite an unexpected existing path there; " ~
+            "move it aside or choose a different --output, then retry)");
+
+    string[] forwarded = ["scrubbed", "--input", input, "--output", output,
+        "--sidecar-output", sidecarPath];
+    if (threadsText.length) forwarded ~= ["--threads", threadsText];
+    if (maxQueuedDocsText.length)
+        forwarded ~= ["--max-queued-docs", maxQueuedDocsText];
+    if (maxInputBytesText.length)
+        forwarded ~= ["--max-input-bytes", maxInputBytesText];
+    if (maxOpenInputsText.length)
+        forwarded ~= ["--max-open-inputs", maxOpenInputsText];
+    forwarded ~= cleanWebDocumentTokensV1;
+    return runApp(forwarded);
+}
+
 /// Dispatch from the shipping executable; argparse owns parsing, help and completion.
 int runCommands(string[] argv) {
     // The opt-in failure route must contain all parser and runtime diagnostics:
@@ -356,6 +518,16 @@ int runCommands(string[] argv) {
                 return result.exitCode;
             }
         return runMetadataRoute(argv[2 .. $]);
+    }
+    if (argv.length > 1 && argv[1] == "clean-web-document") {
+        foreach (arg; argv[2 .. $])
+            if (arg == "--help" || arg == "-h") {
+                Commands help;
+                auto result = CLI!(parserConfig, Commands).parseArgs(help,
+                    [argv[1], "--help"]);
+                return result.exitCode;
+            }
+        return runCleanWebDocument(argv[2 .. $]);
     }
     if (argv.length > 1 && (argv[1] == "errors-init" ||
         argv[1] == "errors-copy" || argv[1] == "errors-export" ||
@@ -413,7 +585,8 @@ int runCommands(string[] argv) {
             return 2;
         } else static if (is(typeof(cmd) == ErrorsInit) ||
             is(typeof(cmd) == ErrorsCopy) || is(typeof(cmd) == ErrorsExport) ||
-            is(typeof(cmd) == ErrorsVerify) || is(typeof(cmd) == RouteMetadata)) {
+            is(typeof(cmd) == ErrorsVerify) || is(typeof(cmd) == RouteMetadata) ||
+            is(typeof(cmd) == CleanWebDocument)) {
             assert(0, "management verbs dispatched before argparse");
             return 2;
         } else {

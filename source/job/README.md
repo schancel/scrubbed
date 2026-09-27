@@ -39,3 +39,11 @@ route option, and normalized-outcome action are materialized. Canonical JSON
 sorts routes and option keys, emits actions in enum order, and derives a
 `job:v4:` identity. The shipping argparse surface accepts them only through
 explicit v4 selection.
+
+[`presets.d`](presets.d) owns fixed, named, versioned preset expansion: a
+preset is a hard-coded ordered list of the same composition tokens
+`cli_tokens.d` already parses from `run`'s `--stage`/`--filter` flags.
+`expandCleanWebDocumentPresetV1()` is pure data assembly to a `JobSpec`; it
+performs no registry lookup, compilation, or I/O. `cli_commands.d` (the `cli`
+layer, not `job`) is responsible for compiling the result with
+`composition.compiler.compileJob` and for real execution.

@@ -33,6 +33,65 @@ format-specific extraction limits and provenance behavior are documented in
 the HTML parser and Markdown guides. Its single selected HTML stage is likewise
 compiled from canonical v3 configuration.
 
+## `clean-web-document`
+
+`clean-web-document` is the first named top-level preset command: a fixed,
+versioned (`clean-web-document/v1`), **sealed** four-stage v3 job --
+`text-transform`'s `fix-mojibake` filter, then `html-metadata-annotate`,
+`html-main-content`, and terminal `pii-four-class` -- run through the same
+compiler and job executor `run` uses. It shares one generic preset-dispatch
+mechanism with `run`/`repair`/`extract`, not a parallel implementation: the
+fixed token list lives in `source/job/presets.d` and lowers through the same
+`job.cli_tokens` parser and `composition.compiler.compileJob` that a
+hand-written `run --stage ...` invocation of the same four stages does.
+
+```sh
+scrubbed clean-web-document --input page.html --output page.txt
+scrubbed clean-web-document --input pages/ --output clean/ --threads 4
+scrubbed clean-web-document --emit-config
+```
+
+It accepts only `--input`, `--output`, `--threads`, `--max-queued-docs`,
+`--max-input-bytes`, `--max-open-inputs`, and `--emit-config`. It does **not**
+accept `--stage`, `--filter`, `--stage-option`, `--filter-option`, or any
+other composition/dispatch token -- the chain is fixed for this version; use
+`run` for custom stage/filter composition.
+
+**Automatic PII-audit sidecar.** `pii-four-class` always produces a terminal
+audit record, which `run`'s local-file execution path always requires an
+explicit `--sidecar-output` destination for. Since `clean-web-document`'s
+flag list is deliberately fixed and has no `--sidecar-output` flag,
+`clean-web-document` derives that destination automatically from `--output`:
+
+- `--output` a file: the sidecar is written to `<output>.pii-audit.json`.
+- `--output` a directory (tree mode): the sidecar root is `<output>.pii-audit/`,
+  mirroring the input tree exactly like a hand-written `--sidecar-output`
+  directory root would (one `<name>.pii-audit.json` per processed file).
+
+This is a new pattern with no other precedent in this codebase: it creates a
+file the user did not name on the command line. To make sure that is never a
+surprise, `clean-web-document` refuses to run -- before touching the input,
+the output, or the sidecar path in any way -- if something already exists at
+the derived sidecar path. It never silently overwrites it. Remove or move the
+existing path aside, or choose a different `--output`, and retry.
+
+**`--emit-config`.** Prints the compiled canonical v3 job JSON for
+`clean-web-document/v1` (the same `canonicalJobJson` a hand-written
+equivalent `run --stage ...` invocation would compile to) and exits 0. It
+touches no input, output, or sidecar path at all -- not even to check
+whether they exist -- and its output is deterministic for a fixed preset
+version. This is provable structurally, not just empirically: the
+`--emit-config` code path only ever reaches `job.presets`, the existing
+`job.cli_tokens`/`job.json` parsers, and the existing, unmodified
+`composition.compiler.compileJob`, none of which `scripts/check_modules.d`'s
+existing module-layering rule permits to import `effects` or any concrete
+I/O module (`std.file`, `std.stdio`, `std.socket`, `std.net`,
+`std.process`).
+
+Any unknown or malformed `clean-web-document` option, and any attempt to
+pass a composition token, fails with exit 2 before any I/O, naming `run` as
+the escape hatch for custom composition.
+
 The built-in argparse completer supplies command and option **names only**;
 it does not complete paths, filter names or argument values. Generate setup
 for your shell:

@@ -3,6 +3,7 @@ module effects.metadata_route_cli;
 
 import composition.compiler : compileJob;
 import composition.executor : runCompiledStage;
+import composition.job_executor : runCompiledJob;
 import content.pieces : Content, ContentPiece;
 import core.stdc.errno : errno, EINTR, ENOENT;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
@@ -11,7 +12,8 @@ import core.sys.posix.unistd : close, posixRead = read;
 import domain.document : Document, OutputName, SourceLocator;
 import effects.atomic_piece_sink : OutputPolicyViolation;
 import effects.cli_option_parsing : nextOption;
-import effects.html_metadata_stage;
+import effects.document_metadata_publish_stage;
+import effects.html_metadata_annotate_stage : htmlMetadataAnnotateStageKeyV1;
 import effects.html_tree : maxRawBytes;
 import effects.independent_sinks : IndependentLocalSinks, IndependentPayloads,
     IndependentSinkFailure, contentSinkKey, metadataSinkKey;
@@ -288,12 +290,14 @@ int runMetadataRoute(const string[] args) {
         auto contentSpec = lowerLegacyNames(o.filters.split(","));
         auto contentJob = compileJob(contentSpec);
         JobSpec metadataSpec;
-        metadataSpec.stages = [JobStageSpec("metadata", "html-metadata")];
+        metadataSpec.stages = [
+            JobStageSpec("metadata-annotate", htmlMetadataAnnotateStageKeyV1),
+            JobStageSpec("metadata-publish", "document-metadata-publish")];
         auto metadataJob = compileJob(metadataSpec);
         auto executable = runningExecutableDigest();
         auto contentHash = routeConfigDigest("route-content:v2:", o.filters, executable);
-        auto metadataHash = routeConfigDigest("route-metadata:v2:",
-            "html-metadata", executable);
+        auto metadataHash = routeConfigDigest("route-metadata:v3:",
+            "html-metadata-annotate,document-metadata-publish", executable);
         scope manifest = new LocalManifest(o.manifest);
         bool incomplete;
         foreach (file; files) {
@@ -308,10 +312,11 @@ int runMetadataRoute(const string[] args) {
             auto document = Document(SourceLocator("local-html:v1", o.input, file.name),
                 OutputName(file.name));
             auto source = new Content([ContentPiece.own(raw)]);
-            auto staged = runCompiledStage([StageDocument(document, source)],
-                metadataJob.stages[0]);
-            if (staged.events.length != 1) throw new Exception("unexpected stage event count");
-            auto event = staged.events[0];
+            auto metadataEvents = runCompiledJob(
+                StageDocument(document, source), metadataJob);
+            if (metadataEvents.length != 1)
+                throw new Exception("unexpected stage event count");
+            auto event = metadataEvents[0];
             if (event.kind == EventKind.quarantined || event.kind == EventKind.rejected) {
                 incomplete = true;
                 continue;

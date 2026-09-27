@@ -29,9 +29,13 @@ Import `effects.html_metadata_stage` to register the stage, then select
 - Reads through the existing restricted `HtmlTree` boundary: 64 KiB
   raw/decoded, plus its node, depth, and attribute limits.
 
-`route-metadata` (see [docs/metadata-route.md](metadata-route.md)) reads
-this side output's bytes for its metadata sink; it no longer reads the
-stage's document content.
+`route-metadata` (see [docs/metadata-route.md](metadata-route.md)) does
+*not* use this stage or its side output for its metadata sink — it compiles
+`html-metadata-annotate` + `document-metadata-publish` instead, and reads
+that job's `document-metadata:v1` terminal side output. This stage's own
+`metadata-json:v2` format remains live through other paths (for example
+`cli.d`'s generic `--stage id=html-metadata` composition), just not through
+`route-metadata`.
 
 ## Fields and priority
 

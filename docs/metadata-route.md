@@ -20,10 +20,17 @@ manifest creation or output publication.
 
 - **Content sink** — the original UTF-8 source after the named filter
   chain, defaulting to `normalize-line-endings,strip-control`.
-- **Metadata sink** — the registered `html-metadata` stage's
-  `metadata-json:v2` payload (see
-  [docs/metadata-extraction.md](metadata-extraction.md)), extracted from the
-  HTML itself. No sidecar or filename is used as metadata.
+- **Metadata sink** — the compiled `[html-metadata-annotate,
+  document-metadata-publish]` job's terminal `document-metadata:v1` payload
+  (see [docs/document-metadata.md](document-metadata.md)), extracted from
+  the HTML itself. `html-metadata-annotate` writes the selected
+  title/author/date/url fields into the shared `DocumentMetadata`
+  accumulator; `document-metadata-publish` then encodes whatever was
+  accumulated as the job's one `TerminalSideOutput`. This route no longer
+  uses the standalone `html-metadata` stage or its `metadata-json:v2` wire
+  format — that stage still exists and is exercised elsewhere (see
+  [docs/metadata-extraction.md](metadata-extraction.md)), but is not the
+  source of this sink's bytes. No sidecar or filename is used as metadata.
 
 Each file's basename (or input-relative nested path for a tree) is used
 under both roots, including the original `.html` suffix in the metadata

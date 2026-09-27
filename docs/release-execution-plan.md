@@ -185,7 +185,12 @@ These do not block the first public package release:
 
 - direct S3 credentials, multipart transport, distributed shard ownership,
   and multi-machine finalization (#46–#57, #63, #64); use explicit local
-  staging with specialist transfer tools until a later accepted contract;
+  staging with specialist transfer tools until a later accepted contract
+  (tracked: whether this scope should be superseded by a bounded
+  crawl/transform-extract/cluster shape chained by an external distributed
+  orchestrator instead of a scrubbed-owned coordinator -- see
+  [issue #338](https://github.com/schancel/scrubbed/issues/338), not
+  decided);
 - crawling, JavaScript rendering, robots/politeness, feeds and sitemap
   discovery;
 - wholesale Apache Tika/Office/PDF/OCR format parsing; #155 provides bounded

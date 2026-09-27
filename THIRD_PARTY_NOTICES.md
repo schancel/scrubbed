@@ -101,6 +101,114 @@ legal clearance or proof of the complete source corresponding to Apple's
 binary; see `docs/http-fetch-evaluation.md` for the fuller recorded
 provenance, including exact header/`.tbd` SHA-256 values.
 
+## PDFium (`bblanchon/pdfium-binaries`)
+
+`source/effects/pdfium_ffi.d` (issue #156) `dlopen()`s a `libpdfium.dylib`
+built and published by the third-party distributor
+[`bblanchon/pdfium-binaries`](https://github.com/bblanchon/pdfium-binaries).
+This is a fourth, distinct trust pattern from every other native dependency
+in this project (see `source/effects/pdfium_ffi.d`'s own module doc
+comment): the artifact is **never fetched, vendored, statically linked, or
+assumed by scrubbed's own build or runtime**. The operator supplies its path
+explicitly at call time; provenance of that exact file is entirely the
+operator's own responsibility. This project selects and evaluated exactly
+one pinned release, `chromium/8066` (published 2026-09-21T12:48:25Z, build
+commit `f2e9a1c45bb17b85b540abf1af30146ef65416ac`), macOS arm64 asset
+`pdfium-mac-arm64.tgz`, SHA-256
+`336219e80580b93c6523f44db7dc1de59cc497b13a7390ddac84223f68ca162b` --
+independently re-confirmed byte-for-byte identical on a fresh download
+during issue #156's own implementation, and cross-checked against that
+release's own GitHub Artifact Attestation (Sigstore/SLSA), which verifies
+build `https://github.com/bblanchon/pdfium-binaries/actions/runs/35584475700/attempts/1`
+from that exact commit. Full reproduction steps, cost/license evaluation,
+and functional verification are recorded in
+[`docs/pdfium-evaluation.md`](docs/pdfium-evaluation.md).
+
+### `bblanchon/pdfium-binaries`'s own license (MIT)
+
+The distributor's own `LICENSE` file inside the archive (SHA-256
+`ba26c1263131696b86c10496b5066b918a20b7161822a80c274d0080105f6c93`), verbatim:
+
+```
+Copyright 2014-2025 Benoit Blanchon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to
+deal in the Software without restriction, including without limitation the
+rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+sell copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+IN THE SOFTWARE.
+
+This package also includes third-party software. See the licenses/
+directory for their respective licenses.
+```
+
+### PDFium's own license
+
+PDFium itself is copyright The PDFium Authors (originally Google Inc.). The
+bundled `licenses/pdfium.txt` inside the distributor's archive and the
+canonical `LICENSE` file at PDFium's own pinned commit
+(`a84323421e94f484faca52dd9d027934eba42ab8`, SHA-256
+`1fe9dea718fbd75cf149adaf4d8a22a4335604d964ddb76d1b45383dec8668c9`) both
+contain the same content: a BSD-3-Clause-style grant, verbatim:
+
+```
+// Copyright 2014 The PDFium Authors
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+//    * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+//    * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//    * Neither the name of Google Inc. nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+```
+
+**Disclosed, unresolved discrepancy** (see `docs/pdfium-evaluation.md` for
+the full account, not re-derived here): the same upstream `LICENSE` file
+also contains the complete, separate Apache License 2.0 text immediately
+following the BSD-style grant above. `docs/pdfium-evaluation.md` flags this
+as unexplained and unresolved; this project treats the BSD-style header as
+the operative grant (it is the license every checked PDFium source file,
+including `public/fpdfview.h`, actually points to), consistent with
+`bblanchon/pdfium-binaries`'s own `licenses/pdfium.txt` reproducing the same
+text, but this is an engineering license-text reading, not independent legal
+clearance.
+
+### Bundled third-party licenses inside the prebuilt artifact
+
+The `pdfium-mac-arm64.tgz` archive statically links the following further
+third-party libraries into the one `libpdfium.dylib`, per its own
+`licenses/` directory (full inventory and per-file license family already
+recorded in `docs/pdfium-evaluation.md`): Abseil (Apache-2.0), Anti-Grain
+Geometry 2.3 (permissive), fast_float (MIT), FreeType (FreeType Project
+LICENSE), ICU (Unicode License v3), Little CMS (MIT-style),
+libjpeg-turbo (IJG License + compatible BSD-style terms), libopenjpeg
+(2-clause BSD), libpng (PNG Reference Library License v2), LLVM-libc
+(Apache-2.0 with LLVM Exceptions), simdutf (MIT), and zlib (zlib License).
+Every bundled dependency identified is permissive; none is copyleft. This is
+a license/provenance inventory, matching `docs/pdfium-evaluation.md`'s own
+posture, not independent legal clearance -- a real shipping/distribution
+decision should verify each bundled version's exact upstream commit and
+reproduce the full per-file `licenses/` text, not just this summary.
+
 ## argparse
 
 The shipping `scrubbed` executable uses `argparse` version 2.0.2 by Andrey

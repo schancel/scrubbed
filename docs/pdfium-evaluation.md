@@ -426,3 +426,45 @@ This evaluation's evidence supports the following as guidance for
 Delete `docs/pdfium-evaluation.md` and `experiments/pdfium_check/`. Zero
 blast radius on any shipped module: nothing in `source/`, `dub.json`, or
 any stage imports or references anything from this evaluation.
+
+## Addendum (2026-09-27): a real production slice now exists
+
+Issue #156's second slice turned this evaluation's proven artifact/symbol
+evidence into a real, tested module: `source/effects/pdfium_ffi.d`
+(`PdfiumLibrary`, an operator-supplied-path `dlopen`/`dlsym` lifecycle, and
+`extractPdfTextV1`, bounded in-memory page-text extraction) plus
+`experiments/pdfium_extract/check.d`, a release-active checker. This
+document remains an evidence record, not a design doc for that module; see
+`source/effects/pdfium_ffi.d`'s own module doc comment for the accepted
+trust-pattern design (the operator supplies `libpdfium.dylib`'s path
+explicitly; scrubbed never fetches, vendors, or assumes one) and the
+recorded `--pdfium-library` flag-name convention for any future stage/CLI
+wiring.
+
+That slice's own verification independently re-confirmed this evaluation's
+central artifact claim rather than trusting it: a fresh `curl` download of
+`pdfium-mac-arm64.tgz` from the same pinned release (`chromium/8066`)
+produced the exact same SHA-256
+(`336219e80580b93c6523f44db7dc1de59cc497b13a7390ddac84223f68ca162b`) recorded
+above, and a fresh `gh attestation verify` against that same freshly
+downloaded file returned the same signed subject digest and the same build
+run (`bblanchon/pdfium-binaries/actions/runs/35584475700/attempts/1`) this
+document already recorded. The extracted `libpdfium.dylib` exports
+`FPDF_LoadMemDocument` (confirmed via `nm -gU`), the in-memory-load API this
+slice's `extractPdfTextV1` uses instead of this evaluation's
+`FPDF_LoadDocument` file-path form; its real signature
+(`const void* data_buf, int size, FPDF_BYTESTRING password`) was verified
+directly against the pinned commit's `public/fpdfview.h`, not assumed.
+
+New evidence this slice's own checker produced, beyond this evaluation's
+three-fixture smoke test: a real, self-authored encrypted PDF (generated
+offline via `pypdf`, RC4-128, a non-empty user password, inheriting
+`pdf-training.pdf`'s CC0-1.0 provenance) round-tripped through
+`FPDF_LoadMemDocument` returns `NULL` with `FPDF_GetLastError() ==
+FPDF_ERR_PASSWORD` (4) -- a distinct, real `encrypted` outcome, never
+conflated with the `malformed`/`FPDF_ERR_FORMAT` (3) path this evaluation
+already proved. This remains a single-machine, single-artifact verification;
+it does not extend this evaluation's disclosed open questions (the
+BSD/Apache-2.0 license co-mingling, the archived-mirror-vs-live-commits
+discrepancy, thread-safety, or the wider platform/pin-policy matrix), all of
+which stay exactly as disclosed above.

@@ -71,10 +71,34 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 
     <h2>Usage</h2>
     <pre>dub build --build=release
+
+# The whole pipeline in one command
 ./scrubbed clean-web-document --input page.html --output page.txt
+./scrubbed clean-web-document --input pages/ --output clean/ --threads 4
+
+# Just extract, in whichever shape you need
+./scrubbed extract --input page.html --output page.md --format markdown
+./scrubbed extract --input page.html --output page.tree.json --format tree-json
+
+# Language ID as a standalone stage, reachable like any other
+./scrubbed run --input page.txt --output page.out \
+    --sidecar-output page.langid.json --stage id=language-id-detect
+
+# PII scan with an audit sidecar, no rewrite of the input
+./scrubbed run --input page.txt --output page.out \
+    --sidecar-output page.pii-audit.json --stage pii=pii-four-class
+
+# Build your own filter chain
 ./scrubbed --list-filters
 ./scrubbed --input path/to/docs --output path/to/clean \
-    --filters normalize-line-endings,strip-control</pre>
+    --filters normalize-line-endings,strip-control
+
+# Corpus pipelines: stream selected JSON fields through the same filters
+./scrubbed run --input - --output - --jsonl-fields text,title \
+    --dataset-namespace corpus-v1 --source-key shard-0001 \
+    --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 \
+    < input.jsonl > clean.jsonl</pre>
+    <p class="note">Full command and flag reference: <a href="https://github.com/schancel/scrubbed/blob/main/docs/cli-commands.md" target="_blank" rel="noopener">docs/cli-commands.md</a>.</p>
 
     <footer>
         <p>MIT licensed. <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">github.com/schancel/scrubbed</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">schancel.github.io</a></p>

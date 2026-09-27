@@ -1363,41 +1363,43 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
                     ? event.payload.content : null;
                 planSideSchemas ~= null;
                 planSideKeys ~= null;
-                foreach (ref output; event.sideOutputs) {
-                    DurableEventPlan side;
-                    side.ordinal = plans.length;
-                    side.kind = "emitted";
-                    side.document = event.payload.document.id;
-                    side.outputName = event.payload.document.outputName.text ~
-                        output.suffix;
-                    side.hasOutput = true;
-                    side.destination = sidecarDestinationFor(sidecarRoot,
-                        inputIsDir, event, output);
-                    side.outputSha256 = output.digest;
-                    side.sink = "side-output:" ~ output.key;
-                    try preflightDestination(side.destination,
-                        inputIsDir ? sidecarRoot : dirName(sidecarRoot));
-                    catch (Exception failure) {
-                        throw new DurableDocumentFailure(rootKey, "failure",
-                            "policy-failed", side.sink, failure, true);
+                if (event.kind == EventKind.emitted) {
+                    foreach (ref output; event.sideOutputs) {
+                        DurableEventPlan side;
+                        side.ordinal = plans.length;
+                        side.kind = "emitted";
+                        side.document = event.payload.document.id;
+                        side.outputName = event.payload.document.outputName.text ~
+                            output.suffix;
+                        side.hasOutput = true;
+                        side.destination = sidecarDestinationFor(sidecarRoot,
+                            inputIsDir, event, output);
+                        side.outputSha256 = output.digest;
+                        side.sink = "side-output:" ~ output.key;
+                        try preflightDestination(side.destination,
+                            inputIsDir ? sidecarRoot : dirName(sidecarRoot));
+                        catch (Exception failure) {
+                            throw new DurableDocumentFailure(rootKey, "failure",
+                                "policy-failed", side.sink, failure, true);
+                        }
+                        try requireUnaliasedFileOrAbsent(side.destination,
+                            side.sink);
+                        catch (Exception failure) {
+                            throw new DurableDocumentFailure(rootKey, "failure",
+                                "policy-failed", side.sink, failure, true);
+                        }
+                        auto normalized = normalizedAbsolute(side.destination);
+                        if (normalized in destinations)
+                            throw new OutputPolicyViolation(
+                                "primary and side-output destinations collide");
+                        destinations[normalized] = true;
+                        sideOutputsByOrdinal[side.ordinal] = output;
+                        plans ~= side;
+                        planContents ~= new Content([
+                            ContentPiece.own(output.bytes)]);
+                        planSideSchemas ~= output.schema;
+                        planSideKeys ~= output.key;
                     }
-                    try requireUnaliasedFileOrAbsent(side.destination,
-                        side.sink);
-                    catch (Exception failure) {
-                        throw new DurableDocumentFailure(rootKey, "failure",
-                            "policy-failed", side.sink, failure, true);
-                    }
-                    auto normalized = normalizedAbsolute(side.destination);
-                    if (normalized in destinations)
-                        throw new OutputPolicyViolation(
-                            "primary and side-output destinations collide");
-                    destinations[normalized] = true;
-                    sideOutputsByOrdinal[side.ordinal] = output;
-                    plans ~= side;
-                    planContents ~= new Content([
-                        ContentPiece.own(output.bytes)]);
-                    planSideSchemas ~= output.schema;
-                    planSideKeys ~= output.key;
                 }
             }
             try ledger.planEvents(rootKey, plans);
@@ -2463,6 +2465,91 @@ unittest {
         assert(parsed["fields"]["title"]["status"].str == "selected" &&
             parsed["fields"]["title"]["value"].str == "Emitted Case",
             "published side output must still carry real extracted metadata");
+    }
+}
+
+// Regression for #334: processDurableOne's side-output plan-building loop
+// (the --manifest/--error-journal durable route) has the same unconditional
+// side-output-publication bug #294 fixed above in the plain local-write
+// route (processCompiledOne) -- a separate loop, same root cause. Exercised
+// through the real `run` command's --manifest route (runApp), not a local
+// test copy of the registry/executor/ledger.
+unittest {
+    import effects.html_tree : maxDepth;
+    import std.file : rmdirRecurse, tempDir;
+
+    auto root = buildPath(tempDir,
+        "scrubbed-durable-side-output-gate-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdir(root);
+
+    // Negative case: the same depth-limit quarantine trigger as the plain
+    // route's #294 regression test above, this time driven through
+    // --manifest so processDurableOne's plan-building loop is under test
+    // instead of processCompiledOne's. Before the #334 fix, the placeholder
+    // TerminalSideOutput attached to this quarantined event would be turned
+    // into a spurious DurableEventPlan side-output entry, which the durable
+    // publication loop then writes to disk as a 0-byte sidecar file.
+    {
+        auto inputDir = buildPath(root, "in");
+        auto outputDir = buildPath(root, "out");
+        auto sidecarDir = buildPath(root, "sidecar");
+        auto manifestStore = buildPath(root, "quarantine-manifest.db");
+        mkdir(inputDir);
+        string deepBody;
+        foreach (i; 0 .. maxDepth + 40) deepBody ~= "<div>";
+        foreach (i; 0 .. maxDepth + 40) deepBody ~= "</div>";
+        write(buildPath(inputDir, "depth.html"),
+            "<html><head><title>Depth</title></head><body>" ~ deepBody ~
+            "</body></html>");
+        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+            "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
+            "--manifest", manifestStore, "--threads", "1"]) == 1,
+            "a quarantined document must report a nonzero terminal status");
+        assert(!exists(buildPath(outputDir, "depth.html")),
+            "a quarantined document must not publish primary content");
+        assert(!exists(buildPath(sidecarDir, "depth.html.metadata.json")),
+            "a quarantined document must not publish its placeholder side " ~
+            "output as a spurious sidecar file via the durable route (#334)");
+    }
+
+    // Positive case: an *emitted* html-metadata event's side output is
+    // still recorded and published through the durable route -- proves the
+    // #334 gate did not also suppress the working path. A replay (the
+    // manifest already records this root as completed) must still report
+    // success and must not disturb the previously published side output.
+    {
+        auto inputDir = buildPath(root, "in2");
+        auto outputDir = buildPath(root, "out2");
+        auto sidecarDir = buildPath(root, "sidecar2");
+        auto manifestStore = buildPath(root, "emitted-manifest.db");
+        mkdir(inputDir);
+        string html = `<html><head><title>Emitted Case</title>` ~
+            `<meta name="author" content="Ada"></head><body>` ~
+            `<p>hello</p></body></html>`;
+        write(buildPath(inputDir, "ok.html"), html);
+        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+            "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
+            "--manifest", manifestStore, "--threads", "1"]) == 0,
+            "an emitted document must report success");
+        assert(readText(buildPath(outputDir, "ok.html")) == html,
+            "an emitted event's content must pass through unmodified");
+        auto sidecarPath = buildPath(sidecarDir, "ok.html.metadata.json");
+        assert(exists(sidecarPath),
+            "an emitted event's side output must still be published " ~
+            "through the durable route (#334 regression check)");
+        auto parsed = parseJSON(readText(sidecarPath));
+        assert(parsed["version"].str == "metadata-json:v2");
+        assert(parsed["fields"]["title"]["status"].str == "selected" &&
+            parsed["fields"]["title"]["value"].str == "Emitted Case",
+            "published side output must still carry real extracted metadata");
+
+        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+            "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
+            "--manifest", manifestStore, "--threads", "1"]) == 0,
+            "a replayed emitted document must report success");
+        assert(exists(sidecarPath),
+            "replay must not remove the previously published side output");
     }
 }
 

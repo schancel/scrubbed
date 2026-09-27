@@ -10,6 +10,7 @@ import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t, S_ISDIR, S_ISREG, S
 import core.sys.posix.unistd : close, posixRead = read;
 import domain.document : Document, OutputName, SourceLocator;
 import effects.atomic_piece_sink : OutputPolicyViolation;
+import effects.cli_option_parsing : nextOption;
 import effects.html_metadata_stage;
 import effects.html_tree : maxRawBytes;
 import effects.independent_sinks : IndependentLocalSinks, IndependentPayloads,
@@ -79,23 +80,17 @@ private ubyte[32] routeConfigDigest(string domain, string config,
 }
 
 private bool parseOptions(const string[] args, ref Options o) {
-    for (size_t i; i < args.length; ++i) {
-        string flag = args[i];
-        if (flag == "--retry") {
+    for (size_t i; i < args.length; ) {
+        if (args[i] == "--retry") {
             if (o.retry) return false;
             o.retry = true;
+            ++i;
             continue;
         }
-        string value;
-        auto equal = flag.indexOf('=');
-        if (equal >= 0) {
-            value = flag[equal + 1 .. $];
-            flag = flag[0 .. equal];
-        } else {
-            if (i + 1 >= args.length || args[i + 1].startsWith("--")) return false;
-            value = args[++i];
-        }
-        if (!value.length || value.indexOf('\0') >= 0) return false;
+        auto parsed = nextOption(args, i);
+        if (!parsed.ok) return false;
+        string flag = parsed.flag;
+        string value = parsed.value;
         switch (flag) {
         case "--input":
             if (o.hasInput) return false;
@@ -359,4 +354,39 @@ int runMetadataRoute(const string[] args) {
         stderr.writeln("scrubbed: route-refused");
         return 2;
     }
+}
+
+unittest {
+    // A valid flag set, mixing the `--flag value` and `--flag=value`
+    // spellings, still parses exactly as before this file's `parseOptions`
+    // switched to the shared `effects.cli_option_parsing.nextOption` helper,
+    // including that the default `--filters` value survives untouched.
+    string[] args = ["--input", "/tmp/in", "--content-output=/tmp/content",
+        "--metadata-output", "/tmp/metadata", "--manifest=/tmp/manifest.sqlite3",
+        "--retry"];
+    Options o;
+    assert(parseOptions(args, o), "a valid flag set was rejected");
+    assert(o.input == "/tmp/in" && o.hasInput);
+    assert(o.contentRoot == "/tmp/content" && o.hasContent);
+    assert(o.metadataRoot == "/tmp/metadata" && o.hasMetadata);
+    assert(o.manifest == "/tmp/manifest.sqlite3" && o.hasManifest);
+    assert(o.retry);
+    assert(o.filters == "normalize-line-endings,strip-control",
+        "default --filters value changed");
+}
+
+unittest {
+    // Regression for issue #351: this file already had the NUL-byte/empty-
+    // value check `error_cli.d` was missing; confirm the switch to the
+    // shared `cli_option_parsing` helper didn't lose it, in both flag
+    // spellings.
+    string[] spaceForm = ["--input", "bad\0value"];
+    Options rejectedSpaceForm;
+    assert(!parseOptions(spaceForm, rejectedSpaceForm),
+        "metadata_route_cli.d parseOptions accepted a NUL-byte-containing value (--flag value form)");
+
+    string[] equalsForm = ["--input=bad\0value"];
+    Options rejectedEqualsForm;
+    assert(!parseOptions(equalsForm, rejectedEqualsForm),
+        "metadata_route_cli.d parseOptions accepted a NUL-byte-containing value (--flag=value form)");
 }

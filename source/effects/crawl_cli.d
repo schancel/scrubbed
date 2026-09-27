@@ -8,6 +8,7 @@ module effects.crawl_cli;
 
 import domain.frontier_contract : AdmissionCode, CandidateInput, FrontierLimits;
 import domain.job_queue : JobQueue, openInMemoryJobQueue, QueueOpenCode;
+import effects.cli_option_parsing : nextOption;
 import effects.crawl_orchestrator : CrawlBounds, crawlPolicyId,
     CrawlOrchestrator, CrawlSummary, ManifestWriter;
 import effects.html_discovery : DiscoveryScopeKind;
@@ -20,7 +21,7 @@ import std.exception : enforce;
 import std.file : exists, mkdirRecurse, readText;
 import std.path : buildPath;
 import std.stdio : stderr, writeln;
-import std.string : indexOf, splitLines, startsWith, strip;
+import std.string : splitLines, startsWith, strip;
 
 // Owner-facing defaults; deliberately the same values
 // `experiments/corpus_crawl/crawl.d` already established as reasonable for a
@@ -79,22 +80,16 @@ private bool parseNonNegativeLong(string value, ref long result) {
 }
 
 private bool parseOptions(const string[] args, ref Options o) {
-    for (size_t i; i < args.length; ++i) {
-        string flag = args[i];
-        if (flag == "--in-memory") {
+    for (size_t i; i < args.length; ) {
+        if (args[i] == "--in-memory") {
             o.inMemory = true;
+            ++i;
             continue;
         }
-        string value;
-        auto equal = flag.indexOf('=');
-        if (equal >= 0) {
-            value = flag[equal + 1 .. $];
-            flag = flag[0 .. equal];
-        } else {
-            if (i + 1 >= args.length || args[i + 1].startsWith("--")) return false;
-            value = args[++i];
-        }
-        if (!value.length || value.indexOf('\0') >= 0) return false;
+        auto parsed = nextOption(args, i);
+        if (!parsed.ok) return false;
+        string flag = parsed.flag;
+        string value = parsed.value;
         switch (flag) {
         case "--seeds":
             o.seedFiles ~= value; break;
@@ -392,6 +387,24 @@ unittest {
     Options rejectedZero;
     assert(!parseOptions(zeroMaxPages, rejectedZero),
         "--max-pages 0 was not rejected");
+}
+
+unittest {
+    // Regression for issue #351: a NUL byte embedded in an option value is
+    // rejected here, in both flag spellings, unchanged from before this
+    // file's `parseOptions` switched to the shared
+    // `effects.cli_option_parsing.nextOption` helper. This is the same
+    // check `metadata_route_cli.d` also has and `error_cli.d` was, before
+    // the fix, missing.
+    string[] spaceForm = ["--corpus-dir", "/tmp/c", "--seed", "bad\0value"];
+    Options rejectedSpaceForm;
+    assert(!parseOptions(spaceForm, rejectedSpaceForm),
+        "crawl_cli.d parseOptions accepted a NUL-byte-containing value (--flag value form)");
+
+    string[] equalsForm = ["--corpus-dir", "/tmp/c", "--seed=bad\0value"];
+    Options rejectedEqualsForm;
+    assert(!parseOptions(equalsForm, rejectedEqualsForm),
+        "crawl_cli.d parseOptions accepted a NUL-byte-containing value (--flag=value form)");
 }
 
 unittest {

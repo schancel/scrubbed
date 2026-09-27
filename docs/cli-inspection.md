@@ -4,7 +4,7 @@ These flags also work under the generated `run`/`clean` and `repair`/`fix`
 commands. See [cli-commands.md](cli-commands.md) for command syntax, help and
 shell completion.
 
-The existing no-verb CLI accepts three additive flags:
+The `run`/`clean`/`repair`/`fix` verbs accept three additive flags:
 
 - `--validate` checks the invocation, registered filters and their options, and
   input/output roots, then exits without visiting documents or creating output.
@@ -18,8 +18,8 @@ The existing no-verb CLI accepts three additive flags:
 For example:
 
 ```sh
-scrubbed --input ./incoming --output ./cleaned --config examples/inspection.json --validate
-scrubbed --input ./incoming --output ./cleaned --config examples/inspection.json --dry-run --explain
+scrubbed run --input ./incoming --output ./cleaned --config examples/inspection.json --validate
+scrubbed run --input ./incoming --output ./cleaned --config examples/inspection.json --dry-run --explain
 ```
 
 Records are tab-separated with fixed fields:

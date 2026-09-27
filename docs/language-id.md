@@ -9,11 +9,15 @@ Latin-script languages (English, Spanish, French, German, Portuguese,
 Italian, Dutch, Turkish, Vietnamese, Polish, Indonesian) plus six Brahmic-
 family languages (Hindi/Devanagari, Bengali, Tamil, Telugu, Gujarati,
 Punjabi/Gurmukhi) — seventeen languages total, a typed result/abstention
-value, and a revision-bound identity/wire idiom. It does **not** parse HTML,
-register a pipeline stage, expose CLI/config, or publish local/JSONL/
-durable/overlay output. `domain.language_id` is self-contained: nothing else
-in `source/` imports it, and the ordinary shipping binary has no
-language-id stage/CLI/config reachability. The parent issue #34 stays open
+value, and a revision-bound identity/wire idiom. This module itself does
+**not** parse HTML, expose a CLI subcommand/flag, or publish local/JSONL/
+durable/overlay output, and `domain.language_id` remains self-contained:
+nothing in `source/domain` or elsewhere imports it. Issue #311 added a thin,
+terminal v3 stage consumer, `effects.language_id_detect_stage`
+(`language-id-detect`), giving the ordinary shipping binary its first real
+reachability path via the existing generic `run --stage id=language-id-detect`
+composition mechanism — no dedicated subcommand, and no change to this
+module's own frozen API/algorithm/thresholds. The parent issue #34 stays open
 for a separately reviewed successor (`source/effects/language_overlay.d`,
 persisting via the existing C01 `OverlayWriter`), for any decision to route
 `domain.topical_tags`'s own caller-supplied `language` parameter from this
@@ -558,9 +562,13 @@ this slice took (Brahmic before the general front end). Not a guarantee
 that the excluded-neighbor mechanism achieves zero false-classification for
 languages outside the supported set — see "Excluded-neighbor abstention"
 above, including why that mechanism was not extended to the 6 new Brahmic
-languages. Not HTML parsing, a pipeline stage, CLI/config surface, or any
-local/JSONL/durable/overlay publication path; those are explicitly out of
-scope for this slice and belong to a separately groomed successor. Not a
+languages. Not HTML parsing, a dedicated CLI subcommand/flag, or any
+local/JSONL/durable/overlay publication path — those remain out of scope
+for this module. Issue #311's `language-id-detect` terminal stage (see
+"Status" above) gives the ordinary shipping binary a real, minimal
+`run --stage id=language-id-detect` reachability path — a pure consumer of
+this module's unmodified `buildLanguageIdentity`/`encodeLanguageIdentity`,
+not a change to this module itself or to its algorithm/thresholds. Not a
 change to `domain.topical_tags`'s existing `language` parameter — whether or
 how a later slice wires this module's output into that parameter is an
 explicitly deferred integration decision, not made here. Not a change to

@@ -46,7 +46,7 @@
 <main>
     <header>
         <h1>scrubbed</h1>
-        <p class="tagline">One local pipeline that turns raw scraped web pages into clean training/eval data: encoding repair, main-content extraction, PII scanning, dedup, and language ID — in a single pass per document, with no intermediate files.</p>
+        <p class="tagline">One native binary that turns raw scraped web pages into clean training/eval data — encoding repair, main-content extraction, and PII scanning in a single pass per document, plus dedup and language ID as separate stages on the same underlying pipeline. No interpreter, no intermediate files, no chain of separate tools.</p>
         <div class="links">
             <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source on GitHub</a>
             <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
@@ -56,7 +56,7 @@
 
     <h2>Why scrubbed</h2>
     <p>Most corpus-cleaning pipelines today are a chain of separate Python tools glued together with intermediate files: <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> to fix encodings, <a href="https://github.com/adbar/trafilatura" target="_blank" rel="noopener">trafilatura</a> to pull the article out of the page, langdetect to tag the language, Presidio to find PII, a separate dedup pass — each one its own interpreter startup, its own read/write of the whole document, its own copy of the string.</p>
-    <p>scrubbed replaces that chain with one native binary that does the whole pass per document in a single process: mojibake repair, HTML main-content extraction, PII scanning, language ID, dedup — zero-copy where the data allows it, real OS-thread parallelism across the whole corpus, no intermediate files between stages. Where a case is covered, it's built and verified to match the reference tool's output, not just approximate it — see the numbers below. Coverage is still growing (more encodings, more scripts, more languages), but the bar for anything shipped is drop-in correctness on what it claims to cover.</p>
+    <p>scrubbed replaces that chain with one native binary and one shared pipeline instead of five separate tools each with their own interpreter startup and intermediate files. <code>clean-web-document</code> bundles mojibake repair, HTML main-content extraction, and PII scanning into a single pass per document today; dedup and language ID run as separate stages on the same underlying machinery rather than in that same pass yet — see the usage examples below for exactly what's bundled versus separate right now. Where a case is covered, it's built and verified to match the reference tool's output, not just approximate it — see the numbers below. Coverage is still growing (more encodings, more scripts, more languages, more of the pipeline unified into one pass), but the bar for anything shipped is drop-in correctness on what it claims to cover.</p>
 
     <h2>Where this fits in a training pipeline</h2>
     <p>Building a corpus for pretraining or fine-tuning is usually four stages: <strong>collect</strong> raw pages, <strong>clean &amp; curate</strong> them into usable text, <strong>package</strong> the result into training-ready shards, then <strong>train</strong>. scrubbed's job is the middle stage &mdash; the part that's normally a chain of separate Python tools today.</p>
@@ -139,6 +139,16 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             <p>Matches trafilatura's gold answers on pages it parses; a known, ticketed parser gap explains the rest &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</p>
         </div>
     </div>
+
+    <h2>Speed</h2>
+    <div class="stats">
+        <div class="stat-card">
+            <span class="big">~25x</span>
+            <span class="label">vs. ftfy, whole-process wall time</span>
+            <p>On a 131,072-line (5.9MB) repetitive mojibake file: scrubbed 0.152&ndash;0.156s vs. ftfy 3.698&ndash;4.076s. Whole-process timing (includes startup), exact output verified every run, three interleaved samples per tool &mdash; one specific workload, not a general corpus-speed claim. Full methodology in <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/README.md" target="_blank" rel="noopener">benchmarks/README.md</a>.</p>
+        </div>
+    </div>
+    <p class="note">Deployment is one static binary with no interpreter or package chain to install (no <code>pip install lxml</code>/<code>cchardet</code>/etc.) &mdash; a real architectural difference, but not yet a separately isolated cold-start benchmark of its own; the number above is dominated by processing a large file, not an empty-input startup measurement.</p>
 
     <h2>Also shipped</h2>
     <ul>

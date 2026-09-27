@@ -2557,6 +2557,117 @@ private void requireCli(bool condition, string message) {
     if (!condition) throw new Exception("CLI inspection test: " ~ message);
 }
 
+private struct JsonlInvocation {
+    int code;
+    ubyte[] stdoutBytes;
+    string stderrText;
+}
+
+/// Drives the real `runApp` JSONL route (`--input -`/`--output -`) against
+/// actual OS-level stdin/stdout/stderr file descriptors -- `effects.stdio_stream`
+/// reads/writes those directly (`stdin.fileno`, `stdout.rawWrite`), so there
+/// is no injectable File handle to mock in this path. This redirects fd
+/// 0/1/2 to private pipes for the duration of the call, feeds `input` and
+/// drains stdout/stderr on background daemon threads concurrently with
+/// `runApp` running on its own thread, and restores the real fds before
+/// returning. Running the read/write/execute concurrently on real pipes
+/// (rather than e.g. an in-memory buffer swapped in ahead of time) means a
+/// payload larger than the OS pipe buffer cannot complete unless the
+/// implementation is genuinely streaming; a bounded wait below turns a
+/// full-buffering deadlock into a clear test failure instead of hanging the
+/// process.
+private JsonlInvocation invokeJsonl(string[] args, const(ubyte)[] input) {
+    import core.sync.semaphore : Semaphore;
+    import core.thread : Thread;
+    import core.time : seconds;
+    import core.sys.posix.unistd : dup, dup2, pipe, posixWrite = write;
+    import std.stdio : stdout;
+
+    int[2] inPipe, outPipe, errPipe;
+    enforce(pipe(inPipe) == 0, "failed to create JSONL test stdin pipe");
+    enforce(pipe(outPipe) == 0, "failed to create JSONL test stdout pipe");
+    enforce(pipe(errPipe) == 0, "failed to create JSONL test stderr pipe");
+
+    stdout.flush();
+    stderr.flush();
+    auto savedIn = dup(0);
+    auto savedOut = dup(1);
+    auto savedErr = dup(2);
+    enforce(savedIn >= 0 && savedOut >= 0 && savedErr >= 0,
+        "failed to save real stdio file descriptors");
+
+    dup2(inPipe[0], 0);
+    dup2(outPipe[1], 1);
+    dup2(errPipe[1], 2);
+    close(inPipe[0]);
+    close(outPipe[1]);
+    close(errPipe[1]);
+
+    ubyte[] capturedOut, capturedErr;
+    auto writer = new Thread({
+        auto remaining = input;
+        while (remaining.length) {
+            auto n = posixWrite(inPipe[1], remaining.ptr, remaining.length);
+            if (n <= 0) break;
+            remaining = remaining[cast(size_t) n .. $];
+        }
+        close(inPipe[1]);
+    });
+    auto outReader = new Thread({
+        ubyte[65536] buffer;
+        for (;;) {
+            auto n = posixRead(outPipe[0], buffer.ptr, buffer.length);
+            if (n <= 0) break;
+            capturedOut ~= buffer[0 .. cast(size_t) n];
+        }
+    });
+    auto errReader = new Thread({
+        ubyte[65536] buffer;
+        for (;;) {
+            auto n = posixRead(errPipe[0], buffer.ptr, buffer.length);
+            if (n <= 0) break;
+            capturedErr ~= buffer[0 .. cast(size_t) n];
+        }
+    });
+    writer.isDaemon = true;
+    outReader.isDaemon = true;
+    errReader.isDaemon = true;
+    writer.start();
+    outReader.start();
+    errReader.start();
+
+    int code;
+    Exception failure;
+    auto done = new Semaphore(0);
+    auto runner = new Thread({
+        try code = runApp(args);
+        catch (Exception error) failure = error;
+        done.notify();
+    });
+    runner.isDaemon = true;
+    runner.start();
+    auto completed = done.wait(30.seconds);
+
+    stdout.flush();
+    stderr.flush();
+    dup2(savedIn, 0);
+    dup2(savedOut, 1);
+    dup2(savedErr, 2);
+    close(savedIn);
+    close(savedOut);
+    close(savedErr);
+
+    if (!completed)
+        throw new Exception("JSONL invocation did not finish within 30s " ~
+            "(possible non-streaming/full-buffering deadlock)");
+    runner.join();
+    writer.join();
+    outReader.join();
+    errReader.join();
+    if (failure !is null) throw failure;
+    return JsonlInvocation(code, capturedOut, cast(string) capturedErr);
+}
+
 unittest {
     import std.file : rmdirRecurse, tempDir;
     import std.exception : assertThrown;
@@ -2813,4 +2924,243 @@ unittest {
     requireCli(explanationRecord(canceled[0], "out/queued.txt", "strip-control",
         "failure", "canceled after traversal error").canFind("status=failure"),
         "canceled path has a failure record");
+}
+
+// Issue #41 -- selected-field JSONL streaming mode (docs/jsonl-stream.md) has
+// no other coverage anywhere in the suite. These six tests drive the real
+// `runApp` JSONL route through `invokeJsonl` (real OS stdin/stdout, real
+// `--input -`/`--output -`, not a mock of the streaming adapter) and prove
+// this ticket's six acceptance criteria against that shipped behavior.
+
+unittest {
+    // 1) Stable IDs: a record's DocumentId is derived only from
+    // --dataset-namespace, --source-key and the record's 1-based physical
+    // line ordinal (docs/jsonl-stream.md), independent of transport path.
+    // Retrying with the same key and line positions must reproduce the same
+    // ID, and a different namespace must not.
+    string[] jsonlArgs(string namespace, string sourceKey) {
+        return ["scrubbed", "run", "--input", "-", "--output", "-",
+            "--jsonl-fields", "text", "--dataset-namespace", namespace,
+            "--source-key", sourceKey, "--max-jsonl-line-bytes", "4096",
+            "--max-jsonl-output-bytes", "8192"];
+    }
+    // Line 2 is malformed so the failure diagnostic reports its DocumentId
+    // on stderr without needing an --explain/dispatch plan.
+    auto input = cast(const(ubyte)[]) "{\"text\":\"ok\"}\n{not-json}\n";
+
+    auto first = invokeJsonl(jsonlArgs("corpus", "logical-source-001"), input);
+    auto second = invokeJsonl(jsonlArgs("corpus", "logical-source-001"), input);
+    requireCli(first.code == 1 && second.code == 1,
+        "malformed second line should fail both runs");
+    auto expectedId = DocumentId.from(
+        SourceLocator("corpus", "logical-source-001", "2")).text;
+    requireCli(first.stderrText.canFind(expectedId) &&
+        second.stderrText.canFind(expectedId),
+        "reported DocumentId did not match namespace+source-key+ordinal " ~
+        "derivation: " ~ first.stderrText);
+    requireCli(first.stderrText == second.stderrText,
+        "identical retry did not produce identical stable-ID diagnostics");
+    requireCli(first.code == second.code &&
+        first.stdoutBytes == second.stdoutBytes,
+        "identical retry produced different stdout/exit code");
+
+    auto differentNamespace = invokeJsonl(
+        jsonlArgs("other-corpus", "logical-source-001"), input);
+    requireCli(differentNamespace.code == 1 &&
+        !differentNamespace.stderrText.canFind(expectedId),
+        "DocumentId did not change with a different dataset namespace");
+}
+
+unittest {
+    // 2) Explicit JSON null is preserved (not dropped, not coerced to "").
+    // docs/jsonl-stream.md: "All other fields retain their parsed JSON
+    // semantic values ... including ... null" for anything not itself
+    // selected for text transform. A field that IS selected for transform is
+    // separately documented as "must be a JSON string when present"; confirm
+    // that's a loud, distinct invalidText failure rather than the null being
+    // silently coerced away.
+    import std.string : splitLines;
+
+    auto base = ["scrubbed", "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "corpus",
+        "--source-key", "nulls", "--max-jsonl-line-bytes", "4096",
+        "--max-jsonl-output-bytes", "8192"];
+
+    auto passthrough = invokeJsonl(base, cast(const(ubyte)[])
+        "{\"text\":\"hello\",\"note\":null,\"tags\":[1,null,\"x\"]}\n");
+    requireCli(passthrough.code == 0,
+        "explicit-null record should succeed: " ~ passthrough.stderrText);
+    auto lines = (cast(string) passthrough.stdoutBytes).splitLines();
+    requireCli(lines.length == 1, "expected exactly one output record");
+    auto parsed = parseJSON(lines[0]);
+    requireCli(parsed["note"].type == JSONType.null_,
+        "unselected null field was dropped or coerced");
+    requireCli(parsed["tags"].array[1].type == JSONType.null_,
+        "nested null array element was dropped or coerced");
+    requireCli(parsed["text"].str == "hello", "selected field unexpectedly changed");
+
+    auto selectedNull = invokeJsonl(base, cast(const(ubyte)[]) "{\"text\":null}\n");
+    requireCli(selectedNull.code == 1 && selectedNull.stdoutBytes.length == 0 &&
+        selectedNull.stderrText.canFind("invalidText"),
+        "null in a selected field was not rejected as documented: " ~
+        selectedNull.stderrText);
+}
+
+unittest {
+    // 3) Unicode round-trip: multi-byte UTF-8 (accented Latin, CJK, and an
+    // astral-plane emoji requiring a 4-byte UTF-8 sequence) in a selected
+    // field must come back byte-for-byte identical.
+    import std.string : splitLines;
+
+    auto original = "héllo wörld café résumé 日本語のテスト emoji😀🎉 中文测试";
+    auto args = ["scrubbed", "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "corpus",
+        "--source-key", "unicode", "--max-jsonl-line-bytes", "4096",
+        "--max-jsonl-output-bytes", "8192"];
+    auto record = JSONValue(["text": JSONValue(original)]);
+    auto line = record.toString() ~ "\n";
+    auto result = invokeJsonl(args, cast(const(ubyte)[]) line);
+    requireCli(result.code == 0, "unicode record should succeed: " ~ result.stderrText);
+    auto lines = (cast(string) result.stdoutBytes).splitLines();
+    requireCli(lines.length == 1, "expected exactly one output record");
+    auto parsed = parseJSON(lines[0]);
+    requireCli(parsed["text"].str == original,
+        "unicode content did not round-trip through JSON parsing");
+    requireCli(canFind(result.stdoutBytes, cast(const(ubyte)[]) original),
+        "unicode bytes were not preserved verbatim (byte-for-byte) in raw stdout");
+}
+
+unittest {
+    // 4) Schema-version field: --explain in v4/dispatch JSONL mode emits one
+    // bounded scrubbed.dispatch.v1 record per present selected field to
+    // stderr (docs/jsonl-stream.md), and its document_id follows the same
+    // namespace+source-key+ordinal derivation proven in criterion 1.
+    import std.algorithm.iteration : filter;
+    import std.string : splitLines;
+
+    string[] passDispatchTokens() {
+        auto tokens = [
+            "--dispatch-option", "detector-prefix-bytes=4096",
+            "--dispatch-option", "detector-evidence-records=16",
+            "--dispatch-option", "detector-warnings=8",
+            "--dispatch-option", "container-max-physical-bytes=33554432",
+            "--dispatch-option", "container-max-expanded-bytes=134217728",
+            "--dispatch-option", "container-max-entries=2048",
+            "--dispatch-option", "container-max-depth=2",
+            "--dispatch-option", "container-max-ratio=100",
+        ];
+        foreach (outcome; ["unknown", "plain-text", "html", "pdf", "png",
+                "jpeg", "gif", "ambiguous", "malformed", "encrypted",
+                "unsupported", "generic-zip", "ooxml-word"])
+            tokens ~= ["--action", outcome ~ "=" ~
+                (outcome == "plain-text" ? "pass" : "reject") ~ ":policy"];
+        tokens ~= "--common";
+        return tokens;
+    }
+
+    auto args = ["scrubbed", "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "corpus",
+        "--source-key", "explain-source", "--max-jsonl-line-bytes", "4096",
+        "--max-jsonl-output-bytes", "8192", "--explain"] ~ passDispatchTokens();
+    auto result = invokeJsonl(args, cast(const(ubyte)[]) "{\"text\":\"hello world\"}\n");
+    requireCli(result.code == 0,
+        "explain dispatch run should succeed: " ~ result.stderrText);
+
+    auto explainLines = result.stderrText.splitLines()
+        .filter!(l => l.startsWith("EXPLAIN\t")).array;
+    requireCli(explainLines.length == 1,
+        "expected exactly one bounded dispatch record for the single " ~
+        "present selected field: " ~ result.stderrText);
+    auto record = parseJSON(explainLines[0]["EXPLAIN\t".length .. $]);
+    requireCli(record["schema"].str == "scrubbed.dispatch.v1",
+        "schema-version field missing or incorrect: " ~ explainLines[0]);
+    auto expectedId = DocumentId.from(
+        SourceLocator("corpus", "explain-source", "1")).text;
+    requireCli(record["document_id"].str == expectedId,
+        "explain record document_id did not match stable-ID derivation");
+}
+
+unittest {
+    // 5) Round-trip through a real pinned reader: parse real output from the
+    // built binary with Python's stdlib json module, one json.loads() call
+    // per line, matching this repo's uv-pinned-Python-tooling convention.
+    import std.process : execute;
+    import std.file : tempDir, remove;
+    import std.string : splitLines;
+
+    auto pythonAvailable = execute(["python3", "--version"]);
+    requireCli(pythonAvailable.status == 0,
+        "python3 must be on PATH for the pinned-reader proof");
+
+    auto args = ["scrubbed", "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "corpus",
+        "--source-key", "python-roundtrip", "--max-jsonl-line-bytes", "4096",
+        "--max-jsonl-output-bytes", "8192"];
+    auto input =
+        "{\"text\":\"plain\",\"n\":18446744073709551615,\"note\":null}\n" ~
+        "{\"text\":\"日本語 emoji😀\",\"tags\":[1,null,true]}\n";
+    auto result = invokeJsonl(args, cast(const(ubyte)[]) input);
+    requireCli(result.code == 0,
+        "python round-trip fixture should succeed: " ~ result.stderrText);
+    requireCli((cast(string) result.stdoutBytes).splitLines().length == 2,
+        "expected exactly two output records");
+
+    auto outPath = buildPath(tempDir,
+        "scrubbed-jsonl-py-" ~ randomUUID.toString ~ ".jsonl");
+    write(outPath, result.stdoutBytes);
+    scope(exit) if (exists(outPath)) remove(outPath);
+
+    auto script = "import json, sys\n" ~
+        "path = sys.argv[1]\n" ~
+        "with open(path, \"r\", encoding=\"utf-8\") as handle:\n" ~
+        "    lines = [line for line in handle.read().split(\"\\n\") if line]\n" ~
+        "assert len(lines) == 2, f\"expected 2 lines, got {len(lines)}\"\n" ~
+        "first = json.loads(lines[0])\n" ~
+        "second = json.loads(lines[1])\n" ~
+        "assert first[\"text\"] == \"plain\"\n" ~
+        "assert first[\"n\"] == 18446744073709551615\n" ~
+        "assert first[\"note\"] is None\n" ~
+        "assert second[\"text\"] == \"日本語 emoji😀\"\n" ~
+        "assert second[\"tags\"] == [1, None, True]\n" ~
+        "print(\"python round-trip: ok\")\n";
+    auto pythonResult = execute(["python3", "-c", script, outPath]);
+    requireCli(pythonResult.status == 0 &&
+        pythonResult.output.canFind("python round-trip: ok"),
+        "python json.loads round-trip failed: " ~ pythonResult.output);
+}
+
+unittest {
+    // 6) Streaming memory-boundedness: a large-N synthetic input, driven
+    // through an OS pipe far smaller than the total payload, must complete
+    // (invokeJsonl's bounded wait turns a full-buffering deadlock into a
+    // failure rather than hanging); and a single record's raw bytes are
+    // genuinely capped by --max-jsonl-line-bytes, not just the aggregate.
+    import std.array : appender, replicate;
+    import std.string : splitLines;
+
+    auto args = ["scrubbed", "run", "--input", "-", "--output", "-",
+        "--jsonl-fields", "text", "--dataset-namespace", "corpus",
+        "--source-key", "large-n", "--max-jsonl-line-bytes", "256",
+        "--max-jsonl-output-bytes", "512"];
+    enum recordCount = 20_000;
+    auto input = appender!string;
+    foreach (i; 0 .. recordCount)
+        input.put("{\"text\":\"record-" ~ i.to!string ~ "\"}\n");
+    requireCli(input.data.length > 256 * 1024,
+        "synthetic input must exceed a typical OS pipe buffer to prove streaming");
+
+    auto result = invokeJsonl(args, cast(const(ubyte)[]) input.data);
+    requireCli(result.code == 0, "large-N stream should succeed: " ~ result.stderrText);
+    requireCli((cast(string) result.stdoutBytes).splitLines().length == recordCount,
+        "large-N stream lost or duplicated records");
+    requireCli(result.stderrText.canFind(recordCount.to!string ~ " records processed"),
+        "large-N stream completion count mismatch: " ~ result.stderrText);
+
+    auto oversizedText = replicate("x", 300);
+    auto capped = invokeJsonl(args, cast(const(ubyte)[])
+        ("{\"text\":\"" ~ oversizedText ~ "\"}\n"));
+    requireCli(capped.code == 1 && capped.stdoutBytes.length == 0 &&
+        capped.stderrText.canFind("inputLimit"),
+        "oversized record was not rejected by the per-record byte cap: " ~
+        capped.stderrText);
 }

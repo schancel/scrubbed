@@ -1,20 +1,20 @@
 # Rich HTML-to-Markdown behavior baseline
 
-This document records the current `HtmlTree` to Markdown behavior. It is an
+This document records the current `HtmlTree`-to-Markdown behavior. It is an
 evidence slice, not a proposed rich-Markdown format. The converter, parser,
 main-content boundary, caps, and emitted Markdown bytes are unchanged.
 
 The authored fixtures are deliberately Wikipedia-like and ordinary-page
-examples rather than downloaded pages. Their exact `.md` files pin the output
-without importing third-party page content:
+examples rather than downloaded pages, so their exact `.md` files pin the
+output without importing third-party page content:
 
 - `wikipedia-like.html` covers an infobox, merged-cell metadata, a figure,
   image attributes, internal IDs/fragments, citation-like markup, a hatnote,
   navigation-like content, and image-fallback mathematics.
 - `ordinary-page.html` covers an aside-like notice, figure, rectangular and
   non-rectangular rows, internal fragments, and unsafe link/image targets.
-- `malformed.html` records the parser-repaired table and unclosed caption/box
-  result.
+- `malformed.html` records the parser-repaired table and unclosed
+  caption/box result.
 - `mathml.html` and `oversized-depth.html` pin typed parser abstentions.
 
 ## Current gap matrix
@@ -39,20 +39,22 @@ future representation.
 
 ## Evidence
 
-The optimized checker compares all three successful conversions byte for byte,
-renders each twice, and asserts the expected typed failures for MathML and
-excessive nesting. It additionally checks:
+The optimized checker compares all three successful conversions byte for
+byte, renders each twice, and asserts the expected typed failures for
+MathML and excessive nesting. It additionally checks:
 
 - unsafe `javascript:` and `data:` destinations remain inert while visible
   link labels and image alt text survive;
 - the authored exact outputs contain no unrecorded/invented prose;
 - caller input can be overwritten after parsing without changing the owned
   tree's output;
-- raw-input cap+1 and escaped-output cap+1 fail without partial Markdown; and
-- rich attributes and box/ID roles remain absent rather than silently gaining
-  semantics.
+- raw-input cap+1 and escaped-output cap+1 fail without partial Markdown;
+  and
+- rich attributes and box/ID roles remain absent rather than silently
+  gaining semantics.
 
-Run it from the repository root after DUB has built the native Lexbor library:
+Run it from the repository root after DUB has built the native Lexbor
+library:
 
 ```sh
 ldc2 -O3 -release -Isource \
@@ -66,38 +68,38 @@ ldc2 -O3 -release -Isource \
 
 ## Decisions still owned by @schancel
 
-The evidence does not select among these representation and fallback choices.
-Before production work, the owner should answer each question with exact
-emitted syntax and bounds:
+The evidence does not select among these representation and fallback
+choices. Before production work, the owner should answer each question with
+exact emitted syntax and bounds:
 
 1. For a rectangular table, should output use a GFM pipe table, bounded raw
    HTML, or the existing linear row form? What is the exact fallback when a
    cell contains blocks, a row is ragged, or row/column/cell counts exceed
    their bounds?
 2. For `rowspan`/`colspan`, should a bounded raw HTML table preserve the
-   spans, should cells be expanded/duplicated into a grid, or should the table
-   explicitly fall back to linear rows? Which malformed span values force
-   abstention rather than repair?
+   spans, should cells be expanded/duplicated into a grid, or should the
+   table explicitly fall back to linear rows? Which malformed span values
+   force abstention rather than repair?
 3. Which structural and attribute evidence makes an infobox/aside/callout
    content rather than chrome? What exact representation identifies a kept
    box, and does ambiguous or over-bound content unwrap, disappear, or cause
    the containing document to abstain?
-4. Should bounded MathML be emitted as raw `<math>`, translated to a selected
-   math syntax, reduced to authored alternative text, or cause a typed
-   abstention? Define inline/display handling plus byte, depth, node, and
-   attribute bounds and the exact over-bound fallback.
+4. Should bounded MathML be emitted as raw `<math>`, translated to a
+   selected math syntax, reduced to authored alternative text, or cause a
+   typed abstention? Define inline/display handling plus byte, depth, node,
+   and attribute bounds and the exact over-bound fallback.
 5. Should a figure use ordinary image Markdown plus a separately marked
    caption, bounded raw `<figure>`, or another exact syntax? Where do width,
    height, selected source/`srcset`, title, original URL, and capture
    provenance live, and which are omitted when untrusted or over-bound?
-6. Should source IDs become raw `<a id="...">` anchors, an explicitly chosen
-   Markdown attribute syntax, or a deterministic rewritten identifier? How
-   are collisions and unsafe IDs handled, and must local fragment links be
-   rewritten or dropped when their target is absent?
+6. Should source IDs become raw `<a id="...">` anchors, an explicitly
+   chosen Markdown attribute syntax, or a deterministic rewritten
+   identifier? How are collisions and unsafe IDs handled, and must local
+   fragment links be rewritten or dropped when their target is absent?
 7. Do citation-like source/target pairs become a selected footnote syntax,
-   remain ordinary links and anchors, or retain bounded HTML? What happens to
-   duplicate labels, missing targets, backlinks, nested markup, and citations
-   beyond the configured bound?
+   remain ordinary links and anchors, or retain bounded HTML? What happens
+   to duplicate labels, missing targets, backlinks, nested markup, and
+   citations beyond the configured bound?
 
 Rollback for this slice is deletion of this document, the checker, and the
 `fixtures/rich` directory. No production compatibility or migration promise

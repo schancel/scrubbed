@@ -1,34 +1,51 @@
 # URL discovery value seam
 
 `effects.web_url` owns the additive `web-url:v1` identity used by later
-discovery and deduplication work. It accepts a caller-supplied HTTP(S) response
-URL, an optional document base, and one selected reference. Resolution and
-serialization use the repository's pinned Lexbor implementation; all returned
-strings are copied into D-owned storage before native memory is released.
+discovery and deduplication work. It accepts a caller-supplied HTTP(S)
+response URL, an optional document base, and one selected reference.
+Resolution and serialization use the repository's pinned Lexbor
+implementation; all returned strings are copied into D-owned storage before
+native memory is released.
 
-The fetch identity is the canonical absolute URL without a fragment. Default
-ports are absent, host case, paths, IPv4/IPv6, and IDNA follow pinned Lexbor
-serialization, and query bytes retain their parsed order and duplicates. The
-separate fragment field distinguishes no fragment from an empty fragment.
-`sameOrigin` compares the complete canonical scheme/host/effective-port origin.
-It does not approximate same-site.
+## Identity and canonicalization
 
-Every input and serialized URL is capped at 4096 bytes. Invalid UTF-8, Lexbor
-validation errors, credentials, non-HTTP(S) schemes, native failures, and
-oversized results produce only typed, content-free failures. Discovery evidence
-contains the canonical response referrer, typed relation and attribute kinds,
-DOM node ordinal, depth, and a lower-case SHA-256 digest of the raw attribute
-value. It never retains that raw value.
+- The fetch identity is the canonical absolute URL without a fragment.
+- Default ports are absent; host case, paths, IPv4/IPv6, and IDNA follow
+  pinned Lexbor serialization; query bytes retain their parsed order and
+  duplicates.
+- The separate fragment field distinguishes no fragment from an empty
+  fragment.
+- `sameOrigin` compares the complete canonical scheme/host/effective-port
+  origin. It does not approximate same-site.
+
+## Bounds and failures
+
+- Every input and serialized URL is capped at 4096 bytes.
+- Invalid UTF-8, Lexbor validation errors, credentials, non-HTTP(S) schemes,
+  native failures, and oversized results produce only typed, content-free
+  failures.
+- Discovery evidence contains the canonical response referrer, typed
+  relation and attribute kinds, DOM node ordinal, depth, and a lower-case
+  SHA-256 digest of the raw attribute value. It never retains that raw
+  value.
+
+## Non-goals
 
 This seam does not walk HTML, parse `srcset`, decide allowed domains or
 one-hop admission, classify same-site, remove tracking parameters, normalize
-query semantics, implement calendar/query traps, fetch content, or claim that
-two query strings identify the same content. The known successor is #237,
-whose persistence and deduplication must key the versioned canonical identity
-rather than an unversioned display URL. No generic URI/plugin abstraction or
-public-suffix database is introduced.
+query semantics, implement calendar/query traps, fetch content, or claim
+that two query strings identify the same content. No generic URI/plugin
+abstraction or public-suffix database is introduced.
 
-Build project dependencies, then compile and run the release-active checker:
+## Successor
+
+`domain.url_frontier` (issue #237; see [docs/url-frontier.md](url-frontier.md))
+is the successor that admits and deduplicates this identity: it keys work by
+the versioned canonical locator this module produces, not by an unversioned
+display URL. Durable persistence of that identity is a separate backend
+layer (see [docs/frontier-contract.md](frontier-contract.md)).
+
+## Running the checker
 
 ```sh
 dub build --compiler=ldc2 --build=release

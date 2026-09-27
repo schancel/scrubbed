@@ -4,6 +4,16 @@
 quality: a feature overlay and a policy-decision overlay. Both are opt-in —
 no CLI command exists yet.
 
+**Not the same mechanism as `docs/quality-ratios-annotate.md` (issue #347).**
+That is a separate, unrelated v3 pipeline stage
+(`quality-ratios-annotate`, the direct sibling of #168's
+`compressibility-annotate`) that writes a `#285` `StageDocument.metadata`
+extension field with Gopher/C4-style deterministic heuristic ratios
+(word count, symbol-to-word ratios, stop-word presence, multi-scale
+repetition fractions). It does not use this document's C01 overlay
+publish/replay lifecycle at all — see that document's own "Relationship to
+`docs/quality-annotations.md`" section for why the two stay separate.
+
 ## Usage
 
 1. `publishMeasurements(shard, featureOverlay)` — measure every document

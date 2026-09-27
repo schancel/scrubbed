@@ -16,13 +16,18 @@ import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WNOHANG, WTERMSIG,
 import core.sys.posix.unistd : _exit, dup2, execvp, fork, setpgid;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds;
+import experiments.html_main_content.token_overlap : containsNormalized,
+    mergeTokenCounts, normalized, scoreTokenOverlap, tokenCounts;
+import std.algorithm.iteration : map;
 import std.algorithm.searching : canFind, endsWith, startsWith;
+import std.array : array;
 import std.conv : to;
 import std.digest : toHexString;
 import std.digest.sha : sha256Of;
 import std.file : copy, exists, mkdirRecurse, read, readText, remove,
     rmdirRecurse, tempDir, write;
-import std.json : JSONValue;
+import std.format : format;
+import std.json : JSONValue, parseJSON;
 import std.path : buildPath, dirName, dirSeparator, relativePath;
 import std.process : execute;
 import std.stdio : File, stderr, writeln;
@@ -277,6 +282,26 @@ private JSONValue publicCommand(string[] command, string scrubbedPath,
     return JSONValue(safe);
 }
 
+// Generic version of publicCommand() above for cases with more than two
+// private executables/paths to redact (the mojibake/scrubbed-vs-ftfy case
+// above keeps using its own original publicCommand() unchanged). Any
+// argument exactly matching a key in `exactReplacements` becomes that key's
+// replacement string; any argument prefixed with `root` becomes
+// "<fixture-root>/..."; everything else (flag names, literal shell script
+// text) publishes unchanged.
+private JSONValue publicCommandGeneric(string[] command,
+                                       const string[string] exactReplacements,
+                                       string root) {
+    JSONValue[] safe;
+    foreach (arg; command) {
+        if (auto replacement = arg in exactReplacements) safe ~= JSONValue(*replacement);
+        else if (arg.startsWith(root ~ dirSeparator))
+            safe ~= JSONValue("<fixture-root>/" ~ relativePath(arg, root));
+        else safe ~= JSONValue(arg);
+    }
+    return JSONValue(safe);
+}
+
 // ---- The migrated ftfy/mojibake case. Fixture and independently authored
 // expectation bytes are generated deterministically (no third-party bytes
 // are redistributed) and pinned by SHA-256 in source, exactly as
@@ -378,6 +403,302 @@ private JSONValue compareFtfyMojibake(string scrubbedBinary, string ftfyBinary,
     return result;
 }
 
+// ---- The main-content/scrubbed-vs-trafilatura case (issue #229's next-slice
+// contract). Unlike the mojibake case above, correctness here is scored by
+// precision/recall against held-out real-page ground truth (issue #26's own
+// word-level tokenized-overlap metric and its own pinned 20-URL trafilatura
+// held-out corpus, reused via `fetch_held_out.sh --emit-corpus-dir`, not a
+// second parallel implementation), not exact-byte equality. Precision/recall
+// are REPORTED, not gated; what still fails closed is corpus-acquisition
+// failure, either tool's own resource/timeout/genuine-failure bound, or a
+// non-reproducible output between a tool's own two timed samples. ----
+
+private enum expectedHeldOutFixtureCount = 20;
+
+// `scrubbed run --input <dir>` (the generic `--stage id=IMPLEMENTATION`
+// composition-token path; `extract --format` is hardcoded to two other
+// stage names and cannot reach `html-main-content`) treats every file under
+// its input directory as a document to process, so the held-out corpus's own
+// `gold.json` must never sit inside the directory passed as --input. This
+// copies out just the resolved fixtures' HTML into a clean directory first.
+private string[] materializeHtmlOnlyCorpus(string corpusDir, string htmlInputDir,
+                                           const JSONValue[] goldFixtures) {
+    mkdirRecurse(htmlInputDir);
+    string[] htmlFiles;
+    foreach (fixture; goldFixtures) {
+        auto name = fixture["htmlFile"].str;
+        copy(buildPath(corpusDir, name), buildPath(htmlInputDir, name));
+        htmlFiles ~= name;
+    }
+    return htmlFiles;
+}
+
+// Combines the existence and content of a fixed, ordered file list into one
+// SHA-256 signature, so two independent full-corpus runs of the same tool
+// can be compared for byte-identical reproducibility without a recursive
+// directory diff. A file that does not exist (an abstention, or trafilatura
+// declining to extract anything) is folded into the signature as a distinct
+// "missing" marker rather than being skipped, so a run that silently drops a
+// fixture cannot appear identical to one that legitimately abstained on it.
+private string directorySignature(string dir, const string[] filenames) {
+    string combined;
+    foreach (name; filenames) {
+        auto path = buildPath(dir, name);
+        combined ~= exists(path) ? "F:" ~ digest(path) ~ "\n" : "M\n";
+    }
+    return toHexString(sha256Of(cast(const(ubyte)[]) combined)).to!string;
+}
+
+private string outputTextOrEmpty(string path) {
+    return exists(path) ? readText(path) : "";
+}
+
+private struct FixtureScoreEntry {
+    bool produced;
+    double precision = 0.0;
+    double recall = 0.0;
+    size_t withoutLeaks;
+}
+
+// Scores one tool's output for one fixture against that fixture's gold
+// "with"/"without" probe phrases, reusing issue #26's own token_overlap
+// module (the same normalized()/tokenCounts()/scoreTokenOverlap() used by
+// fetch_held_out.sh's own driver) rather than a second implementation of the
+// metric. An empty (or missing) output file is treated as an abstention:
+// both tools' shell/CLI wrappers always create their declared output path,
+// but leave it empty when nothing was extracted.
+private FixtureScoreEntry scoreOneFixture(string outputText, JSONValue goldFixture) {
+    FixtureScoreEntry result;
+    if (outputText.length == 0) return result;
+    result.produced = true;
+    auto folded = normalized(outputText);
+    auto extractedTokens = tokenCounts(folded);
+    int[string] goldTokens;
+    foreach (chunk; goldFixture["with"].array)
+        mergeTokenCounts(goldTokens, tokenCounts(normalized(chunk.str)));
+    auto overlap = scoreTokenOverlap(extractedTokens, goldTokens);
+    result.precision = overlap.precision;
+    result.recall = overlap.recall;
+    foreach (chunk; goldFixture["without"].array)
+        if (containsNormalized(folded, chunk.str)) ++result.withoutLeaks;
+    return result;
+}
+
+private struct ToolScoreSummary {
+    size_t extractedCount;
+    size_t abstainedCount;
+    double meanPrecision = 0.0;
+    double meanRecall = 0.0;
+    size_t withoutLeakTotal;
+    FixtureScoreEntry[] perFixture;
+}
+
+// Precision/recall are computed once per tool -- from a single canonical
+// output directory, proven interchangeable with that tool's other timed
+// sample by the reproducibility check above -- never recomputed per sample.
+private ToolScoreSummary scoreToolAgainstGold(const string[] outputPaths,
+                                              const JSONValue[] goldFixtures) {
+    require(outputPaths.length == goldFixtures.length,
+        "output path count must match gold fixture count");
+    ToolScoreSummary summary;
+    double precisionSum = 0, recallSum = 0;
+    foreach (i, fixture; goldFixtures) {
+        auto scored = scoreOneFixture(outputTextOrEmpty(outputPaths[i]), fixture);
+        summary.perFixture ~= scored;
+        if (scored.produced) {
+            ++summary.extractedCount;
+            precisionSum += scored.precision;
+            recallSum += scored.recall;
+            summary.withoutLeakTotal += scored.withoutLeaks;
+        } else ++summary.abstainedCount;
+    }
+    summary.meanPrecision = summary.extractedCount ? precisionSum / summary.extractedCount : 0.0;
+    summary.meanRecall = summary.extractedCount ? recallSum / summary.extractedCount : 0.0;
+    return summary;
+}
+
+private JSONValue toolSummaryJson(const ref ToolScoreSummary summary) {
+    return JSONValue([
+        "extractedCount": JSONValue(summary.extractedCount),
+        "abstainedCount": JSONValue(summary.abstainedCount),
+        "meanPrecision": JSONValue(summary.meanPrecision),
+        "meanRecall": JSONValue(summary.meanRecall),
+        "withoutLeakTotal": JSONValue(summary.withoutLeakTotal),
+    ]);
+}
+
+private JSONValue fixtureEntryJson(const ref FixtureScoreEntry entry) {
+    if (!entry.produced) return JSONValue(["status": JSONValue("abstained")]);
+    return JSONValue([
+        "status": JSONValue("produced"),
+        "precision": JSONValue(entry.precision),
+        "recall": JSONValue(entry.recall),
+        "withoutLeaks": JSONValue(entry.withoutLeaks),
+    ]);
+}
+
+// One shell-loop sample = one full pass over all held-out fixtures, wrapping
+// single-file invocations (the fallback shape the accepted contract names
+// for when trafilatura's batch-directory convention doesn't hold for the
+// pinned version -- confirmed necessary here: `trafilatura --input-dir
+// --output-dir --keep-dirs` on the pinned 2.2.0 silently drops every file in
+// this version's own CLI, a real, verified upstream bug, not an assumption;
+// see this ticket's handoff for the captured `--help` output and the exact
+// verification). Each fixture is fed on trafilatura's stdin and its
+// extracted text captured from trafilatura's stdout to its own output file
+// -- the one single-file invocation shape this pinned version actually
+// supports (`-i`/`--input-file` is batch URL-list mode, not single-file HTML
+// extraction). `/usr/bin/time` (added by the caller via runBoundedSample)
+// wraps this whole shell process, so one timed sample still times one full
+// pass over every fixture, matching the mojibake case's own methodology.
+private string trafilaturaBatchScript() {
+    return "traf=\"$1\"; outdir=\"$2\"; shift 2; status=0; " ~
+        "for f in \"$@\"; do base=$(basename \"$f\"); " ~
+        "\"$traf\" --output-format txt < \"$f\" > \"$outdir/${base%.html}.txt\" " ~
+        "|| status=$?; done; exit \"$status\"";
+}
+
+private JSONValue compareMainContentTrafilatura(string scrubbedBinary,
+        string trafilaturaBinary, string pythonBinary, string root,
+        bool darwin, double timeoutSeconds, long maxRssBytes) {
+    auto scrubbedSnapshot = snapshotExecutable(scrubbedBinary, root, "scrubbed-mc-snapshot");
+    auto trafilaturaSnapshot = snapshotExecutable(trafilaturaBinary, root, "trafilatura-snapshot");
+
+    auto acquisitionOrder = verifyPinnedPackages(
+        checked(["uv", "pip", "freeze", "--python", pythonBinary]),
+        [PinnedPackage("trafilatura", "2.2.0")]);
+
+    auto trafilaturaVersion = checked([trafilaturaSnapshot.path, "--version"]);
+    require(trafilaturaVersion.startsWith("Trafilatura "),
+        "trafilatura CLI version was not discoverable via --version: " ~ trafilaturaVersion);
+
+    // Corpus acquisition: reuses issue #26's own pinned held-out corpus and
+    // scoring module unmodified via the additive `--emit-corpus-dir` flag.
+    // A nonzero exit here (network failure, resolution failure, a checked-
+    // out commit that doesn't match the pin) fails the whole case closed.
+    auto corpusDir = buildPath(root, "held-out-corpus");
+    auto heldOutReportPath = buildPath(root, "held-out-report.json");
+    checked(["experiments/html_main_content/fetch_held_out.sh",
+        "--emit-corpus-dir", corpusDir, heldOutReportPath]);
+
+    auto gold = parseJSON(readText(buildPath(corpusDir, "gold.json")));
+    auto goldFixtures = gold["fixtures"].array;
+    require(goldFixtures.length == expectedHeldOutFixtureCount,
+        "held-out corpus did not resolve all " ~
+        expectedHeldOutFixtureCount.to!string ~ " pinned fixtures: got " ~
+        goldFixtures.length.to!string);
+
+    auto htmlInputDir = buildPath(root, "held-out-html-only");
+    auto htmlFiles = materializeHtmlOnlyCorpus(corpusDir, htmlInputDir, goldFixtures);
+    string[] scrubbedOutputNames = htmlFiles; // scrubbed mirrors the input file name exactly.
+    string[] trafilaturaOutputNames;
+    foreach (name; htmlFiles) trafilaturaOutputNames ~= name[0 .. $ - 5] ~ ".txt"; // strip ".html"
+    auto trafilaturaInputPaths = htmlFiles.map!(name => buildPath(htmlInputDir, name)).array;
+
+    JSONValue[] samples;
+    string[2] scrubbedOutputDirs, trafilaturaOutputDirs;
+    size_t scrubbedSampleIndex, trafilaturaSampleIndex;
+    string[] scrubbedCommand, trafilaturaCommand;
+
+    foreach (index; 0 .. 4) {
+        bool useScrubbed = index % 2 == 0;
+        auto tool = useScrubbed ? "scrubbed" : "trafilatura";
+        JSONValue sample;
+        if (useScrubbed) {
+            auto outDir = buildPath(root, "scrubbed-out-" ~ index.to!string);
+            scrubbedCommand = [scrubbedSnapshot.path, "--input", htmlInputDir,
+                "--output", outDir, "--stage", "content=html-main-content",
+                "--threads", "1"];
+            sample = runBoundedSample(scrubbedCommand, darwin, timeoutSeconds);
+            auto status = sample["status"].integer;
+            // `scrubbed run`'s process exit code is 1 whenever ANY input is
+            // quarantined, which conflates a genuine per-file crash with an
+            // entirely expected, already-documented content-driven
+            // abstention (this real corpus reproducibly abstains on some
+            // fixtures -- see docs/html-main-content.md). Status 0 or 1 are
+            // both a clean invocation; anything else (a bad-argument exit, a
+            // signal-terminated crash) is not. The reproducibility check
+            // below is what actually catches a genuine nondeterministic
+            // failure: unlike content-driven abstention, a real crash/race
+            // would not reliably reproduce byte-identical output twice.
+            require(status == 0 || status == 1,
+                "scrubbed exited with a status that is neither a clean run nor an " ~
+                "expected content-driven quarantine: " ~ status.to!string);
+            scrubbedOutputDirs[scrubbedSampleIndex++] = outDir;
+        } else {
+            auto outDir = buildPath(root, "trafilatura-out-" ~ index.to!string);
+            mkdirRecurse(outDir);
+            trafilaturaCommand = ["/bin/sh", "-c", trafilaturaBatchScript(), "sh",
+                trafilaturaSnapshot.path, outDir] ~ trafilaturaInputPaths;
+            sample = runBoundedSample(trafilaturaCommand, darwin, timeoutSeconds);
+            require(sample["status"].integer == 0,
+                "trafilatura batch invocation exited nonzero: " ~
+                sample["status"].integer.to!string);
+            trafilaturaOutputDirs[trafilaturaSampleIndex++] = outDir;
+        }
+        auto peakRss = sample["peak_rss_bytes"].integer;
+        require(peakRss <= maxRssBytes,
+            tool ~ " exceeded the declared resource bound: " ~ peakRss.to!string ~
+            " > " ~ maxRssBytes.to!string ~ " bytes");
+        sample["tool"] = tool;
+        samples ~= sample;
+    }
+    verifySnapshot(scrubbedSnapshot);
+    verifySnapshot(trafilaturaSnapshot);
+    require(samples.length == 4 && samples[0]["tool"].str == "scrubbed" &&
+        samples[1]["tool"].str == "trafilatura" && samples[2]["tool"].str == "scrubbed" &&
+        samples[3]["tool"].str == "trafilatura",
+        "main-content comparator lost its A/B/A/B interleave order");
+
+    auto scrubbedSignatureA = directorySignature(scrubbedOutputDirs[0], scrubbedOutputNames);
+    auto scrubbedSignatureB = directorySignature(scrubbedOutputDirs[1], scrubbedOutputNames);
+    require(scrubbedSignatureA == scrubbedSignatureB,
+        "scrubbed produced non-reproducible output between its own two timed samples");
+    auto trafilaturaSignatureA = directorySignature(trafilaturaOutputDirs[0], trafilaturaOutputNames);
+    auto trafilaturaSignatureB = directorySignature(trafilaturaOutputDirs[1], trafilaturaOutputNames);
+    require(trafilaturaSignatureA == trafilaturaSignatureB,
+        "trafilatura produced non-reproducible output between its own two timed samples");
+
+    string[] scrubbedOutputPaths, trafilaturaOutputPaths;
+    foreach (name; scrubbedOutputNames) scrubbedOutputPaths ~= buildPath(scrubbedOutputDirs[0], name);
+    foreach (name; trafilaturaOutputNames) trafilaturaOutputPaths ~= buildPath(trafilaturaOutputDirs[0], name);
+    auto scrubbedScore = scoreToolAgainstGold(scrubbedOutputPaths, goldFixtures);
+    auto trafilaturaScore = scoreToolAgainstGold(trafilaturaOutputPaths, goldFixtures);
+
+    JSONValue[] combinedFixtures;
+    foreach (i; 0 .. goldFixtures.length) {
+        JSONValue entry = JSONValue(["id": JSONValue(format("%02d", i + 1))]);
+        entry["scrubbed"] = fixtureEntryJson(scrubbedScore.perFixture[i]);
+        entry["trafilatura"] = fixtureEntryJson(trafilaturaScore.perFixture[i]);
+        combinedFixtures ~= entry;
+    }
+    JSONValue scoring = JSONValue(["gold_fixture_count": JSONValue(goldFixtures.length)]);
+    scoring["scrubbed"] = toolSummaryJson(scrubbedScore);
+    scoring["trafilatura"] = toolSummaryJson(trafilaturaScore);
+    scoring["fixtures"] = JSONValue(combinedFixtures);
+
+    JSONValue result = JSONValue(["name": JSONValue("main-content/scrubbed-vs-trafilatura")]);
+    result["scrubbed_binary_sha256"] = scrubbedSnapshot.sha256;
+    result["trafilatura_binary_sha256"] = trafilaturaSnapshot.sha256;
+    result["trafilatura_version"] = trafilaturaVersion;
+    result["held_out_corpus_commit"] = gold["trafilaturaCommit"].str;
+    result["held_out_fixture_count"] = goldFixtures.length;
+    result["python_packages_acquisition_order"] = acquisitionOrder;
+    result["scrubbed_command"] = publicCommandGeneric(scrubbedCommand,
+        [scrubbedSnapshot.path: "<scrubbed-binary>"], root);
+    result["trafilatura_command"] = publicCommandGeneric(trafilaturaCommand,
+        [trafilaturaSnapshot.path: "<trafilatura-cli>"], root);
+    result["timeout_seconds"] = timeoutSeconds;
+    result["max_rss_bytes"] = maxRssBytes;
+    result["samples"] = JSONValue(samples);
+    result["reproducibility"] = JSONValue([
+        "scrubbed": JSONValue(true),
+        "trafilatura": JSONValue(true),
+    ]);
+    result["scoring"] = scoring;
+    return result;
+}
+
 // ---- Report assembly: fails closed on a duplicate declared case name or a
 // required case that never produced a result. ----
 
@@ -429,8 +750,9 @@ int main(string[] args) {
             selfTest();
             return 0;
         }
-        if (args.length != 3)
-            throw new Exception("usage: external_comparator SCRUBBED_BINARY FTFY_BINARY");
+        if (args.length != 4)
+            throw new Exception(
+                "usage: external_comparator SCRUBBED_BINARY FTFY_BINARY TRAFILATURA_BINARY");
         auto os = checked(["uname", "-s"]);
         bool darwin = os == "Darwin";
         require(darwin || os == "Linux", "BSD/GNU time only");
@@ -439,10 +761,14 @@ int main(string[] args) {
         scope(exit) rmdirRecurse(root);
         auto python = buildPath(dirName(args[2]), "python");
         auto pythonVersion = checked([python, "--version"]);
+        auto trafilaturaPython = buildPath(dirName(args[3]), "python");
 
         auto mojibake = compareFtfyMojibake(args[1], args[2], python, root, darwin,
             60.0, 512L * 1024 * 1024);
-        auto report = assembleReport([mojibake], ["mojibake/scrubbed-vs-ftfy"]);
+        auto mainContent = compareMainContentTrafilatura(args[1], args[3],
+            trafilaturaPython, root, darwin, 180.0, 512L * 1024 * 1024);
+        auto report = assembleReport([mojibake, mainContent],
+            ["mojibake/scrubbed-vs-ftfy", "main-content/scrubbed-vs-trafilatura"]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["harness_sha256"] = digest("benchmarks/external_comparator.d");
         report["harness_build_command"] =
@@ -462,7 +788,8 @@ int main(string[] args) {
             "version>, verified via uv pip freeze at run time; nothing vendored";
         auto published = report.toString;
         require(!published.canFind(root) && !published.canFind(args[1]) &&
-            !published.canFind(args[2]) && !published.canFind(checked(["uname", "-n"])),
+            !published.canFind(args[2]) && !published.canFind(args[3]) &&
+            !published.canFind(checked(["uname", "-n"])),
             "result contains a private run path or hostname");
         writeln(published);
         return 0;

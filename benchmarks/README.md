@@ -379,16 +379,83 @@ freeze` happens to print.
 bench_env=$(mktemp -d /tmp/scrubbed-external-comparator-XXXXXX)
 uv venv "$bench_env/venv"
 uv pip install --python "$bench_env/venv/bin/python" ftfy==6.3.1 wcwidth==0.8.4
+uv venv "$bench_env/trafilatura-venv"
+uv pip install --python "$bench_env/trafilatura-venv/bin/python" trafilatura==2.2.0
 dub build --build=release --compiler=ldc2
-ldc2 -O3 -release benchmarks/external_comparator.d -of="$bench_env/external_comparator"
+ldc2 -O3 -release -I. benchmarks/external_comparator.d \
+  experiments/html_main_content/token_overlap.d -of="$bench_env/external_comparator"
 "$bench_env/external_comparator" --self-test
 "$bench_env/external_comparator" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" \
-  > "$bench_env/result.json"
+  "$bench_env/trafilatura-venv/bin/trafilatura" > "$bench_env/result.json"
 ldc2 -O3 -release benchmarks/external_comparator_check.d \
   -of="$bench_env/external_comparator_check"
 "$bench_env/external_comparator_check" --self-test
 "$bench_env/external_comparator_check" --check "$bench_env/result.json"
 ```
+
+Its second case, `main-content/scrubbed-vs-trafilatura` (issue #229's
+trafilatura next-slice contract), exercises the real `scrubbed` binary and
+the real, shipped `html-main-content` v3 stage end to end through
+`scrubbed run --input <dir> --output <dir> --stage content=html-main-content
+--threads 1` (the generic `--stage id=IMPLEMENTATION` composition-token path
+-- `extract --format` is hardcoded to two other stage names and cannot reach
+`html-main-content`), against the real pinned `trafilatura` CLI. Unlike the
+mojibake case, correctness here is scored by precision/recall against
+held-out real-page ground truth instead of exact-byte equality: it reuses
+issue #26's own word-level, case-normalized, whitespace-tokenized
+multiset-overlap metric (`precision = overlap/extractedTotal`,
+`recall = overlap/goldTotal`) and issue #26's own pinned 20-URL trafilatura
+held-out corpus (same corpus commit, same URLs), never a second, parallel
+implementation of either. The metric itself now lives in one pure, shared
+module, [`experiments/html_main_content/token_overlap.d`](../experiments/html_main_content/token_overlap.d),
+imported both by `fetch_held_out.sh`'s own generated driver and by this
+comparator directly -- previously the formula was embedded once, in
+`fetch_held_out.sh`'s bash heredoc.
+
+The held-out corpus is acquired via one additive, optional flag on that same
+script, `fetch_held_out.sh --emit-corpus-dir DIR`: absent, the script's
+behavior is byte-identical to before the flag existed; present, it
+additionally materializes the resolved fixtures' HTML and a `gold.json`
+(URL, original and materialized file name, and "with"/"without" probe-phrase
+text) into a durable directory for this comparator to consume. `gold.json`
+is deliberately excluded from the directory passed to `scrubbed run
+--input`: that command treats every file under an input directory as a
+document to process, so the fixtures' HTML is copied into a separate,
+`gold.json`-free directory first. trafilatura is invoked once per fixture,
+its raw HTML piped in on stdin and its extracted plain text captured from
+its own stdout (`trafilatura --output-format txt < fixture.html >
+output.txt`) -- the one single-file invocation shape the pinned `2.2.0`
+actually supports: its own `--input-dir`/`--output-dir --keep-dirs` batch
+mode silently drops every file due to a real, verified path-joining bug in
+that release (`cli_utils.py`'s `determine_output_path` doubles the input
+directory into the output path when `--keep-dirs` is set, so `write_result`'s
+`open()` always raises `FileNotFoundError`, which a bare `ProcessPoolExecutor
+.map()` call whose results are never consumed then silently swallows), and
+`-i`/`--input-file` is batch URL-list mode, not single-file HTML extraction
+-- both discovered by running the pinned CLI's own `--help` and reading its
+`cli_utils.py`, not assumed from memory. A shell-loop wrapping that per-file
+stdin/stdout invocation (the contract's named fallback shape for exactly
+this situation) is passed through the existing, unmodified `runBoundedSample`
+machinery so one timed sample still means one full pass over all 20 fixtures.
+
+`scrubbed run`'s own process exit code is 1 whenever *any* input is
+quarantined -- which this real corpus's content legitimately and
+reproducibly does for 8 of its 20 pages (see
+[`docs/html-main-content.md`](../docs/html-main-content.md)) -- so this case
+treats a scrubbed exit status of 0 or 1 as a clean invocation and instead
+relies on the required per-tool output-reproducibility check (two independent
+full runs of the same tool must produce byte-identical output for every
+fixture) to catch a genuine crash or race, which -- unlike a purely
+content-driven abstention -- would not reliably reproduce. Precision/recall
+are reported, not gated: there is no accepted numeric target, matching #26's
+own stance. What does gate closed: corpus-acquisition failure (a nonzero
+`fetch_held_out.sh` exit), fewer than 20/20 resolved fixtures, either tool's
+declared resource bound or an unexpected exit status, or a non-reproducible
+output between a tool's own two timed samples. No raw page bytes or gold
+phrase text appear anywhere in this case's JSON (only fixture ids, status
+names, counts, and numeric scores) -- `gold.json` itself, which legitimately
+holds that text for the two subprocesses to consume, lives only in the
+private corpus directory and is never read into the published report.
 
 The report schema is `scrubbed-external-comparator-v1`. **This is an
 intentional, fail-closed format break, not a bug**: it does not read or
@@ -416,7 +483,15 @@ report and confirms the migrated
 `mojibake/scrubbed-vs-ftfy` case reproduces `cli_baseline.d`'s prior
 correctness result for that case: the same fixture/expected SHA-256 pair and
 the same exact-output gate, even though the report format itself
-intentionally is not backward-compatible.
+intentionally is not backward-compatible. It also validates
+`main-content/scrubbed-vs-trafilatura`'s required provenance (executable
+hashes, dynamically discovered trafilatura version, held-out corpus commit
+and fixture count, package acquisition order), its four-sample A/B/A/B
+interleave and per-sample timing fields, both tools' output-reproducibility
+flags, and the scoring object's shape (per-tool extracted/abstained counts
+that add up to 20, precision/recall within `[0,1]`, and one scored entry per
+held-out fixture) -- it does not recompute precision/recall itself, since
+those are reported, not gated.
 
 The timed sample child (`/usr/bin/time` and the command it wraps) owns its
 own process group: `runBoundedSample` forks, the child calls `setpgid(0, 0)`

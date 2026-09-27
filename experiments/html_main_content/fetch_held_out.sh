@@ -52,9 +52,42 @@
 # already-built native Lexbor static library (run `dub build --build=release`
 # from the repository root first if you have not already).
 #
-# Usage: experiments/html_main_content/fetch_held_out.sh [output.json]
+# Usage: experiments/html_main_content/fetch_held_out.sh [--emit-corpus-dir DIR] [output.json]
+#
+# --emit-corpus-dir DIR is an additive, optional flag (issue #229's
+# trafilatura next-slice contract). Absent, behavior is byte-identical to
+# before this flag existed. Present, DIR is removed and recreated, then
+# additionally populated with the resolved fixtures' raw HTML bytes (one file
+# per fixture, "NN.html") plus a "gold.json" binding each fixture's URL,
+# original corpus file name, materialized file name, and "with"/"without"
+# probe-phrase text -- a durable, self-contained corpus for
+# benchmarks/external_comparator.d's main-content/scrubbed-vs-trafilatura
+# case (or any other external subprocess) to consume without depending on
+# this script, its temporary clone, or its throwaway driver. This script's
+# own stdout/output.json report is unaffected either way: it never contains
+# raw page bytes or gold phrase text, with or without this flag.
 
 set -euo pipefail
+
+emit_corpus_dir=""
+positional_args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --emit-corpus-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "fetch_held_out.sh: --emit-corpus-dir requires a DIR argument" >&2
+        exit 2
+      fi
+      emit_corpus_dir="$2"
+      shift 2
+      ;;
+    *)
+      positional_args+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- "${positional_args[@]}"
 
 TRAFILATURA_REPO="https://github.com/adbar/trafilatura.git"
 # Pinned exact commit (adbar/trafilatura, tests/evaldata.json + tests/cache
@@ -97,6 +130,11 @@ if [[ ! -f "$lexbor_lib" ]]; then
   echo "Run 'dub build --build=release' from the repository root first." >&2
   exit 2
 fi
+if [[ -n "$emit_corpus_dir" ]]; then
+  mkdir -p "$emit_corpus_dir"
+  emit_corpus_dir="$(cd "$emit_corpus_dir" && pwd)"
+  rm -rf "${emit_corpus_dir:?}"/*
+fi
 for tool in git ldc2; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "fetch_held_out.sh: required tool '$tool' not found on PATH." >&2
@@ -127,40 +165,17 @@ module held_out_driver;
 
 import effects.html_main_content : MainContentStatus, extractMainContent;
 import effects.html_tree : maxConfigurableHtmlBytes, parseHtml;
-import std.algorithm.iteration : map, splitter;
+import experiments.html_main_content.token_overlap : containsNormalized,
+    mergeTokenCounts, normalized, scoreTokenOverlap, tokenCounts;
+import std.algorithm.iteration : map;
 import std.array : array;
 import std.conv : to;
-import std.file : exists, read, readText;
+import std.file : exists, read, readText, write;
+import std.format : format;
 import std.json : JSONValue, parseJSON;
 import std.path : buildPath;
 import std.stdio : stderr, writeln;
-import std.string : indexOf, splitLines, strip, toLower;
-import std.uni : isWhite;
-import std.utf : encode;
-
-// ASCII/Unicode case fold plus whitespace-run collapse, matching the same
-// normalization family used on both sides of every comparison so
-// formatting differences between the corpus's annotation strings and this
-// module's own whitespace-collapsed extracted text don't cost precision or
-// recall.
-private string normalized(string value) {
-    char[] result;
-    bool pending;
-    foreach (dchar c; value.toLower) {
-        if (isWhite(c)) { if (result.length) pending = true; continue; }
-        if (pending) { result ~= ' '; pending = false; }
-        char[4] buf;
-        result ~= buf[0 .. encode(buf, c)];
-    }
-    return result.idup;
-}
-
-private int[string] tokenCounts(string normalizedText) {
-    int[string] counts;
-    foreach (word; normalizedText.splitter(' '))
-        if (word.length) counts[word] = counts.get(word, 0) + 1;
-    return counts;
-}
+import std.string : splitLines, strip;
 
 private string resolveFile(string root, string file) {
     auto cachePath = buildPath(root, "tests", "cache", file);
@@ -172,20 +187,26 @@ private string resolveFile(string root, string file) {
 
 // No raw held-out page bytes and no "with"/"without" annotation text are
 // ever placed into a `fixtures` entry or an exception: only bounded counts,
-// status/reason names, node tag names, and numeric scores.
+// status/reason names, node tag names, and numeric scores. This does NOT
+// apply to `gold.json` when EMIT_CORPUS_DIR is non-empty: that file is a
+// durable, private corpus artifact meant to hold real ground truth for an
+// external subprocess to score against, not this script's own report.
 void main(string[] args) {
-    if (args.length != 3) {
-        stderr.writeln("usage: held_out_driver CORPUS_ROOT URLS_FILE");
+    if (args.length != 4) {
+        stderr.writeln("usage: held_out_driver CORPUS_ROOT URLS_FILE EMIT_CORPUS_DIR_OR_EMPTY");
         import core.stdc.stdlib : exit;
         exit(2);
     }
     auto root = args[1];
     auto urls = readText(args[2]).splitLines.map!strip.array;
+    auto emitDir = args[3];
 
     auto evaldataPath = buildPath(root, "tests", "evaldata.json");
     auto evaldata = parseJSON(readText(evaldataPath));
 
     JSONValue[] fixtures;
+    JSONValue[] goldFixtures;
+    size_t emittedCount;
     size_t selectedCount, abstainedCount, parseFailedCount, missingCount;
     double precisionSum = 0, recallSum = 0;
     size_t scoredCount, leakExampleCount;
@@ -209,6 +230,26 @@ void main(string[] args) {
         }
 
         auto raw = cast(const(ubyte)[]) read(path);
+
+        // Materializing the resolved fixture is independent of whether this
+        // module's own extractMainContent goes on to select or abstain on
+        // it below -- an external comparator scores an entirely different
+        // extractor against the same real page and the same gold text.
+        if (emitDir.length) {
+            auto htmlFile = format("%02d.html", ++emittedCount);
+            write(buildPath(emitDir, htmlFile), raw);
+            JSONValue[] withPhrases, withoutPhrases;
+            foreach (chunk; entry["with"].array) withPhrases ~= JSONValue(chunk.str);
+            foreach (chunk; entry["without"].array) withoutPhrases ~= JSONValue(chunk.str);
+            goldFixtures ~= JSONValue([
+                "url": JSONValue(url),
+                "file": JSONValue(file),
+                "htmlFile": JSONValue(htmlFile),
+                "with": JSONValue(withPhrases),
+                "without": JSONValue(withoutPhrases),
+            ]);
+        }
+
         auto parsed = parseHtml(raw, null, "held-out", maxConfigurableHtmlBytes);
         if (!parsed.isParsed) {
             fixtures ~= JSONValue(["url": JSONValue(url), "file": JSONValue(file),
@@ -238,28 +279,18 @@ void main(string[] args) {
 
             int[string] goldTokens;
             foreach (chunk; entry["with"].array)
-                foreach (word, n; tokenCounts(normalized(chunk.str)))
-                    goldTokens[word] = goldTokens.get(word, 0) + n;
+                mergeTokenCounts(goldTokens, tokenCounts(normalized(chunk.str)));
 
-            size_t overlap;
-            foreach (word, n; goldTokens) {
-                auto found = word in extractedTokens;
-                overlap += found ? (n < *found ? n : *found) : 0;
-            }
-            size_t extractedTotal;
-            foreach (_, n; extractedTokens) extractedTotal += n;
-            size_t goldTotal;
-            foreach (_, n; goldTokens) goldTotal += n;
-
-            double precision = extractedTotal ? cast(double) overlap / extractedTotal : 0.0;
-            double recall = goldTotal ? cast(double) overlap / goldTotal : 0.0;
+            auto overlapScore = scoreTokenOverlap(extractedTokens, goldTokens);
+            double precision = overlapScore.precision;
+            double recall = overlapScore.recall;
             precisionSum += precision;
             recallSum += recall;
             ++scoredCount;
 
             size_t withoutLeaks;
             foreach (chunk; entry["without"].array)
-                if (foldedExtracted.indexOf(normalized(chunk.str)) >= 0) ++withoutLeaks;
+                if (containsNormalized(foldedExtracted, chunk.str)) ++withoutLeaks;
             leakExampleCount += withoutLeaks;
 
             fixtures ~= JSONValue([
@@ -298,6 +329,16 @@ void main(string[] args) {
             "more informative signals here"),
     ]);
     report["fixtures"] = JSONValue(fixtures);
+
+    if (emitDir.length) {
+        JSONValue gold = JSONValue([
+            "schema": JSONValue("scrubbed-main-content-held-out-gold-v1"),
+            "trafilaturaCommit": JSONValue("__TRAFILATURA_COMMIT__"),
+        ]);
+        gold["fixtures"] = JSONValue(goldFixtures);
+        write(buildPath(emitDir, "gold.json"), gold.toString);
+    }
+
     writeln(report.toString);
 }
 DRIVER_EOF
@@ -308,16 +349,17 @@ sed -i.bak "s/__TRAFILATURA_COMMIT__/$TRAFILATURA_COMMIT/" "$driver_src" && rm -
 
 driver_bin="$scratch/held_out_driver"
 echo "fetch_held_out.sh: compiling the held-out driver (ldc2 -O3 -release)..." >&2
-ldc2 -O3 -release -I"$repo_root/source" -of="$driver_bin" \
+ldc2 -O3 -release -I"$repo_root/source" -I"$repo_root" -of="$driver_bin" \
   "$driver_src" \
   "$repo_root/source/effects/html_main_content.d" \
   "$repo_root/source/effects/html_tree.d" \
   "$repo_root/source/effects/lexbor_ffi.d" \
   "$repo_root/source/text/decoding.d" \
+  "$repo_root/experiments/html_main_content/token_overlap.d" \
   "$lexbor_lib" >&2
 
 echo "fetch_held_out.sh: scoring ${#PINNED_URLS[@]} held-out pages at trafilatura $TRAFILATURA_COMMIT..." >&2
-report="$("$driver_bin" "$corpus" "$urls_file")"
+report="$("$driver_bin" "$corpus" "$urls_file" "$emit_corpus_dir")"
 
 if [[ $# -ge 1 ]]; then
   printf '%s\n' "$report" > "$1"

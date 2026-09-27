@@ -472,6 +472,110 @@ private void checkReport(string path) {
     writeln("external comparator report check passed: migrated mojibake case reproduces ",
         "cli_baseline.d's fixture/expected hashes and exact-output gate under the new ",
         "scrubbed-external-comparator-v1 report format");
+
+    checkMainContentTrafilaturaCase(report);
+}
+
+// ---- main-content/scrubbed-vs-trafilatura case validation (issue #229's
+// next-slice contract). Precision/recall are reported, not gated, so this
+// structurally validates required fields/shape rather than recomputing the
+// score: `--check` proves the report has the right shape, not that this
+// particular run's numbers are "correct" (there is no accepted numeric
+// target, matching #26's own stance). ----
+
+private enum expectedHeldOutCommit = "1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6";
+private enum expectedHeldOutFixtureCount = 20;
+
+private void requireUnitInterval(double value, string label) {
+    require(value >= 0.0 && value <= 1.0, label ~ " is out of the [0,1] unit interval: " ~
+        value.to!string);
+}
+
+private void checkMainContentTrafilaturaCase(JSONValue report) {
+    JSONValue found;
+    bool hasCase;
+    foreach (c; report["cases"].array)
+        if (c["name"].str == "main-content/scrubbed-vs-trafilatura") { found = c; hasCase = true; }
+    require(hasCase, "missing main-content/scrubbed-vs-trafilatura case");
+
+    require(found["scrubbed_binary_sha256"].str.length == 64,
+        "scrubbed_binary_sha256 is not a SHA-256 hex digest");
+    require(found["trafilatura_binary_sha256"].str.length == 64,
+        "trafilatura_binary_sha256 is not a SHA-256 hex digest");
+    require(found["trafilatura_version"].str.startsWith("Trafilatura "),
+        "unexpected trafilatura version string");
+    require(found["held_out_corpus_commit"].str == expectedHeldOutCommit,
+        "held-out corpus commit differs from the pinned commit reused from issue #26");
+    require(found["held_out_fixture_count"].integer == expectedHeldOutFixtureCount,
+        "held-out corpus did not resolve all pinned fixtures");
+    require(found["python_packages_acquisition_order"].array.length == 1 &&
+        found["python_packages_acquisition_order"].array[0].str.startsWith("trafilatura=="),
+        "unexpected trafilatura package acquisition order");
+    require(found["timeout_seconds"].floating > 0, "missing declared timeout");
+    require(found["max_rss_bytes"].integer > 0, "missing declared resource bound");
+
+    auto samples = found["samples"].array;
+    require(samples.length == 4, "expected four A/B/A/B samples");
+    require(samples[0]["tool"].str == "scrubbed" && samples[1]["tool"].str == "trafilatura" &&
+        samples[2]["tool"].str == "scrubbed" && samples[3]["tool"].str == "trafilatura",
+        "samples lost their A/B/A/B interleave order");
+    foreach (i, sample; samples) {
+        auto status = sample["status"].integer;
+        if (i == 0 || i == 2)
+            require(status == 0 || status == 1,
+                "a scrubbed sample's status is neither a clean run nor an expected " ~
+                "content-driven quarantine");
+        else
+            require(status == 0, "a trafilatura sample exited nonzero or was signaled");
+        foreach (metric; ["wall_seconds", "user_seconds", "system_seconds", "peak_rss_bytes"])
+            require((metric in sample.object) !is null, "sample missing " ~ metric);
+    }
+
+    require(found["reproducibility"]["scrubbed"].boolean &&
+        found["reproducibility"]["trafilatura"].boolean,
+        "a tool's output-reproducibility check did not pass");
+
+    auto scoring = found["scoring"];
+    require(scoring["gold_fixture_count"].integer == expectedHeldOutFixtureCount,
+        "unexpected gold fixture count");
+    auto fixtures = scoring["fixtures"].array;
+    require(fixtures.length == expectedHeldOutFixtureCount,
+        "scoring fixtures array does not cover all pinned held-out fixtures");
+
+    foreach (toolName; ["scrubbed", "trafilatura"]) {
+        auto summary = scoring[toolName];
+        auto extracted = summary["extractedCount"].integer;
+        auto abstained = summary["abstainedCount"].integer;
+        require(extracted + abstained == expectedHeldOutFixtureCount,
+            toolName ~ "'s extracted/abstained counts do not add up to the fixture count");
+        requireUnitInterval(summary["meanPrecision"].floating, toolName ~ " meanPrecision");
+        requireUnitInterval(summary["meanRecall"].floating, toolName ~ " meanRecall");
+        require(summary["withoutLeakTotal"].integer >= 0,
+            toolName ~ " withoutLeakTotal must be non-negative");
+    }
+
+    bool[string] seenFixtureIds;
+    foreach (fixture; fixtures) {
+        auto id = fixture["id"].str;
+        require(id !in seenFixtureIds, "duplicate scoring fixture id: " ~ id);
+        seenFixtureIds[id] = true;
+        foreach (toolName; ["scrubbed", "trafilatura"]) {
+            auto entry = fixture[toolName];
+            auto status = entry["status"].str;
+            require(status == "produced" || status == "abstained",
+                toolName ~ " fixture status must be 'produced' or 'abstained': " ~ status);
+            if (status == "produced") {
+                requireUnitInterval(entry["precision"].floating, toolName ~ " fixture precision");
+                requireUnitInterval(entry["recall"].floating, toolName ~ " fixture recall");
+                require(entry["withoutLeaks"].integer >= 0,
+                    toolName ~ " fixture withoutLeaks must be non-negative");
+            }
+        }
+    }
+    writeln("external comparator report check passed: main-content/scrubbed-vs-trafilatura ",
+        "case has the required provenance, reproducibility, and precision/recall scoring ",
+        "shape (", expectedHeldOutFixtureCount, "/", expectedHeldOutFixtureCount,
+        " held-out fixtures accounted for)");
 }
 
 int main(string[] args) {

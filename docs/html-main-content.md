@@ -204,6 +204,18 @@ placed into the report or into any exception/diagnostic, in either the
 shell script or the driver it compiles: only bounded counts, status/reason
 names, node tag names, and numeric scores.
 
+This script also accepts one additive, optional flag, `--emit-corpus-dir
+DIR`, that additionally materializes the resolved fixtures' HTML and a
+`gold.json` into a durable directory (absent, behavior is byte-identical to
+before the flag existed). Its scoring formula lives in one pure, shared
+module, `experiments/html_main_content/token_overlap.d`. Both exist for
+[`benchmarks/external_comparator.d`'s `main-content/scrubbed-vs-trafilatura`
+case](../benchmarks/README.md#shared-external-tool-comparator) (issue #229's
+trafilatura next-slice), which reuses this exact corpus, commit, and metric
+to score the real `scrubbed` CLI's `html-main-content` v3 stage end to end
+against the real pinned trafilatura CLI — see that document for the full
+CLI-invocation and report-shape detail.
+
 ## v3 stage registration
 
 `source/effects/html_main_content_stage.d` (issue #26's next-slice) is a v3

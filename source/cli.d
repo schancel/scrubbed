@@ -2216,7 +2216,7 @@ unittest {
 
     auto same = buildPath(root, "same.txt");
     write(same, "already clean");
-    assert(runApp(["scrubbed", "--input", same, "--output", same,
+    assert(runApp(["scrubbed", "run", "--input", same, "--output", same,
         "--filters", "fix-mojibake", "--threads", "1"]) == 0);
     assert(readText(same) == "already clean");
     {
@@ -2229,12 +2229,12 @@ unittest {
         }
         auto separateOutput = buildPath(root, "metrics-collision-output.txt");
         environment["SCRUBBED_COORDINATION_METRICS_V2"] = same;
-        assertThrown(runApp(["scrubbed", "--input", same,
+        assertThrown(runApp(["scrubbed", "run", "--input", same,
             "--output", separateOutput, "--filters", "fix-mojibake",
             "--threads", "1"]));
         assert(readText(same) == "already clean" && !exists(separateOutput));
         environment["SCRUBBED_COORDINATION_METRICS_V2"] = separateOutput;
-        assertThrown(runApp(["scrubbed", "--input", same,
+        assertThrown(runApp(["scrubbed", "run", "--input", same,
             "--output", separateOutput, "--filters", "fix-mojibake",
             "--threads", "1"]));
         assert(readText(same) == "already clean" && !exists(separateOutput));
@@ -2242,7 +2242,7 @@ unittest {
         auto nestedOutput = buildPath(metricsAncestor, "output.txt");
         environment["SCRUBBED_COORDINATION_METRICS_V2"] = metricsAncestor;
         assertThrown!CoordinationMetricsPathConflict(runApp(["scrubbed",
-            "--input", same, "--output", nestedOutput, "--filters",
+            "run", "--input", same, "--output", nestedOutput, "--filters",
             "fix-mojibake", "--threads", "1"]));
         assert(readText(same) == "already clean" &&
             !exists(metricsAncestor) && !exists(nestedOutput));
@@ -2250,7 +2250,7 @@ unittest {
         auto nestedMetrics = buildPath(outputAncestor, "metrics.json");
         environment["SCRUBBED_COORDINATION_METRICS_V2"] = nestedMetrics;
         assertThrown!CoordinationMetricsPathConflict(runApp(["scrubbed",
-            "--input", same, "--output", outputAncestor, "--filters",
+            "run", "--input", same, "--output", outputAncestor, "--filters",
             "fix-mojibake", "--threads", "1"]));
         assert(readText(same) == "already clean" &&
             !exists(outputAncestor) && !exists(nestedMetrics));
@@ -2258,7 +2258,7 @@ unittest {
         auto manifestOutput = buildPath(root, "metrics-manifest-output.txt");
         auto manifestStore = buildPath(root, "metrics-manifest.db");
         environment["SCRUBBED_COORDINATION_METRICS_V2"] = durableMetrics;
-        assertThrown(runApp(["scrubbed", "--input", same,
+        assertThrown(runApp(["scrubbed", "run", "--input", same,
             "--output", manifestOutput, "--filters", "fix-mojibake",
             "--threads", "1", "--manifest", manifestStore]));
         assert(!exists(durableMetrics) && !exists(manifestOutput) &&
@@ -2267,7 +2267,7 @@ unittest {
         auto journalStore = buildPath(root, "metrics-journal.db");
         createJournalV3(journalStore);
         auto journalBefore = read(journalStore);
-        assertThrown(runApp(["scrubbed", "--input", same,
+        assertThrown(runApp(["scrubbed", "run", "--input", same,
             "--output", journalOutput, "--filters", "fix-mojibake",
             "--threads", "1", "--error-journal", journalStore]));
         assert(!exists(durableMetrics) && !exists(journalOutput) &&
@@ -2275,7 +2275,7 @@ unittest {
             !exists(journalStore ~ "-wal") && !exists(journalStore ~ "-shm"));
         auto metricsPath = buildPath(root, "coordination-metrics.json");
         environment["SCRUBBED_COORDINATION_METRICS_V2"] = metricsPath;
-        assert(runApp(["scrubbed", "--input", same,
+        assert(runApp(["scrubbed", "run", "--input", same,
             "--output", separateOutput, "--filters", "fix-mojibake",
             "--threads", "1"]) == 0);
         assert(parseJSON(readText(metricsPath))["schema"].str ==
@@ -2291,31 +2291,31 @@ unittest {
     auto empty = buildPath(root, "empty.txt");
     auto emptyOut = buildPath(root, "empty-out.txt");
     write(empty, "");
-    assert(runApp(["scrubbed", "--input", empty, "--output", emptyOut,
+    assert(runApp(["scrubbed", "run", "--input", empty, "--output", emptyOut,
         "--threads", "1"]) == 0);
     assert(exists(emptyOut) && getSize(emptyOut) == 0);
 
     auto inputDir = buildPath(root, "input");
     mkdir(inputDir);
-    assertThrown(runApp(["scrubbed", "--input", inputDir,
+    assertThrown(runApp(["scrubbed", "run", "--input", inputDir,
         "--output", buildPath(inputDir, "out"), "--threads", "1"]));
-    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "run", "--input", same, "--output", emptyOut,
         "--config", "x.json", "--filters", "fix-mojibake"]));
-    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "run", "--input", same, "--output", emptyOut,
         "--config", "x.json", "--FILTERS", "fix-mojibake"]));
-    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "run", "--input", same, "--output", emptyOut,
         "--threads", "0"]));
 
     auto badConfig = buildPath(root, "bad.json");
     write(badConfig, `{ "filters": [{ "name": "fix-mojibake", ` ~
         `"options": { "max-pass": 0 } }] }`);
-    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "run", "--input", same, "--output", emptyOut,
         "--config", badConfig, "--threads", "1"]));
 
     auto emptyConfig = buildPath(root, "empty-config.json");
     write(emptyConfig, "");
     write(emptyOut, "sentinel");
-    assertThrown(runApp(["scrubbed", "--input", same, "--output", emptyOut,
+    assertThrown(runApp(["scrubbed", "run", "--input", same, "--output", emptyOut,
         "--config", emptyConfig, "--threads", "1"]));
     assert(readText(emptyOut) == "sentinel");
 
@@ -2325,7 +2325,7 @@ unittest {
     auto noFiles = buildPath(root, "no-files");
     auto noFilesOutput = buildPath(root, "no-files-output");
     mkdir(noFiles);
-    assertThrown(runApp(["scrubbed", "--input", noFiles,
+    assertThrown(runApp(["scrubbed", "run", "--input", noFiles,
         "--output", noFilesOutput, "--config", invalidValueConfig,
         "--threads", "1"]));
     assert(!exists(noFilesOutput));
@@ -2337,19 +2337,19 @@ unittest {
     auto configuredInput = buildPath(root, "configured.txt");
     auto configuredOutput = buildPath(root, "configured-output.txt");
     write(configuredInput, "“schÃ¶n”\0");
-    assert(runApp(["scrubbed", "--input", configuredInput,
+    assert(runApp(["scrubbed", "run", "--input", configuredInput,
         "--output", configuredOutput, "--config", validConfig,
         "--threads", "1"]) == 0);
     assert(readText(configuredOutput) == `"schÃ¶n"`);
 
     auto blockedParent = buildPath(root, "not-a-directory");
     write(blockedParent, "x");
-    assertThrown(runApp(["scrubbed", "--input", same,
+    assertThrown(runApp(["scrubbed", "run", "--input", same,
         "--output", buildPath(blockedParent, "out.txt"), "--threads", "1"]));
 
     auto invalidUtf8 = buildPath(root, "invalid-utf8.bin");
     write(invalidUtf8, [cast(ubyte) 0xFF]);
-    assertThrown(runApp(["scrubbed", "--input", invalidUtf8,
+    assertThrown(runApp(["scrubbed", "run", "--input", invalidUtf8,
         "--output", buildPath(root, "invalid-output.txt"),
         "--threads", "1"]));
 
@@ -2358,7 +2358,7 @@ unittest {
     foreach (index; 0 .. 64)
         write(buildPath(sharedInput, index.to!string ~ ".txt"), "clean");
     auto sharedOutput = buildPath(root, "shared-output");
-    assert(runApp(["scrubbed", "--input", dirName(sharedInput),
+    assert(runApp(["scrubbed", "run", "--input", dirName(sharedInput),
         "--output", sharedOutput, "--filters", "fix-mojibake",
         "--threads", "4", "--max-queued-docs", "1",
         "--max-input-bytes", "5", "--max-open-inputs", "1"]) == 0);
@@ -2369,7 +2369,7 @@ unittest {
     auto oversized = buildPath(root, "oversized.txt");
     write(oversized, "too large");
     auto oversizedOutput = buildPath(root, "oversized-output.txt");
-    assertThrown(runApp(["scrubbed", "--input", oversized,
+    assertThrown(runApp(["scrubbed", "run", "--input", oversized,
         "--output", oversizedOutput, "--threads", "1",
         "--max-input-bytes", "2"]));
     assert(!exists(oversizedOutput));
@@ -2378,20 +2378,20 @@ unittest {
         import std.file : symlink;
         auto link = buildPath(root, "input-link");
         symlink(same, link);
-        assertThrown(runApp(["scrubbed", "--input", link,
+        assertThrown(runApp(["scrubbed", "run", "--input", link,
             "--output", emptyOut, "--threads", "1"]));
 
         auto external = buildPath(root, "external.txt");
         auto outputLink = buildPath(root, "output-link.txt");
         write(external, "must survive");
         symlink(external, outputLink);
-        assertThrown(runApp(["scrubbed", "--input", same,
+        assertThrown(runApp(["scrubbed", "run", "--input", same,
             "--output", outputLink, "--threads", "1"]));
         assert(readText(external) == "must survive");
 
         auto treeLink = buildPath(inputDir, "outside-link");
         symlink(external, treeLink);
-        assertThrown(runApp(["scrubbed", "--input", inputDir,
+        assertThrown(runApp(["scrubbed", "run", "--input", inputDir,
             "--output", buildPath(root, "tree-output"), "--threads", "1"]));
     }
 }
@@ -2427,7 +2427,7 @@ unittest {
         write(buildPath(inputDir, "depth.html"),
             "<html><head><title>Depth</title></head><body>" ~ deepBody ~
             "</body></html>");
-        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+        assert(runApp(["scrubbed", "run", "--input", inputDir, "--output", outputDir,
             "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
             "--threads", "1"]) == 1,
             "a quarantined document must report a nonzero terminal status");
@@ -2450,7 +2450,7 @@ unittest {
             `<meta name="author" content="Ada"></head><body>` ~
             `<p>hello</p></body></html>`;
         write(buildPath(inputDir, "ok.html"), html);
-        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+        assert(runApp(["scrubbed", "run", "--input", inputDir, "--output", outputDir,
             "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
             "--threads", "1"]) == 0,
             "an emitted document must report success");
@@ -2502,7 +2502,7 @@ unittest {
         write(buildPath(inputDir, "depth.html"),
             "<html><head><title>Depth</title></head><body>" ~ deepBody ~
             "</body></html>");
-        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+        assert(runApp(["scrubbed", "run", "--input", inputDir, "--output", outputDir,
             "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
             "--manifest", manifestStore, "--threads", "1"]) == 1,
             "a quarantined document must report a nonzero terminal status");
@@ -2528,7 +2528,7 @@ unittest {
             `<meta name="author" content="Ada"></head><body>` ~
             `<p>hello</p></body></html>`;
         write(buildPath(inputDir, "ok.html"), html);
-        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+        assert(runApp(["scrubbed", "run", "--input", inputDir, "--output", outputDir,
             "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
             "--manifest", manifestStore, "--threads", "1"]) == 0,
             "an emitted document must report success");
@@ -2544,7 +2544,7 @@ unittest {
             parsed["fields"]["title"]["value"].str == "Emitted Case",
             "published side output must still carry real extracted metadata");
 
-        assert(runApp(["scrubbed", "--input", inputDir, "--output", outputDir,
+        assert(runApp(["scrubbed", "run", "--input", inputDir, "--output", outputDir,
             "--stage", "id=html-metadata", "--sidecar-output", sidecarDir,
             "--manifest", manifestStore, "--threads", "1"]) == 0,
             "a replayed emitted document must report success");
@@ -2571,7 +2571,7 @@ unittest {
     write(badConfig, `{ "filters": [{ "name": "strip-control", ` ~
         `"options": { "not-an-option": true } }] }`);
     try {
-        runApp(["scrubbed", "--input", input, "--output", output,
+        runApp(["scrubbed", "run", "--input", input, "--output", output,
             "--config", badConfig, "--threads", "1"]);
         throw new Exception("invalid config was accepted");
     } catch (Exception error) {
@@ -2579,14 +2579,14 @@ unittest {
     }
     requireCli(!exists(dirName(output)), "invalid config created output parent");
 
-    requireCli(runApp(["scrubbed", "--input", input, "--output", output,
+    requireCli(runApp(["scrubbed", "run", "--input", input, "--output", output,
         "--validate", "--threads", "1"]) == 0, "validate exit");
     requireCli(!exists(dirName(output)), "validate created output parent");
-    requireCli(runApp(["scrubbed", "--input", input, "--output", output,
+    requireCli(runApp(["scrubbed", "run", "--input", input, "--output", output,
         "--dry-run", "--explain", "--threads", "1"]) == 0, "dry-run exit");
     requireCli(!exists(dirName(output)), "dry-run created output parent");
     requireCli(readText(input) == "line\r\n", "dry-run changed source");
-    requireCli(runApp(["scrubbed", "--input", input, "--output", input,
+    requireCli(runApp(["scrubbed", "run", "--input", input, "--output", input,
         "--dry-run", "--threads", "1"]) == 0, "same-file dry-run exit");
     requireCli(readText(input) == "line\r\n", "same-file dry-run changed source");
 
@@ -2596,7 +2596,7 @@ unittest {
     write(buildPath(inputTree, "unchanged.txt"), "clean");
     write(buildPath(inputTree, "bad.bin"), [cast(ubyte) 0xFF]);
     auto treeOutput = buildPath(root, "tree-output");
-    assertThrown(runApp(["scrubbed", "--input", inputTree, "--output", treeOutput,
+    assertThrown(runApp(["scrubbed", "run", "--input", inputTree, "--output", treeOutput,
         "--dry-run", "--explain", "--threads", "4", "--max-queued-docs", "1",
         "--max-open-inputs", "1"]));
     requireCli(!exists(treeOutput), "multi-thread dry-run created output tree");
@@ -2606,7 +2606,7 @@ unittest {
         mkdir(unsafeOutput);
         auto linkedFile = buildPath(unsafeOutput, "changed.txt");
         symlink(input, linkedFile);
-        assertThrown(runApp(["scrubbed", "--input", inputTree,
+        assertThrown(runApp(["scrubbed", "run", "--input", inputTree,
             "--output", unsafeOutput, "--dry-run", "--threads", "1"]));
         requireCli(readText(input) == "line\r\n", "unsafe dry-run followed output link");
     }
@@ -2632,7 +2632,7 @@ unittest {
         "split failure retains committed prefix");
 
     auto plainOutput = buildPath(root, "plain.txt");
-    requireCli(runApp(["scrubbed", "--input", input, "--output", plainOutput,
+    requireCli(runApp(["scrubbed", "run", "--input", input, "--output", plainOutput,
         "--filters", "normalize-line-endings", "--threads", "1"]) == 0,
         "legacy invocation exit");
     requireCli(readText(plainOutput) == "line\n", "legacy invocation output");
@@ -2641,7 +2641,7 @@ unittest {
     // terminal rejection as an acknowledged per-document outcome: no output
     // is published and the invocation exits 1 rather than becoming fatal.
     auto rejectedOutput = buildPath(root, "rejected.txt");
-    requireCli(runApp(["scrubbed", "--input", input, "--output",
+    requireCli(runApp(["scrubbed", "run", "--input", input, "--output",
         rejectedOutput, "--stage", "stop=fixture", "--stage-option",
         "suffix=text:policy-stop", "--stage-option", "enabled=boolean:true",
         "--threads", "1"]) == 1, "compiled rejection exit");
@@ -2714,27 +2714,27 @@ unittest {
         tokenPlan.canonical == jsonPlan.canonical);
 
     auto routed = buildPath(root, "routed.txt");
-    assert(runApp(["scrubbed", "--input", input, "--output", routed,
+    assert(runApp(["scrubbed", "run", "--input", input, "--output", routed,
         "--threads", "1"] ~ routeTokens) == 0);
     assert(readText(routed) == "hello");
 
     auto passOutput = buildPath(root, "passed.txt");
-    assert(runApp(["scrubbed", "--input", input, "--output", passOutput,
+    assert(runApp(["scrubbed", "run", "--input", input, "--output", passOutput,
         "--threads", "1"] ~ dispatchTokens("pass")) == 0);
     assert(readText(passOutput) == "hello");
     foreach (policy; ["reject", "quarantine"]) {
         auto output = buildPath(root, policy ~ ".txt");
-        assert(runApp(["scrubbed", "--input", input, "--output", output,
+        assert(runApp(["scrubbed", "run", "--input", input, "--output", output,
             "--threads", "1"] ~ dispatchTokens(policy)) == 1);
         assert(!exists(output));
     }
 
     auto below = buildPath(root, "below.txt");
-    assertThrown(runApp(["scrubbed", "--input", input, "--output", below,
+    assertThrown(runApp(["scrubbed", "run", "--input", input, "--output", below,
         "--threads", "1"] ~ dispatchTokens("route", 4)));
     assert(!exists(below));
     auto above = buildPath(root, "above.txt");
-    assert(runApp(["scrubbed", "--input", input, "--output", above,
+    assert(runApp(["scrubbed", "run", "--input", input, "--output", above,
         "--threads", "1"] ~ dispatchTokens("route", 6)) == 0);
 
     auto invalid = buildPath(root, "invalid.txt");
@@ -2743,7 +2743,7 @@ unittest {
     invalidBytes[$ - 1] = 0xff;
     write(invalid, invalidBytes);
     auto invalidOutput = buildPath(root, "invalid-output.txt");
-    assertThrown(runApp(["scrubbed", "--input", invalid,
+    assertThrown(runApp(["scrubbed", "run", "--input", invalid,
         "--output", invalidOutput, "--threads", "1"] ~
         dispatchTokens("route", 5000)));
     assert(!exists(invalidOutput));
@@ -2753,7 +2753,7 @@ unittest {
         "max-output-bytes=integer:5", "--common"];
     auto unopenedOutput = buildPath(root, "unopened.txt");
     auto unopenedStore = buildPath(root, "unopened.db");
-    assertThrown(runApp(["scrubbed", "--input", buildPath(root, "missing"),
+    assertThrown(runApp(["scrubbed", "run", "--input", buildPath(root, "missing"),
         "--output", unopenedOutput, "--manifest", unopenedStore] ~ malformed));
     assert(!exists(unopenedOutput) && !exists(unopenedStore));
 
@@ -2763,7 +2763,7 @@ unittest {
         "--threads", "1", "--manifest", durableStore] ~ routeTokens;
     assert(runApp(durableArgs) == 0);
     assert(runApp(durableArgs) == 0);
-    assertThrown(runApp(["scrubbed", "--input", input, "--output", durableOutput,
+    assertThrown(runApp(["scrubbed", "run", "--input", input, "--output", durableOutput,
         "--threads", "1", "--manifest", durableStore] ~
         dispatchTokens("route", 6)));
 
@@ -2772,7 +2772,7 @@ unittest {
     auto v3Args = ["scrubbed", "--input", input, "--output", v3Output,
         "--threads", "1", "--manifest", v3Store];
     assert(runApp(v3Args) == 0);
-    assertThrown(runApp(["scrubbed", "--input", input, "--output", v3Output,
+    assertThrown(runApp(["scrubbed", "run", "--input", input, "--output", v3Output,
         "--threads", "1", "--manifest", v3Store] ~ routeTokens));
     assert(runApp(v3Args) == 0);
 }

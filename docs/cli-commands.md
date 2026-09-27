@@ -1,18 +1,21 @@
 # Commands and shell completion
 
 `scrubbed run` (alias `clean`) and `scrubbed repair` (alias `fix`) execute the
-existing bounded filter pipeline. Running without a verb remains supported:
-prior long options and defaults remain available, including `--list-filters`,
-`--validate`, `--dry-run` and `--explain`. Failure exits follow the policy below.
-Use `scrubbed --help` or `<verb> --help` for argparse-generated help and option
-names.
+existing bounded filter pipeline. A verb is always required: there is no bare
+no-verb form. `--list-filters`, `--validate`, `--dry-run` and `--explain` are
+still available, but must follow one of the four verbs. Omitting the verb
+entirely, or giving one that isn't recognized, prints help (the same output as
+`scrubbed --help`) and exits 2 -- it does not run any pipeline. Failure exits
+follow the policy below. Use `scrubbed --help` or `<verb> --help` for
+argparse-generated help and option names.
 
 ```sh
-scrubbed --input input.txt --output clean.txt
 scrubbed run --input input.txt --output clean.txt --filters normalize-line-endings
 scrubbed repair -i input.txt -o clean.txt --dry-run --explain
 scrubbed clean --input input.txt --output clean.txt --validate
-scrubbed --list-filters
+scrubbed run --list-filters
+scrubbed            # no verb: prints help and exits 2, does not run
+scrubbed --input input.txt --output clean.txt   # also prints help and exits 2
 ```
 
 Ordinary local file/tree runs also accept ordered v3 composition:
@@ -120,7 +123,8 @@ Exit codes:
   in opt-in manifest mode.
 - `2` — a run-fatal invocation, config, output-policy, resource/admission,
   traversal, lost-acknowledgment, or unrecorded worker error (including a
-  late symlink or a no-manifest worker failure).
+  late symlink or a no-manifest worker failure); this also covers a missing
+  or unrecognized verb, which prints help instead of running anything.
 
 Path, resource-limit and config/filter exclusivity checks remain in the
 processing boundary.

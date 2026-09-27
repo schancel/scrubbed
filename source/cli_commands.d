@@ -11,7 +11,7 @@ import job.json : canonicalJobJson;
 import job.presets : cleanWebDocumentTokensV1, expandCleanWebDocumentPresetV1;
 import std.conv : to;
 import std.file : FileException, exists, isDir, isSymlink, thisExePath;
-import std.stdio : stderr, writeln;
+import std.stdio : stderr, stdout, writeln;
 import std.string : indexOf, startsWith;
 
 mixin template ProcessingOptions() {
@@ -83,7 +83,7 @@ mixin template ProcessingOptions() {
     ulong maxJsonlSidecarBytes;
 }
 
-@(Command("run", "clean").Description("Run the bounded filter pipeline (also the no-verb default)."))
+@(Command("run", "clean").Description("Run the bounded filter pipeline."))
 struct Run {
     mixin ProcessingOptions;
 }
@@ -210,12 +210,25 @@ struct RouteMetadata {
 
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
-    SubCommand!(Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
-        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl,
-        Default!Run) command;
+    SubCommand!(Run, Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
+        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl)
+        command;
 }
 
 enum Config parserConfig = { errorExitCode: 2 };
+
+/// True for a genuine top-level `--help`/`-h`, left to argparse's own
+/// handling, or for any recognized subcommand name/alias. Every other
+/// argument value here is dispatched earlier in `runCommands`, before this
+/// helper is ever consulted; this covers only the remaining commands
+/// (`run`/`clean`/`repair`/`fix`/`extract`/`x`) that fall through to
+/// argparse's generic `SubCommand!` parse below.
+private bool isKnownVerbToken(string token) {
+    if (token == "--help" || token == "-h") return true;
+    foreach (name; ["run", "clean", "repair", "fix", "extract", "x"])
+        if (token == name) return true;
+    return false;
+}
 
 private bool present(const string[] args, string name) {
     foreach (arg; args)
@@ -597,6 +610,21 @@ int runCommands(string[] argv) {
         return CLI!(parserConfig, Commands).complete(argv[1 .. $]);
     if (argv.length > 1 && argv[1] == "completion")
         return runPublicCompletion(argv);
+    // Every other recognized subcommand token is dispatched above before
+    // this point; only `run`/`clean`/`repair`/`fix`/`extract`/`x` (plus a
+    // genuine top-level --help/-h, left to argparse's own handling just
+    // below) reach here as valid. No token at all, or any other token --
+    // including a bare informational/pipeline flag like `--input` or
+    // `--list-filters` with no verb, or a misspelled/unknown verb -- means
+    // there is no bare-no-verb pipeline-execution fallback anymore: print
+    // real help (the same generated text `--help` prints) and fail loudly,
+    // rather than silently no-op (bare `scrubbed`) or surface argparse's own
+    // terse "Unrecognized arguments" message (bare `scrubbed --input ...`).
+    if (argv.length < 2 || !isKnownVerbToken(argv[1])) {
+        Commands help;
+        cast(void) CLI!(parserConfig, Commands).parseArgs(help, ["--help"]);
+        return 2;
+    }
     Commands commands;
     const original = argv[1 .. $].dup;
     auto result = CLI!(parserConfig, Commands).parseArgs(commands, argv[1 .. $]);
@@ -636,4 +664,108 @@ int runCommands(string[] argv) {
             return process(cmd, original);
         }
     });
+}
+
+version (unittest) {
+    import std.algorithm : canFind;
+    import std.file : mkdirRecurse, readText, remove, rmdirRecurse, tempDir,
+        write;
+    import std.path : buildPath;
+    import std.stdio : File;
+    import std.typecons : tuple;
+    import std.uuid : randomUUID;
+
+    private void tryRemove(string path) {
+        if (!exists(path)) return;
+        try remove(path);
+        catch (Exception ignored) {}
+    }
+
+    /// Runs `runCommands(argv)` with stdout redirected to a temp file, and
+    /// returns (exit code, captured stdout text) so a test can assert on
+    /// both without depending on process-level output capture.
+    private auto runCommandsCapturingStdout(string[] argv) {
+        auto capturePath = buildPath(tempDir,
+            "scrubbed-runcommands-capture-" ~ randomUUID.toString ~ ".txt");
+        auto saved = stdout;
+        scope(exit) {
+            stdout = saved;
+            tryRemove(capturePath);
+        }
+        stdout = File(capturePath, "w");
+        auto exitCode = runCommands(argv);
+        stdout.flush();
+        stdout = saved;
+        return tuple(exitCode, exists(capturePath) ? readText(capturePath) : "");
+    }
+}
+
+// Issue #336: the bare no-verb pipeline-execution form (`Default!Run`) is
+// gone. Zero arguments, and any first token that is not a recognized verb,
+// must print real help+examples (not silently no-op, not argparse's terse
+// "Unrecognized arguments" message) and exit 2.
+unittest {
+    auto zeroArgs = runCommandsCapturingStdout(["scrubbed"]);
+    assert(zeroArgs[0] == 2, "zero-args must exit 2, not silently succeed");
+    assert(zeroArgs[1].length > 0,
+        "zero-args must print help, not stay silent");
+    assert(zeroArgs[1].canFind("Available commands"),
+        "zero-args help output must list the real subcommands");
+    assert(zeroArgs[1].canFind("run,clean"),
+        "zero-args help output must mention the run verb");
+}
+
+unittest {
+    auto bareWithFlags = runCommandsCapturingStdout(["scrubbed", "--input",
+        "in.txt", "--output", "out.txt"]);
+    assert(bareWithFlags[0] == 2,
+        "bare --input/--output with no verb must exit 2");
+    assert(bareWithFlags[1].canFind("Available commands"),
+        "bare --input/--output with no verb must print real help, not " ~
+        "argparse's terse 'Unrecognized arguments' message");
+}
+
+unittest {
+    auto unknownVerb = runCommandsCapturingStdout(["scrubbed", "bogus",
+        "--input", "in.txt", "--output", "out.txt"]);
+    assert(unknownVerb[0] == 2, "an unrecognized verb must exit 2");
+    assert(unknownVerb[1].canFind("Available commands"),
+        "an unrecognized verb must print real help");
+}
+
+// A genuine top-level --help/-h is a different, pre-existing code path and
+// must remain completely unaffected: still exit 0.
+unittest {
+    auto help = runCommandsCapturingStdout(["scrubbed", "--help"]);
+    assert(help[0] == 0, "--help must still exit 0");
+    assert(help[1].canFind("Available commands"));
+
+    auto shortHelp = runCommandsCapturingStdout(["scrubbed", "-h"]);
+    assert(shortHelp[0] == 0, "-h must still exit 0");
+}
+
+// run/repair/clean/fix remain byte-identical to each other and completely
+// unchanged by the Default! removal, once a verb is actually given.
+unittest {
+    auto root = buildPath(tempDir, "scrubbed-cli-commands-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdirRecurse(root);
+    auto input = buildPath(root, "in.txt");
+    write(input, "hello  world");
+
+    foreach (verb; ["run", "clean", "repair", "fix"]) {
+        auto output = buildPath(root, verb ~ "-out.txt");
+        auto exitCode = runCommands(["scrubbed", verb, "--input", input,
+            "--output", output]);
+        assert(exitCode == 0, verb ~ " must still succeed");
+        assert(exists(output), verb ~ " must still write its output");
+        assert(readText(output) == readText(input),
+            verb ~ " must still behave exactly as before");
+    }
+
+    // Still requires --input/--output once a real verb is named -- only the
+    // bare/unrecognized-verb fallback changed.
+    auto missingArgs = runCommandsCapturingStdout(["scrubbed", "run"]);
+    assert(missingArgs[0] == 2);
 }

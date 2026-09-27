@@ -3,10 +3,14 @@
 Status: scoped **uncompressed and compressed WARC/1.1 production candidates**
 live in [`effects.warc_reader`](../source/effects/warc_reader.d) and
 [`effects.warc_compressed`](../source/effects/warc_compressed.d), with API and
-limits in [warc-reader.md](warc-reader.md). The older experiment evidence below
-is retained as historical context; the new release-active adapter proof is
-`experiments/warc_reader/compressed_check.d`. Issue #30 stays open: there is
-no production archive file/source adapter, CLI command, or S3 integration.
+limits in [warc-reader.md](warc-reader.md). The older experiment evidence
+below is retained as historical context; the new release-active adapter proof
+is `experiments/warc_reader/compressed_check.d`. Issue #30 stays open: there
+is no CLI command or S3 integration (confirmed empty:
+`git grep -n "warc" -- source/cli.d source/cli_commands.d`). A bounded,
+trusted-root, single-file local adapter now exists — see warc-reader.md's
+["Local-file transport"](warc-reader.md#local-file-transport-partial-w06-slice)
+section — but it is not multi-file/archive discovery.
 
 ## Normative boundary
 
@@ -57,44 +61,60 @@ format-consistent positive fixtures, not a claim of full WARC validation.
 | `...0001` | `1AF48705DC634605AD10FBEE02711C2635FA429B3E7271E74D6AB5FD7B8E3420` | `39AD3DAD2662D694C233E7BA171EDCB439020FBEBAFB8D8127C11EDFE7A411E4` |
 | `...0002` | `E6CB6BE0F41709D716C8D871E8AFF0A60D310FEAACF69784FE1DB617E02F97DF` | `1F359813ACDD5E1A8BB0EF7AA6EBF46E477889FD0387BFD5050A1B0FF6A01D61` |
 
-Release-active rejection covers invalid/missing/overflow/oversized
-`Content-Length`, oversized header, truncated record, truncated/corrupt gzip
-member, truncated/corrupt zstd frame, compressed-input cap, and a highly
-compressible oversized block for each codec. These are code checks via
-exceptions, not D `assert`, so `-release` does not remove them. One-byte input
-chunks and 127-byte output chunks stress progress and boundary handling.
-Plain WARC, gzip WARC, and zstd WARC reject zero-record input; the compressed
-entry checks also reject empty input when the supplied parser already holds
-records from an earlier call.
-Unknown fields are ignored. The probe requires Target-URI for every evaluated
-type except `warcinfo` (forbidden) and `metadata` (optional), consistent with
-the WARC 1.1 field rule. Field names are handled case-insensitively, but
-folded UTF-8 headers and RFC 2047 encoded-word decoding required of full
-WARC/1.1 readers are not implemented. A failure rejects the entire archive, not a
-best-effort skip; no resynchronization is promised. The parser can retain
-earlier or current records when a late gzip/zstd checksum fails; release-active
-negative cases prove this partial state. A caller **must discard the parser
-and all its records on any decode error**. There is no atomic rollback claim.
-The release-built `--negative-control` invocation deliberately feeds corrupt
-gzip without catching the rejection and exits nonzero.
+Release-active rejection covers:
 
-Bounds precede potentially large decompression output: at most 1 MiB
-compressed input in memory; fixed 127-byte inflate output; at most 128 KiB
-record pending; at most 4 KiB header and 64 KiB declared body. The zstd frame
-content size is checked before decompression, and libzstd's streaming window
-is capped at 128 KiB through `ZSTD_d_windowLogMax`. An additional 64:1 ratio
-check applies during decoding and is exercised by separate 60 KiB repeated-
-byte fixtures. On one macOS arm64 run, 100 repeated gzip decodes reported max RSS
+- Invalid/missing/overflow/oversized `Content-Length`, oversized header,
+  truncated record.
+- Truncated/corrupt gzip member, truncated/corrupt zstd frame,
+  compressed-input cap, a highly compressible oversized block for each
+  codec.
+- Zero-record input for plain, gzip, and zstd WARC; the compressed entry
+  checks also reject empty input when the supplied parser already holds
+  records from an earlier call.
+
+These are code checks via exceptions, not D `assert`, so `-release` does not
+remove them. One-byte input chunks and 127-byte output chunks stress
+progress and boundary handling.
+
+Unknown fields are ignored. The probe requires Target-URI for every
+evaluated type except `warcinfo` (forbidden) and `metadata` (optional),
+consistent with the WARC 1.1 field rule. Field names are handled
+case-insensitively, but folded UTF-8 headers and RFC 2047 encoded-word
+decoding required of full WARC/1.1 readers are not implemented. A failure
+rejects the entire archive, not a best-effort skip; no resynchronization is
+promised. The parser can retain earlier or current records when a late
+gzip/zstd checksum fails; release-active negative cases prove this partial
+state. A caller **must discard the parser and all its records on any decode
+error** — there is no atomic rollback claim. The release-built
+`--negative-control` invocation deliberately feeds corrupt gzip without
+catching the rejection and exits nonzero.
+
+Bounds precede potentially large decompression output:
+
+| Bound | Value |
+| --- | --- |
+| Compressed input in memory | at most 1 MiB |
+| Inflate output | fixed 127 bytes |
+| Record pending | at most 128 KiB |
+| Header | at most 4 KiB |
+| Declared body | at most 64 KiB |
+| Expansion ratio | 64:1 (exercised by separate 60 KiB repeated-byte fixtures) |
+
+The zstd frame content size is checked before decompression, and libzstd's
+streaming window is capped at 128 KiB through `ZSTD_d_windowLogMax`.
+
+On one macOS arm64 run, 100 repeated gzip decodes reported max RSS
 2,392,064 to 6,651,904 bytes, GC used 352 to 18,768 bytes after collection,
 and `/dev/fd` entries 4 before/after. A D-authored compressed fixture also
 round-trips through a temp `File` with 127-byte reads and checks FD count 4,
-5, 4 before/open/after explicit close. These are observations, not resource
-budgets: max RSS is process high-water mark, and **descriptor lifetime across
-error paths in a real archive reader remains unproven**. This is therefore not evidence that
-a production reader can process arbitrarily large archives or preserve an
-overall memory bound across I/O, callbacks, or concurrent work. No huge
-decompressed output is allocated for the negative case (65 KiB is enough to
-trigger the body cap), but the fixture generator allocates its 65 KiB input.
+5, 4 before/open/after explicit close. **These are observations, not
+resource budgets**: max RSS is process high-water mark, and descriptor
+lifetime across error paths in a real archive reader remains unproven. This
+is therefore not evidence that a production reader can process arbitrarily
+large archives or preserve an overall memory bound across I/O, callbacks, or
+concurrent work. No huge decompressed output is allocated for the negative
+case (65 KiB is enough to trigger the body cap), but the fixture generator
+allocates its 65 KiB input.
 
 External zstd is upstream v1.5.7 tarball SHA-256
 `eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3`,
@@ -106,15 +126,24 @@ libzstd `ZSTD_decompressStream` FFI to cap each output call.
 
 ## Production decisions still open
 
-Before Issue #30 can close, a real archive source/CLI integration and its file
-descriptor lifetime, corpus tolerance, and resource evidence still need a
-separate accepted scope. The current memory-input adapter proves only the
-bounded WARC/1.1 subset, not WARC/1.0, large segmented records, proposed
-zstd dictionaries/multi-frame records, or all-platform packaging. Its
-process-level RSS/GC/FD observations do not prove real-file descriptor
-closure, archive-scale memory behavior, or recovery after corruption. The
-source-key/record-ID/ordinal identity policy remains explicit, with no
-archive-wide uniqueness index. Rollback of this adapter slice is deletion of
+Before Issue #30 can close, a CLI command, S3 integration, and multi-file/
+archive discovery still need a separate accepted scope — the single-file
+local adapter (`effects.warc_file`) covers only one trusted-root regular
+file per call, not a corpus. Open items:
+
+- **CLI/S3 wiring and corpus tolerance.** No command surfaces any of these
+  readers today; corpus-scale file descriptor lifetime and resource
+  evidence still need a separate accepted scope.
+- **Format scope.** The current adapters prove only the bounded WARC/1.1
+  subset, not WARC/1.0, large segmented records, proposed zstd
+  dictionaries/multi-frame records, or all-platform packaging.
+- **Resource evidence.** Process-level RSS/GC/FD observations (compression
+  adapter and local-file transport) do not prove archive-scale memory
+  behavior or recovery after corruption across a real corpus.
+- **Identity policy.** The source-key/record-ID/ordinal identity policy
+  remains explicit, with no archive-wide uniqueness index.
+
+Rollback of the compressed-adapter slice is deletion of
 `source/effects/warc_compressed.d` and
 `experiments/warc_reader/compressed_check.d`, plus restoration of their
 documentation changes; the separately merged plain reader and pinned zstd

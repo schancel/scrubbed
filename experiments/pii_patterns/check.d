@@ -40,6 +40,19 @@ private void golden() {
     check(overlap.length == 2 && overlap[0].start == 0 && overlap[1].start == 0 &&
         overlap[0].category == PiiCategory.phone && overlap[1].category == PiiCategory.email,
         "overlaps retained");
+
+    // #328: parenthesized US area-code form, e.g. "(415) 555-0199", including
+    // the exact gold phone span from #302's comparator fixture 05.txt.
+    check(scan("(415) 555-0199")[0].confidence == PiiConfidence.ambiguous,
+        "parenthesized US national ambiguity");
+    check(scan("+1 (415) 555-0199")[0].confidence == PiiConfidence.high,
+        "parenthesized US international confidence");
+    auto prefix = "Customer service line: ";
+    auto goldSpan = "(415) 555-0199";
+    auto fixture05 = scan(prefix ~ goldSpan ~ ", or email support.line@example.org.");
+    check(fixture05.length == 2 && fixture05[0].category == PiiCategory.phone &&
+        fixture05[0].start == prefix.length && fixture05[0].end == prefix.length + goldSpan.length &&
+        fixture05[0].rule == "phone.national.ambiguous.v1", "#302 fixture 05.txt gold phone span");
 }
 
 private void negatives() {
@@ -55,6 +68,8 @@ private void negatives() {
         "4111 1111 1111 1112"]);
     countFalsePositives("US phone", ["123-555-0142", "202-055-0142",
         "202-555-01420", "020 7946 0958"]);
+    countFalsePositives("US phone parenthesized", ["(015) 555-0199", "(115) 555-0199",
+        "(415) 055-0199", "(415) 555-019", "(415) 555-01990"]);
     countFalsePositives("GB phone", ["+44 20 7946 095", "020 7946 095",
         "+1-202-555-0142"], "GB");
     check(scan("éhello@example.com").length == 1, "Unicode byte boundary");

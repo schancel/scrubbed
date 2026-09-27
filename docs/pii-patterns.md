@@ -18,8 +18,8 @@ scanPii(bytes, locale)   // locale is "US" or "GB"
 | Category | Rule | Confidence | Example |
 | --- | --- | --- | --- |
 | email | ASCII-domain email | high | `name@example.com` |
-| phone | US/GB national format | ambiguous | `202-555-0142`, `020 7946 0958` |
-| phone | US/GB international format | high | `+1-202-555-0142`, `+44 20 7946 0958` |
+| phone | US/GB national format | ambiguous | `202-555-0142`, `(415) 555-0199`, `020 7946 0958` |
+| phone | US/GB international format | high | `+1-202-555-0142`, `+1 (415) 555-0199`, `+44 20 7946 0958` |
 | card | issuer-prefix + Luhn-valid, 13–19 digits | ambiguous | `4111 1111 1111 1111` |
 | ip | canonical dotted IPv4 | high | `192.0.2.9` |
 

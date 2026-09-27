@@ -137,18 +137,32 @@ private size_t cardEnd(const(ubyte)[] b, size_t i) {
 
 private size_t phoneEnd(const(ubyte)[] b, size_t i, string locale, out bool ambiguous) {
     ambiguous = false;
-    if (!leftClear(b, i) || (i > 0 && (b[i - 1] == '-' || b[i - 1] == '+'))) return i;
+    if (!leftClear(b, i) || (i > 0 && (b[i - 1] == '-' || b[i - 1] == '+')) ||
+        (locale == "US" && b[i] == '(' && i >= 3 && b[i - 3] == '+' && b[i - 2] == '1' &&
+            b[i - 1] == ' ')) return i;
     size_t p = i;
     bool international;
     if (locale == "US") {
-        if (p + 3 <= b.length && b[p .. p + 3] == cast(const(ubyte)[]) "+1-") {
+        if (p + 4 <= b.length && b[p .. p + 4] == cast(const(ubyte)[]) "+1 (") {
+            p += 3; international = true;
+        } else if (p + 3 <= b.length && b[p .. p + 3] == cast(const(ubyte)[]) "+1-") {
             p += 3; international = true;
         }
-        if (p + 12 > b.length || b[p] < '2' || b[p] > '9' || !digit(b[p + 1]) ||
-            !digit(b[p + 2]) || b[p + 3] != '-' || b[p + 4] < '2' || b[p + 4] > '9' ||
-            !digit(b[p + 5]) || !digit(b[p + 6]) || b[p + 7] != '-') return i;
-        foreach (c; b[p + 8 .. p + 12]) if (!digit(c)) return i;
-        p += 12;
+        if (p < b.length && b[p] == '(') {
+            // Parenthesized area-code form: (NNN) NNN-NNNN.
+            if (p + 14 > b.length || b[p + 1] < '2' || b[p + 1] > '9' || !digit(b[p + 2]) ||
+                !digit(b[p + 3]) || b[p + 4] != ')' || b[p + 5] != ' ' ||
+                b[p + 6] < '2' || b[p + 6] > '9' || !digit(b[p + 7]) || !digit(b[p + 8]) ||
+                b[p + 9] != '-') return i;
+            foreach (c; b[p + 10 .. p + 14]) if (!digit(c)) return i;
+            p += 14;
+        } else {
+            if (p + 12 > b.length || b[p] < '2' || b[p] > '9' || !digit(b[p + 1]) ||
+                !digit(b[p + 2]) || b[p + 3] != '-' || b[p + 4] < '2' || b[p + 4] > '9' ||
+                !digit(b[p + 5]) || !digit(b[p + 6]) || b[p + 7] != '-') return i;
+            foreach (c; b[p + 8 .. p + 12]) if (!digit(c)) return i;
+            p += 12;
+        }
     } else {
         if (p + 4 <= b.length && b[p .. p + 4] == cast(const(ubyte)[]) "+44 ") {
             p += 4; international = true;
@@ -189,7 +203,7 @@ PiiFinding[] scanPii(const(ubyte)[] bytes, string locale) {
             auto e = emailEnd(bytes, i);
             add(i, e, PiiCategory.email, "email.ascii-domain.v1");
         }
-        if (!digit(value) && value != '+') continue;
+        if (!digit(value) && value != '+' && !(locale == "US" && value == '(')) continue;
         if (digit(value)) {
             auto e = ipEnd(bytes, i);
             add(i, e, PiiCategory.ip, "ip.v4.v1");
@@ -224,4 +238,41 @@ unittest {
 
     auto cappedRun = "a".replicate(maxPiiInputBytes);
     assert(scanPii(cast(const(ubyte)[]) cappedRun, "US").length == 0);
+}
+
+unittest {
+    // #328: parenthesized US area-code form, e.g. "(415) 555-0199".
+    auto national = scanPii(cast(const(ubyte)[]) "(415) 555-0199", "US");
+    assert(national.length == 1 && national[0].start == 0 &&
+        national[0].end == "(415) 555-0199".length &&
+        national[0].category == PiiCategory.phone &&
+        national[0].confidence == PiiConfidence.ambiguous &&
+        national[0].rule == "phone.national.ambiguous.v1");
+
+    auto international = scanPii(cast(const(ubyte)[]) "+1 (415) 555-0199", "US");
+    assert(international.length == 1 && international[0].start == 0 &&
+        international[0].end == "+1 (415) 555-0199".length &&
+        international[0].category == PiiCategory.phone &&
+        international[0].confidence == PiiConfidence.high &&
+        international[0].rule == "phone.international.v1");
+
+    // Previously-passing hyphenated forms remain unaffected.
+    auto hyphenNational = scanPii(cast(const(ubyte)[]) "202-555-0142", "US");
+    assert(hyphenNational.length == 1 &&
+        hyphenNational[0].confidence == PiiConfidence.ambiguous &&
+        hyphenNational[0].rule == "phone.national.ambiguous.v1");
+    auto hyphenInternational = scanPii(cast(const(ubyte)[]) "+1-202-555-0142", "US");
+    assert(hyphenInternational.length == 1 &&
+        hyphenInternational[0].confidence == PiiConfidence.high &&
+        hyphenInternational[0].rule == "phone.international.v1");
+
+    // Area code first digit must be 2-9: NANP area codes never start with 0 or 1.
+    assert(scanPii(cast(const(ubyte)[]) "(015) 555-0199", "US").length == 0);
+    assert(scanPii(cast(const(ubyte)[]) "(115) 555-0199", "US").length == 0);
+
+    // Wrong digit count in the final group is rejected, not loosely matched.
+    assert(scanPii(cast(const(ubyte)[]) "(415) 555-019", "US").length == 0);
+
+    // GB locale does not recognize the US parenthesized form.
+    assert(scanPii(cast(const(ubyte)[]) "(415) 555-0199", "GB").length == 0);
 }

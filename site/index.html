@@ -69,7 +69,7 @@
         <div class="arrow">&rarr;</div>
         <div class="step">Train</div>
     </div>
-    <p class="note">scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. On the collection side it has the building blocks for a crawler (a durable frontier, bounded fetch, link discovery) but not yet a packaged crawl command, so bring your own crawl or point it at pages you already have.</p>
+    <p class="note">scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. On the collection side it has the real building blocks for a crawler (a durable frontier, bounded fetch, link discovery) and they've been used for a real crawl, just not yet behind a shipped <code>scrubbed crawl</code> command &mdash; today that means composing them yourself (see <a href="https://github.com/schancel/scrubbed/tree/main/experiments/corpus_crawl" target="_blank" rel="noopener">experiments/corpus_crawl</a>) or pointing scrubbed at pages you already have.</p>
 
     <h2>See it work</h2>
     <p class="note">Real output from the actual binary, not a mockup.</p>

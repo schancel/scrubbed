@@ -15,7 +15,8 @@ output without importing third-party page content:
   non-rectangular rows, internal fragments, and unsafe link/image targets.
 - `malformed.html` records the parser-repaired table and unclosed
   caption/box result.
-- `mathml.html` and `oversized-depth.html` pin typed parser abstentions.
+- `mathml.html` pins foreign-namespace subtree pruning (the surrounding page
+  still renders). `oversized-depth.html` pins a typed parser abstention.
 
 ## Current gap matrix
 
@@ -27,7 +28,7 @@ output without importing third-party page content:
 | Image attributes | A safe `src` plus escaped `alt` becomes `![alt](<src>)`. An unsafe or absent source emits alt text only. | Safe source and alt text. | Width, height, `srcset`, loading/referrer attributes, title, file identity, and provenance are dropped. |
 | IDs and fragments | Every `id` is dropped. A safe `href="#id"` is emitted unchanged. | Fragment spelling on source links. | No target anchor is emitted, so an otherwise preserved fragment can dangle. |
 | Citation-like markup | `sup` and citation spans unwrap; a safe fragment link remains an ordinary link; a references `ol` remains an ordinary numbered list. | Label text, reference text, source order, and safe fragment destination. | Citation identity, backlink/target semantics, and source/reference association are lost. |
-| MathML | A real MathML namespace causes the whole selected parse to abstain with `unsupportedNamespace`. A common image fallback is treated as an ordinary image. | For an image fallback, safe source and alt text only. | Native MathML structure has no Markdown result; display/inline role and formula semantics are unavailable. |
+| MathML | A real MathML namespace is pruned as a whole subtree at parse time (`ns != 2`); the rest of the page still parses and renders normally. A common image fallback (outside the pruned subtree) is treated as an ordinary image. | Sibling content outside the pruned MathML subtree; for an image fallback, safe source and alt text only. | Native MathML structure has no Markdown result at all -- it disappears rather than degrading to any textual/alt fallback; display/inline role and formula semantics are unavailable. |
 | Box-like regions | Unknown `aside`/span wrappers unwrap; `div` creates a generic block. Classes such as hatnote, notice, navbox, and infobox are not classified. | Visible children, including navigation-like text. | Content boxes cannot be distinguished from page chrome; box identity and role are lost. |
 | Malformed structure | Lexbor repairs the tree, then the converter renders the repaired order deterministically. | Visible repaired-tree text. | The Markdown does not signal that repair occurred or recover discarded span/role information. |
 | Oversized structure/input | The depth fixture abstains with `depthLimit`; a raw input of `maxRawBytes + 1` abstains with `rawLimit`. | Typed failure reason only. | No partial Markdown or structural fallback is returned. |
@@ -39,9 +40,10 @@ future representation.
 
 ## Evidence
 
-The optimized checker compares all three successful conversions byte for
-byte, renders each twice, and asserts the expected typed failures for
-MathML and excessive nesting. It additionally checks:
+The optimized checker compares all four successful conversions (including
+the MathML fixture, whose foreign-namespace subtree is pruned rather than
+aborting the parse) byte for byte, renders each twice, and asserts the
+expected typed failure for excessive nesting. It additionally checks:
 
 - unsafe `javascript:` and `data:` destinations remain inert while visible
   link labels and image alt text survive;
@@ -84,9 +86,11 @@ exact emitted syntax and bounds:
    content rather than chrome? What exact representation identifies a kept
    box, and does ambiguous or over-bound content unwrap, disappear, or cause
    the containing document to abstain?
-4. Should bounded MathML be emitted as raw `<math>`, translated to a
-   selected math syntax, reduced to authored alternative text, or cause a
-   typed abstention? Define inline/display handling plus byte, depth, node,
+4. The parser now silently prunes MathML (and any other foreign-namespace
+   element) as a whole subtree rather than aborting the document; should
+   bounded MathML instead be emitted as raw `<math>`, translated to a
+   selected math syntax, or reduced to authored alternative text? Define
+   inline/display handling plus byte, depth, node,
    and attribute bounds and the exact over-bound fallback.
 5. Should a figure use ordinary image Markdown plus a separately marked
    caption, bounded raw `<figure>`, or another exact syntax? Where do width,

@@ -78,6 +78,7 @@ void main(string[] args) {
     auto wiki = exactGolden(root, "wikipedia-like");
     auto ordinary = exactGolden(root, "ordinary-page");
     auto malformed = exactGolden(root, "malformed");
+    auto mathml = exactGolden(root, "mathml");
 
     // Exact authored goldens establish that no unrecorded prose is invented.
     need(wiki.canFind("- Known for | Analytical Engine notes") &&
@@ -102,13 +103,18 @@ void main(string[] args) {
         !ordinary.canFind("640") && !ordinary.canFind("480"),
         "figure, caption, or image-attribute behavior changed");
 
-    expectParserFailure(root, "mathml",
-        HtmlFailureReason.unsupportedNamespace);
+    // A foreign-namespace element (native MathML here) is pruned as a
+    // subtree rather than aborting the parse: the surrounding page still
+    // renders, and no MathML content/tag leaks into the Markdown.
+    need(mathml == "Formula:\n" && !mathml.canFind("<m") &&
+        !mathml.canFind("equation-1"),
+        "foreign-namespace pruning of MathML changed");
+
     expectParserFailure(root, "oversized-depth",
         HtmlFailureReason.depthLimit);
     parserOwnershipProof(root);
     capProof();
 
-    writeln("rich Markdown baseline: 3 exact goldens, determinism, " ~
-        "URI inertness, ownership, MathML/depth/raw/output caps pass");
+    writeln("rich Markdown baseline: 4 exact goldens, determinism, " ~
+        "URI inertness, ownership, MathML pruning, depth/raw/output caps pass");
 }

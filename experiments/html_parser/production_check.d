@@ -29,6 +29,12 @@ private bool hasText(ref const(HtmlTree) tree, string text) {
     return false;
 }
 
+private bool hasElement(ref const(HtmlTree) tree, string name) {
+    foreach (ref const node; tree.nodes)
+        if (node.kind == HtmlNodeKind.element && node.name == name) return true;
+    return false;
+}
+
 private Thread independentTreeWorker(size_t index, bool[] passed) {
     return new Thread(() {
         foreach (_; 0 .. 100) {
@@ -137,10 +143,16 @@ void main(string[] args) {
     manyAttrs ~= ">";
     expectFailure(cast(const(ubyte)[]) manyAttrs, HtmlFailureReason.attributeLimit);
 
-    auto foreign = parseHtml(cast(const(ubyte)[]) "<svg><circle/></svg>");
-    require(!foreign.isParsed &&
-        foreign.failure.reason == HtmlFailureReason.unsupportedNamespace,
-        "foreign namespace was not quarantined");
+    // A foreign-namespace element is pruned as a subtree, not aborted: the
+    // parse still succeeds, the svg/circle never appear in the tree, and a
+    // sibling before and after the pruned subtree is still observed.
+    auto foreign = parseHtml(cast(const(ubyte)[])
+        "<p>before</p><svg><circle/></svg><p>after</p>");
+    require(foreign.isParsed, "foreign namespace subtree aborted the parse");
+    require(!hasElement(foreign.tree, "svg") && !hasElement(foreign.tree, "circle"),
+        "foreign namespace element/subtree was not pruned");
+    require(hasText(foreign.tree, "before") && hasText(foreign.tree, "after"),
+        "sibling content around pruned foreign subtree was lost");
 
     verifyHtmlFaults(); // Includes during-traversal observation-cap negative.
 

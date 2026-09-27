@@ -116,10 +116,15 @@ private void observe(NativeNode* first, size_t parent, size_t depth,
         if (++visited > maxNodes) throw new BoundaryFault(HtmlFailureReason.nodeLimit);
         if (fault == Fault.duringTraversal && visited == 3)
             throw new BoundaryFault(HtmlFailureReason.injectedFault);
+        // Foreign-namespace elements (e.g. inline <svg>/<math>) are pruned:
+        // neither the element nor its subtree is observed, but traversal
+        // continues over its siblings. This mirrors how hiddenTag content
+        // is excluded downstream, but at tree-construction time so every
+        // consumer of the parsed tree benefits.
+        if (node.type == elementNode && node.ns != 2)
+            continue;
         size_t childParent = parent;
         if (node.type == elementNode || node.type == textNode) {
-            if (node.type == elementNode && node.ns != 2)
-                throw new BoundaryFault(HtmlFailureReason.unsupportedNamespace);
             charge(tree, HtmlNode.sizeof);
             const index = tree.nodes.length;
             tree.nodes ~= HtmlNode(node.type == elementNode ? HtmlNodeKind.element :
@@ -228,6 +233,32 @@ unittest {
     }
     assert(found);
     assert(outcome.tree.nodes.canFind!(n => n.text == "Hi"));
+}
+
+unittest {
+    // A foreign-namespace element (e.g. a decorative inline <svg> icon) is
+    // pruned as a whole subtree rather than aborting the entire parse; its
+    // siblings, including later siblings under the same parent, still
+    // observe normally.
+    import std.algorithm.searching : canFind;
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<nav><svg viewBox='0 0 10 10'><circle cx='5' cy='5' r='4'/></svg>" ~
+        "<a href='/'>Home</a></nav><article><p>Real content</p></article>"));
+    assert(outcome.isParsed);
+    auto nodes = outcome.tree.nodes;
+    // The svg subtree, including its child, is excluded entirely.
+    assert(!nodes.canFind!(n => n.name == "svg"));
+    assert(!nodes.canFind!(n => n.name == "circle"));
+    // Sibling content before and after the pruned subtree is preserved.
+    assert(nodes.canFind!(n => n.text == "Home"));
+    assert(nodes.canFind!(n => n.text == "Real content"));
+    size_t navIndex = size_t.max;
+    foreach (i, node; nodes) if (node.name == "nav") navIndex = i;
+    assert(navIndex != size_t.max);
+    bool anchorUnderNav;
+    foreach (node; nodes)
+        if (node.name == "a" && node.parentIndex == navIndex) anchorUnderNav = true;
+    assert(anchorUnderNav);
 }
 
 version (htmlTreeProductionCheck) {

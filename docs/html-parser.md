@@ -28,9 +28,14 @@ Traversal rejects:
 
 - native depth above 128,
 - more than 8,192 visited native nodes,
-- more than 256 attributes on one element,
-- non-HTML element namespaces, and
+- more than 256 attributes on one element, and
 - more than 1 MiB of D-owned selected observation.
+
+A non-HTML element namespace (e.g. inline `<svg>`/`<math>`) is not a
+rejection: that element and its whole subtree are pruned -- neither observed
+nor descended into -- and traversal continues over its siblings, so a
+decorative foreign-namespace fragment no longer aborts an otherwise
+parseable document.
 
 The observation budget counts each copied name/value/text byte plus the
 logical `HtmlNode.sizeof` and `HtmlAttribute.sizeof` for each appended

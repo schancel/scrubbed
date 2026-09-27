@@ -24,6 +24,20 @@
         .honesty { border-left: 3px solid #ccc; padding-left: 1rem; color: #444; }
         footer { margin-top: 3.5rem; padding-top: 1.25rem; border-top: 1px solid #eee; color: #888; font-family: monospace; font-size: 0.8rem; }
         footer a { color: #888; }
+        .stats { display: flex; flex-wrap: wrap; gap: 1rem; }
+        .stat-card { flex: 1 1 180px; border: 1px solid #ddd; padding: 1rem; }
+        .stat-card .big { font-family: monospace; font-size: 1.7rem; font-weight: bold; display: block; }
+        .stat-card .label { font-size: 0.8rem; color: #666; display: block; margin-top: 0.15rem; }
+        .stat-card p { font-size: 0.85rem; color: #444; margin-top: 0.5rem; }
+        .pipeline-steps { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.4rem; margin: 1rem 0; }
+        .pipeline-steps .step { flex: 1 1 130px; border: 1px solid #ddd; padding: 0.75rem 0.6rem; text-align: center; font-size: 0.85rem; }
+        .pipeline-steps .step.here { border-color: #1a1a1a; border-width: 2px; background: #f7f7f7; font-weight: bold; }
+        .pipeline-steps .arrow { display: flex; align-items: center; justify-content: center; color: #999; font-family: monospace; flex: 0 0 auto; }
+        .demo-pair { display: flex; flex-wrap: wrap; gap: 1rem; margin: 1rem 0; }
+        .demo-pair > div { flex: 1 1 260px; }
+        .demo-pair .demo-label { font-family: monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: #888; margin-bottom: 0.35rem; display: block; }
+        .demo-pair pre { margin: 0; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; }
+        .demo-pair .after pre { background: #0e2a17; }
     </style>
 </head>
 <body>
@@ -42,17 +56,87 @@
     <p>Most corpus-cleaning pipelines today are a chain of separate Python tools glued together with intermediate files: <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> to fix encodings, <a href="https://github.com/adbar/trafilatura" target="_blank" rel="noopener">trafilatura</a> to pull the article out of the page, langdetect to tag the language, Presidio to find PII, a separate dedup pass — each one its own interpreter startup, its own read/write of the whole document, its own copy of the string.</p>
     <p>scrubbed replaces that chain with one native binary that does the whole pass per document in a single process: mojibake repair, HTML main-content extraction, PII scanning, language ID, dedup — zero-copy where the data allows it, real OS-thread parallelism across the whole corpus, no intermediate files between stages. Where a case is covered, it's built and verified to match the reference tool's output, not just approximate it — see the numbers below. Coverage is still growing (more encodings, more scripts, more languages), but the bar for anything shipped is drop-in correctness on what it claims to cover.</p>
 
+    <h2>Where this fits in a training pipeline</h2>
+    <p>Building a corpus for pretraining or fine-tuning is usually four stages: <strong>collect</strong> raw pages, <strong>clean &amp; curate</strong> them into usable text, <strong>package</strong> the result into training-ready shards, then <strong>train</strong>. scrubbed's job is the middle stage &mdash; the part that's normally a chain of separate Python tools today.</p>
+    <div class="pipeline-steps">
+        <div class="step">Collect<br><span style="color:#888;font-size:0.78rem;">crawl or licensed source</span></div>
+        <div class="arrow">&rarr;</div>
+        <div class="step here">Clean &amp; curate<br><span style="font-size:0.78rem;font-weight:normal;">scrubbed</span></div>
+        <div class="arrow">&rarr;</div>
+        <div class="step">Package<br><span style="color:#888;font-size:0.78rem;">shards, tokenizer</span></div>
+        <div class="arrow">&rarr;</div>
+        <div class="step">Train</div>
+    </div>
+    <p class="note">scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. On the collection side it has the building blocks for a crawler (a durable frontier, bounded fetch, link discovery) but not yet a packaged crawl command, so bring your own crawl or point it at pages you already have.</p>
+
+    <h2>See it work</h2>
+    <p class="note">Real output from the actual binary, not a mockup.</p>
+    <div class="demo-pair">
+        <div class="before">
+            <span class="demo-label">Input (UTF-8 read as Latin-1, then re-saved)</span>
+            <pre>The cafÃ© menu featured crÃ¨me brÃ»lÃ©e â a classic dessert.</pre>
+        </div>
+        <div class="after">
+            <span class="demo-label">./scrubbed run --filters fix-mojibake</span>
+            <pre>The café menu featured crème brûlée — a classic dessert.</pre>
+        </div>
+    </div>
+    <div class="demo-pair">
+        <div class="before">
+            <span class="demo-label">Input (raw HTML: nav, ad sidebar, footer)</span>
+            <pre>&lt;nav&gt;Home | Archive | Subscribe&lt;/nav&gt;
+&lt;aside&gt;Sponsored: buy our
+  newsletter subscription today!&lt;/aside&gt;
+&lt;article&gt;
+  &lt;h1&gt;Field notes from the
+  delta survey&lt;/h1&gt;
+  &lt;p&gt;The survey team spent three
+  weeks mapping the river delta's
+  shifting sandbars, recording
+  water depth every two hundred
+  meters along six transects. The
+  main channel has migrated nearly
+  forty meters east since the last
+  survey.&lt;/p&gt;
+&lt;/article&gt;
+&lt;footer&gt;&amp;copy; 2026 Delta Survey
+  Project. All rights reserved.&lt;/footer&gt;</pre>
+        </div>
+        <div class="after">
+            <span class="demo-label">./scrubbed clean-web-document</span>
+            <pre>Field notes from the delta survey The survey team spent three weeks mapping the river delta's shifting sandbars, recording water depth every two hundred meters along six transects. The main channel has migrated nearly forty meters east since the last survey.</pre>
+        </div>
+    </div>
+
     <h2>The pipeline, one command</h2>
     <pre>scrubbed clean-web-document --input page.html --output page.txt
 scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p class="note">Repairs mojibake, extracts the article body out of the page (nav/ads/footers dropped), scans the result for emails/phones/card numbers/IPv4 addresses, and writes a PII-audit sidecar next to the output — one process, one pass, parallel across a whole directory tree.</p>
 
     <h2>Verified against the tools it replaces</h2>
-    <ul>
-        <li><strong>Encoding repair vs. ftfy:</strong> on its Latin-1/Windows-1252 scope, scrubbed's mojibake repair matches ftfy exactly against ftfy's own test corpus — all 39 corrupted cases in scope fixed, all 48 clean cases left untouched. More encodings are on the roadmap.</li>
-        <li><strong>Language ID vs. langdetect:</strong> 100% classification agreement (11/11) on a real held-out fixture run across scrubbed's 17 supported languages (11 Latin-script plus 6 Brahmic-family: Hindi, Bengali, Tamil, Telugu, Gujarati, Punjabi).</li>
-        <li><strong>Main-content extraction vs. trafilatura:</strong> matches trafilatura's held-out gold answers on the pages it processes today; full methodology, current coverage gaps, and the open ticket tracking them are in <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</li>
-    </ul>
+    <p class="note">Every number below comes from <code>benchmarks/external_comparator.d</code>, runnable yourself against real pinned installs of each reference tool &mdash; not a claimed result.</p>
+    <div class="stats">
+        <div class="stat-card">
+            <span class="big">39/39 + 48/48</span>
+            <span class="label">vs. ftfy, encoding repair</span>
+            <p>Exact match on ftfy's own test corpus, within scrubbed's Latin-1/Windows-1252 scope: every corrupted case fixed, every clean case left untouched.</p>
+        </div>
+        <div class="stat-card">
+            <span class="big">11/11</span>
+            <span class="label">vs. langdetect, language ID</span>
+            <p>100% classification agreement on a real held-out run, across scrubbed's 17 supported languages.</p>
+        </div>
+        <div class="stat-card">
+            <span class="big">20/21</span>
+            <span class="label">vs. Presidio, PII detection</span>
+            <p>Exact parity on email/card/IP (5/5 each). Phone: 5/6 vs. Presidio's 6/6 &mdash; the one place it's behind, disclosed not hidden. Zero false positives from scrubbed on any category.</p>
+        </div>
+        <div class="stat-card">
+            <span class="big">12/20 pages</span>
+            <span class="label">vs. trafilatura, extraction</span>
+            <p>Matches trafilatura's gold answers on pages it parses; a known, ticketed parser gap explains the rest &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</p>
+        </div>
+    </div>
 
     <h2>Also shipped</h2>
     <ul>
@@ -110,7 +194,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p class="note">Full command and flag reference: <a href="https://github.com/schancel/scrubbed/blob/main/docs/cli-commands.md" target="_blank" rel="noopener">docs/cli-commands.md</a>.</p>
 
     <footer>
-        <p>MIT licensed. <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">github.com/schancel/scrubbed</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">schancel.github.io</a></p>
+        <p><a href="https://github.com/schancel/scrubbed/blob/main/LICENSE" target="_blank" rel="noopener">MIT licensed</a> &middot; <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a> &middot; <a href="https://github.com/schancel/scrubbed/tree/main/benchmarks" target="_blank" rel="noopener">Verify the numbers yourself</a> &middot; <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">Open issues</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">schancel.github.io</a></p>
     </footer>
 </main>
 </body>

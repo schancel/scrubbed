@@ -14,7 +14,7 @@ import std.exception : enforce;
 import std.uni : normalize, toLower, unicode, isWhite;
 import std.utf : UTFException, validate;
 
-enum uint topicalTagsSchema = 1;
+enum uint topicalTagsSchema = 2;
 enum uint topicalNormalizationVersion = 1;
 enum string controlledTokenV1 = "controlled-token-v1";
 
@@ -30,6 +30,11 @@ enum size_t maxTermsPerTopic = 16;
 enum size_t maxTokensPerTerm = 4;
 enum size_t maxStoredMatches = 16;
 enum size_t maxAnnotationBytes = 64 * 1024;
+
+/// Bounded raw occurrence count for `DeclaredEvidence.contentMatchCount`
+/// (schema 2). Not a relevance score: see the `DeclaredContentSupport` doc
+/// comment.
+enum uint maxDeclaredContentMatchCount = 65_535;
 
 enum CandidateOrigin : ubyte { declared, inferred }
 
@@ -128,10 +133,40 @@ struct DeclaredObservation {
     size_t sourceNode;
 }
 
+/// Schema 2 (owner-approved additive bump from schema 1): whether an
+/// independently checked caller-owned text has been consulted for this
+/// candidate, and if so, whether it was actually found there.
+/// `unchecked` is the zero-value default: `canonicalizeDeclared` itself has
+/// no page/content text to check against, so every candidate it produces
+/// starts `unchecked`. A caller with content text available (e.g. a
+/// terminal HTML-extraction stage) may then set `supported`/`unsupported`
+/// on its own copy after the fact -- see `contentMatchCount`'s doc comment
+/// for why this does not require re-deriving `evidenceDigest`.
+enum DeclaredContentSupport : ubyte { unchecked, unsupported, supported }
+
 struct DeclaredEvidence {
     string sourceRuleId;
     string extractorId;
     size_t sourceNode;
+
+    /// Schema 2 additive fields. Both default to their schema-1-compatible
+    /// zero value (`unchecked`, `0`) so every existing construction site
+    /// (`canonicalizeDeclared`'s positional `DeclaredEvidence(...)` literal)
+    /// is unchanged and unaffected.
+    DeclaredContentSupport support;
+    /// Bounded raw occurrence count of this candidate's canonical token
+    /// sequence in whatever text `support` was checked against -- a plain
+    /// count, not a relevance/confidence score. Always `0` when `support`
+    /// is `unchecked` or `unsupported`. Deliberately excluded from
+    /// `evidenceDigest`'s input bytes: that digest binds the
+    /// source-declared observation identity (rule/extractor/node plus the
+    /// canonicalized display/key/hierarchy), which is fully known at
+    /// `canonicalizeDeclared` time, before any later content-support check
+    /// can run. A caller may attach `support`/`contentMatchCount` to its own
+    /// copy of an already-built annotation's candidates without invalidating
+    /// `evidenceDigest`; `checkTopicalTags` still enforces internal
+    /// consistency between the two fields.
+    uint contentMatchCount;
 }
 
 struct DeclaredCandidate {
@@ -591,6 +626,14 @@ void checkTopicalTags(ref const TopicalTagsAnnotation value) {
             candidate.evidence.extractorId.length <= maxIdBytes,
             "topical tags: malformed declared extractor id");
         enforce(candidate.evidence.sourceNode <= uint.max, "topical tags: declared source node out of range");
+        enforce(candidate.evidence.contentMatchCount <= maxDeclaredContentMatchCount,
+            "topical tags: declared content match count out of range");
+        enforce(candidate.evidence.support != DeclaredContentSupport.supported ||
+            candidate.evidence.contentMatchCount != 0,
+            "topical tags: supported evidence requires a nonzero content match count");
+        enforce(candidate.evidence.support == DeclaredContentSupport.supported ||
+            candidate.evidence.contentMatchCount == 0,
+            "topical tags: content match count must be zero unless supported");
         bool expectedDuplicate = (candidate.canonicalKey in seenDeclaredKeys) !is null;
         enforce(candidate.duplicateKey == expectedDuplicate, "topical tags: declared duplicate flag mismatch");
         seenDeclaredKeys[candidate.canonicalKey] = true;
@@ -715,6 +758,8 @@ ubyte[] encodeTopicalTags(TopicalTagsAnnotation value) {
         appendField(bytes, candidate.evidence.sourceRuleId);
         appendField(bytes, candidate.evidence.extractorId);
         appendU32(bytes, cast(uint) candidate.evidence.sourceNode);
+        appendU8(bytes, cast(ubyte) candidate.evidence.support);
+        appendU32(bytes, candidate.evidence.contentMatchCount);
     }
     appendU32(bytes, cast(uint) value.inferred.length);
     foreach (candidate; value.inferred) {
@@ -798,8 +843,13 @@ TopicalTagsAnnotation decodeTopicalTags(const(ubyte)[] wireBytes, DocumentId exp
         auto ruleId = readField(bytes, at, maxIdBytes);
         auto extractorId = readField(bytes, at, maxIdBytes);
         auto node = readU32(bytes, at);
+        auto supportValue = readU8(bytes, at);
+        enforce(supportValue <= DeclaredContentSupport.max,
+            "topical tags: malformed declared content support");
+        auto contentMatchCount = readU32(bytes, at);
         result.declared ~= DeclaredCandidate(display, key, hierarchy, CandidateOrigin.declared,
-            duplicate, DeclaredEvidence(ruleId, extractorId, node));
+            duplicate, DeclaredEvidence(ruleId, extractorId, node,
+                cast(DeclaredContentSupport) supportValue, contentMatchCount));
     }
     auto inferredCount = readU32(bytes, at);
     enforce(inferredCount <= maxInferredCandidates, "topical tags: inferred candidate overflow");

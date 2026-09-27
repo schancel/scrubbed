@@ -212,3 +212,162 @@ handful of authored sentences. Not HTML parsing, a pipeline stage, CLI/config
 surface, or any local/JSONL/durable publication path; those are explicitly
 out of scope for this slice and belong to a separately groomed successor
 that must re-groom against the integrated #180 generic side-output shape.
+
+## `topical-tags-extract`: declared-extraction stage (next-slice, additive)
+
+**Status: next-slice of issue #167**, accepted per the "Strong Tier-3
+next-slice solution contract" recorded on the issue. This wires the frozen
+declared-candidate shape above into a real, self-registering, TERMINAL v3
+stage, `source/effects/topical_tags_extract_stage.d` (stage key
+`topical-tags-extract`), matching `stages.pii_four_class`'s single-shot
+terminal shape rather than the two-phase `html-metadata-annotate` +
+`html-main-content` shape. It is **declared-extraction only**: no
+controlled-vocabulary inference is wired in this slice, and nothing above
+this section changes except the one additive schema bump below.
+
+### Extraction sources
+
+The stage parses a document's HTML exactly once (`effects.html_tree.parseHtml`)
+and extracts declared candidates from three sources, all feeding the
+unmodified `canonicalizeDeclared`:
+
+1. **`<meta name="keywords" content="...">`** (head-scoped). `content` is
+   split on `,`/`;`; each nonempty, normalized piece becomes one
+   `DeclaredObservation` with `sourceRuleId = "meta.keywords"`.
+2. **The `rel="tag"` microformat**: `<a rel="tag">` (anchor text is the
+   display candidate) and `<link rel="tag">` (no text: falls back to a
+   display candidate derived from the `href`'s last path segment, with
+   `-`/`_` loosened to spaces). Both use
+   `sourceRuleId = "microformat.rel-tag"`. Visible category/tag navigation
+   *without* an explicit `rel="tag"` attribute is not extracted: no bounded,
+   deterministic detection rule exists for that.
+3. **JSON-LD `<script type="application/ld+json">` schema.org `Article`**:
+   scoped narrowly to `@type` exactly `"Article"` (string or array
+   containing it), never `NewsArticle`/`BlogPosting`/etc. Reads `keywords`
+   (string, comma/semicolon-split, or a JSON array of strings;
+   `sourceRuleId = "ldjson.article.keywords"`) and `about` (array of JSON
+   string or `Thing` object with `name`; `sourceRuleId =
+   "ldjson.article.about"`). Parsed with `std.json.parseJSON` +
+   `JSONOptions.strictParsing` and an explicit depth cap of 32, bounded to
+   128 KiB of aggregate ld+json bytes scanned per document.
+
+`extractorId = "topical-tags-extract:v1"` uniformly. The stage caps its own
+extraction at 64 candidates (`maxDeclaredCandidates`) before calling
+`canonicalizeDeclared`, truncating extras in document order, rather than
+letting `canonicalizeDeclared`'s own cap `enforce` throw over a routine
+"too many meta keywords" case.
+
+### Content-support signal: `DeclaredEvidence` schema 1 → 2
+
+Raw `<meta name="keywords">` extraction surfaces SEO spam — keyword-stuffed
+tags that are never actually about the page. Because this stage is terminal
+and self-parsing (it can never be sandwiched between `html-metadata-annotate`
+and `html-main-content` in one job; see below), the only text available to
+check a candidate against is the whole page's own visible text, concatenated
+from every `HtmlNodeKind.text` node in the parsed tree (nav/boilerplate
+included, head and body alike). This is named `pageTextSupport` rather than
+"canonical-text support" to avoid conflating it with the narrower
+main-content-only text this document's own "encode/decode" section refers to.
+
+This is the one owner-approved additive touch to `source/domain/topical_tags.d`
+since the first slice: `topicalTagsSchema` bumps 1 → 2, and `DeclaredEvidence`
+gains two additive fields:
+
+- `DeclaredContentSupport support` — a tri-state enum: `unchecked` (no page
+  text was ever checked — the zero-value default `canonicalizeDeclared`
+  itself produces, since it has no page text; kept because that function is
+  a public API any future non-HTML caller could use without page text
+  available), `unsupported` (checked, not found), `supported` (checked,
+  found at least once).
+- `uint contentMatchCount` — a bounded, plain raw occurrence count of the
+  candidate's canonical token sequence in the checked text (adjacent-token
+  matching, not a substring search), always `0` unless `support ==
+  supported`. This is deliberately **not** a BM25/TF-IDF/relevance score:
+  both would need a corpus-relative term-rarity signal this codebase has no
+  shipped, provenance-clean source for.
+
+Both fields thread additively through `checkTopicalTags` (internal
+consistency between `support`/`contentMatchCount`, plus the bounded-count
+cap), `encodeTopicalTags`, and `decodeTopicalTags`. They are deliberately
+**excluded** from `evidenceDigest`'s input bytes: that digest binds the
+source-declared observation identity (rule/extractor/node plus the
+canonicalized display/key/hierarchy), which is fully known at
+`canonicalizeDeclared` time — before any later content-support check can
+run. This is what lets the stage call the frozen, unmodified `buildAnnotation`
+exactly as documented and then attach `support`/`contentMatchCount` to its
+own copy of the resulting candidates afterward, without invalidating
+`evidenceDigest`. Nothing durably publishes the schema-1 wire anywhere in
+this repository, so this bump has zero migration cost.
+
+### Reused, frozen `buildAnnotation`, deliberately inert
+
+`buildAnnotation` is `domain.topical_tags`'s only construction entry point,
+and it unconditionally also runs `controlled-token-v1` inference. Since this
+slice defers inferred-tag wiring, the stage calls it with a fixed, inert
+placeholder `Vocabulary` (one topic, required only because `Vocabulary.build`
+rejects zero topics) and `language = "und"`, which deterministically abstains
+inference via `InferenceAbstention.unsupportedLanguage` before the vocabulary
+is ever consulted (the language gate precedes vocabulary iteration in
+`inferControlledTokenV1`) whenever the page text is itself nonempty,
+appropriately sized, and valid UTF-8; otherwise one of the other typed
+abstentions applies instead. Controlled-vocabulary/inferred-tag stage wiring
+is out of scope here and left to its own future contract.
+
+### Architecture: why this is one terminal stage, not two phases
+
+The rich `TopicalTagsAnnotation` payload cannot travel through
+`StageDocument.metadata` (the `html-metadata-annotate` →
+`document-metadata-publish` two-phase shape used elsewhere): that path's
+extension-field cap is 512 bytes, and this annotation's own identity/digest
+overhead alone is already close to that before any candidate. Separately,
+`composition.compiler`'s `compileJob` admits at most one
+`SideOutputCapability.terminal`-producing stage per compiled job, which must
+be last. So `topical-tags-extract` is single, self-contained, and terminal —
+parsing its own full HTML independent of any prior stage's transform, the
+same shape as `stages.pii_four_class`. Being terminal, it can only ever be
+the pipeline's last stage, so "must run before html-main-content" holds by
+construction.
+
+**Inherited, not resolved:** a single job cannot currently produce both
+topical-tags output and PII-audit/document-metadata output at once — the
+same limitation `pii-four-class` vs. `document-metadata-publish` already has
+today. This is the "multiple optional terminal annotations coexist" gap the
+first slice above already named and deferred to a future generic multi-sink
+redesign; this stage inherits, not resolves, that gap.
+
+A `SideOutputCapability.terminal` registration also means
+`composition.executor.validateCapabilities` requires *every* event —
+quarantined ones included — to carry exactly one `TerminalSideOutput`. On
+quarantine, the stage attaches a placeholder side output with an empty
+payload (never read once a caller branches on quarantine), mirroring
+`effects.html_metadata_stage`'s own `quarantinedMetadataSideOutput` idiom for
+the same, already-precedented reason.
+
+### Abstention/quarantine behavior
+
+- HTML parse failure or raw-bytes-over-limit → quarantine, the same
+  reason-mapping idiom as `html-metadata-annotate`/`html-main-content`.
+- No declared candidates found across all three sources is **not** an
+  error: the stage emits a well-formed annotation with `declared.length ==
+  0` and `identity.hasEvidence == false`.
+- A single malformed evidence item (unparseable JSON in one ld+json block, a
+  non-string/non-object `about` entry, a candidate failing canonicalization
+  or its size bound, an oversize ld+json block beyond the 128 KiB aggregate
+  cap) is skipped; the rest of the document's evidence is still extracted.
+  The whole document is never quarantined over one bad source.
+- A genuine internal-invariant failure in the stage's own mapping code
+  defensively quarantines with the fixed, content-free reason
+  `annotationBuildFailure`, mirroring `html-main-content`'s
+  `catch (HtmlMainContentOutputLimit)` pattern.
+
+### Files added in this slice
+
+- `source/effects/topical_tags_extract_stage.d` — the stage, its local
+  meta-keyword/rel-tag/JSON-LD extraction code, and co-located unit tests
+  covering each evidence source alone and combined, cross-source duplicate
+  marking, conflicting casing, malformed/oversize/wrong-type JSON-LD,
+  absent evidence, SEO-spam and genuine content-support cases, the
+  rel-tag-empty-text slug fallback, deterministic re-run byte-identical
+  output, and the 64-candidate cap.
+- The one additive edit to `source/domain/topical_tags.d` described above.
+- This section.

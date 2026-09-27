@@ -2,7 +2,7 @@
 
 Status key: [x] done and verified, [~] partially done, [ ] not started.
 
-Planning status (2026-09-22): [73 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
+Planning status (2026-09-27): [73 accepted GitHub issues](https://github.com/schancel/scrubbed/issues)
 cover the broader corpus-curation roadmap with 142 native dependency edges.
 Acceptance is not an implementation claim; worker readiness is tracked per
 issue. This file remains the status record for implemented work.
@@ -185,6 +185,27 @@ for explicitly supported document formats are tracked separately (#67, #156).
       exits and a real queued-cancellation `--explain` path. Value/path/filter
       completion is not supported; parser startup/size observations are not
       per-document throughput evidence (`docs/cli-commands.md`).
+- [~] Compile presets and custom workflows into one canonical plan (#240).
+      The original contract proposed a generic `source/workflow/*.d` facade
+      (spec/JSON/presets/CLI-token compiler) for arbitrary crawl workflows;
+      the owner explicitly superseded that design before any of it was
+      implemented (no `source/workflow/*.d` file has ever existed). The
+      current, narrower contract instead ships a sealed, versioned top-level
+      `clean-web-document` preset command (`source/job/presets.d`) that
+      expands through the same `job.cli_tokens`/`composition.compiler.compileJob`
+      machinery `run` uses, wiring the already-shipped four-stage chain
+      (`fix-mojibake` -> `html-metadata-annotate` -> `html-main-content` ->
+      `pii-four-class`) with an implicit PII-audit sidecar path derived from
+      `--output`. The chain is sealed: any attempt to override stages,
+      filters, options, or routes exits 2 before I/O, naming `run` as the
+      escape hatch. `run`, `repair`, and `extract` remain the configurable,
+      general-purpose pipeline path; presets are friendly top-level commands
+      built on that same canonical plan. The full generic-workflow ambition
+      (a `crawl`/`web-corpus` command compiling arbitrary source/frontier/
+      fetcher/pipeline/sink/publisher selections into one canonical,
+      `--explain`-inspectable plan) remains open, natively blocked by
+      #238/#239's still-open crawl/frontier work for any broader dispatch
+      beyond this one narrow slice.
 
 ## Phase 4 — HTML->Markdown (mechanical CLI route exists)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
@@ -393,22 +414,96 @@ is useful, but it is not sufficient on its own.
       requiring an explicit local GGUF path for offline single-machine use.
       Both must implement one metadata port/schema with model/version,
       provenance, timeout and failure fields; deterministic heuristic metadata
-      remains model-free.
-- [ ] Add provenance-bearing topical tags (#167) after the common extracted
+      remains model-free. A typed `DocumentMetadata` domain value with
+      standard and extension fields (#285) now carries this data across
+      stages via `StageDocument.metadata`, consumed by
+      `document-metadata-publish` and by the new `compressibility-annotate`
+      stage below.
+- [~] Add provenance-bearing topical tags (#167) after the common extracted
       text-document boundary. Source-declared tags/categories and inferred
       tags must remain distinct candidates; inferred values carry a named
       algorithm/model, vocabulary identity, confidence and abstention rather
-      than masquerading as author metadata.
-- [ ] Add an optional per-document compressibility annotation (#168) with raw
+      than masquerading as author metadata. First slice shipped: the pure
+      `domain.topical_tags` v1 annotation and `controlled-token-v1` inference
+      API, with canonicalization and abstention rules (PR #277). A second
+      slice added the self-registering terminal v3 stage
+      `topical-tags-extract`, extracting source-declared candidates from
+      `<meta name="keywords">`, the `rel="tag"` microformat, and schema.org
+      JSON-LD `Article` keywords/about in one HTML parse
+      (`docs/topical-tags.md`). Controlled-vocabulary inference is not wired
+      into that stage yet, no CLI/config surface selects it, and coexisting
+      with `pii-four-class`/`document-metadata-publish` as terminal stages in
+      one job remains an inherited, unresolved gap; #167 stays open for
+      those successors.
+- [x] Add an optional per-document compressibility annotation (#168) with raw
       input/compressed sizes and a precisely named, versioned estimator. This
       is an algorithm-specific proxy related to complexity, not exact
-      Kolmogorov complexity, and it must not silently become a quality policy.
+      Kolmogorov complexity, and it does not feed the separate, pre-existing
+      quality gate. Shipped as the opt-in `compressibility-annotate` v3
+      stage, reporting order-0 token-frequency entropy and a zstd
+      compression ratio into one compact `compressibility` extension field
+      via `StageDocument.metadata` (#285), to be published by the existing,
+      unmodified `document-metadata-publish` terminal stage; not wired into
+      any default chain (`docs/compressibility-annotate.md`).
 - [x] Evaluate embedding-space intrinsic dimension separately (#169) after
       #66. The repository-only TwoNN evidence attaches results to an evaluated
       population with estimator/model/metric/sample/stability provenance and
       explicit abstention; it is not a production stage, a scalar inferred
       from one document embedding, or interchangeable with Hausdorff or
       compression complexity.
+- [~] Identify language with confidence and abstention (C03/#34). A pure,
+      repository-local `domain.language_id` character-n-gram classifier
+      covers seventeen languages: the original eleven Latin-script languages
+      (English, Spanish, French, German, Portuguese, Italian, Dutch,
+      Turkish, Vietnamese, Polish, Indonesian; PR #291 first slice, later
+      extended) plus six Brahmic-family languages (Hindi/Devanagari,
+      Bengali, Tamil, Telugu, Gujarati, Punjabi/Gurmukhi; #299), with a
+      typed result/abstention value and a revision-bound wire idiom
+      (`docs/language-id.md`). It does not parse HTML, and nothing in
+      `source/domain` imports it. #311 added a thin terminal v3 stage,
+      `language-id-detect`, giving the shipping binary a real reachability
+      path via `run --stage id=language-id-detect`; #301 added a benchmark
+      comparator case against Python `langdetect`. The separately reviewed
+      persistence overlay (`source/effects/language_overlay.d`, via the
+      existing C01 `OverlayWriter`) and the broader ~25-language,
+      13-script-family roadmap remain open; #34 stays open for them.
+- [~] Build disk-backed similarity signatures and buckets (C05/#36). Stage 1
+      (`source/domain/similarity_signature.d`, PR #142) is a pure, versioned
+      near/segment signature API. A disk-backed successor,
+      `effects.similarity_buckets.writeSimilarityBucketOverlays`
+      (`docs/similarity-buckets.md`), turns those signatures into
+      skew-capped candidate buckets and persists them as a durable C01
+      overlay analyzer, bounding memory with deterministic keys across
+      restart/shard order. It does not read C01 shards itself, compute
+      signatures, or decide duplicates/representatives; final duplicate
+      clustering remains #37's separate, still-unspecified scope.
+- [~] Extract baseline main content from saved HTML (W03/#26). A pure,
+      deterministic scoring/selection algorithm,
+      `effects.html_main_content.extractMainContent`
+      (`docs/html-main-content.md`), answers whether an HTML subtree is the
+      article or nav/ad/footer chrome, over the existing restricted
+      `html_tree` representation. A second slice registered it as the
+      self-registering v3 stage `html-main-content`, sequenced
+      `text-transform -> html-metadata-annotate -> html-main-content ->
+      pii-four-class`; on abstention the whole document, including
+      metadata, quarantines together. This stage is one of the four wired
+      into the shipped `clean-web-document` preset (see #240 below). Held-out
+      precision/recall against a pinned trafilatura reference and the #229
+      comparator case remain the open acceptance gates; #26 stays open for
+      them. In practice, this means main-content selection work has already
+      begun ahead of the Phase 6 "begin only after Phase 5A gates are
+      complete" framing below, though full trafilatura parity is still
+      gated as described there.
+- [~] Propagate source-rights and takedown policy (C11/#43). Stage 1,
+      `source/domain/source_rights.d` (#161), is a pure, effect-free
+      policy/closure boundary: given typed evidence it returns a
+      deterministic decision (state, required action, reason, affected
+      artifact IDs, provenance) without discovering rights or performing
+      quarantine/removal itself (`docs/source-rights.md`). Stage 2a wires a
+      real, strictly read-only C01 shard/overlay join so closure decisions
+      can see actual shard/overlay state; it has no quarantine/removal
+      effect yet and adds no CLI wiring. #43 stays open for the effecting
+      and CLI-facing stages.
 - [~] Store immutable source documents and keyed analyzer overlays. A
       standalone binary-v1 artifact API now has bounded integrity-checked
       frames, version/revision-checked streaming joins, create-only source
@@ -463,13 +558,23 @@ is useful, but it is not sufficient on its own.
       with no-follow path checks and release-active D on-disk tests. File
       discovery, CLI/S3 wiring, Common Crawl WARC 1.0 compatibility, full format
       conformance, real-corpus parity, and TB throughput remain open.
-- [ ] Evaluate then adopt bounded document-to-text adapters (#67, #156) for
+- [~] Evaluate then adopt bounded document-to-text adapters (#67, #156) for
       the explicitly supported Office/PDF/image families. Container or binary
       bytes must be detected and extracted before mojibake/Unicode filters;
       selected adapters must enforce input/expansion/output/time/concurrency
       limits and retain extractor/version/provenance. This does not claim
       wholesale Tika, Docling, Pandoc, or OCR ecosystem parity, and no model or
-      service may be downloaded or contacted implicitly.
+      service may be downloaded or contacted implicitly. Two evidence/adapter
+      slices have landed: an opt-in `effects.pdf_execve` fallback that
+      execve's a user-already-installed Poppler `pdftotext` under a bounded
+      subprocess (RLIMIT_CPU/RLIMIT_FSIZE, wall-timeout, process-group kill)
+      to extract PDF text, with no CLI/dispatch wiring and no MuPDF support
+      yet (#296, `docs/pdf-execve-fallback.md`); and a container-inspection
+      fix admitting DEFLATE-compressed ZIP entries via an injected
+      system-zlib decompressor, closing the gap that refused essentially
+      every real .docx/.xlsx/.pptx entry (#156 slice) -- still no OOXML/XML
+      text walking or CLI-visible behavior change. Wiring either into a
+      production extraction path, and OCR/image adapters, remain open.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

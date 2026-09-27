@@ -191,7 +191,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p><a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a>, or comment directly on the <a href="https://github.com/schancel/scrubbed/issues/338" target="_blank" rel="noopener">open architecture proposals</a> linked above.</p>
 
     <h2>Usage</h2>
-    <p class="note">Requires the D toolchain to build from source &mdash; <a href="https://dlang.org/download.html" target="_blank" rel="noopener">dub</a> and the <a href="https://github.com/ldc-developers/ldc" target="_blank" rel="noopener">LDC compiler</a>. Quickest install: <code>curl -fsS https://dlang.org/install.sh | bash -s ldc</code> (any platform), or <code>brew install dub ldc</code> on macOS. No prebuilt binaries are published yet &mdash; packaging is still on the roadmap above.</p>
+    <p class="note"><strong>Currently macOS (Apple Silicon) only.</strong> The native FFI bindings (zlib, the SHA-256 hardware backend) are only ABI-verified on macOS arm64 today, and the build itself is gated to that platform until Linux/Windows support lands. Requires the D toolchain to build from source &mdash; <a href="https://dlang.org/download.html" target="_blank" rel="noopener">dub</a> and the <a href="https://github.com/ldc-developers/ldc" target="_blank" rel="noopener">LDC compiler</a> (<code>brew install dub ldc</code>). No prebuilt binaries are published yet &mdash; packaging, and broader platform support, are both on the roadmap above.</p>
     <pre>dub build --build=release
 
 # Crawl a seed list locally, 4 workers, resumable if interrupted

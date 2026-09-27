@@ -61,7 +61,7 @@
     <h2>Where this fits in a training pipeline</h2>
     <p>Building a corpus for pretraining or fine-tuning is usually four stages: <strong>collect</strong> raw pages, <strong>clean &amp; curate</strong> them into usable text, <strong>package</strong> the result into training-ready shards, then <strong>train</strong>. scrubbed's job is the middle stage &mdash; the part that's normally a chain of separate Python tools today.</p>
     <div class="pipeline-steps">
-        <div class="step">Collect<br><span style="color:#888;font-size:0.78rem;">crawl or licensed source</span></div>
+        <div class="step here">Collect<br><span style="font-size:0.78rem;font-weight:normal;">scrubbed crawl</span></div>
         <div class="arrow">&rarr;</div>
         <div class="step here">Clean &amp; curate<br><span style="font-size:0.78rem;font-weight:normal;">scrubbed</span></div>
         <div class="arrow">&rarr;</div>
@@ -69,7 +69,7 @@
         <div class="arrow">&rarr;</div>
         <div class="step">Train</div>
     </div>
-    <p class="note">scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. On the collection side it has the real building blocks for a crawler (a durable frontier, bounded fetch, link discovery) and they've been used for a real crawl, just not yet behind a shipped <code>scrubbed crawl</code> command &mdash; today that means composing them yourself (see <a href="https://github.com/schancel/scrubbed/tree/main/experiments/corpus_crawl" target="_blank" rel="noopener">experiments/corpus_crawl</a>) or pointing scrubbed at pages you already have.</p>
+    <p class="note">scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. Collection is now a real shipped command too: <code>scrubbed crawl</code> is a local, multithreaded, resumable crawler (durable SQLite-backed frontier, bounded polite fetch, link discovery) &mdash; single-machine only, no distributed/sharded crawling yet. It writes raw pages only, no cleaning inline; run <code>clean-web-document</code> over its output as a separate pass, or point scrubbed straight at pages you already have.</p>
 
     <h2>See it work</h2>
     <p class="note">Real output from the actual binary, not a mockup.</p>
@@ -153,7 +153,8 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <li>An opt-in per-document quality signal: order-0 token entropy plus compression ratio, for flagging degenerate/repetitive text.</li>
         <li>HTML entity decoding (all 2,231 WHATWG named references), smart-quote and line-ending normalization, and a JSONL streaming mode for corpus pipelines that only need specific text fields touched.</li>
         <li>Real parallelism across files (OS threads, not green threads), zero-copy input reads, atomic output writes, and an opt-in error journal/manifest for resuming interrupted runs.</li>
-        <li>A bounded WARC/1.1 reader (plain, gzip, and zstd-compressed), a crawl frontier with durable, resumable, duplicate-safe job tracking, bounded HTTP fetch, and link discovery — the building blocks for a full crawl-to-corpus pipeline, with a top-level crawl command still on the roadmap.</li>
+        <li>A bounded WARC/1.1 reader (plain, gzip, and zstd-compressed) for reading existing archives.</li>
+        <li><code>scrubbed crawl</code>: a local, multithreaded, resumable crawler &mdash; durable SQLite-backed frontier with permanent duplicate-rejection, bounded polite HTTP fetch, HTML link discovery, real OS-thread concurrency with correct per-host throttling under concurrency. Single machine only; no distributed or sharded crawling. Kill it mid-run and it recovers cleanly on restart, no duplicate fetches.</li>
         <li>Declared topical-tag extraction, a source-rights policy engine for permission/takedown decisions across derived artifacts, and structured chunking with stable, content-addressed chunk IDs for downstream corpus formats.</li>
     </ul>
 
@@ -163,7 +164,14 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <h2>Usage</h2>
     <pre>dub build --build=release
 
-# The whole pipeline in one command
+# Crawl a seed list locally, 4 workers, resumable if interrupted
+./scrubbed crawl --seeds seeds.txt --corpus-dir ./crawled --db crawl.sqlite \
+    --concurrency 4 --max-pages 200
+
+# Then clean what you crawled (raw pages land under ./crawled/raw/)
+./scrubbed clean-web-document --input ./crawled/raw --output ./clean --threads 4
+
+# Or run the whole pipeline directly on pages you already have
 ./scrubbed clean-web-document --input page.html --output page.txt
 ./scrubbed clean-web-document --input pages/ --output clean/ --threads 4
 

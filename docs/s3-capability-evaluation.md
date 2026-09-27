@@ -104,3 +104,29 @@ AWS interoperability. A later owner-approved production selection must pin
 all source/transitive licenses and hashes, test those behaviors against the
 selected client's real API, and separately decide whether a scoped live-service
 gate with real-account authority is warranted. Until then, #46 remains open.
+
+## Addendum (2026-09-27): pure-D SigV4 evidence
+
+This document's table above named the SigV4 gap directly ("The test does not
+sign a request... cannot prove AWS SigV4 canonicalization") without
+considering a fourth candidate: implementing AWS Signature Version 4 directly
+in D over this codebase's own already-shipped `effects.http_fetch`/
+`effects.curl_ffi`, using `crypto.sha256` as the base for a new
+`crypto.hmac_sha256`. A 2026-09-27 owner decision on issue #46 directed that
+this option be evaluated with the same rigor as the three above before #46 is
+decided.
+
+That evaluation is `docs/sigv4-evaluation.md`. Summary: a pure-D HMAC-SHA256
+(`source/crypto/hmac_sha256.d`) verified against RFC 4231's published test
+vectors, and a pure-D SigV4 signer (`experiments/sigv4_check/`) verified
+byte-exact (canonical request, string-to-sign, and final signature) against 8
+fixtures copied from AWS's own published SigV4 test suite. Verified against
+the three candidates above: pure-D SigV4 needs no C/C++ FFI bridge for the
+signing algorithm itself (pure D calling pure D, no external library), and
+carries no GPLv3 or unverifiable-source risk (original code, this
+repository's MIT license, fully reviewable). It does not, by itself, supply
+the rest of a production S3 client (bucket listing, S3 XML error parsing,
+multipart, retries); see that document's "unresolved" and "honest comparison"
+sections for what is and is not yet shown. This addendum does not change the
+table above, does not select a candidate, and does not close #46 -- see
+`docs/sigv4-evaluation.md` for the full evidence and verdict.

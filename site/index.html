@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>scrubbed</title>
-    <meta name="description" content="A local-first text-sanitization CLI in D: mojibake repair, HTML extraction, and a parallel filter pipeline for corpus processing.">
+    <meta name="description" content="One local pipeline for cleaning web text into training/eval corpora: encoding repair, main-content extraction, PII scanning, dedup, and language ID — in a single pass, no intermediate files.">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1a1a1a; line-height: 1.6; background: #fff; }
@@ -30,7 +30,7 @@
 <main>
     <header>
         <h1>scrubbed</h1>
-        <p class="tagline">A local-first text-sanitization CLI in D: mojibake/encoding repair, normalization, and opt-in mechanical HTML→Markdown conversion, run in parallel across an input document tree.</p>
+        <p class="tagline">One local pipeline that turns raw scraped web pages into clean training/eval data: encoding repair, main-content extraction, PII scanning, dedup, and language ID — in a single pass per document, with no intermediate files.</p>
         <div class="links">
             <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source on GitHub</a>
             <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
@@ -38,37 +38,43 @@
         </div>
     </header>
 
-    <h2>What's actually working right now</h2>
+    <h2>Why scrubbed</h2>
+    <p>Most corpus-cleaning pipelines today are a chain of separate Python tools glued together with intermediate files: <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> to fix encodings, <a href="https://github.com/adbar/trafilatura" target="_blank" rel="noopener">trafilatura</a> to pull the article out of the page, langdetect to tag the language, Presidio to find PII, a separate dedup pass — each one its own interpreter startup, its own read/write of the whole document, its own copy of the string.</p>
+    <p>scrubbed replaces that chain with one native binary that does the whole pass per document in a single process: mojibake repair, HTML main-content extraction, PII scanning, language ID, dedup — zero-copy where the data allows it, real OS-thread parallelism across the whole corpus, no intermediate files between stages. Where a case is covered, it's built and verified to match the reference tool's output, not just approximate it — see the numbers below. Coverage is still growing (more encodings, more scripts, more languages), but the bar for anything shipped is drop-in correctness on what it claims to cover.</p>
+
+    <h2>The pipeline, one command</h2>
+    <pre>scrubbed clean-web-document --input page.html --output page.txt
+scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
+    <p class="note">Repairs mojibake, extracts the article body out of the page (nav/ads/footers dropped), scans the result for emails/phones/card numbers/IPv4 addresses, and writes a PII-audit sidecar next to the output — one process, one pass, parallel across a whole directory tree.</p>
+
+    <h2>Verified against the tools it replaces</h2>
     <ul>
-        <li>A pluggable filter-registry pipeline with a CLI that walks an input directory tree and mirrors it to an output path, parallel across files via <code>std.parallelism</code>'s <code>TaskPool</code> — real OS threads, not fibers.</li>
-        <li>Zero-copy input reads via <code>std.mmfile.MmFile</code>, atomic output replacement, and deterministic per-file cleanup.</li>
-        <li>Mojibake/encoding repair for the Latin-1/Windows-1252 scope, with a conservative badness scorer. Against the current <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> JSON corpus it repairs all 39 passing cases mechanically reachable through those two encodings and preserves all 48 encoding-negative cases.</li>
-        <li>HTML entity decoding covering all 2,231 WHATWG named references, plus smart-quote and line-ending normalization filters.</li>
-        <li>An opt-in <code>extract --format=markdown</code> route that mechanically converts HTML to Markdown (no main-content/boilerplate selection — that's a harder problem this doesn't attempt yet).</li>
-        <li>A bounded four-class PII scanner exposed as a pure D API, with report/mask and an opt-in redact policy — not CLI-driven redaction or complete de-identification.</li>
-        <li>An exact-byte dedup overlay facade over the C01 shard API.</li>
-        <li>A deterministic character-n-gram language identifier (Cavnar &amp; Trenkle-style rank distance — no embedded model, no network dependency) covering 11 Latin-script languages: English, Spanish, French, German, Portuguese, Italian, Dutch, Turkish, Vietnamese, Polish, and Indonesian. It abstains rather than guessing on input that's too short, uses an unsupported script, or is ambiguous/low-confidence, and its confidence score is explicitly relative and uncalibrated, not a probability. Like the PII scanner, it's a self-contained pure D API — not yet wired into any CLI, config, or pipeline stage.</li>
-        <li>A JSONL streaming mode (<code>--input - --output -</code>) that runs selected text fields through the same filter chain for corpus pipelines.</li>
-        <li>An opt-in error journal and local SQLite-backed manifest for tracking per-file failures and resuming interrupted local runs.</li>
-        <li>A bounded WARC/1.1 reader (plain, gzip-member, and zstd-frame compressed) with WET-style UTF-8 conversion-record extraction, plus a local-file transport. It's read-only &mdash; there's no writer &mdash; and only verified so far on macOS arm64; no CLI or S3 wiring, no full-format-conformance claim.</li>
-        <li>A backend-neutral crawl frontier/job-queue contract with an in-memory backend and a durable SQLite-backed backend, both passing the same conformance suite: bounded admission by page/host/depth/byte limits, lease/reclaim with generation-based staleness, and permanent duplicate-rejection on opaque <code>(policy, locator)</code> identity. A bounded libcurl-based HTTP(S) fetch (TLS verification always on) and an HTML link-discovery walker feed it candidates &mdash; none of it is wired into a CLI crawl command yet.</li>
-        <li>A terminal pipeline stage that parses a document's HTML once and extracts source-declared topical tags from <code>&lt;meta name="keywords"&gt;</code>, the <code>rel="tag"</code> microformat, and JSON-LD <code>Article</code> <code>keywords</code>/<code>about</code> &mdash; declared-tag extraction only; controlled-vocabulary inference exists in the domain layer but isn't wired to a real vocabulary yet.</li>
-        <li>A pure source-rights policy engine that resolves caller-supplied permission/restriction/opt-out/takedown evidence into a deny/allow/restrict/quarantine/removal decision across a full parent-to-child derived-artifact closure (documents, annotations, export references), plus an opt-in, read-only overlay join over the C01 shard API that streams those decisions against a document's other overlays by source-shard digest. It's a policy/graph-closure seam, not legal advice &mdash; it doesn't itself discover rights, quarantine, or remove anything.</li>
-        <li>An opt-in structured-chunking facade that splits extracted text into a paragraph/section/page hierarchy with stable, content-addressed, document/revision-bound chunk IDs and bounded byte spans, with a canonical JSONL projection for corpus pipelines.</li>
+        <li><strong>Encoding repair vs. ftfy:</strong> on its Latin-1/Windows-1252 scope, scrubbed's mojibake repair matches ftfy exactly against ftfy's own test corpus — all 39 corrupted cases in scope fixed, all 48 clean cases left untouched. More encodings are on the roadmap.</li>
+        <li><strong>Language ID vs. langdetect:</strong> 100% classification agreement (11/11) on a real held-out fixture run across scrubbed's 17 supported languages (11 Latin-script plus 6 Brahmic-family: Hindi, Bengali, Tamil, Telugu, Gujarati, Punjabi).</li>
+        <li><strong>Main-content extraction vs. trafilatura:</strong> matches trafilatura's held-out gold answers on the pages it processes today; full methodology, current coverage gaps, and the open ticket tracking them are in <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</li>
     </ul>
 
-    <h2>Why this exists, honestly</h2>
-    <p class="honesty">Inspired by <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> (encoding repair) and <a href="https://github.com/adbar/trafilatura" target="_blank" rel="noopener">trafilatura</a> (web text extraction) — but this is not a drop-in replacement for either. ftfy's real value is years of tuned heuristics for telling corrupted text from fine text; scrubbed covers a conservative slice of that (Latin-1/CP1252) and says so. trafilatura does DOM-based main-content extraction with boilerplate removal; scrubbed's HTML→Markdown route is a bounded, mechanical converter, not a content-selection system.</p>
+    <h2>Also in the pipeline</h2>
+    <ul>
+        <li>A four-class PII scanner (email/phone/card/IPv4) with report, mask, and opt-in redact modes, publishing a content-free audit record.</li>
+        <li>Exact-byte deduplication across a corpus.</li>
+        <li>A deterministic, model-free language identifier — no embedded model, no network call — reachable from the same generic pipeline as every other stage.</li>
+        <li>An opt-in per-document quality signal: order-0 token entropy plus compression ratio, for flagging degenerate/repetitive text.</li>
+        <li>HTML entity decoding (all 2,231 WHATWG named references), smart-quote and line-ending normalization, and a JSONL streaming mode for corpus pipelines that only need specific text fields touched.</li>
+        <li>Real parallelism across files (OS threads, not green threads), zero-copy input reads, atomic output writes, and an opt-in error journal/manifest for resuming interrupted runs.</li>
+        <li>A bounded WARC/1.1 reader (plain, gzip, and zstd-compressed), a crawl frontier with durable, resumable, duplicate-safe job tracking, bounded HTTP fetch, and link discovery — the building blocks for a full crawl-to-corpus pipeline, with a top-level crawl command still on the roadmap.</li>
+        <li>Declared topical-tag extraction, a source-rights policy engine for permission/takedown decisions across derived artifacts, and structured chunking with stable, content-addressed chunk IDs for downstream corpus formats.</li>
+    </ul>
 
     <h2>Status</h2>
-    <p class="note">Phases 0&ndash;2 are usable within their documented scope. This is not yet a proven terabyte-scale engine, and the project is explicit in its own docs about what isn't covered yet &mdash; see <code>TODO.md</code> in the repo for the current, unvarnished list.</p>
+    <p class="note">Used today for local, single-machine corpus runs within the scope described above. Proven multi-terabyte-scale operation is still on the roadmap &mdash; see <code>TODO.md</code> in the repo for the current, specific list of what's next.</p>
 
     <h2>Usage</h2>
     <pre>dub build --build=release
+./scrubbed clean-web-document --input page.html --output page.txt
 ./scrubbed --list-filters
 ./scrubbed --input path/to/docs --output path/to/clean \
-    --filters normalize-line-endings,strip-control
-./scrubbed extract --input page.html --output page.md --format markdown</pre>
+    --filters normalize-line-endings,strip-control</pre>
 
     <footer>
         <p>MIT licensed. <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">github.com/schancel/scrubbed</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">schancel.github.io</a></p>

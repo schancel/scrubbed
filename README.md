@@ -48,10 +48,7 @@ malformed, and binary-looking input rather than guessing an encoding.
   a real lazy range transform, not a buffer-copy pretending to be one.
 - A single native binary with no runtime dependency (no `pip install
   lxml`/`cchardet` build chain) — easy to embed in a non-Python pipeline
-  or invoke as a subprocess without interpreter-startup cost. (Empirically
-  measured in a sibling project: a compiled D binary ran a comparable
-  one-shot task in ~0.56s wall-clock vs. Python's much larger per-
-  invocation interpreter/import overhead for the same scale of work.)
+  or invoke as a subprocess without interpreter-startup cost.
 - Direct `extern(C)` FFI to fast C libraries when needed (e.g. a real HTML
   parser for `html2md.d`, or `ftfy`-equivalent statistical tables) with no
   binding-generation ceremony.

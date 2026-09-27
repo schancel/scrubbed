@@ -183,14 +183,18 @@ D, DUB, Python, or an implicit model download.
 
 These do not block the first public package release:
 
-- direct S3 credentials, multipart transport, distributed shard ownership,
-  and multi-machine finalization (#46–#57, #63, #64); use explicit local
-  staging with specialist transfer tools until a later accepted contract
-  (tracked: whether this scope should be superseded by a bounded
-  crawl/transform-extract/cluster shape chained by an external distributed
-  orchestrator instead of a scrubbed-owned coordinator -- see
-  [issue #338](https://github.com/schancel/scrubbed/issues/338), not
-  decided);
+- direct S3 credentials and multipart transport (#46–#50); use explicit
+  local staging with specialist transfer tools until a later accepted
+  contract;
+- scrubbed-owned distributed shard ownership and multi-machine
+  finalization -- **decided, not merely deferred**: superseded by the
+  bounded crawl/transform-extract/cluster shape chained by an external
+  distributed orchestrator (Ray/Spark/Beam/DataTrove/etc.), scrubbed never
+  owning multi-machine coordination -- see
+  [issue #338](https://github.com/schancel/scrubbed/issues/338)'s accepted
+  decision. #51–#57 closed as superseded; #63–#64 (distributed benchmarks)
+  stay open, flagged for re-scoping to the accepted shape rather than
+  scrubbed's own distributed execution;
 - crawling, JavaScript rendering, robots/politeness, feeds and sitemap
   discovery;
 - wholesale Apache Tika/Office/PDF/OCR format parsing; #155 provides bounded

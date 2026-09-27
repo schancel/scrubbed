@@ -35,7 +35,7 @@ import std.json : JSONValue, parseJSON;
 import std.path : buildPath, dirName, dirSeparator, relativePath;
 import std.process : execute;
 import std.stdio : File, stderr, writeln;
-import std.string : fromStringz, split, splitLines, strip, toStringz;
+import std.string : fromStringz, indexOf, split, splitLines, strip, toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string message) {
@@ -89,42 +89,73 @@ private void verifySnapshot(ExecutableSnapshot snapshot) {
 // <venv>/bin/python <pkg>==<exact version>, verified here via uv pip
 // freeze at run time). ----
 
+// `url` is non-empty for a package pinned by an exact download URL instead
+// of a plain PyPI version (issue #302's spaCy model: `en_core_web_sm` has no
+// ordinary versioned PyPI release, only a GitHub release-asset wheel, so
+// `uv pip install <url>` and `uv pip freeze` both represent it as
+// "name @ url" rather than "name==version" -- verified empirically, not
+// assumed). Exactly one of `exactVersion`/`url` is set per declared package.
 private struct PinnedPackage {
     string name;
     string exactVersion;
+    string url;
 }
 
-private string[string] parseFreeze(string output) {
-    string[string] versions;
+private struct FreezeEntry {
+    string exactVersion; // empty when this row was a "name @ url" install
+    string url;          // empty when this row was a "name==version" install
+}
+
+private FreezeEntry[string] parseFreeze(string output) {
+    FreezeEntry[string] entries;
     foreach (line; output.splitLines) {
         auto row = line.strip;
         if (row.length == 0) continue;
         if (row.startsWith("Using Python ")) continue; // uv environment notice
+        auto separator = row.indexOf(" @ ");
+        if (separator >= 0) {
+            auto name = row[0 .. separator];
+            auto url = row[separator + 3 .. $];
+            if (name.length == 0 || url.length == 0 || name in entries)
+                throw new Exception("unparseable or duplicate uv freeze row: " ~ row);
+            entries[name] = FreezeEntry("", url);
+            continue;
+        }
         auto fields = row.split("==");
         if (fields.length != 2 || fields[0].length == 0 || fields[1].length == 0 ||
-            fields[0] in versions)
+            fields[0] in entries)
             throw new Exception("unparseable or duplicate uv freeze row: " ~ row);
-        versions[fields[0]] = fields[1];
+        entries[fields[0]] = FreezeEntry(fields[1], "");
     }
-    return versions;
+    return entries;
 }
 
-// Verifies every pinned package is present at its exact version (rejecting
-// a prefix-collision version such as ftfy==6.3.10 when 6.3.1 is pinned, and
-// rejecting duplicate freeze rows), then returns the *declared* acquisition
-// order as a JSON array bound into the case, independent of whatever row
-// order `uv pip freeze` happened to print.
+// Verifies every pinned package is present at its exact version or exact
+// install URL (rejecting a prefix-collision version such as ftfy==6.3.10
+// when 6.3.1 is pinned, a URL that doesn't match byte-for-byte, a
+// version/URL type mismatch, and duplicate freeze rows), then returns the
+// *declared* acquisition order as a JSON array bound into the case,
+// independent of whatever row order `uv pip freeze` happened to print.
 private JSONValue verifyPinnedPackages(string freezeOutput,
                                        const PinnedPackage[] pinned) {
     require(pinned.length != 0, "no pinned packages declared for acquisition");
-    auto versions = parseFreeze(freezeOutput);
+    auto entries = parseFreeze(freezeOutput);
     JSONValue[] order;
     foreach (pkg; pinned) {
-        auto found = pkg.name in versions;
-        require(found !is null && *found == pkg.exactVersion,
-            "expected " ~ pkg.name ~ "==" ~ pkg.exactVersion ~ " exactly, observed " ~
-            (found is null ? "missing" : pkg.name ~ "==" ~ *found));
-        order ~= JSONValue(pkg.name ~ "==" ~ pkg.exactVersion);
+        auto found = pkg.name in entries;
+        string observed = found is null ? "missing" :
+            found.url.length != 0 ? pkg.name ~ " @ " ~ found.url :
+            pkg.name ~ "==" ~ found.exactVersion;
+        if (pkg.url.length != 0) {
+            require(found !is null && found.url == pkg.url,
+                "expected " ~ pkg.name ~ " @ " ~ pkg.url ~ " exactly, observed " ~ observed);
+            order ~= JSONValue(pkg.name ~ " @ " ~ pkg.url);
+        } else {
+            require(found !is null && found.url.length == 0 &&
+                found.exactVersion == pkg.exactVersion,
+                "expected " ~ pkg.name ~ "==" ~ pkg.exactVersion ~ " exactly, observed " ~ observed);
+            order ~= JSONValue(pkg.name ~ "==" ~ pkg.exactVersion);
+        }
     }
     return JSONValue(order);
 }
@@ -955,6 +986,420 @@ private JSONValue compareLanguageIdLangdetect(string scrubbedBinary,
     return result;
 }
 
+// ---- The pii-four-class/scrubbed-vs-presidio case (issue #302's accepted
+// next-slice contract). Like the trafilatura and language-id cases above,
+// correctness here is scored by precision/recall against authored gold
+// spans rather than exact-byte equality, computed per category (email/
+// phone/card/ip -- the only four categories `pii-four-class` implements) for
+// BOTH tools symmetrically against the same fixture set; neither tool's
+// output is ever treated as the other's ground truth. All five fixture
+// texts and their gold spans are originally authored here (no scraped or
+// real PII-bearing text anywhere): emails use RFC 2606 documentation-
+// reserved domains (example.com/.org/.net), phone numbers use the NANPA
+// 555-01XX range reserved for fictional use, IPs use RFC 5737 TEST-NET
+// documentation ranges, and card numbers are long-standing published
+// payment-gateway test numbers (never real accounts) -- each fixture is
+// additionally exercised with the pinned real Presidio install below and its
+// gold spans confirmed to line up exactly with what a real run reports
+// before being pinned, not merely handwritten. A few deliberate near-miss
+// decoys (an invalid-domain "address", out-of-range IP octets, a card
+// number one Luhn digit off) are not gold spans, to observe both tools'
+// precision rather than only recall.
+//
+// **Owner-resolved model-size decision, empirically verified at
+// implementation time (2026-09-27)**: `en_core_web_sm` (~12 MiB), not
+// `en_core_web_lg`, is used. `AnalyzerEngine`'s own bare, unconfigured
+// default has no model installed and instead attempts to auto-download the
+// *large* model on first use; this driver never takes that path; it always
+// constructs its own `NlpEngineProvider` naming the small model explicitly.
+// The four entities compared here are Presidio's pattern/checksum
+// recognizers, not NER-dependent, and the small model was empirically
+// confirmed sufficient for all four in a real install (see
+// benchmarks/README.md for the live sample) -- the large-model fallback the
+// contract named was not needed and is not used.
+//
+// Presidio has no ordinary versioned PyPI release for `en_core_web_sm` (only
+// a GitHub release-asset wheel, exactly as `python -m spacy download` itself
+// installs it), so it is pinned by exact download URL rather than by
+// version -- see `PinnedPackage.url` above, added for this case.
+//
+// Presidio's recognizer configuration is scoped to exactly the four overlap
+// entities two ways: **by construction**, `presidio_driver.py` builds its
+// `AnalyzerEngine` from a `RecognizerRegistry` containing only
+// `EmailRecognizer`/`PhoneRecognizer`/`CreditCardRecognizer`/`IpRecognizer`
+// -- requesting any other entity (PERSON, LOCATION, DATE_TIME, ...) from
+// that analyzer instance raises, it does not silently no-op -- and
+// **empirically**, `--print-scope` prints that analyzer's own
+// `get_supported_entities()` at run time, verified below to be exactly the
+// four overlap entities, not Presidio's full default catalog.
+private enum presidioSpacyModelUrl =
+    "https://github.com/explosion/spacy-models/releases/download/" ~
+    "en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl";
+private enum presidioSupportedEntitiesLine =
+    "CREDIT_CARD,EMAIL_ADDRESS,IP_ADDRESS,PHONE_NUMBER";
+
+private enum presidioDriverPath = "benchmarks/presidio_driver.py";
+private enum presidioDriverSha256 =
+    "BDE2AE9D44F8749A076BB4D6073921576C6E161FEF2BD888189971908F24EF34";
+
+private enum piiCategories = ["email", "phone", "card", "ip"];
+
+private struct PiiGoldSpanSpec { string category; string text; }
+private struct PiiFixtureSpec { string fileName; string text; PiiGoldSpanSpec[] spans; }
+
+private PiiFixtureSpec[] piiFixtures() {
+    return [
+        PiiFixtureSpec("01.txt",
+            "Please route billing questions to billing.dept@example.com or call " ~
+            "+1-415-555-0148 during business hours. Our staff-only mirror lives at " ~
+            "203.0.113.10. A recent sandbox transaction used test card " ~
+            "4111 1111 1111 1111 to confirm the checkout flow.\n",
+            [PiiGoldSpanSpec("email", "billing.dept@example.com"),
+             PiiGoldSpanSpec("phone", "+1-415-555-0148"),
+             PiiGoldSpanSpec("ip", "203.0.113.10"),
+             PiiGoldSpanSpec("card", "4111 1111 1111 1111")]),
+        PiiFixtureSpec("02.txt",
+            "Ticket reopened: customer reachable at 415-555-0148 or via " ~
+            "a.tester@example.org. VPN egress was observed from 198.51.100.23. A " ~
+            "refund is pending on card 5500 0000 0000 0004. Note: user@localhost " ~
+            "was rejected as an invalid contact and 10.0.0.999 is not a routable " ~
+            "address.\n",
+            [PiiGoldSpanSpec("phone", "415-555-0148"),
+             PiiGoldSpanSpec("email", "a.tester@example.org"),
+             PiiGoldSpanSpec("ip", "198.51.100.23"),
+             PiiGoldSpanSpec("card", "5500 0000 0000 0004")]),
+        PiiFixtureSpec("03.txt",
+            "Escalation contact: security.desk@example.net, alternate line " ~
+            "+1-212-555-0199. Firewall logs show 192.0.2.77 attempting repeated " ~
+            "logins. The disputed charge references card 378282246310005, already " ~
+            "flagged by fraud review. A malformed serial like " ~
+            "4111-1111-1111-1112 failed the checksum and was ignored.\n",
+            [PiiGoldSpanSpec("email", "security.desk@example.net"),
+             PiiGoldSpanSpec("phone", "+1-212-555-0199"),
+             PiiGoldSpanSpec("ip", "192.0.2.77"),
+             PiiGoldSpanSpec("card", "378282246310005")]),
+        PiiFixtureSpec("04.txt",
+            "Support macro: reach out at helpdesk@example.com or dial " ~
+            "646-555-0136 first, then +1-415-555-0177 if unanswered. Internal " ~
+            "telemetry uses 203.0.113.99 as a sinkhole address. Test refund card " ~
+            "6011111111111117 was used for the demo store. The string " ~
+            "999.999.999.999 in the log is not a valid host.\n",
+            [PiiGoldSpanSpec("email", "helpdesk@example.com"),
+             PiiGoldSpanSpec("phone", "646-555-0136"),
+             PiiGoldSpanSpec("phone", "+1-415-555-0177"),
+             PiiGoldSpanSpec("ip", "203.0.113.99"),
+             PiiGoldSpanSpec("card", "6011111111111117")]),
+        PiiFixtureSpec("05.txt",
+            "Customer service line: (415) 555-0199, or email " ~
+            "support.line@example.org for written requests. Our staging subnet " ~
+            "exposes 203.0.113.5 to partners only. The mock invoice lists card " ~
+            "4012888888881881 as fully refunded.\n",
+            [PiiGoldSpanSpec("phone", "(415) 555-0199"),
+             PiiGoldSpanSpec("email", "support.line@example.org"),
+             PiiGoldSpanSpec("ip", "203.0.113.5"),
+             PiiGoldSpanSpec("card", "4012888888881881")]),
+    ];
+}
+
+private enum piiFixtureSpecSha256 =
+    "38A60E319B25D84ABBE2363B85D68B33054B7E5BF1CFF64B3DCB5BD323D99539";
+
+// Deterministic serialization of the authored fixture texts and their gold
+// spans, hashed and pinned above in the same fixture/expectation-drift idiom
+// as `mojibakeFixtureSha256`/`mojibakeExpectedSha256`: a silently edited
+// fixture or gold label is caught before any subprocess runs. "\x00" never
+// appears in the authored ASCII prose above, so it is a safe, unambiguous
+// field separator for this hash input only (not a wire format).
+private string encodePiiFixtureSpec(const PiiFixtureSpec[] fixtures) {
+    string encoded;
+    foreach (fixture; fixtures) {
+        encoded ~= "FILE:" ~ fixture.fileName ~ "\x00";
+        encoded ~= "TEXT:" ~ fixture.text ~ "\x00";
+        foreach (span; fixture.spans)
+            encoded ~= "SPAN:" ~ span.category ~ ":" ~ span.text ~ "\x00";
+    }
+    return encoded;
+}
+
+private struct PiiSpan { string category; size_t start; size_t end; }
+
+// Resolves each gold span's literal text to a byte offset by searching the
+// generated fixture text, rather than hand-computed offsets: any edit that
+// makes a gold span's literal text missing or non-unique in its own fixture
+// fails closed here, before any subprocess runs.
+private PiiSpan[] resolvePiiGoldSpans(string text, const PiiGoldSpanSpec[] specs) {
+    PiiSpan[] spans;
+    foreach (spec; specs) {
+        auto start = text.indexOf(spec.text);
+        require(start >= 0, "pii fixture gold span text not found: " ~ spec.text);
+        require(text[start + 1 .. $].indexOf(spec.text) < 0,
+            "pii fixture gold span text is not unique in its fixture: " ~ spec.text);
+        spans ~= PiiSpan(spec.category, cast(size_t) start,
+            cast(size_t) start + spec.text.length);
+    }
+    return spans;
+}
+
+private bool piiSpansOverlap(PiiSpan a, PiiSpan b) {
+    return a.category == b.category && a.start < b.end && b.start < a.end;
+}
+
+private struct PiiCategoryCounts { size_t truePositive; size_t falsePositive; size_t falseNegative; }
+
+private PiiCategoryCounts[string] emptyPiiCategoryCounts() {
+    PiiCategoryCounts[string] counts;
+    foreach (category; piiCategories) counts[category] = PiiCategoryCounts.init;
+    return counts;
+}
+
+// Greedily matches each gold span in this one fixture against an unused
+// predicted span of the same category with any byte overlap (fixtures are
+// authored with well-separated single-instance spans per category, so this
+// has no order-dependent ambiguity), then folds the result into the running
+// per-category totals: a matched gold span is a true positive, an unmatched
+// gold span is a false negative, and an unmatched predicted span is a false
+// positive. Never lets one tool's predictions serve as another's gold.
+private void accumulatePiiFixtureScore(PiiCategoryCounts[string] totals,
+        const PiiSpan[] predicted, const PiiSpan[] gold) {
+    auto predictedUsed = new bool[](predicted.length);
+    auto goldUsed = new bool[](gold.length);
+    foreach (gi, g; gold)
+        foreach (pi, p; predicted) {
+            if (predictedUsed[pi] || goldUsed[gi]) continue;
+            if (piiSpansOverlap(p, g)) { predictedUsed[pi] = true; goldUsed[gi] = true; break; }
+        }
+    foreach (gi, g; gold)
+        if (goldUsed[gi]) ++totals[g.category].truePositive;
+        else ++totals[g.category].falseNegative;
+    foreach (pi, p; predicted)
+        if (!predictedUsed[pi]) ++totals[p.category].falsePositive;
+}
+
+private JSONValue piiCategoryCountsJson(const ref PiiCategoryCounts counts) {
+    auto precisionDenominator = counts.truePositive + counts.falsePositive;
+    auto recallDenominator = counts.truePositive + counts.falseNegative;
+    return JSONValue([
+        "truePositive": JSONValue(counts.truePositive),
+        "falsePositive": JSONValue(counts.falsePositive),
+        "falseNegative": JSONValue(counts.falseNegative),
+        "precision": JSONValue(precisionDenominator ?
+            cast(double) counts.truePositive / precisionDenominator : 0.0),
+        "recall": JSONValue(recallDenominator ?
+            cast(double) counts.truePositive / recallDenominator : 0.0),
+    ]);
+}
+
+private JSONValue piiToolScoringJson(const PiiCategoryCounts[string] totals) {
+    JSONValue[string] fields;
+    foreach (category; piiCategories) fields[category] = piiCategoryCountsJson(totals[category]);
+    return JSONValue(fields);
+}
+
+// Parses one real `pii-four-class` sidecar audit (`encodePiiAuditV1`'s own
+// JSON shape from `stages.pii_four_class.d`, read here as plain JSON --
+// never imported -- since only the already-human-readable category/start/end
+// fields are needed, not the full identity/policy binding that module
+// encodes for its own production consumers). Each contributor within each
+// union is one predicted PII span; a union's own merged bounds are not used,
+// since a contributor's own start/end is the actual per-category detection.
+private PiiSpan[] parseScrubbedPiiAudit(string sidecarPath) {
+    auto audit = parseJSON(readText(sidecarPath));
+    PiiSpan[] spans;
+    foreach (unionSpan; audit["unions"].array)
+        foreach (contributor; unionSpan["contributors"].array)
+            spans ~= PiiSpan(contributor["category"].str,
+                cast(size_t) contributor["start"].integer,
+                cast(size_t) contributor["end"].integer);
+    return spans;
+}
+
+// Parses one real `presidio_driver.py` run's "CATEGORY START END" lines
+// (already scrubbed-audit-fashioned lowercase categories -- see the driver's
+// own CATEGORY_NAME table). An "error:" line is never silently scored as an
+// abstention here (unlike langdetect's own genuinely-ambiguous-input
+// abstentions): these fixtures are small, authored, and known-good, so a
+// driver error indicates a real environment or install problem that must
+// fail the whole case closed rather than silently under-count recall.
+private PiiSpan[] parsePresidioOutput(string outputPath) {
+    PiiSpan[] spans;
+    foreach (line; outputTextOrEmpty(outputPath).splitLines) {
+        auto trimmed = line.strip;
+        if (trimmed.length == 0) continue;
+        require(!trimmed.startsWith("error:"),
+            "presidio driver reported an error for an authored fixture: " ~ trimmed);
+        auto fields = trimmed.split(" ");
+        require(fields.length == 3, "malformed presidio driver output line: " ~ trimmed);
+        spans ~= PiiSpan(fields[0], fields[1].to!size_t, fields[2].to!size_t);
+    }
+    return spans;
+}
+
+// One shell-loop sample = one full pass over all five authored fixtures,
+// matching the language-id case's own single-file `scrubbed run --input FILE
+// --output FILE --sidecar-output FILE --stage id=pii-four-class --threads 1`
+// invocation shape exactly (default stage options already select all four
+// categories and both confidence levels).
+private string piiScrubbedBatchScript() {
+    return "scrubbed=\"$1\"; outdir=\"$2\"; sidecardir=\"$3\"; shift 3; status=0; " ~
+        "for f in \"$@\"; do base=$(basename \"$f\"); stem=${base%.txt}; " ~
+        "\"$scrubbed\" run --input \"$f\" --output \"$outdir/$stem.out\" " ~
+        "--sidecar-output \"$sidecardir/$stem.sidecar\" " ~
+        "--stage id=pii-four-class --threads 1 || status=$?; done; exit \"$status\"";
+}
+
+// The presidio-side equivalent: one full pass over the same five fixtures,
+// one `presidio_driver.py` invocation per file (its only supported
+// single-file shape -- it has no batch mode of its own, mirroring
+// langdetect_driver.py's own precedent above).
+private string piiPresidioBatchScript() {
+    return "python=\"$1\"; driver=\"$2\"; outdir=\"$3\"; shift 3; status=0; " ~
+        "for f in \"$@\"; do base=$(basename \"$f\"); stem=${base%.txt}; " ~
+        "\"$python\" \"$driver\" \"$f\" > \"$outdir/$stem.out\" || status=$?; done; " ~
+        "exit \"$status\"";
+}
+
+private JSONValue comparePiiFourClassPresidio(string scrubbedBinary,
+        string presidioPython, string root, bool darwin, double timeoutSeconds,
+        long maxRssBytes) {
+    auto scrubbedSnapshot = snapshotExecutable(scrubbedBinary, root, "scrubbed-pii-snapshot");
+
+    auto acquisitionOrder = verifyPinnedPackages(
+        checked(["uv", "pip", "freeze", "--python", presidioPython]),
+        [PinnedPackage("presidio-analyzer", "2.2.364"),
+         PinnedPackage("presidio-anonymizer", "2.2.364"),
+         PinnedPackage("en-core-web-sm", "", presidioSpacyModelUrl)]);
+
+    require(digest(presidioDriverPath) == presidioDriverSha256,
+        "presidio driver script drift: on-disk bytes no longer match the pinned hash");
+
+    auto presidioPythonVersion = checked([presidioPython, "--version"]);
+
+    // Empirically verifies the by-construction recognizer scoping (never
+    // Presidio's full default catalog) at run time, not just by reading the
+    // pinned driver source.
+    auto supportedEntities = checked([presidioPython, presidioDriverPath, "--print-scope"]);
+    require(supportedEntities == presidioSupportedEntitiesLine,
+        "presidio analyzer is not strictly scoped to the four overlap entities: " ~
+        supportedEntities);
+
+    auto fixtures = piiFixtures();
+    require(toHexString(sha256Of(cast(const(ubyte)[]) encodePiiFixtureSpec(fixtures))).to!string ==
+        piiFixtureSpecSha256,
+        "authored pii fixture/gold-span spec drift: generated bytes no longer match the " ~
+        "pinned hash");
+
+    auto fixtureDir = buildPath(root, "pii-fixtures");
+    mkdirRecurse(fixtureDir);
+    string[] fixtureNames;
+    PiiSpan[][] goldByFixture;
+    foreach (fixture; fixtures) {
+        write(buildPath(fixtureDir, fixture.fileName), fixture.text);
+        fixtureNames ~= fixture.fileName;
+        goldByFixture ~= resolvePiiGoldSpans(fixture.text, fixture.spans);
+    }
+    string[] fixturePaths;
+    foreach (name; fixtureNames) fixturePaths ~= buildPath(fixtureDir, name);
+
+    JSONValue[] samples;
+    string[2] scrubbedSidecarDirs, presidioOutDirs;
+    size_t scrubbedSampleIndex, presidioSampleIndex;
+    string[] scrubbedCommand, presidioCommand;
+
+    foreach (index; 0 .. 4) {
+        bool useScrubbed = index % 2 == 0;
+        auto tool = useScrubbed ? "scrubbed" : "presidio";
+        JSONValue sample;
+        if (useScrubbed) {
+            auto outDir = buildPath(root, "pii-scrubbed-out-" ~ index.to!string);
+            auto sidecarDir = buildPath(root, "pii-scrubbed-sidecar-" ~ index.to!string);
+            mkdirRecurse(outDir);
+            mkdirRecurse(sidecarDir);
+            scrubbedCommand = ["/bin/sh", "-c", piiScrubbedBatchScript(), "sh",
+                scrubbedSnapshot.path, outDir, sidecarDir] ~ fixturePaths;
+            sample = runBoundedSample(scrubbedCommand, darwin, timeoutSeconds);
+            require(sample["status"].integer == 0,
+                "scrubbed exited nonzero across the pii-four-class fixture batch: " ~
+                sample["status"].integer.to!string);
+            scrubbedSidecarDirs[scrubbedSampleIndex++] = sidecarDir;
+        } else {
+            auto outDir = buildPath(root, "pii-presidio-out-" ~ index.to!string);
+            mkdirRecurse(outDir);
+            presidioCommand = ["/bin/sh", "-c", piiPresidioBatchScript(), "sh",
+                presidioPython, presidioDriverPath, outDir] ~ fixturePaths;
+            sample = runBoundedSample(presidioCommand, darwin, timeoutSeconds);
+            require(sample["status"].integer == 0,
+                "presidio driver exited nonzero across the pii-four-class fixture batch: " ~
+                sample["status"].integer.to!string);
+            presidioOutDirs[presidioSampleIndex++] = outDir;
+        }
+        auto peakRss = sample["peak_rss_bytes"].integer;
+        require(peakRss <= maxRssBytes,
+            tool ~ " exceeded the declared resource bound: " ~ peakRss.to!string ~
+            " > " ~ maxRssBytes.to!string ~ " bytes");
+        sample["tool"] = tool;
+        samples ~= sample;
+    }
+    verifySnapshot(scrubbedSnapshot);
+    require(samples.length == 4 && samples[0]["tool"].str == "scrubbed" &&
+        samples[1]["tool"].str == "presidio" && samples[2]["tool"].str == "scrubbed" &&
+        samples[3]["tool"].str == "presidio",
+        "pii-four-class comparator lost its A/B/A/B interleave order");
+
+    string[] scrubbedSidecarNames, presidioOutputNames;
+    foreach (name; fixtureNames) {
+        auto stem = name[0 .. $ - 4]; // strip ".txt"
+        scrubbedSidecarNames ~= stem ~ ".sidecar";
+        presidioOutputNames ~= stem ~ ".out";
+    }
+    auto scrubbedSignatureA = directorySignature(scrubbedSidecarDirs[0], scrubbedSidecarNames);
+    auto scrubbedSignatureB = directorySignature(scrubbedSidecarDirs[1], scrubbedSidecarNames);
+    require(scrubbedSignatureA == scrubbedSignatureB,
+        "scrubbed produced non-reproducible pii-audit output between its own two timed samples");
+    auto presidioSignatureA = directorySignature(presidioOutDirs[0], presidioOutputNames);
+    auto presidioSignatureB = directorySignature(presidioOutDirs[1], presidioOutputNames);
+    require(presidioSignatureA == presidioSignatureB,
+        "presidio driver produced non-reproducible output between its own two timed samples");
+
+    auto scrubbedTotals = emptyPiiCategoryCounts();
+    auto presidioTotals = emptyPiiCategoryCounts();
+    foreach (i, name; fixtureNames) {
+        auto stem = name[0 .. $ - 4];
+        auto scrubbedPredicted = parseScrubbedPiiAudit(
+            buildPath(scrubbedSidecarDirs[0], stem ~ ".sidecar"));
+        auto presidioPredicted = parsePresidioOutput(
+            buildPath(presidioOutDirs[0], stem ~ ".out"));
+        accumulatePiiFixtureScore(scrubbedTotals, scrubbedPredicted, goldByFixture[i]);
+        accumulatePiiFixtureScore(presidioTotals, presidioPredicted, goldByFixture[i]);
+    }
+
+    JSONValue scoring = JSONValue(["categories": strings(piiCategories.dup)]);
+    scoring["scrubbed"] = piiToolScoringJson(scrubbedTotals);
+    scoring["presidio"] = piiToolScoringJson(presidioTotals);
+
+    JSONValue result = JSONValue(["name": JSONValue("pii-four-class/scrubbed-vs-presidio")]);
+    result["scrubbed_binary_sha256"] = scrubbedSnapshot.sha256;
+    result["presidio_driver_sha256"] = presidioDriverSha256;
+    result["presidio_spacy_model"] = "en_core_web_sm";
+    result["presidio_python_version"] = presidioPythonVersion;
+    result["presidio_supported_entities"] = strings(supportedEntities.split(","));
+    result["python_packages_acquisition_order"] = acquisitionOrder;
+    result["scrubbed_command"] = publicCommandGeneric(scrubbedCommand,
+        [scrubbedSnapshot.path: "<scrubbed-binary>"], root);
+    result["presidio_command"] = publicCommandGeneric(presidioCommand,
+        [presidioPython: "<presidio-python>"], root);
+    result["timeout_seconds"] = timeoutSeconds;
+    result["max_rss_bytes"] = maxRssBytes;
+    result["samples"] = JSONValue(samples);
+    result["reproducibility"] = JSONValue([
+        "scrubbed": JSONValue(true),
+        "presidio": JSONValue(true),
+    ]);
+    result["fixture_spec_sha256"] = piiFixtureSpecSha256;
+    result["fixture_count"] = fixtureNames.length;
+    result["scoring"] = scoring;
+    return result;
+}
+
 // ---- Report assembly: fails closed on a duplicate declared case name or a
 // required case that never produced a result. ----
 
@@ -986,6 +1431,21 @@ private void selfTest() {
         catch (Exception) rejected = true;
         require(rejected, "version prefix, duplicate, or missing package accepted: " ~ bad);
     }
+    // URL-pinned package (a spaCy model with no plain-PyPI release): accepted
+    // only when the freeze row's URL matches byte-for-byte, and a version/URL
+    // type mismatch is rejected in both directions.
+    enum urlPinUrl = "https://example.invalid/en_core_web_sm-3.8.0.whl";
+    auto urlPin = PinnedPackage("en-core-web-sm", "", urlPinUrl);
+    auto urlOk = verifyPinnedPackages("en-core-web-sm @ " ~ urlPinUrl ~ "\n", [urlPin]);
+    require(urlOk.array.length == 1 && urlOk.array[0].str == "en-core-web-sm @ " ~ urlPinUrl,
+        "url-pinned acquisition order self-test regression");
+    foreach (bad; ["en-core-web-sm @ https://example.invalid/en_core_web_sm-3.9.0.whl",
+                   "en-core-web-sm==3.8.0"]) {
+        bool rejected;
+        try verifyPinnedPackages(bad, [urlPin]);
+        catch (Exception) rejected = true;
+        require(rejected, "url-pin mismatch or version/url type confusion accepted: " ~ bad);
+    }
     auto a = JSONValue(["name": JSONValue("a")]);
     auto b = JSONValue(["name": JSONValue("b")]);
     assembleReport([a, b], ["a", "b"]);
@@ -1006,10 +1466,10 @@ int main(string[] args) {
             selfTest();
             return 0;
         }
-        if (args.length != 5)
+        if (args.length != 6)
             throw new Exception(
                 "usage: external_comparator SCRUBBED_BINARY FTFY_BINARY TRAFILATURA_BINARY " ~
-                "LANGDETECT_PYTHON");
+                "LANGDETECT_PYTHON PRESIDIO_PYTHON");
         auto os = checked(["uname", "-s"]);
         bool darwin = os == "Darwin";
         require(darwin || os == "Linux", "BSD/GNU time only");
@@ -1020,6 +1480,7 @@ int main(string[] args) {
         auto pythonVersion = checked([python, "--version"]);
         auto trafilaturaPython = buildPath(dirName(args[3]), "python");
         auto langdetectPython = args[4];
+        auto presidioPython = args[5];
 
         auto mojibake = compareFtfyMojibake(args[1], args[2], python, root, darwin,
             60.0, 512L * 1024 * 1024);
@@ -1027,9 +1488,11 @@ int main(string[] args) {
             trafilaturaPython, root, darwin, 180.0, 512L * 1024 * 1024);
         auto languageId = compareLanguageIdLangdetect(args[1], langdetectPython, root,
             darwin, 60.0, 512L * 1024 * 1024);
-        auto report = assembleReport([mojibake, mainContent, languageId],
+        auto piiPresidio = comparePiiFourClassPresidio(args[1], presidioPython, root,
+            darwin, 60.0, 512L * 1024 * 1024);
+        auto report = assembleReport([mojibake, mainContent, languageId, piiPresidio],
             ["mojibake/scrubbed-vs-ftfy", "main-content/scrubbed-vs-trafilatura",
-             "language-id/scrubbed-vs-langdetect"]);
+             "language-id/scrubbed-vs-langdetect", "pii-four-class/scrubbed-vs-presidio"]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["harness_sha256"] = digest("benchmarks/external_comparator.d");
         report["harness_build_command"] =
@@ -1050,7 +1513,7 @@ int main(string[] args) {
         auto published = report.toString;
         require(!published.canFind(root) && !published.canFind(args[1]) &&
             !published.canFind(args[2]) && !published.canFind(args[3]) &&
-            !published.canFind(args[4]) &&
+            !published.canFind(args[4]) && !published.canFind(args[5]) &&
             !published.canFind(checked(["uname", "-n"])),
             "result contains a private run path or hostname");
         writeln(published);

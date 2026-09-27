@@ -1,10 +1,11 @@
 // Release-active D-only checker for benchmarks/external_comparator.d. Build
 // with ldc2 -O3 -release. `--self-test` independently re-proves every
-// fail-closed gate the runner relies on (version-prefix collision,
-// executable mutation, fixture drift, independently authored expectation
-// drift, output drift, zero samples, missing case, duplicate case, nonzero
-// exit, timeout, and resource refusal) using its own copies of the gating
-// primitives, not by importing the runner module. `--check <report.json>`
+// fail-closed gate the runner relies on (version-prefix collision, url-pin
+// mismatch, executable mutation, fixture drift, independently authored
+// expectation drift, output drift, zero samples, missing case, duplicate
+// case, nonzero exit, timeout, and resource refusal) using its own copies of
+// the gating primitives, not by importing the runner module. `--check
+// <report.json>`
 // structurally validates a report actually produced by external_comparator
 // and proves the migrated ftfy case reproduces cli_baseline.d's prior
 // correctness result for that case (same input/expected hashes, same
@@ -28,7 +29,7 @@ import std.json : JSONValue, parseJSON;
 import std.path : buildPath;
 import std.process : execute;
 import std.stdio : File, stderr, writeln;
-import std.string : split, splitLines, strip, toStringz;
+import std.string : indexOf, split, splitLines, strip, toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string message) {
@@ -77,41 +78,70 @@ private void checkExecutableMutation() {
 // verification (proves version-prefix-collision and duplicate-row
 // rejection without importing the runner). ----
 
+// `url` is non-empty for a package pinned by an exact download URL instead
+// of a plain PyPI version (issue #302's spaCy model: `en_core_web_sm` has no
+// ordinary versioned PyPI release, only a GitHub release-asset wheel, so
+// `uv pip freeze` represents it as "name @ url" rather than "name==version").
+// Exactly one of `exactVersion`/`url` is set per declared package. Kept as
+// an independent copy of `external_comparator.d`'s own struct, matching this
+// checker's own "no import of the runner module" design.
 private struct PinnedPackage {
     string name;
     string exactVersion;
+    string url;
 }
 
-private string[string] parseFreeze(string output) {
-    string[string] versions;
+private struct FreezeEntry {
+    string exactVersion; // empty when this row was a "name @ url" install
+    string url;          // empty when this row was a "name==version" install
+}
+
+private FreezeEntry[string] parseFreeze(string output) {
+    FreezeEntry[string] entries;
     foreach (line; output.splitLines) {
         auto row = line.strip;
         if (row.length == 0) continue;
         if (row.startsWith("Using Python ")) continue;
+        auto separator = row.indexOf(" @ ");
+        if (separator >= 0) {
+            auto name = row[0 .. separator];
+            auto url = row[separator + 3 .. $];
+            if (name.length == 0 || url.length == 0 || name in entries)
+                throw new Exception("unparseable or duplicate uv freeze row: " ~ row);
+            entries[name] = FreezeEntry("", url);
+            continue;
+        }
         auto fields = row.split("==");
         if (fields.length != 2 || fields[0].length == 0 || fields[1].length == 0 ||
-            fields[0] in versions)
+            fields[0] in entries)
             throw new Exception("unparseable or duplicate uv freeze row: " ~ row);
-        versions[fields[0]] = fields[1];
+        entries[fields[0]] = FreezeEntry(fields[1], "");
     }
-    return versions;
+    return entries;
 }
 
 private JSONValue verifyPinnedPackages(string freezeOutput,
                                        const PinnedPackage[] pinned) {
     require(pinned.length != 0, "no pinned packages declared");
-    auto versions = parseFreeze(freezeOutput);
+    auto entries = parseFreeze(freezeOutput);
     JSONValue[] order;
     foreach (pkg; pinned) {
-        auto found = pkg.name in versions;
-        require(found !is null && *found == pkg.exactVersion,
-            "expected " ~ pkg.name ~ "==" ~ pkg.exactVersion ~ " exactly");
-        order ~= JSONValue(pkg.name ~ "==" ~ pkg.exactVersion);
+        auto found = pkg.name in entries;
+        if (pkg.url.length != 0) {
+            require(found !is null && found.url == pkg.url,
+                "expected " ~ pkg.name ~ " @ " ~ pkg.url ~ " exactly");
+            order ~= JSONValue(pkg.name ~ " @ " ~ pkg.url);
+        } else {
+            require(found !is null && found.url.length == 0 &&
+                found.exactVersion == pkg.exactVersion,
+                "expected " ~ pkg.name ~ "==" ~ pkg.exactVersion ~ " exactly");
+            order ~= JSONValue(pkg.name ~ "==" ~ pkg.exactVersion);
+        }
     }
     return JSONValue(order);
 }
 
-private void checkVersionPrefixCollisionAndDuplicates() {
+private void checkPinnedPackageVerification() {
     auto pinned = [PinnedPackage("ftfy", "6.3.1"), PinnedPackage("wcwidth", "0.8.4")];
     verifyPinnedPackages("ftfy==6.3.1\nwcwidth==0.8.4\n", pinned); // exact pins: must pass
     foreach (bad; ["ftfy==6.3.10\nwcwidth==0.8.4",             // prefix collision
@@ -122,6 +152,20 @@ private void checkVersionPrefixCollisionAndDuplicates() {
         try verifyPinnedPackages(bad, pinned);
         catch (Exception) rejected = true;
         require(rejected, "prefix-collision, duplicate, or missing pin accepted: " ~ bad);
+    }
+
+    // URL-pinned package (a spaCy model with no plain-PyPI release): accepted
+    // only when the freeze row's URL matches byte-for-byte, and a version/URL
+    // type mismatch is rejected in both directions.
+    enum urlPinUrl = "https://example.invalid/en_core_web_sm-3.8.0.whl";
+    auto urlPin = PinnedPackage("en-core-web-sm", "", urlPinUrl);
+    verifyPinnedPackages("en-core-web-sm @ " ~ urlPinUrl ~ "\n", [urlPin]); // exact pin: must pass
+    foreach (bad; ["en-core-web-sm @ https://example.invalid/en_core_web_sm-3.9.0.whl",
+                   "en-core-web-sm==3.8.0"]) {
+        bool rejected;
+        try verifyPinnedPackages(bad, [urlPin]);
+        catch (Exception) rejected = true;
+        require(rejected, "url-pin mismatch or version/url type confusion accepted: " ~ bad);
     }
 }
 
@@ -402,7 +446,7 @@ private void checkResourceRefusal() {
 }
 
 private void selfTest() {
-    checkVersionPrefixCollisionAndDuplicates();
+    checkPinnedPackageVerification();
     checkExecutableMutation();
     checkFixtureAndExpectationDrift();
     checkOutputDrift();
@@ -412,10 +456,10 @@ private void selfTest() {
     checkProcessGroupTimeout();
     checkResourceRefusal();
     writeln("external comparator negative-control self-test passed: ",
-        "version-prefix-collision, executable-mutation, fixture-drift, ",
-        "expectation-drift, output-drift, zero-samples, missing-case, ",
-        "duplicate-case, nonzero-exit, timeout, process-group-timeout, ",
-        "resource-refusal");
+        "version-prefix-collision, url-pin-mismatch, executable-mutation, ",
+        "fixture-drift, expectation-drift, output-drift, zero-samples, ",
+        "missing-case, duplicate-case, nonzero-exit, timeout, ",
+        "process-group-timeout, resource-refusal");
 }
 
 // ---- Report validation: proves a real external_comparator run reproduces
@@ -475,6 +519,7 @@ private void checkReport(string path) {
 
     checkMainContentTrafilaturaCase(report);
     checkLanguageIdLangdetectCase(report);
+    checkPiiFourClassPresidioCase(report);
 }
 
 // ---- main-content/scrubbed-vs-trafilatura case validation (issue #229's
@@ -681,6 +726,99 @@ private void checkLanguageIdLangdetectCase(JSONValue report) {
         "scoring shape (", expectedOriginalLanguageIdLanguages.length, "/",
         expectedOriginalLanguageIdLanguages.length, " original-language fixtures accounted ",
         "for, #299's six Devanagari-family languages correctly excluded)");
+}
+
+// ---- pii-four-class/scrubbed-vs-presidio case validation (issue #302's
+// accepted next-slice contract). Per-category precision/recall against the
+// authored gold fixture is reported, not gated -- there is no accepted
+// numeric target -- so this structurally validates required fields/shape
+// (provenance including the pinned URL-installed spaCy model, the
+// empirically re-verified recognizer scoping, A/B/A/B interleave, both
+// tools' output reproducibility, and the per-category scoring object's
+// shape restricted to exactly the four overlap categories) rather than
+// recomputing the scores itself. ----
+
+private enum expectedPresidioSupportedEntities =
+    ["CREDIT_CARD", "EMAIL_ADDRESS", "IP_ADDRESS", "PHONE_NUMBER"];
+private enum expectedPiiCategories = ["email", "phone", "card", "ip"];
+
+private void checkPiiFourClassPresidioCase(JSONValue report) {
+    JSONValue found;
+    bool hasCase;
+    foreach (c; report["cases"].array)
+        if (c["name"].str == "pii-four-class/scrubbed-vs-presidio") { found = c; hasCase = true; }
+    require(hasCase, "missing pii-four-class/scrubbed-vs-presidio case");
+
+    require(found["scrubbed_binary_sha256"].str.length == 64,
+        "scrubbed_binary_sha256 is not a SHA-256 hex digest");
+    require(found["presidio_driver_sha256"].str.length == 64,
+        "presidio_driver_sha256 is not a SHA-256 hex digest");
+    require(found["presidio_spacy_model"].str == "en_core_web_sm",
+        "unexpected presidio_spacy_model: the small model was expected to suffice for these " ~
+        "four pattern/checksum recognizers");
+    require(found["presidio_python_version"].str.length != 0,
+        "missing presidio_python_version provenance");
+
+    auto acquisition = found["python_packages_acquisition_order"].array;
+    require(acquisition.length == 3 &&
+        acquisition[0].str.startsWith("presidio-analyzer==") &&
+        acquisition[1].str.startsWith("presidio-anonymizer==") &&
+        acquisition[2].str.startsWith("en-core-web-sm @ "),
+        "unexpected presidio package acquisition order");
+    require(found["timeout_seconds"].floating > 0, "missing declared timeout");
+    require(found["max_rss_bytes"].integer > 0, "missing declared resource bound");
+
+    auto supported = found["presidio_supported_entities"].array;
+    require(supported.length == expectedPresidioSupportedEntities.length,
+        "presidio_supported_entities must name exactly the four overlap entities");
+    foreach (i, entity; expectedPresidioSupportedEntities)
+        require(supported[i].str == entity,
+            "presidio recognizer configuration is not empirically confirmed scoped to the " ~
+            "four overlap entities (position " ~ i.to!string ~ " was " ~ supported[i].str ~ ")");
+
+    auto samples = found["samples"].array;
+    require(samples.length == 4, "expected four A/B/A/B samples");
+    require(samples[0]["tool"].str == "scrubbed" && samples[1]["tool"].str == "presidio" &&
+        samples[2]["tool"].str == "scrubbed" && samples[3]["tool"].str == "presidio",
+        "samples lost their A/B/A/B interleave order");
+    foreach (sample; samples) {
+        require(sample["status"].integer == 0, "a sample exited nonzero or was signaled");
+        foreach (metric; ["wall_seconds", "user_seconds", "system_seconds", "peak_rss_bytes"])
+            require((metric in sample.object) !is null, "sample missing " ~ metric);
+    }
+
+    require(found["reproducibility"]["scrubbed"].boolean &&
+        found["reproducibility"]["presidio"].boolean,
+        "a tool's output-reproducibility check did not pass");
+
+    require(found["fixture_spec_sha256"].str.length == 64,
+        "fixture_spec_sha256 is not a SHA-256 hex digest");
+    require(found["fixture_count"].integer > 0, "fixture_count must be positive");
+
+    auto scoring = found["scoring"];
+    auto categories = scoring["categories"].array;
+    require(categories.length == expectedPiiCategories.length,
+        "scoring categories must name exactly the four overlap categories");
+    foreach (i, category; expectedPiiCategories)
+        require(categories[i].str == category,
+            "unexpected scoring category order: " ~ categories[i].str);
+
+    foreach (toolName; ["scrubbed", "presidio"]) {
+        auto perCategory = scoring[toolName];
+        foreach (category; expectedPiiCategories) {
+            auto entry = perCategory[category];
+            require(entry["truePositive"].integer >= 0 && entry["falsePositive"].integer >= 0 &&
+                entry["falseNegative"].integer >= 0,
+                toolName ~ " " ~ category ~ " counts must be non-negative");
+            requireUnitInterval(entry["precision"].floating, toolName ~ " " ~ category ~ " precision");
+            requireUnitInterval(entry["recall"].floating, toolName ~ " " ~ category ~ " recall");
+        }
+    }
+    writeln("external comparator report check passed: pii-four-class/scrubbed-vs-presidio ",
+        "case has the required provenance (including the URL-pinned small spaCy model), ",
+        "reproducibility, an empirically re-verified four-entity recognizer scope, and ",
+        "per-category precision/recall scoring shape for exactly the four overlap categories ",
+        "(email/phone/card/ip)");
 }
 
 int main(string[] args) {

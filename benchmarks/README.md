@@ -383,12 +383,18 @@ uv venv "$bench_env/trafilatura-venv"
 uv pip install --python "$bench_env/trafilatura-venv/bin/python" trafilatura==2.2.0
 uv venv "$bench_env/langdetect-venv"
 uv pip install --python "$bench_env/langdetect-venv/bin/python" langdetect==1.0.9
+uv venv "$bench_env/presidio-venv"
+uv pip install --python "$bench_env/presidio-venv/bin/python" \
+  presidio-analyzer==2.2.364 presidio-anonymizer==2.2.364
+uv pip install --python "$bench_env/presidio-venv/bin/python" \
+  "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 dub build --build=release --compiler=ldc2
 ldc2 -O3 -release -preview=dip1000 -i -Isource -I. benchmarks/external_comparator.d \
   experiments/html_main_content/token_overlap.d -of="$bench_env/external_comparator"
 "$bench_env/external_comparator" --self-test
 "$bench_env/external_comparator" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" \
   "$bench_env/trafilatura-venv/bin/trafilatura" "$bench_env/langdetect-venv/bin/python" \
+  "$bench_env/presidio-venv/bin/python" \
   > "$bench_env/result.json"
 ldc2 -O3 -release benchmarks/external_comparator_check.d \
   -of="$bench_env/external_comparator_check"
@@ -504,6 +510,82 @@ all 11/11 fixtures correctly for both scrubbed and langdetect, with 11/11
 mutual agreement -- a small authored-fixture observation, not a
 calibrated-accuracy or web-scale claim.
 
+Its fourth case, `pii-four-class/scrubbed-vs-presidio` (issue #302's
+next-slice contract), exercises the real, shipped `pii-four-class` terminal
+stage end to end through `scrubbed run --input FILE --output FILE
+--sidecar-output FILE --stage id=pii-four-class --threads 1` (default stage
+options already select all four categories and both confidence levels)
+against the real, pinned Presidio (`presidio-analyzer`/`presidio-anonymizer`
+2.2.364; Presidio is now community-owned under `data-privacy-stack` --
+Microsoft remains on the steering committee -- with its MIT license and
+public APIs unchanged). Like the trafilatura and language-id cases,
+correctness is scored by precision/recall against authored gold spans, here
+computed **per category** (email/phone/card/ip -- the only four categories
+`pii-four-class` implements) for both tools symmetrically, against one
+small, five-fixture, originally authored corpus with independently authored
+gold spans: no scraped or real PII-bearing text anywhere. Emails use RFC
+2606 documentation-reserved domains (`example.com`/`.org`/`.net`), phone
+numbers use the NANPA `555-01XX` range reserved for fictional use, IP
+addresses use RFC 5737 `TEST-NET` documentation ranges, and card numbers are
+long-standing published payment-gateway test numbers (Luhn-valid, never real
+accounts). A few deliberate near-miss decoys (an invalid-domain "address", an
+out-of-range IP, a card number one Luhn digit off) are not gold spans, so
+both tools' precision is observed too, not only recall.
+
+**Owner-resolved model-size decision, empirically verified at implementation
+time (2026-09-27)**: the small `en_core_web_sm` spaCy model (~12 MiB) is
+used, not the large `en_core_web_lg` (~560-740 MiB) the ticket flagged as a
+fallback. `AnalyzerEngine`'s own bare, unconfigured default has no model
+installed and instead attempts to auto-download the *large* model on first
+use; `benchmarks/presidio_driver.py` never takes that path -- it always
+constructs its own `NlpEngineProvider` naming the small model explicitly. The
+four entities compared here (`EMAIL_ADDRESS`, `PHONE_NUMBER`, `CREDIT_CARD`,
+`IP_ADDRESS` -- exact spellings re-verified against the pinned version's own
+`get_supported_entities()`, not assumed from documentation) are Presidio's
+pattern/checksum recognizers, not NER-dependent, and a real install
+confirmed the small model sufficient for all four: a live run scored
+scrubbed at 5/5 email, 5/5 card, 5/5 ip, and 5/6 phone (missing only a
+`(415) 555-0199`-style alternate format `pii-four-class`'s own regex does not
+support -- an honest, reported recall gap, not a bug), all with 0 false
+positives; the same live run scored Presidio at 5/5, 5/5, 5/5, and 6/6, also
+with 0 false positives. The large-model fallback the contract named was not
+needed and is not used; `en_core_web_sm` has no ordinary versioned PyPI
+release (only a GitHub release-asset wheel, exactly as `python -m spacy
+download` itself installs it), so it is pinned by exact download URL rather
+than by version -- `PinnedPackage` grew an optional `url` field for this, and
+`uv pip freeze`'s own "name @ url" row shape is parsed and verified
+byte-for-byte alongside its existing "name==version" rows.
+
+Presidio's recognizer configuration is scoped to exactly the four overlap
+entities two ways, both real, not assumed: **by construction**,
+`presidio_driver.py` builds its `AnalyzerEngine` from a `RecognizerRegistry`
+containing only `EmailRecognizer`/`PhoneRecognizer`/`CreditCardRecognizer`/
+`IpRecognizer` -- requesting any other entity (`PERSON`, `LOCATION`,
+`DATE_TIME`, ...) from that analyzer instance raises `ValueError: No matching
+recognizers were found to serve the request.`, not a silent no-op -- and
+**empirically**, the driver's own `--print-scope` mode prints that analyzer
+instance's `get_supported_entities()` at run time, and the comparator
+requires this equal exactly `CREDIT_CARD,EMAIL_ADDRESS,IP_ADDRESS,
+PHONE_NUMBER` before any fixture is run. Presidio is never compared against
+its own full default catalog, and scrubbed is never penalized for lacking
+entity types it doesn't implement (`PERSON`, `LOCATION`, `DATE_TIME`, ...),
+matching the contract's own non-goal.
+
+On the scrubbed side, each real `TerminalSideOutput` `.pii-audit.json`
+sidecar (`stages.pii_four_class.d`'s own `encodePiiAuditV1` shape) is parsed
+here as plain JSON -- never imported, since only the already-human-readable
+per-contributor category/start/end fields are needed, not the full identity/
+policy binding that module encodes for its own production consumers. Each
+A/B/A/B timed sample is one full pass over all five fixtures (one
+single-file `scrubbed run` or driver invocation per fixture, looped by a
+small shell wrapper under the existing, unmodified `runBoundedSample`
+machinery, mirroring the language-id case's own batch-script shape), and
+both tools' output must reproduce byte-identical results between their own
+two timed samples. Per-category true/false-positive/negative counts and
+precision/recall are reported, never gated: there is no accepted numeric
+target, and the two tools' per-category counts are never combined or
+compared against each other's as if one were the other's ground truth.
+
 The report schema is `scrubbed-external-comparator-v1`. **This is an
 intentional, fail-closed format break, not a bug**: it does not read or
 replay `cli_baseline.d`'s prior `scrubbed-cli-baseline-v1` report shape, and
@@ -515,14 +597,16 @@ tags identity checks). [`experiments/text/compare_cli.d` and
 this new shape.
 
 `external_comparator_check.d` (release-active D-only checker, own copies of
-the gating primitives rather than an import of the runner) exercises twelve
-negative controls end to end: version-prefix collision, executable mutation
-after snapshot, fixture drift, independently authored expectation drift,
-output drift, zero samples, missing case, duplicate case, nonzero exit,
-timeout (a command that outlives its declared bound is sent SIGTERM, then
-SIGKILL after a bounded grace period, and the run fails closed with no
-partial sample retained), process-group timeout (a synthetic command that
-backgrounds a long-running grandchild is timed out, and the grandchild's
+the gating primitives rather than an import of the runner) exercises thirteen
+negative controls end to end: version-prefix collision, url-pin mismatch (a
+package pinned by exact download URL -- issue #302's spaCy model -- rejects a
+mismatched URL and a version/URL type confusion in either direction),
+executable mutation after snapshot, fixture drift, independently authored
+expectation drift, output drift, zero samples, missing case, duplicate case,
+nonzero exit, timeout (a command that outlives its declared bound is sent
+SIGTERM, then SIGKILL after a bounded grace period, and the run fails closed
+with no partial sample retained), process-group timeout (a synthetic command
+that backgrounds a long-running grandchild is timed out, and the grandchild's
 PID is confirmed gone, not just the direct child's), and resource refusal
 (a peak RSS above the declared bound fails the case). Its
 `--check <report.json>` mode also structurally validates a real run's
@@ -547,7 +631,16 @@ original languages and excludes issue #299's six added ones, and the scoring
 object's shape (per-tool correct/abstained-or-error counts and accuracy
 within `[0,1]`, an agreement rate within `[0,1]`, and one scored entry per
 original-language fixture) -- again without recomputing the agreement/
-accuracy scores itself, since those are reported, not gated.
+accuracy scores itself, since those are reported, not gated. It likewise
+validates `pii-four-class/scrubbed-vs-presidio`'s required provenance
+(executable and pinned-driver hashes, the URL-pinned `en_core_web_sm`
+acquisition row, `presidio_spacy_model`), its empirically re-verified
+`presidio_supported_entities` (exactly the four overlap entities), its
+four-sample A/B/A/B interleave, both tools' output-reproducibility flags, and
+the per-category scoring object's shape (non-negative true/false-positive/
+negative counts and precision/recall within `[0,1]` for each of exactly
+email/phone/card/ip) -- again without recomputing the precision/recall
+scores itself, since those are reported, not gated.
 
 The timed sample child (`/usr/bin/time` and the command it wraps) owns its
 own process group: `runBoundedSample` forks, the child calls `setpgid(0, 0)`

@@ -274,3 +274,141 @@ int runCrawl(const string[] args) {
         return 2;
     }
 }
+
+version (unittest) {
+    import std.file : remove, tempDir, write;
+    import std.uuid : randomUUID;
+
+    private string freshTempFile(string label) {
+        return buildPath(tempDir(), "scrubbed-crawl-cli-test-" ~ label ~ "-" ~
+            randomUUID.toString ~ ".txt");
+    }
+}
+
+unittest {
+    // A valid full flag set -- every flag `parseOptions` recognizes, mixing
+    // the `--flag value` and `--flag=value` spellings the loop supports --
+    // parses correctly into `Options`, and it defaults to the SQLite backend
+    // (not `--in-memory`) whenever an explicit `--db` is given.
+    string[] args = [
+        "--corpus-dir", "/tmp/some-corpus",
+        "--seed", "https://example.test/a",
+        "--seed=https://example.test/b",
+        "--db", "/tmp/some-corpus/frontier.sqlite3",
+        "--max-pages", "500",
+        "--max-pages-per-host", "10",
+        "--max-depth", "2",
+        "--concurrency", "8",
+        "--min-host-delay-ms", "1500",
+        "--scope", "one-hop-external",
+        "--allowed-origin", "https://other.test",
+    ];
+    Options o;
+    assert(parseOptions(args, o), "a fully-specified, valid flag set was rejected");
+    assert(o.corpusDir == "/tmp/some-corpus");
+    assert(o.hasCorpusDir);
+    assert(o.seedUrls == ["https://example.test/a", "https://example.test/b"]);
+    assert(o.seedFiles.length == 0);
+    assert(o.db == "/tmp/some-corpus/frontier.sqlite3");
+    assert(o.hasDb);
+    assert(!o.inMemory);
+    assert(o.maxPages == 500);
+    assert(o.maxPagesPerHost == 10);
+    assert(o.maxDepth == 2);
+    assert(o.concurrency == 8);
+    assert(o.minHostDelayMs == 1500);
+    assert(o.scopeText == "one-hop-external");
+    assert(o.allowedOrigins == ["https://other.test"]);
+}
+
+unittest {
+    // `--in-memory` alone is exactly as valid as `--db` alone, but the
+    // required `--corpus-dir` is genuinely required: omitting it fails
+    // validation even though every other flag given is individually valid.
+    string[] withCorpusDir = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/", "--in-memory"];
+    Options ok;
+    assert(parseOptions(withCorpusDir, ok));
+
+    string[] missingCorpusDir = ["--seed", "https://example.test/", "--in-memory"];
+    Options rejected;
+    assert(!parseOptions(missingCorpusDir, rejected),
+        "parseOptions accepted a flag set missing the required --corpus-dir");
+}
+
+unittest {
+    // `--db` and `--in-memory` are mutually exclusive: each is independently
+    // valid, but combining them must be rejected. Proven against both flag
+    // orderings so this isn't an artifact of parse order.
+    string[] dbOnly = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/", "--db", "/tmp/c/f.sqlite3"];
+    Options dbOptions;
+    assert(parseOptions(dbOnly, dbOptions), "--db alone was incorrectly rejected");
+
+    string[] inMemoryOnly = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/", "--in-memory"];
+    Options inMemoryOptions;
+    assert(parseOptions(inMemoryOnly, inMemoryOptions), "--in-memory alone was incorrectly rejected");
+
+    string[] both = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/",
+        "--db", "/tmp/c/f.sqlite3", "--in-memory"];
+    Options combined;
+    assert(!parseOptions(both, combined),
+        "parseOptions accepted mutually exclusive --db and --in-memory together");
+
+    string[] reversed = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/",
+        "--in-memory", "--db", "/tmp/c/f.sqlite3"];
+    Options reversedCombined;
+    assert(!parseOptions(reversed, reversedCombined),
+        "parseOptions accepted --in-memory/--db together in reversed order");
+}
+
+unittest {
+    // Numeric overflow guards: a decimal literal far beyond `size_t.max` (for
+    // `--max-pages`) or `long.max` (for `--min-host-delay-ms`) must be
+    // rejected outright rather than silently wrapping into some small or
+    // negative bound. A merely large-but-representable value is still
+    // accepted, so this isn't just rejecting any long digit string.
+    enum string wayTooBig = "999999999999999999999999999999999999999999"; // far beyond size_t.max
+    string[] overflowMaxPages = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/",
+        "--max-pages", wayTooBig];
+    Options rejectedMaxPages;
+    assert(!parseOptions(overflowMaxPages, rejectedMaxPages),
+        "an overflowing --max-pages value was not rejected");
+
+    string[] overflowDelay = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/",
+        "--min-host-delay-ms", wayTooBig];
+    Options rejectedDelay;
+    assert(!parseOptions(overflowDelay, rejectedDelay),
+        "an overflowing --min-host-delay-ms value was not rejected");
+
+    string[] largeButValid = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/",
+        "--max-pages", "1000000"];
+    Options acceptedMaxPages;
+    assert(parseOptions(largeButValid, acceptedMaxPages) && acceptedMaxPages.maxPages == 1_000_000,
+        "a large but representable --max-pages value was incorrectly rejected");
+
+    // Zero is a distinct, separately-guarded rejection (see `--max-pages ==
+    // 0` in `parseOptions`), not the same code path as overflow.
+    string[] zeroMaxPages = ["--corpus-dir", "/tmp/c", "--seed", "https://example.test/",
+        "--max-pages", "0"];
+    Options rejectedZero;
+    assert(!parseOptions(zeroMaxPages, rejectedZero),
+        "--max-pages 0 was not rejected");
+}
+
+unittest {
+    // Seed-file reading: comments and blank lines are skipped, surviving
+    // lines are resolved as absolute URLs in file order, and a missing file
+    // is a hard failure rather than an empty seed list.
+    auto path = freshTempFile("seeds");
+    write(path, "# a comment\n\nhttps://example.test/one\n   \nhttps://example.test/two\n# trailing\n");
+    scope(exit) remove(path);
+
+    auto seeds = readSeedFile(path);
+    assert(seeds.length == 2, "comments/blank lines were not correctly skipped");
+    assert(seeds[0].canonical == "https://example.test/one");
+    assert(seeds[1].canonical == "https://example.test/two");
+
+    bool threw;
+    try readSeedFile(freshTempFile("does-not-exist"));
+    catch (Exception) threw = true;
+    assert(threw, "reading a nonexistent seeds file did not fail");
+}

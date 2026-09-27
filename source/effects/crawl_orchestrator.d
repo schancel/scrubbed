@@ -761,6 +761,81 @@ unittest {
         "restarting against the same database re-fetched already-completed pages");
 }
 
+// One-hop-external discovery gating: unlike the three tests above (all
+// `allowedDomain` scope), this exercises the `oneHopExternal` branch of
+// `processLease`'s `discoverFurther` check directly -- the one integration
+// point this orchestrator adds on top of `effects.html_discovery`'s own
+// (separately tested) scope-membership logic. Two distinct real servers on
+// two distinct loopback origins stand in for "core" and "external" sites: the
+// core seed page links one hop out to the external site, and that external
+// page in turn links one hop further still (deeper into the external site).
+// `oneHopExternal` must admit and fetch the first external page (a genuine
+// one-hop-out reference), but must never treat that already-external page as
+// a source of further discoveries -- so the second-hop external page must
+// never be admitted or fetched at all.
+unittest {
+    // The external site's own further link is same-origin, so it can be a
+    // plain relative reference -- no chicken-and-egg problem with the core
+    // server needing to exist first. The core page's link to the external
+    // site must be absolute (cross-origin), so the external server (and its
+    // bound port) is created first.
+    string[string] externalPages = [
+        "/hub": `<html><body><a href="/further">further</a></body></html>`,
+        "/further": "<html><body>should never be reached</body></html>",
+    ];
+    auto externalServer = new TestServer(externalPages);
+    scope(exit) externalServer.stop();
+    auto externalOrigin = "http://127.0.0.1:" ~ externalServer.port.to!string;
+
+    string[string] corePages = [
+        "/": `<html><body><a href="` ~ externalOrigin ~ `/hub">hub</a></body></html>`,
+    ];
+    auto coreServer = new TestServer(corePages);
+    scope(exit) coreServer.stop();
+    auto coreOrigin = "http://127.0.0.1:" ~ coreServer.port.to!string;
+
+    auto workDir = freshTempDir("one-hop-external");
+    scope(exit) removeTempDir(workDir);
+    auto rawDir = buildPath(workDir, "raw");
+    mkdirRecurse(rawDir);
+    auto manifest = new ManifestWriter(buildPath(workDir, "manifest.jsonl"));
+
+    auto opened = openInMemoryJobQueue(FrontierLimits(32, 32, 4, 32, 1,
+        16 * 1024 * 1024, 8192, 4096, 1024 * 1024));
+    assert(opened.code == QueueOpenCode.opened);
+    JobQueue queue = opened.queue;
+    auto seedAdmission = queue.admit(CandidateInput(crawlPolicyId, coreOrigin ~ "/",
+        coreOrigin, 0, "seed"));
+    assert(seedAdmission.code == AdmissionCode.admittedQueued);
+
+    CrawlBounds bounds;
+    bounds.maxPages = 32;
+    bounds.maxPagesPerHost = 32;
+    bounds.maxDepth = 4;
+    bounds.concurrency = 1;
+    bounds.minHostDelayMs = 0;
+    bounds.scopeKind = DiscoveryScopeKind.oneHopExternal;
+    // Only the core origin is "core" for gating purposes -- exactly what
+    // `effects.crawl_cli` builds from the seeds' own origins plus any
+    // `--allowed-origin` flags; the external origin is deliberately absent.
+    bounds.allowedOrigins = [coreOrigin];
+
+    auto orchestrator = new CrawlOrchestrator(queue, rawDir, manifest, bounds);
+    auto summary = orchestrator.run();
+
+    // Exactly the core seed and the one external hop -- never the external
+    // site's own further link.
+    assert(summary.pagesAdmitted == 2,
+        "one-hop-external admitted something other than exactly the core page plus one external hop");
+    assert(summary.completed == 2 && summary.failed == 0);
+    assert(coreServer.hitsFor("/") == 1);
+    assert(externalServer.hitsFor("/hub") == 1,
+        "the one-hop-external page itself was never fetched");
+    assert(externalServer.hitsFor("/further") == 0,
+        "one-hop-external discovery gating failed to stop at the external page: " ~
+        "a second hop past an already-external page was fetched");
+}
+
 // Resumability proof #2: a process kill mid-fetch leaves a durable frontier
 // candidate stuck in `leased` state forever (nothing else ever times out a
 // lease). Without `recoverOrphanedLeases`, that candidate would sit inert on

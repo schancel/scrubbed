@@ -138,17 +138,12 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             <span class="label">vs. trafilatura, extraction</span>
             <p>Matches trafilatura's gold answers on pages it parses; a known, ticketed parser gap explains the rest &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</p>
         </div>
-    </div>
-
-    <h2>Speed</h2>
-    <div class="stats">
         <div class="stat-card">
             <span class="big">~25x</span>
             <span class="label">vs. ftfy, whole-process wall time</span>
-            <p>On a 131,072-line (5.9MB) repetitive mojibake file: scrubbed 0.152&ndash;0.156s vs. ftfy 3.698&ndash;4.076s. Whole-process timing (includes startup), exact output verified every run, three interleaved samples per tool &mdash; one specific workload, not a general corpus-speed claim. Full methodology in <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/README.md" target="_blank" rel="noopener">benchmarks/README.md</a>.</p>
+            <p>On a 131,072-line (5.9MB) repetitive mojibake file: 0.152&ndash;0.156s vs. ftfy's 3.698&ndash;4.076s. Whole-process timing including startup, exact output verified every run &mdash; one specific workload, not a general throughput claim. Trafilatura/langdetect/Presidio timing isn't published yet, only correctness above.</p>
         </div>
     </div>
-    <p class="note">Deployment is one static binary with no interpreter or package chain to install (no <code>pip install lxml</code>/<code>cchardet</code>/etc.) &mdash; a real architectural difference, but not yet a separately isolated cold-start benchmark of its own; the number above is dominated by processing a large file, not an empty-input startup measurement.</p>
 
     <h2>Also shipped</h2>
     <ul>

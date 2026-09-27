@@ -1,10 +1,13 @@
 # scrubbed
 
-A single, zero-dependency native binary that cleans web/corpus text for
-training and evaluation pipelines — encoding repair, HTML main-content
-extraction, PII scanning, dedup, and language ID, all in one pass per
-document. Easy to deploy (one static binary, no interpreter, no `pip
-install`), fast to run.
+A single native binary that cleans web/corpus text for training and
+evaluation pipelines. `clean-web-document` bundles encoding repair, HTML
+main-content extraction, and PII scanning into one pass per document;
+dedup and language ID run as separate stages on the same pipeline, not
+that same pass yet. No interpreter, no `pip install` -- though not a
+fully static binary either: it dynamically links the system's libcurl,
+and `dlopen`s libz at runtime for the code paths that need it (WARC gzip
+members, DOCX's DEFLATE entries). Fast to run.
 
 ## Why
 

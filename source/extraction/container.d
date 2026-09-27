@@ -2,11 +2,36 @@
 module extraction.container;
 
 import content.pieces : Content, ContentPiece;
+import std.algorithm.searching : canFind;
 import std.algorithm.sorting : sort;
 import std.exception : enforce;
 import std.string : indexOf;
 
 enum ZipInspectionStatusV1 : ubyte { admitted, refused }
+
+/// Outcome of one injected raw-DEFLATE decompression attempt. `ok` means a
+/// complete, valid raw-DEFLATE stream; `malformed` covers any corrupt,
+/// truncated, or otherwise invalid stream; `unavailable` covers the
+/// decoder itself failing to load (see `effects.zlib_ffi`, the real
+/// implementation). Never an exception: every outcome is a clean coded
+/// value, the same discipline every other refusal in this module already
+/// follows.
+enum ZipInflateOutcomeV1 : ubyte { ok, malformed, unavailable }
+
+/// Injected raw-DEFLATE decompression, mirroring `extraction.port`'s
+/// `ExtractorApplyV1`: a pure function-pointer boundary defined in this
+/// I/O-free layer (see `extraction/README.md`), whose real implementation
+/// (system zlib FFI) is supplied by an `effects`-layer caller -- this
+/// module never performs I/O itself. `input` is one entry's real,
+/// physically-bounded compressed bytes; `emit` receives each produced
+/// output chunk immediately, so the caller can charge/bound expansion
+/// incrementally without this module ever buffering a full decompressed
+/// result, and may throw to abort the attempt before it finishes. A
+/// caller that has no real decompressor to inject passes `null`; DEFLATE
+/// entries are then refused as `unsupportedFeature`, exactly as they were
+/// before this capability existed.
+alias ZipInflateV1 = ZipInflateOutcomeV1 function(const(ubyte)[] input,
+    scope void delegate(const(ubyte)[]) pure emit) pure;
 
 /// Closed refusal vocabulary. Diagnostics never contain archive-controlled names.
 enum ZipInspectionReasonV1 : ubyte {
@@ -31,6 +56,7 @@ enum ZipEvidenceV1 : ubyte {
     indexedLocalRecords,
     canonicalPaths,
     storeOnly,
+    deflatePresent,
     ooxmlWordMarkers
 }
 
@@ -80,12 +106,20 @@ struct ZipEntryEvidenceV1 {
     private size_t expandedValue;
     private size_t depthValue;
     private bool directoryValue;
+    private bool deflateValue;
 
     string name() const pure { return nameValue; }
     size_t compressedBytes() const pure { return compressedValue; }
+    /// The actually-produced byte count for a DEFLATE entry (discovered by
+    /// decompressing during admission), never the untrusted declared header
+    /// value. Equal to the declared value for STORE entries, same as before.
     size_t expandedBytes() const pure { return expandedValue; }
     size_t depth() const pure { return depthValue; }
     bool isDirectory() const pure { return directoryValue; }
+    /// True for a `method == 8` entry. `streamEntry` refuses these: this
+    /// slice only admits DEFLATE entries, it does not yet expose their
+    /// decompressed bytes through the streaming capability.
+    bool isDeflate() const pure { return deflateValue; }
 }
 
 private struct PieceSpan {
@@ -205,6 +239,8 @@ final class AdmittedZipV1 {
             if (entry.evidence.nameValue == canonicalName) {
                 enforce(!entry.evidence.directoryValue,
                     "ZIP directory entries have no byte stream");
+                enforce(!entry.evidence.deflateValue,
+                    "ZIP DEFLATE entry bytes are not exposed by streamEntry in this slice");
                 source.validateRange(entry.payloadOffset,
                     entry.evidence.compressedValue);
                 auto remaining = entry.evidence.compressedValue;
@@ -295,6 +331,7 @@ private final class InspectionState {
     ContentSnapshot source;
     size_t sourceSize;
     ZipInspectionLimitsV1 limits;
+    ZipInflateV1 inflate;
     size_t examined;
     size_t compressed;
     size_t expanded;
@@ -303,10 +340,11 @@ private final class InspectionState {
     ZipInspectionReasonV1 refusal = ZipInspectionReasonV1.admitted;
     AdmittedEntry[] admittedEntries;
 
-    this(ContentSnapshot source, ZipInspectionLimitsV1 limits) {
+    this(ContentSnapshot source, ZipInspectionLimitsV1 limits, ZipInflateV1 inflate) {
         this.source = source;
         sourceSize = source.size;
         this.limits = limits;
+        this.inflate = inflate;
     }
 
     void refuse(ZipInspectionReasonV1 reason) pure {
@@ -383,14 +421,84 @@ private final class InspectionState {
                  expandedBytes % compressedBytes != 0)))
             refuse(ZipInspectionReasonV1.ratioLimit);
     }
+
+    /// Distinct incremental accounting for streamed DEFLATE output, charged
+    /// once per produced chunk during inflate rather than once from a
+    /// declared size the way `chargeEntry` charges STORE bytes. `chargeEntry`
+    /// trusts sizes tied to physical archive layout (STORE's compressed and
+    /// expanded byte counts are the same physically-tiled bytes); a DEFLATE
+    /// entry's true expanded size has no such guarantee, so a high-ratio
+    /// bomb must be caught mid-stream, before a possibly enormous full
+    /// output would ever be produced or its declared size ever trusted.
+    void chargeInflatedChunk(size_t entryCompressedBytes,
+            size_t entryExpandedBefore, size_t amount) pure {
+        if (amount > size_t.max - expanded) {
+            expanded = size_t.max;
+            refuse(ZipInspectionReasonV1.expandedLimit);
+            throw new InspectionBudgetExceeded;
+        }
+        expanded += amount;
+        if (expanded > limits.maxExpandedBytes) {
+            refuse(ZipInspectionReasonV1.expandedLimit);
+            throw new InspectionBudgetExceeded;
+        }
+        auto entryExpandedAfter = entryExpandedBefore + amount;
+        if (entryCompressedBytes == 0 ||
+                entryExpandedAfter / entryCompressedBytes > limits.maxRatio ||
+                (entryExpandedAfter / entryCompressedBytes == limits.maxRatio &&
+                 entryExpandedAfter % entryCompressedBytes != 0)) {
+            refuse(ZipInspectionReasonV1.ratioLimit);
+            throw new InspectionBudgetExceeded;
+        }
+    }
 }
 
-/// Inspect without flattening Content or exposing source bytes.
+/// Decompresses one DEFLATE entry's real, physically-bounded compressed
+/// bytes (already validated against the archive's own layout, the same way
+/// STORE payload bytes are) via the injected `state.inflate`, and returns
+/// the byte count inflate actually produced. Each produced chunk is charged
+/// via `chargeInflatedChunk` as it is produced, so a crafted high-ratio
+/// stream is refused before this function ever finishes, not after. The ZIP
+/// header's declared expanded size is never read or trusted here. No
+/// decompressor injected (`state.inflate is null`) is refused the same way
+/// an unrecognized method would be: `unsupportedFeature`.
+private size_t inflateDeflateEntry(InspectionState state, size_t payloadBase,
+        size_t compressedBytes) {
+    if (state.inflate is null) {
+        state.refuse(ZipInspectionReasonV1.unsupportedFeature);
+        return 0;
+    }
+    state.source.validateRange(payloadBase, compressedBytes);
+    auto input = new ubyte[compressedBytes];
+    foreach (index; 0 .. compressedBytes)
+        input[index] = state.source.at(payloadBase + index);
+    size_t entryExpanded;
+    auto outcome = state.inflate(input, (const(ubyte)[] chunk) {
+        state.chargeInflatedChunk(compressedBytes, entryExpanded, chunk.length);
+        entryExpanded += chunk.length;
+    });
+    final switch (outcome) {
+    case ZipInflateOutcomeV1.ok: break;
+    case ZipInflateOutcomeV1.malformed:
+        state.refuse(ZipInspectionReasonV1.malformed);
+        break;
+    case ZipInflateOutcomeV1.unavailable:
+        state.refuse(ZipInspectionReasonV1.unsupportedFeature);
+        break;
+    }
+    return entryExpanded;
+}
+
+/// Inspect without flattening Content or exposing source bytes. `inflate`
+/// is the injected raw-DEFLATE decompressor (see `ZipInflateV1`); omit it
+/// (or pass `null`) to admit only STORE entries, exactly as before this
+/// capability existed.
 ZipInspectionResultV1 inspectZipContainerV1(Content content,
-        ZipInspectionLimitsV1 limits = ZipInspectionLimitsV1()) {
+        ZipInspectionLimitsV1 limits = ZipInspectionLimitsV1(),
+        ZipInflateV1 inflate = null) {
     limits.validate;
     auto snapshot = new ContentSnapshot(content);
-    auto state = new InspectionState(snapshot, limits);
+    auto state = new InspectionState(snapshot, limits, inflate);
     auto sourceBytes = snapshot.size;
     if (sourceBytes > limits.maxPhysicalBytes)
         state.refuse(ZipInspectionReasonV1.physicalLimit);
@@ -417,9 +525,13 @@ ZipInspectionResultV1 inspectZipContainerV1(Content content,
             ZipEvidenceV1.classicSingleDisk,
             ZipEvidenceV1.contiguousCentralDirectory,
             ZipEvidenceV1.indexedLocalRecords,
-            ZipEvidenceV1.canonicalPaths,
-            ZipEvidenceV1.storeOnly
+            ZipEvidenceV1.canonicalPaths
         ];
+        bool anyDeflate;
+        foreach (admittedEntry; state.admittedEntries)
+            if (admittedEntry.evidence.deflateValue) { anyDeflate = true; break; }
+        result.evidenceValue ~= anyDeflate
+            ? ZipEvidenceV1.deflatePresent : ZipEvidenceV1.storeOnly;
         if (root.packageKind == ZipPackageKindV1.ooxmlWord)
             result.evidenceValue ~= ZipEvidenceV1.ooxmlWordMarkers;
         sort!((a, b) => a.evidence.nameValue < b.evidence.nameValue)(state.admittedEntries);
@@ -510,14 +622,19 @@ private ParseFacts parseArchive(InspectionState state, size_t base,
         auto directory = name.length != 0 && name[$ - 1] == '/';
         if (!safePath(name)) state.refuse(ZipInspectionReasonV1.unsafePath);
         if (flags & 1) state.refuse(ZipInspectionReasonV1.encrypted);
-        state.chargeEntry(compressed, expanded);
+        // DEFLATE's declared expanded size is attacker-controlled and, unlike
+        // STORE's, not tied to the archive's physical layout: the real value
+        // is discovered and charged incrementally during inflate below, once
+        // payloadOffset is resolved. Charge only the real, physically-bounded
+        // compressed byte count here.
+        state.chargeEntry(compressed, method == 8 ? 0 : expanded);
         if (flags & 8) state.refuse(ZipInspectionReasonV1.unsupportedFeature);
         if ((flags & ~cast(ushort) 0x0800) != 0 || versionNeeded > 20)
             state.refuse(ZipInspectionReasonV1.unsupportedFeature);
-        if (method != 0) state.refuse(ZipInspectionReasonV1.unsupportedFeature);
+        if (method != 0 && method != 8) state.refuse(ZipInspectionReasonV1.unsupportedFeature);
         if (extraBytes != 0 || entryComment != 0 || startDisk != 0)
             state.refuse(ZipInspectionReasonV1.unsupportedFeature);
-        if (compressed != expanded)
+        if (method == 0 && compressed != expanded)
             state.refuse(ZipInspectionReasonV1.unsupportedFeature);
         if (directory && (compressed != 0 || expanded != 0))
             state.refuse(ZipInspectionReasonV1.malformed);
@@ -581,12 +698,23 @@ private ParseFacts parseArchive(InspectionState state, size_t base,
     }
     if (localCursor != centralOffset) state.refuse(ZipInspectionReasonV1.malformed);
 
+    // DEFLATE entries: discover and charge the real expanded byte count now
+    // that payloadOffset is resolved, replacing the untrusted declared value.
+    // A crafted high-ratio or truncated/corrupt stream is refused here,
+    // before any nested-archive or evidence work below trusts its size.
+    foreach (ref entry; byOffset) {
+        if (entry.directory || entry.method != 8) continue;
+        entry.expanded = inflateDeflateEntry(state,
+            base + entry.payloadOffset, entry.compressed);
+    }
+
     // Copy resolved offsets back by name; duplicates have already been refused.
     foreach (ref entry; facts.entries)
         foreach (local; byOffset)
             if (entry.name == local.name) {
                 entry.payloadOffset = local.payloadOffset;
                 entry.recordEnd = local.recordEnd;
+                entry.expanded = local.expanded;
                 break;
             }
 
@@ -604,6 +732,7 @@ private ParseFacts parseArchive(InspectionState state, size_t base,
             evidence.expandedValue = entry.expanded;
             evidence.depthValue = depth;
             evidence.directoryValue = entry.directory;
+            evidence.deflateValue = entry.method == 8;
             state.admittedEntries ~= AdmittedEntry(evidence,
                 base + entry.payloadOffset);
         }
@@ -853,10 +982,12 @@ unittest {
 
     auto encrypted = zipFixture([FixtureEntry("safe", cast(ubyte[]) "x".dup, 0, 1)]);
     assert(inspectBytes(encrypted).reason == ZipInspectionReasonV1.encrypted);
-    auto unsupported = zipFixture([FixtureEntry("safe", cast(ubyte[]) "x".dup, 8)]);
+    // Method 12 (BZIP2 in the ZIP spec) stays genuinely unsupported; only 0
+    // (STORE) and 8 (DEFLATE) are admitted.
+    auto unsupported = zipFixture([FixtureEntry("safe", cast(ubyte[]) "x".dup, 12)]);
     assert(inspectBytes(unsupported).reason == ZipInspectionReasonV1.unsupportedFeature);
     auto bombBeforeUnsupported = zipFixture([
-        FixtureEntry("safe", cast(ubyte[]) "x".dup, 8, 0, 1, 10_000)
+        FixtureEntry("safe", cast(ubyte[]) "x".dup, 12, 0, 1, 10_000)
     ]);
     auto lowRatio = ZipInspectionLimitsV1();
     lowRatio.maxRatio = 10;
@@ -967,7 +1098,7 @@ unittest {
     assert(inspectBytes(outer, exactExpanded).reason == ZipInspectionReasonV1.expandedLimit);
 
     auto ratioArchive = zipFixture([
-        FixtureEntry("compressed", cast(ubyte[]) "x".dup, 8, 0, 1, 10)
+        FixtureEntry("compressed", cast(ubyte[]) "x".dup, 12, 0, 1, 10)
     ]);
     auto exactRatio = ZipInspectionLimitsV1();
     exactRatio.maxRatio = 10;
@@ -1026,6 +1157,162 @@ unittest {
     assert(boundaryChunks == [maxZipEntryStreamChunkBytesV1, cast(size_t) 1]);
     assertThrown(small.admitted.streamEntry("tiny",
         (ZipEntryChunkV1 chunk) {}, 0));
+}
+
+version (unittest) {
+    // This module is I/O-free (see extraction/README.md) and cannot import
+    // effects.zlib_ffi, so its own tests exercise the DEFLATE admission and
+    // budget-charging logic against small, genuinely pure fake decompressors
+    // rather than real zlib. Real end-to-end decompression correctness
+    // (actual system zlib via the injected ZipInflateV1) is proved by
+    // effects/zlib_ffi.d's own unittests, which *can* import this module.
+
+    /// Echoes its input back unchanged: a trivial, always-successful "codec"
+    /// for exercising the admission/evidence plumbing without needing any
+    /// particular byte format.
+    private ZipInflateOutcomeV1 fakeIdentityInflate(const(ubyte)[] input,
+            scope void delegate(const(ubyte)[]) pure emit) pure {
+        if (input.length) emit(input);
+        return ZipInflateOutcomeV1.ok;
+    }
+
+    /// Expands each input byte into 1,000 identical output bytes, emitted
+    /// one input byte's worth at a time -- a deterministic, real-codec-
+    /// independent way to exercise the ratio budget without needing an
+    /// actual high-ratio compressed stream.
+    private ZipInflateOutcomeV1 fakeAmplifyInflate(const(ubyte)[] input,
+            scope void delegate(const(ubyte)[]) pure emit) pure {
+        foreach (b; input) {
+            ubyte[1000] chunk = b;
+            emit(chunk[]);
+        }
+        return ZipInflateOutcomeV1.ok;
+    }
+
+    /// Always reports a corrupt/truncated stream, regardless of input.
+    private ZipInflateOutcomeV1 fakeMalformedInflate(const(ubyte)[] input,
+            scope void delegate(const(ubyte)[]) pure emit) pure {
+        return ZipInflateOutcomeV1.malformed;
+    }
+
+    /// Always reports the decoder itself as unavailable, regardless of input.
+    private ZipInflateOutcomeV1 fakeUnavailableInflate(const(ubyte)[] input,
+            scope void delegate(const(ubyte)[]) pure emit) pure {
+        return ZipInflateOutcomeV1.unavailable;
+    }
+}
+
+unittest {
+    import std.exception : assertThrown;
+
+    // DEFLATE admission, with a real decompressor injected: a docx-shaped
+    // archive whose word/document.xml is method 8 is admitted, its
+    // ooxmlWord/deflatePresent evidence is correct, and the entry's
+    // expandedBytes is the actually-produced size (fakeIdentityInflate
+    // echoes input back unchanged, so that's the input length here) rather
+    // than whatever the declared header value happens to say.
+    auto documentBytes = cast(ubyte[]) "<w:document>pretend content</w:document>".dup;
+    auto docx = zipFixture([
+        FixtureEntry("[Content_Types].xml", cast(ubyte[]) "c".dup),
+        FixtureEntry("_rels/.rels", cast(ubyte[]) "r".dup),
+        // Declared expanded size (1) is deliberately wrong; nothing above
+        // may trust it once a real decompressor is injected.
+        FixtureEntry("word/document.xml", documentBytes, 8, 0,
+            cast(uint) documentBytes.length, 1)
+    ]);
+    auto result = inspectBytes(docx, ZipInspectionLimitsV1(), &fakeIdentityInflate);
+    assert(result.status == ZipInspectionStatusV1.admitted);
+    assert(result.reason == ZipInspectionReasonV1.admitted);
+    assert(result.packageKind == ZipPackageKindV1.ooxmlWord);
+    assert(result.evidence.canFind(ZipEvidenceV1.deflatePresent));
+    assert(!result.evidence.canFind(ZipEvidenceV1.storeOnly));
+    assert(result.evidence[$ - 1] == ZipEvidenceV1.ooxmlWordMarkers);
+
+    ZipEntryEvidenceV1 documentEvidence;
+    bool foundDocument;
+    foreach (entry; result.admitted.entries)
+        if (entry.name == "word/document.xml") {
+            documentEvidence = entry;
+            foundDocument = true;
+        }
+    assert(foundDocument);
+    assert(documentEvidence.isDeflate);
+    assert(!documentEvidence.isDirectory);
+    assert(documentEvidence.expandedBytes == documentBytes.length);
+    assert(documentEvidence.compressedBytes == documentBytes.length);
+
+    // This slice admits DEFLATE entries but does not yet expose their
+    // decompressed bytes through the streaming capability (next slice).
+    assertThrown(result.admitted.streamEntry("word/document.xml",
+        (ZipEntryChunkV1 chunk) {}));
+
+    // No decompressor injected: exactly the pre-DEFLATE-support behavior.
+    auto unwired = inspectBytes(docx);
+    assert(unwired.status == ZipInspectionStatusV1.refused);
+    assert(unwired.reason == ZipInspectionReasonV1.unsupportedFeature);
+
+    // The decoder itself reporting unavailable is refused the same way.
+    auto unavailable = inspectBytes(docx, ZipInspectionLimitsV1(), &fakeUnavailableInflate);
+    assert(unavailable.status == ZipInspectionStatusV1.refused);
+    assert(unavailable.reason == ZipInspectionReasonV1.unsupportedFeature);
+}
+
+unittest {
+    // Zip-bomb-style extreme ratio, caught mid-stream: a 20-byte "compressed"
+    // entry through fakeAmplifyInflate (1,000x per input byte) would expand
+    // to 20,000 bytes if it ran to completion, but the default ratio budget
+    // (100:1) refuses it after only a few of those 1,000-byte chunks.
+    auto placeholderCompressed = new ubyte[20];
+    auto bomb = zipFixture([
+        FixtureEntry("bomb.bin", placeholderCompressed, 8, 0,
+            cast(uint) placeholderCompressed.length, 1)
+    ]);
+    auto result = inspectBytes(bomb, ZipInspectionLimitsV1(), &fakeAmplifyInflate);
+    assert(result.status == ZipInspectionStatusV1.refused);
+    assert(result.reason == ZipInspectionReasonV1.ratioLimit);
+    // Refused well short of the full 20,000-byte expansion: proof this is a
+    // mid-stream abort, not a check performed only after full decompression.
+    assert(result.cumulativeExpandedBytes > 0 &&
+        result.cumulativeExpandedBytes < 20_000);
+
+    // The same stream, but with the ratio budget raised high enough to admit
+    // it, proves the refusal above was genuinely the ratio check (not, say,
+    // a decoder failure) and that a legitimate high-but-allowed ratio still
+    // decompresses in full.
+    auto permissive = ZipInspectionLimitsV1();
+    permissive.maxRatio = 1_000;
+    auto admitted = inspectBytes(bomb, permissive, &fakeAmplifyInflate);
+    assert(admitted.status == ZipInspectionStatusV1.admitted);
+    assert(admitted.admitted.entries[0].expandedBytes == 20_000);
+}
+
+unittest {
+    // Corrupt/truncated DEFLATE stream: refused with a specific reason, not
+    // a crash or hang, regardless of what the (untrusted) declared sizes say.
+    auto zip = zipFixture([
+        FixtureEntry("word/document.xml", new ubyte[5], 8, 0, 5, 48)
+    ]);
+    auto result = inspectBytes(zip, ZipInspectionLimitsV1(), &fakeMalformedInflate);
+    assert(result.status == ZipInspectionStatusV1.refused);
+    assert(result.reason == ZipInspectionReasonV1.malformed);
+}
+
+unittest {
+    // STORE-mode entries are unaffected: unchanged refusal/admission
+    // behavior, still no DEFLATE-only budget path involved (no decompressor
+    // is even injected here).
+    auto store = zipFixture([FixtureEntry("plain.txt", cast(ubyte[]) "abc".dup)]);
+    auto result = inspectBytes(store);
+    assert(result.status == ZipInspectionStatusV1.admitted);
+    assert(result.evidence.canFind(ZipEvidenceV1.storeOnly));
+    assert(!result.evidence.canFind(ZipEvidenceV1.deflatePresent));
+    assert(!result.admitted.entries[0].isDeflate);
+
+    // An unsupported (non-STORE, non-DEFLATE) method is still refused, even
+    // with a decompressor injected -- injection only ever applies to method 8.
+    auto other = zipFixture([FixtureEntry("odd.bin", cast(ubyte[]) "abc".dup, 12)]);
+    assert(inspectBytes(other, ZipInspectionLimitsV1(), &fakeIdentityInflate).reason ==
+        ZipInspectionReasonV1.unsupportedFeature);
 }
 
 private struct FixtureEntry {
@@ -1098,8 +1385,9 @@ private ubyte[] zipFixture(FixtureEntry[] entries, bool reverseCentral = false) 
 }
 
 private ZipInspectionResultV1 inspectBytes(ubyte[] bytes,
-        ZipInspectionLimitsV1 limits = ZipInspectionLimitsV1()) {
-    return inspectZipContainerV1(new Content([ContentPiece.own(bytes)]), limits);
+        ZipInspectionLimitsV1 limits = ZipInspectionLimitsV1(),
+        ZipInflateV1 inflate = null) {
+    return inspectZipContainerV1(new Content([ContentPiece.own(bytes)]), limits, inflate);
 }
 
 private void put16(ref ubyte[] bytes, ushort value) {

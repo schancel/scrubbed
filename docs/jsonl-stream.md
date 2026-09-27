@@ -15,12 +15,20 @@ same input/field order. `--max-jsonl-sidecar-bytes` bounds the aggregate spool
 (default 67108864 bytes) independently of the per-record output cap. See
 [side-output-publication.md](side-output-publication.md).
 
-All five JSONL options and both `-` endpoints are required. Field names are
-unique top-level JSON keys. The default, `--filters`, v1/v3 `--config`, ordered
-v3 composition tokens, and explicit v4 JSON/tokens all compile before stdin is
-read or stdout is written. File scheduling options and `--list-filters` are
-unavailable in this mode. Linear v3 rejects `--explain`; explicit v4 accepts it
-and emits one bounded `scrubbed.dispatch.v1` record per present selected field
+Both `-` endpoints and all five JSONL options are required:
+
+- `--jsonl-fields`
+- `--dataset-namespace`
+- `--source-key`
+- `--max-jsonl-line-bytes`
+- `--max-jsonl-output-bytes`
+
+Field names are unique top-level JSON keys. The default, `--filters`, v1/v3
+`--config`, ordered v3 composition tokens, and explicit v4 JSON/tokens all
+compile before stdin is read or stdout is written. File scheduling options
+and `--list-filters` are unavailable in this mode. Linear v3 rejects
+`--explain`; explicit v4 accepts it and emits one bounded
+`scrubbed.dispatch.v1` record per present selected field
 to stderr, leaving stdout as whole-record JSONL. `--validate` checks options,
 identity, config, and filters without reading stdin or writing stdout.
 `--dry-run` processes records and reports the bounded count to stderr but

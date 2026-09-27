@@ -4,11 +4,17 @@ Version 4 is an explicit opt-in dispatch root. It has exactly three top-level
 members: `version`, `dispatch`, and `common`. The canonical example is
 [`scrubbed.dispatch.example.json`](../scrubbed.dispatch.example.json).
 
-`dispatch.detector` and `dispatch.container` contain all bounded detection and
-ZIP-inspection limits. `routes` names a finite extractor and supplies its typed
-options. `actions` contains exactly one entry for every outcome. Every route
-must be used, and every action must explicitly be `route`, `pass`, `reject`, or
-`quarantine`; there are no defaults. `common` is a complete nested v3 job.
+Inside `dispatch`:
+
+- `detector` and `container` — all bounded detection and ZIP-inspection
+  limits.
+- `routes` — names a finite extractor and supplies its typed options.
+- `actions` — exactly one entry per outcome. Every route must be used, and
+  every action must explicitly be `route`, `pass`, `reject`, or `quarantine`;
+  there are no defaults.
+
+`common` is a complete nested v3 job.
+
 Byte signatures and bounded content/container evidence are authoritative;
 filename extensions and declared media hints are untrusted evidence and never
 select a type alone. The fixed outcomes are `unknown`, `plain-text`, `html`,

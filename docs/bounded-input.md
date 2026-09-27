@@ -1,34 +1,51 @@
 # Bounded local input walk
 
-The CLI now walks a directory incrementally and submits each file through a
-local bounded scheduler. It does not retain a full-tree pathname array.
+The CLI walks a directory incrementally and submits each file through a
+local bounded scheduler (`effects.bounded_input.BoundedInput`). It does not
+retain a full-tree pathname array.
 
-`--max-queued-docs` (default 64) caps file tasks admitted but not yet started.
-`--max-input-bytes` (default 268435456) caps the sum of admitted file sizes,
-including queued and active tasks. `--max-open-inputs` (default `--threads`)
-caps workers in the file-processing callback, conservatively covering input
-mapping and output writing. These are independent ceilings: a worker waiting
-for a descriptor still owns its byte reservation, but is no longer queued.
-The scheduler exposes current and peak counters for each ceiling, and a
-blocking join waits for every submitted task before returning.
+## Ceilings
 
-A file larger than the byte ceiling is a run-fatal resource/admission error
-(exit 2), not an acknowledged per-document skip. For a nonempty file, the CLI checks size before
-opening, maps exactly its reserved byte count (never the grown full length),
-and checks size again before reading. A detected change fails closed rather
-than exceeding the byte budget. A file modified between those checks, or
-*after* mapping, may still fail during reading; this is not a stable snapshot
-protocol. Empty files use a size check on an opened handle. The
-future windowed-input work can replace the single-file rejection policy.
+| Flag | Default | Caps |
+| --- | --- | --- |
+| `--max-queued-docs` | 64 | File tasks admitted but not yet started |
+| `--max-input-bytes` | 268435456 | Sum of admitted file sizes, including queued and active tasks |
+| `--max-open-inputs` | `--threads` | Workers in the file-processing callback (input mapping + output writing) |
 
-Traversal and processing can now overlap. A symlink found later in a tree
-still aborts the command, but earlier successfully written outputs can remain.
-Cancellation stops new admissions, drains already submitted work and releases
-all reservations. Only manifest-backed, durably acknowledged per-file failures
-are reported as `SKIP` and may continue; an unrecorded worker failure reports
-`FATAL` and exits 2. A discovered path rejected after worker-fatal cancellation
-gets one `status=canceled` EXPLAIN record; traversal-error cancellation remains
-distinct. This queue is local and ephemeral: it is not a resume
-manifest or a distributed scheduler. The per-document pipeline still
-materializes whole-document text and may expand it substantially, so the
-input-byte ceiling is not a bound on process memory or output size.
+These are independent ceilings: a worker waiting for a descriptor still owns
+its byte reservation, but is no longer queued. The scheduler exposes current
+and peak counters for each ceiling, and a blocking join waits for every
+submitted task before returning.
+
+## File-size admission
+
+- A file larger than the byte ceiling is a **run-fatal resource/admission
+  error (exit 2)**, not an acknowledged per-document skip.
+- For a nonempty file, the CLI checks size before opening, maps exactly its
+  reserved byte count (never the grown full length), and checks size again
+  before reading. A detected change fails closed rather than exceeding the
+  byte budget.
+- A file modified between those checks, or *after* mapping, may still fail
+  during reading; this is not a stable snapshot protocol.
+- Empty files use a size check on an opened handle.
+- Future windowed-input work can replace the single-file rejection policy.
+
+## Traversal, cancellation, and failure reporting
+
+Traversal and processing can overlap. A symlink found later in a tree still
+aborts the command, but earlier successfully written outputs can remain.
+
+Cancellation stops new admissions, drains already-submitted work, and
+releases all reservations.
+
+- Only manifest-backed, durably acknowledged per-file failures are reported
+  as `SKIP` and may continue; an unrecorded worker failure reports `FATAL`
+  and exits 2.
+- A discovered path rejected after worker-fatal cancellation gets one
+  `status=canceled` EXPLAIN record; traversal-error cancellation remains
+  distinct.
+
+This queue is local and ephemeral: it is not a resume manifest or a
+distributed scheduler. The per-document pipeline still materializes
+whole-document text and may expand it substantially, so the input-byte
+ceiling is not a bound on process memory or output size.

@@ -29,6 +29,25 @@ enum long defaultMaxEncodedBytes = 16 * 1024 * 1024;
 enum size_t defaultMaxDecodedBytes = 32 * 1024 * 1024;
 enum size_t defaultMaxConcurrentFetches = 8;
 
+/// Sent as `User-Agent` on every request (issue #305 review found real
+/// Wikipedia fetches came back HTTP 403 for having none at all). Honest
+/// crawler self-identification — name/version + URL for more info, the same
+/// pattern as Googlebot — never a spoofed browser string; see this project's
+/// established transparency/provenance discipline elsewhere (executable
+/// snapshots, exact tool versions, no silent anything). Fixed literal rather
+/// than derived from a release version: `dub.json` carries no version field
+/// today, and this fix is scoped to this file only, so there's nothing to
+/// derive from without expanding scope.
+enum string userAgent = "scrubbed/0.1 (+https://github.com/schancel/scrubbed)";
+
+/// `CURLOPT_USERAGENT` (include/curl/curl.h: `CURLOPTTYPE_STRINGPOINT` (10 000)
+/// + 18). Declared here rather than in `effects.curl_ffi` because that
+/// module's declared `CURLOPT_*` set is scoped to exactly what the
+/// ADOPT_DYNAMIC evaluation probe exercised, and this fix's allowed files
+/// are limited to this one; `curl_easy_setopt`'s `int option, ...` signature
+/// accepts the raw numeric option regardless of where it's declared.
+private enum int curloptUserAgent = 10_018;
+
 /// Typed connection/total-time/redirect/header/encoded-body/decoded-body/
 /// concurrency caps. Every cap is enforced as a content-free rejection: no
 /// captured header, body byte, or URL ever appears in a `FetchFailure`.
@@ -432,6 +451,8 @@ FetchOutcome fetchHttp(FetchRequest request) {
     setOption(curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 1L));
     setOption(curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 2L));
     setOption(curl_easy_setopt(easy, CURLOPT_ACCEPT_ENCODING, encoding));
+    auto userAgentz = userAgent.toStringz;
+    setOption(curl_easy_setopt(easy, curloptUserAgent, userAgentz));
     setOption(curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &fetchBodyCallback));
     setOption(curl_easy_setopt(easy, CURLOPT_WRITEDATA, &state));
     setOption(curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &fetchHeaderCallback));
@@ -551,4 +572,61 @@ unittest {
     releaseConcurrencySlot();
     assert(acquireConcurrencySlot(1));
     releaseConcurrencySlot();
+}
+
+unittest {
+    // Real proof, per issue #307's acceptance criteria: not that setopt was
+    // called, but that the exact `User-Agent` value is genuinely present on
+    // the wire. This sandbox has no outbound network access for a live
+    // fetch against a header-echoing service (e.g. httpbin.org), so this
+    // stands up a real loopback TCP server on an ephemeral port, drives a
+    // real `fetchHttp()` call at it over a real socket, and inspects the
+    // literal bytes the server received.
+    import core.thread : Thread;
+    import std.conv : to;
+    import std.socket : AddressFamily, InternetAddress, SocketOption,
+        SocketOptionLevel, TcpSocket;
+    import std.string : indexOf;
+
+    auto listener = new TcpSocket(AddressFamily.INET);
+    scope(exit) listener.close();
+    listener.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+    listener.bind(new InternetAddress("127.0.0.1", 0));
+    listener.listen(1);
+    immutable port = (cast(InternetAddress) listener.localAddress).port;
+
+    string capturedRequest;
+    auto worker = new Thread({
+        auto client = listener.accept();
+        scope(exit) client.close();
+        ubyte[4_096] buffer;
+        string received;
+        while (received.indexOf("\r\n\r\n") < 0) {
+            auto count = client.receive(buffer[]);
+            if (count <= 0) break;
+            received ~= cast(string) buffer[0 .. count].idup;
+        }
+        capturedRequest = received;
+        enum string responseBody = "ok";
+        client.send(cast(const(ubyte)[])("HTTP/1.1 200 OK\r\nContent-Length: " ~
+            responseBody.length.to!string ~ "\r\nConnection: close\r\n\r\n" ~ responseBody));
+    });
+    worker.start();
+
+    auto rawUrl = "http://127.0.0.1:" ~ port.to!string ~ "/probe";
+    auto resolved = resolveWebUrl(rawUrl, rawUrl);
+    assert(resolved.isResolved);
+
+    FetchRequest request;
+    request.url = resolved.value;
+    request.limits.connectTimeoutMs = 500;
+    request.limits.totalTimeoutMs = 2_000;
+
+    auto outcome = fetchHttp(request);
+    worker.join();
+
+    assert(outcome.succeeded);
+    assert(outcome.evidence.status == 200);
+    assert(capturedRequest.indexOf("User-Agent: " ~ userAgent ~ "\r\n") >= 0,
+        "http fetch: exact User-Agent header not found on the wire");
 }

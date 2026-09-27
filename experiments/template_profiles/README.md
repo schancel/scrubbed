@@ -27,3 +27,27 @@ low-confidence, and layout-drift abstention, grouping confusion,
 structural-versus-exact-text behavior, content-variation and preservation-veto
 mutants, recurrence-only deletion, bounded decision evidence, and held-out
 content/chrome precision and recall.
+
+## Production port cross-check
+
+Issue #244's production-wiring slice ports this evaluation's training/
+classification algorithm into `source/domain/template_profiles.d`, a pure
+domain module operating on a real tree-plus-node-index shape instead of this
+experiment's TSV/one-line-HTML fixture format. `domain_check.d` in this
+directory rebuilds every fixture `Block` as a `domain.template_profiles.
+BlockTree` slice (its `data-role`/`data-path`/`data-position`/`data-density`/
+`data-links` become real `BlockAttribute`s) and asserts the ported module's
+`classifyBlock` produces byte-identical decisions -- keep, abstain, score,
+recurrence, content variation, and reason -- to this evaluation's own
+`classify` on every held-out block. Build and run it alongside `check.d`:
+
+```console
+ldc2 -I=experiments/template_profiles -Isource \
+  experiments/template_profiles/domain_check.d \
+  experiments/template_profiles/evaluation.d \
+  source/domain/template_profiles.d source/crypto/sha256.d \
+  source/crypto/sha256_x86_64.d source/crypto/sha256_arm64.d \
+  source/text/decoding.d \
+  -of=/tmp/template-profile-domain-check
+/tmp/template-profile-domain-check experiments/template_profiles
+```

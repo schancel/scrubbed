@@ -82,13 +82,22 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 
 # Language ID as a standalone stage, reachable like any other
 ./scrubbed run --input page.txt --output page.out \
-    --sidecar-output page.langid.json --stage id=language-id-detect
+    --sidecar-output page.langid.json --stage langid=language-id-detect
 
 # PII scan with an audit sidecar, no rewrite of the input
 ./scrubbed run --input page.txt --output page.out \
     --sidecar-output page.pii-audit.json --stage pii=pii-four-class
 
-# Build your own filter chain
+# Compose several stages by hand -- each --stage NAME=IMPLEMENTATION
+# opens a stage; --filter tokens attach to whichever one opened last
+./scrubbed run --input page.html --output page.out \
+    --sidecar-output page.pii-audit.json \
+    --stage clean=text-transform --filter fix-mojibake \
+    --stage extract=html-main-content \
+    --stage scan=pii-four-class
+
+# Or skip stages entirely: the bare --filters flag is shorthand for
+# one single implicit text-transform stage
 ./scrubbed --list-filters
 ./scrubbed --input path/to/docs --output path/to/clean \
     --filters normalize-line-endings,strip-control

@@ -202,11 +202,12 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     --stage extract=html-main-content \
     --stage scan=pii-four-class
 
-# Or skip stages entirely: the bare --filters flag is shorthand for
-# one single implicit text-transform stage
-./scrubbed --list-filters
-./scrubbed --input path/to/docs --output path/to/clean \
+# Or skip stages entirely: --filters is shorthand for one single
+# implicit text-transform stage
+./scrubbed run --input path/to/docs --output path/to/clean \
     --filters normalize-line-endings,strip-control
+./scrubbed --list-filters
+./scrubbed --help
 
 # Corpus pipelines: stream selected JSON fields through the same filters
 ./scrubbed run --input - --output - --jsonl-fields text,title \

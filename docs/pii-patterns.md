@@ -1,35 +1,58 @@
-# Deterministic PII pattern slice
+# Deterministic PII pattern scanner
 
-`domain.pii_patterns.scanPii` takes C01 opaque content bytes and an explicit
-`US` or `GB` locale. It first checks the 1 MiB input cap and valid UTF-8,
-then returns findings sorted by starting byte, ending byte, and category.
-Spans are half-open byte offsets into the original content. Overlaps are
-retained for the later policy layer; callers must not assume findings are a
-redaction decision.
-An ordinary terminal period delimits a finding and is excluded from its span;
-malformed numeric extensions and chained `@` addresses are rejected.
-For grouped cards, a following space or hyphen and digit is conservatively
-treated as a possible extra group: no card candidate is emitted, even when
-the following token independently matches an IP address. That IP finding is
-still emitted. A punctuation delimiter such as `;` preserves both findings.
+`domain.pii_patterns.scanPii` finds four bounded, ASCII-oriented PII patterns
+in UTF-8 bytes. It's pure — no I/O, no storage, no CLI.
 
-The first slice recognizes conservative ASCII email domains, US/GB telephone
-formats, issuer-prefix and Luhn-valid 13–19 digit card candidates, and canonical dotted IPv4.
-US numbers use `202-555-0142` or `+1-202-555-0142`; GB numbers use
-`020 7946 0958` or `+44 20 7946 0958`. National phone forms and card
-candidates are explicitly `ambiguous`: formatting or a checksum alone does
-not establish that the bytes identify a person or a payment card. The rule
-and locale travel with every finding. Unsupported locale, invalid UTF-8,
-input overflow, and more than 4096 findings throw fixed diagnostic messages
-without matched text.
+```d
+scanPii(bytes, locale)   // locale is "US" or "GB"
+```
+
+- Input cap: 1 MiB; input must be valid UTF-8.
+- Returns findings sorted by starting byte, ending byte, category.
+- Spans are half-open byte offsets into the original content.
+- Overlapping findings are retained — this scanner makes no redaction
+  decision. See [pii-policy.md](pii-policy.md) for the layer that does.
+
+## What it recognizes
+
+| Category | Rule | Confidence | Example |
+| --- | --- | --- | --- |
+| email | ASCII-domain email | high | `name@example.com` |
+| phone | US/GB national format | ambiguous | `202-555-0142`, `020 7946 0958` |
+| phone | US/GB international format | high | `+1-202-555-0142`, `+44 20 7946 0958` |
+| card | issuer-prefix + Luhn-valid, 13–19 digits | ambiguous | `4111 1111 1111 1111` |
+| ip | canonical dotted IPv4 | high | `192.0.2.9` |
+
+National phone and card matches are always `ambiguous`: formatting or a
+checksum alone doesn't establish that the bytes identify a person or a
+payment card. Every finding carries its rule and locale.
+
+## Edge cases
+
+- A terminal period ending a sentence is excluded from the match span.
+- Malformed numeric extensions and chained `@` addresses are rejected.
+- A card candidate followed by a separator and digit (looks like one more
+  group) is conservatively not emitted — even if that following token
+  independently matches an IP address, the IP finding is still emitted. A
+  punctuation delimiter such as `;` preserves both findings.
+
+## Limits
+
+Unsupported locale, invalid UTF-8, input over 1 MiB, or more than 4096
+findings all throw a fixed diagnostic message with no matched text.
+
+## Not included
 
 This is not complete de-identification, NER, policy masking, or universal
-locale support. It neither reads nor writes a shard or overlay. The subsequent
-effects-layer overlay remains a separate landing; additional identifiers
-require an owner decision. Do not log source content or interpolate matched
-substrings when integrating this API.
+locale support. It neither reads nor writes a shard or overlay — the
+effects-layer overlay built on top lives in
+[pii-annotations.md](pii-annotations.md). Additional identifiers need a
+separate owner decision.
 
-Release-active check:
+Never log source content or interpolate matched substrings when integrating
+this API.
+
+## Release-active check
 
 ```sh
 ldc2 -O3 -release -Isource -of=.dub/pii-patterns-check \

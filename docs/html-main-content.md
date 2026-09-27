@@ -200,17 +200,20 @@ this, and **recall** and **`withoutLeakTotal`** (a substring leak count of
 signals from this corpus's actual shape. This is quality-matched reporting,
 not a trafilatura-parity claim.
 
-**A real run against the 20 pinned pages** (2026-09-26): selected 12,
-abstained 0, could not parse 8. Every `parseFailed` case was
-`unsupportedNamespace` — `html_tree.d`'s existing, out-of-scope-to-change
-restriction to the HTML namespace rejecting a page with embedded SVG, not a
-defect in this module. Across the 12 scored pages: mean precision ≈0.053
-(expected, per the gold-set-size caveat above), mean recall ≈0.78, and
-`withoutLeakTotal` was 0 — no `without` chrome phrase leaked into any
-selected extraction. One page
-(`france.attc.org-privatisations.html`) selected a `<select>` element with
-recall 0.11: a clear, named nav/ad/footer-style failure example, a real page
-whose actual main content this first-slice algorithm did not find.
+**A real run against the 20 pinned pages** (2026-09-27, after #308 and #309
+landed): selected 19, abstained 1 (`homify.de-Tischdecke.html`,
+`abstainedBelowThreshold`), could not parse 0. #308's foreign-namespace-subtree
+prune eliminated every prior `parseFailed` case — all 8 pages that previously
+aborted with `unsupportedNamespace` now parse and score. Across the 19 scored
+pages: mean precision ≈0.051 (expected, per the gold-set-size caveat above),
+mean recall ≈0.79, and `withoutLeakTotal` was 2 — both leaks on the same page,
+`for-me-online.de-pubertät.html` (2 of its 3 `without` chrome phrases leaked
+into the selected text; every other scored page had zero leaks). The
+previously named `france.attc.org-privatisations.html` case no longer selects
+a `<select>` element — #309's whitespace-only-text fix removed that exact
+mechanism — but it is still a failure case, now for a different reason: it
+selects a `<p>` element with precision 0.0 and recall 0.0, still missing the
+real article content, just via a different wrong node.
 
 No raw held-out page bytes and no `with`/`without` annotation text are ever
 placed into the report or into any exception/diagnostic, in either the shell

@@ -12,11 +12,17 @@ the #66 evidence nor attaches a corpus statistic to individual documents.
 The experiment asks whether a bounded local semantic embedding pass can improve
 duplicate/related-document grouping over a sparse lexical Jaccard baseline,
 while preserving stable typed identities and resumable deterministic artifacts.
+
 It uses 36 short, authored CC0 documents split before evaluation into 18 train
-and 18 held-out documents. Each split has nine judgments: three duplicates,
-three related pairs, two unrelated pairs, and one abstention. Thresholds are
-selected only from the eight non-abstained train judgments and then frozen for
-held-out scoring.
+and 18 held-out documents. Each split has nine judgments:
+
+- three duplicates;
+- three related pairs;
+- two unrelated pairs;
+- one abstention.
+
+Thresholds are selected only from the eight non-abstained train judgments and
+then frozen for held-out scoring.
 
 The native candidate is llama.cpp b11115 (`d5f66492e`) serving the 384-wide
 F16 `all-MiniLM-L6-v2` GGUF from the immutable Ollama `all-minilm:22m`

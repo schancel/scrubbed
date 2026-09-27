@@ -48,16 +48,21 @@ regions](https://docs.aws.amazon.com/AmazonS3/latest/developerguide/specify-sign
 `Capability` currently names `getObject`, `listObjectsV2`, and `unsupported`;
 the latter fails closed before request dispatch. These are proposed types, not
 a claim that the candidates support the operation. Public `Failure` codes are
-fixed labels (`missing_credentials`, `incomplete_credentials`,
-`unsupported_capability`, `bad_auth`, `tls_untrusted`, `endpoint_failure`).
-The fake-endpoint probe parses an exact
-HTTP/1.1 status-code token: 200 is success, 403 is bad auth, and 404, 500 or
-malformed status lines (including `200bogus` and a missing second separator
-space) are endpoint failures; it does not infer that every
-non-200 response is an authentication failure. Raw transport exception text,
-request headers, URLs, environment values, credential fields and certificate details
-must not be copied into publication-safe errors or logs. Structured diagnostics
-may later carry an operation code and non-secret request id only after review.
+fixed labels: `missing_credentials`, `incomplete_credentials`,
+`unsupported_capability`, `bad_auth`, `tls_untrusted`, `endpoint_failure`.
+
+The fake-endpoint probe parses an exact HTTP/1.1 status-code token:
+
+- 200 is success;
+- 403 is bad auth;
+- 404, 500, or malformed status lines (including `200bogus` and a missing
+  second separator space) are endpoint failures.
+
+It does not infer that every non-200 response is an authentication failure.
+Raw transport exception text, request headers, URLs, environment values,
+credential fields and certificate details must not be copied into
+publication-safe errors or logs. Structured diagnostics may later carry an
+operation code and non-secret request id only after review.
 
 ## Reproduce local evidence
 

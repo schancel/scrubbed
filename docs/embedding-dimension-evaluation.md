@@ -36,10 +36,17 @@ Sampling uses SHA-256 ranks of `(seed, member ID)` and then restores stable ID
 order for scanning. The stability interval is the minimum/maximum estimate from
 nine deterministic, hash-ranked 80% subsamples of the retained per-point log
 ratios. It is a stability interval, not a population confidence guarantee.
-The evaluator abstains on fewer than 12 points, too few valid ratios,
-nonfinite/malformed/model/dimension drift, degenerate ratios, or a stability
-width greater than 1.25 times the estimate. Zero-distance duplicate pairs are
-skipped and explicitly warned; a wholly duplicated population abstains.
+
+The evaluator abstains on any of:
+
+- fewer than 12 points;
+- too few valid ratios;
+- nonfinite/malformed/model/dimension drift;
+- degenerate ratios;
+- a stability width greater than 1.25 times the estimate.
+
+Zero-distance duplicate pairs are skipped and explicitly warned; a wholly
+duplicated population abstains.
 
 ## Evidence
 

@@ -1,9 +1,12 @@
 # Current text-core package feasibility (#61 prerequisite)
 
 This is an evidence-only local directory package, **not** a release or an
-installer. It packages the current text CLI, not HTML extraction: #24 has no
-adopted native parser. The accepted #61 Linux/macOS/Windows text-and-HTML
-outcome remains open. Do not publish this directory as a supported artifact.
+installer. It packages the current text CLI, not HTML extraction: at the time
+of this evaluation, #24 had not yet adopted a native parser, so this package
+predates and does not exercise the Lexbor wrapper that #24 later shipped (see
+[html-parser-evaluation.md](html-parser-evaluation.md)). The accepted #61
+Linux/macOS/Windows text-and-HTML outcome remains open. Do not publish this
+directory as a supported artifact.
 
 ## Reproduce on macOS arm64
 
@@ -23,21 +26,26 @@ otool -L "$package61_tmp/package/scrubbed"
 nm "$package61_tmp/package/scrubbed" | rg ' _sqlite3_close$'
 ```
 
-The D runner creates the directory only if absent, copies the binary and all
-six shipping notice/provenance files, writes `SHA256SUMS`, then verifies exact
-source-pinned notice bytes, every member checksum, a closed member inventory,
-and exact `--help` and `line\r\n` → `line\n` local text behavior. It runs the
-packaged binary by absolute path while `PATH` points to an empty temporary
-directory; this proves no D, DUB, Python, shell, or helper executable is
-needed on `PATH` for those operations. It does **not** prove a fully static
-binary, a clean machine with no system libraries, or all CLI operations.
-`verify` repeats the check and runs seventeen release-active negatives: missing
-and corrupt binary, checksum manifest, and every bundled notice, plus an extra
-empty directory. It permits only the structural `third_party` and
-`third_party/sqlite` directories, rejecting other directories, symlinks,
-nonregular entries, unexpected files, and missing members.
-`bench` records the median elapsed `--help` process time over 21 samples after
-five warmups; it is a local observation, not a performance target.
+The D runner has three modes:
+
+- `create` — makes the directory only if absent, copies the binary and all
+  six shipping notice/provenance files, and writes `SHA256SUMS`.
+- `verify` — checks exact source-pinned notice bytes, every member checksum,
+  a closed member inventory, and exact `--help` and `line\r\n` → `line\n`
+  local text behavior; it also runs seventeen release-active negatives
+  (missing and corrupt binary, checksum manifest, and every bundled notice,
+  plus an extra empty directory), and permits only the structural
+  `third_party` and `third_party/sqlite` directories, rejecting other
+  directories, symlinks, nonregular entries, unexpected files, and missing
+  members.
+- `bench` — records the median elapsed `--help` process time over 21 samples
+  after five warmups; it is a local observation, not a performance target.
+
+`create`/`verify` run the packaged binary by absolute path while `PATH`
+points to an empty temporary directory; this proves no D, DUB, Python, shell,
+or helper executable is needed on `PATH` for those operations. It does
+**not** prove a fully static binary, a clean machine with no system
+libraries, or all CLI operations.
 
 The package contains project `LICENSE` (MIT),
 `THIRD_PARTY_NOTICES.md` (including WHATWG BSD-3 binary redistribution terms),

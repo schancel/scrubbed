@@ -223,10 +223,17 @@ The authored exact cases cover article/nav/list markup, broken nesting,
 table fostering, custom attributes/entities, script/style text, UTF-8 BOM,
 UTF-16LE BOM, and declared UTF-16BE. Latin-1 labels, a meta charset with
 invalid UTF-8 bytes (no sniffing), malformed Unicode, and BOM/declaration
-conflicts quarantine before a native owner exists. A 64-KiB raw-byte cap,
-128-level selected traversal depth, 8,192-node cap, and 1-MiB observation cap
-are active in optimized release D; oversized raw input and deep/wide trees
-are rejected. These are **prototype thresholds**, not approved product limits.
+conflicts quarantine before a native owner exists.
+
+These caps are active in optimized release D, and oversized raw input and
+deep/wide trees are rejected:
+
+- 64-KiB raw-byte cap;
+- 128-level selected traversal depth;
+- 8,192-node cap;
+- 1-MiB observation cap.
+
+These are **prototype thresholds**, not approved product limits.
 The returned D string is checked after Lexbor destruction and source-input
 mutation. Four injected failures (before parse, after parse, during observation,
 before cleanup) each close the single native owner exactly once according to
@@ -283,6 +290,10 @@ supported native build matrix, bundle the full LICENSE/NOTICE, and run
 sanitizers plus boundary regressions in CI. It must explicitly keep unsupported
 HTML byte-sniffing and richer DOM semantics out of the public API until
 separately specified. @schancel owns adoption, limits, platform, and package
-authorization. Issue #24 remains open for that reviewed production adoption;
-there is no fourth prerequisite evidence loop absent a concrete blocker.
-Rollback of this slice deletes only `final_check.d` and this section.
+authorization. **Update:** #24 has since closed — the restricted wrapper
+(`source/effects/lexbor_ffi.d`, `source/effects/html_tree.d`) was adopted and
+is now linked into the shipping CLI (see `dub.json`), with production stages
+such as `html_main_content`, `html_markdown`, and the metadata/discovery
+stages built on top of it. Rollback of this slice deletes only
+`final_check.d` and this section; rolling back the shipped wrapper is a
+separate, later decision.

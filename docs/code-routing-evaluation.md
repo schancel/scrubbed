@@ -8,14 +8,18 @@ selection quality on representative documents. A production change would need
 a separate contract, representative rights-cleared evidence, and an explicit
 maintenance budget.
 
-The evaluated candidate recognizes exactly one closed, lowercase `d`,
-`python`, or `json` Markdown fence when nonempty prose occurs both before and
-after it. The closing delimiter must have at least as many backticks as the
-opener, then only optional spaces or tabs before the line ending. The entire
-delimiter line is consumed before testing the trailing prose. It records the
-code span as routing metadata; it does not alter the input or production
-behavior. The baseline keeps only the generic whole-document view. Both modes
-receive the same bytes.
+The evaluated candidate:
+
+- recognizes exactly one closed, lowercase `d`, `python`, or `json` Markdown
+  fence when nonempty prose occurs both before and after it;
+- requires the closing delimiter to have at least as many backticks as the
+  opener, then only optional spaces or tabs before the line ending;
+- consumes the entire delimiter line before testing the trailing prose;
+- records the code span as routing metadata only — it does not alter the
+  input or production behavior.
+
+The baseline keeps only the generic whole-document view; both modes receive
+the same bytes.
 
 ## Evidence
 
@@ -61,13 +65,16 @@ The rule would create a maintained boundary around fence spelling, language
 aliases, nested or multiple fences, prose classification, and syntax-specific
 integrity. The current checks are intentionally small heuristics, not language
 parsers: braces inside strings or comments and richer Markdown constructs are
-outside their claims. The fixture set is tiny and synthetic, contains no
-production corpus, and its frozen fixtures exercise only triple-backtick
-lowercase language labels. Release-active controls additionally exercise valid
-longer delimiter runs, a closing run shorter than its opener, an invalid
-closing-line suffix, and a longer valid close without trailing prose. Negative
-fixture cases cover inline code, a prose license marker, code-only input, an
-unclosed fence, a non-code fence, and multiple fences.
+outside their claims.
+
+The fixture set is tiny and synthetic, with no production corpus:
+
+- frozen fixtures exercise only triple-backtick lowercase language labels;
+- release-active controls additionally exercise valid longer delimiter runs,
+  a closing run shorter than its opener, an invalid closing-line suffix, and
+  a longer valid close without trailing prose;
+- negative fixture cases cover inline code, a prose license marker,
+  code-only input, an unclosed fence, a non-code fence, and multiple fences.
 
 Given those limits, the perfect fixture classification and proxy result do not
 justify the additional runtime and maintenance surface. This package adds no

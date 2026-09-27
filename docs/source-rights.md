@@ -92,9 +92,60 @@ input item. Wall time is not used as the complexity oracle.
 
 ## Deferred integration
 
-Stage 2 must bind these pure decisions to the real source manifest, annotation
-index, export references, and effect boundary. That work must separately prove
-complete affected-ID discovery, idempotent quarantine/removal behavior,
-restart safety, authorization, and operator-visible auditing. Until then,
-`quarantineRequired` and `removalRequired` are policy results only; no
-production path consumes them.
+Stage 2a proved the frozen `evaluateSourceRights` graph and closure logic
+against real, on-disk C01 document-shard and overlay data, not only synthetic
+in-memory graphs. `effects.source_rights_overlay` is strictly read-only:
+discovery and decision only, with no quarantine/removal effect, no filesystem
+mutation, and no CLI surface. `documentArtifact` trivially wraps a
+`DocumentId` as `RightsArtifactId`. `annotationArtifact(analyzerKey, owner)`
+derives a deterministic, domain-separated `annotation:v1:` canonical ID from a
+fixed domain tag and length-prefixed `(owner, analyzerKey)` fields under
+SHA-256, mirroring the same idiom as `DocumentId.childOf` and
+`RightsAuditId.fromDecisionBytes`. `joinCorpusForRights(root, shardPath,
+overlayPaths, evidence)` calls the existing, unmodified
+`effects.document_shards.joinShards` over one shard and only its two accepted
+overlay analyzer keys, `quality.decisions` and `exact-dedup`; any other
+analyzer key present among `overlayPaths` fails closed with a fixed,
+content-free diagnostic instead of being silently dropped. Every document the
+join visits other than `root` becomes a derived child of `root`, and every
+present accepted-overlay annotation on a visited document becomes a derived
+child of that document. The resulting real `DerivedArtifactRelation`s are
+passed, unmodified, to `evaluateSourceRights`, and its `RightsDecision` is
+returned unchanged. Evidence remains entirely caller/fixture-supplied; this
+facade neither reads nor writes an evidence store.
+
+The release-active checker (`experiments/source_rights/overlay_check.d`)
+builds a real on-disk C01 shard holding a root document and a real
+shard-resident child derived with the unmodified `Document.derivedChild`, plus
+a genuinely separate sibling document in its own shard, absent from the
+root's family corpus. It joins two real overlay files over the family shard,
+one present on both documents and one present only on the child, and proves
+an exact `affectedIds()` match — root, child, and every present annotation
+artifact, no more and no fewer — for one case each of `unknown`,
+`documentedPermission`, `optOut`, and `takedown` evidence. It also proves:
+evidence naming the absent sibling is rejected via the existing
+`evidenceSubjectMismatch` reason code, not a new one; a real but unaccepted
+overlay analyzer key fails closed with a fixed diagnostic; canonical decision
+bytes are byte-identical regardless of overlay-path argument order; and a
+distinctive canary byte sequence planted in fixture content, locators, and
+annotation values never appears in any artifact ID, decision, or diagnostic
+this module produces. Run it with:
+
+```sh
+ldc2 -O3 -release -i -I=source \
+    experiments/source_rights/overlay_check.d \
+    -of=.dub/source-rights-overlay-check
+.dub/source-rights-overlay-check
+```
+
+This join does not discover real parent/child structure from shard bytes: a
+shard's caller must already scope it to the family whose closure is being
+decided. Recognizing that structure from a real corpus (a persisted
+parent-pointer field, or a job-execution-time-supplied relation set), where
+durable rights evidence is captured and stored, and how a rights closure
+interacts with an already-published export are separate, later design
+questions. Stage 2 must still bind these decisions to a real effect boundary:
+complete affected-ID discovery over a real corpus, idempotent
+quarantine/removal behavior, restart safety, authorization, and
+operator-visible auditing. `quarantineRequired` and `removalRequired` remain
+policy results only; no production path consumes them.

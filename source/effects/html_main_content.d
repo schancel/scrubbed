@@ -95,6 +95,21 @@ private bool containsCaseInsensitive(string haystack, string needle) pure nothro
     return false;
 }
 
+// A text node's raw bytes only count as real "own text" if at least one
+// decoded character is non-whitespace; pretty-printed indentation/newlines
+// between element siblings (e.g. a <select>'s many <option> children) are
+// otherwise indistinguishable from prose by byte length alone. Uses the
+// same replacement-on-invalid-UTF-8 decoding as `CollapsingWriter.feed` so
+// malformed text can never throw here.
+private bool isWhitespaceOnly(string text) pure {
+    size_t at;
+    while (at < text.length) {
+        dchar ch = decode!(UseReplacementDchar.yes)(text, at);
+        if (!isWhite(ch)) return false;
+    }
+    return true;
+}
+
 private double tagWeightFor(string name) pure nothrow @nogc {
     foreach (tag; positiveContentTags) if (tag == name) return positiveTagWeight;
     foreach (tag; negativeContentTags) if (tag == name) return -negativeTagWeight;
@@ -209,9 +224,11 @@ private void collectText(const ref HtmlTree tree, size_t index, ref CollapsingWr
 /// before that parent's own turn in the loop. Per element node this pass
 /// tracks: cumulative subtree text length, cumulative link (`<a>`) text
 /// length for link-density, the element's own direct text (from immediate
-/// text-node children only), and paragraph-sibling clustering (the summed
-/// text of direct `<p>` children that individually clear
-/// `minParagraphTextBytes`). A fixed tag-name table and a fixed class/id
+/// text-node children only, excluding whitespace-only text nodes so
+/// pretty-printed indentation between siblings can't inflate a score), and
+/// paragraph-sibling clustering (the summed non-whitespace text of direct
+/// `<p>` children that individually clear `minParagraphTextBytes`). A fixed
+/// tag-name table and a fixed class/id
 /// keyword table add bounded bonuses/penalties. The final per-node score is
 /// `(ownDirectText + paragraphClusterText + clusterBonus + tagWeight +
 /// keywordWeight) * (1 - linkDensity)` — link density is the strongest
@@ -237,6 +254,13 @@ MainContentResult extractMainContent(const ref HtmlTree tree) pure {
     }
 
     auto cumulativeText = new size_t[n];
+    // Same subtree byte totals as `cumulativeText`, but excluding
+    // whitespace-only text nodes. `cumulativeText` itself stays
+    // whitespace-inclusive because link density and reported `textLength`
+    // describe the true extent of a subtree's text, not just its scoring
+    // signal; only the two accumulators below (which *are* the scoring
+    // signal) need the whitespace-only bytes excluded.
+    auto cumulativeVisibleText = new size_t[n];
     auto cumulativeLinkText = new size_t[n];
     auto ownDirectText = new size_t[n];
     auto paragraphAccum = new size_t[n];
@@ -252,6 +276,13 @@ MainContentResult extractMainContent(const ref HtmlTree tree) pure {
             bool hidden = node.parentIndex != size_t.max &&
                 hiddenTag(tree.nodes[node.parentIndex].name);
             cumulativeText[i] = hidden ? 0 : node.text.length;
+            // A leaf text node's own raw text is known directly here (unlike
+            // at an element, where cumulativeText[i] is already an
+            // aggregated multi-descendant sum with no single string left to
+            // inspect), so whitespace-only-ness must be decided now and
+            // carried forward as a byte count.
+            cumulativeVisibleText[i] = (hidden || isWhitespaceOnly(node.text)) ?
+                0 : node.text.length;
         } else {
             if (node.name == "a") cumulativeLinkText[i] = cumulativeText[i];
 
@@ -273,11 +304,12 @@ MainContentResult extractMainContent(const ref HtmlTree tree) pure {
         if (node.parentIndex != size_t.max) {
             auto p = node.parentIndex;
             cumulativeText[p] += cumulativeText[i];
+            cumulativeVisibleText[p] += cumulativeVisibleText[i];
             cumulativeLinkText[p] += cumulativeLinkText[i];
             if (node.kind == HtmlNodeKind.text)
-                ownDirectText[p] += cumulativeText[i];
-            else if (node.name == "p" && cumulativeText[i] >= minParagraphTextBytes) {
-                paragraphAccum[p] += cumulativeText[i];
+                ownDirectText[p] += cumulativeVisibleText[i];
+            else if (node.name == "p" && cumulativeVisibleText[i] >= minParagraphTextBytes) {
+                paragraphAccum[p] += cumulativeVisibleText[i];
                 ++paragraphCount[p];
             }
         }
@@ -382,4 +414,41 @@ unittest {
     assert(scriptedResult.status == MainContentStatus.selected);
     import std.algorithm.searching : canFind;
     assert(!scriptedResult.text.canFind("secretPayload"), "hidden script text leaked");
+
+    // Regression for issue #309: a <select> with many <option> children
+    // separated only by pretty-printed indentation/newline whitespace (the
+    // exact france.attac.org country-picker shape that outscored a real
+    // article by ~30x) must not accumulate any of that whitespace into its
+    // score. Each of the 6 whitespace runs below is 200 bytes -- 1200 bytes
+    // total, comfortably more than the real article/p's few-hundred-byte
+    // scores would be if whitespace were still (wrongly) counted.
+    string wsChunk;
+    foreach (_; 0 .. 40) wsChunk ~= "\n    "; // 40 * 5 bytes = 200 bytes, all whitespace
+    HtmlNode[] whitespaceHeavy;
+    whitespaceHeavy ~= HtmlNode(HtmlNodeKind.element, size_t.max, "select", null, null);
+    enum optionCount = 5;
+    foreach (_; 0 .. optionCount) {
+        whitespaceHeavy ~= HtmlNode(HtmlNodeKind.text, 0, null, wsChunk);
+        whitespaceHeavy ~= HtmlNode(HtmlNodeKind.element, 0, "option", null, null);
+    }
+    whitespaceHeavy ~= HtmlNode(HtmlNodeKind.text, 0, null, wsChunk);
+    size_t articleIndex = whitespaceHeavy.length;
+    whitespaceHeavy ~= HtmlNode(HtmlNodeKind.element, size_t.max, "article", null, null);
+    whitespaceHeavy ~= HtmlNode(HtmlNodeKind.element, articleIndex, "p", null, null);
+    whitespaceHeavy ~= HtmlNode(HtmlNodeKind.text, articleIndex + 1, null, longParagraph);
+
+    HtmlTree whitespaceVsArticle;
+    whitespaceVsArticle.nodes = whitespaceHeavy;
+    auto whitespaceResult = extractMainContent(whitespaceVsArticle);
+    assert(whitespaceResult.status == MainContentStatus.selected);
+    assert(whitespaceResult.node == articleIndex,
+        "whitespace-only <option> siblings must not outscore the real article");
+
+    bool foundSelectCandidate;
+    double selectScore;
+    foreach (candidate; whitespaceResult.candidates)
+        if (candidate.node == 0) { foundSelectCandidate = true; selectScore = candidate.score; }
+    assert(foundSelectCandidate, "the <select> should still be a scored candidate");
+    assert(selectScore < 50.0,
+        "whitespace-only text must not inflate the <select>'s score (was pure formatting)");
 }

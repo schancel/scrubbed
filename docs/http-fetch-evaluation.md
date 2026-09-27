@@ -1,50 +1,55 @@
 # Host libcurl HTTP-fetch evaluation
 
-Status: evidence only. This does not add a production dependency, select a
-fetch policy, or make a package/release claim. Production adoption remains a
-separate owner decision and contract.
+Status: production HTTP(S) fetch (`effects.http_fetch`) shipped from this
+evaluation's `ADOPT_DYNAMIC` verdict — see [http-fetch.md](http-fetch.md) for
+the production module and API. The evidence below is retained as the
+historical record of the probe that justified that decision; on its own it
+does not add a production dependency, select a fetch policy, or make a
+package/release claim beyond what has since shipped.
 
 ## Observed host and dependency identity
 
-The probe was built and run on 2026-09-24 on macOS 26.6.2 (build 25G83,
-Darwin 25.6.0), arm64. The compiler was LDC 1.43.0 (DMD 2.113.0, LLVM
-23.1.0), targeting `arm64-apple-darwin25.6.0`; Apple clang was 21.0.0.
+### Host and toolchain
 
-The arm64 probe called the linked library's `curl_version()` and observed:
+- Probe built and run on 2026-09-24, on macOS 26.6.2 (build 25G83, Darwin
+  25.6.0), arm64.
+- Compiler: LDC 1.43.0 (DMD 2.113.0, LLVM 23.1.0), targeting
+  `arm64-apple-darwin25.6.0`; Apple clang 21.0.0.
+- The arm64 probe's linked library reported, via `curl_version()`:
+  ```text
+  libcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.68.1
+  ```
+  TLS backend: SecureTransport, with LibreSSL 3.3.6 also reported at
+  runtime. Compression backend: zlib 1.2.12.
+- `curl-config --feature`: SSL, MultiSSL, libz, HTTP2, AsynchDNS,
+  `threadsafe`. No brotli, no zstd.
+- `curl-config --protocols` advertises many protocols, but the probe sets
+  both the initial and redirect protocol allowlists to exactly
+  `http,https`.
 
-```text
-libcurl/8.7.1 (SecureTransport) LibreSSL/3.3.6 zlib/1.2.12 nghttp2/1.68.1
-```
+### Runtime linkage and license provenance
 
-Thus the demonstrated TLS backend is SecureTransport, with the runtime also
-reporting LibreSSL 3.3.6; the demonstrated compression backend is zlib 1.2.12.
-`curl-config --feature` reports SSL, MultiSSL, libz, HTTP2, AsynchDNS, and
-`threadsafe`. It does not report brotli or zstd. `curl-config --protocols`
-advertises many protocols, but the probe sets both the initial and redirect
-protocol allowlists to exactly `http,https`.
-
-An optimized probe is a Mach-O 64-bit arm64 executable. `otool -L` reports
-these direct runtime links:
-
-```text
-/usr/lib/libcurl.4.dylib (compatibility 7.0.0, current 9.0.0)
-/usr/lib/libSystem.B.dylib (compatibility 1.0.0, current 1356.0.0)
-/usr/lib/libobjc.A.dylib (compatibility 1.0.0, current 228.0.0)
-```
-
-The Command Line Tools SDK 26.5 supplies `curl/curl.h` (SHA-256
-`bc859632290c0495e45d80157ebb97bb296f7391d7efa054d127c7cf14469190`) and the
-`libcurl.4.tbd` linker stub for x86_64 and arm64e macOS/Mac Catalyst; the OS
-supplies the runtime library through the dyld shared cache. The stub SHA-256 is
-`1b6d181ac7c9f13cbd270d8b1c81738ebefa45308baf53f82912b5f127006116`. The SDK header
-identifies the license as SPDX `curl`, carries the upstream permission and
-warranty notice, and points to upstream `COPYING`; that `COPYING` file is not
-present beside the installed SDK header. This is license provenance, not
-legal clearance or proof of the complete source corresponding to Apple's
-binary. Homebrew metadata on this host offers keg-only formula `curl` 8.22.0,
-but it is not installed and was neither linked nor tested. OpenSSL 3.6.4 was
-used only as the loopback TLS fixture server and is not a dependency of the
-probe executable.
+- The optimized probe is a Mach-O 64-bit arm64 executable. `otool -L`
+  reports these direct runtime links:
+  ```text
+  /usr/lib/libcurl.4.dylib (compatibility 7.0.0, current 9.0.0)
+  /usr/lib/libSystem.B.dylib (compatibility 1.0.0, current 1356.0.0)
+  /usr/lib/libobjc.A.dylib (compatibility 1.0.0, current 228.0.0)
+  ```
+- The Command Line Tools SDK 26.5 supplies `curl/curl.h` (SHA-256
+  `bc859632290c0495e45d80157ebb97bb296f7391d7efa054d127c7cf14469190`) and the
+  `libcurl.4.tbd` linker stub for x86_64 and arm64e macOS/Mac Catalyst
+  (SHA-256 `1b6d181ac7c9f13cbd270d8b1c81738ebefa45308baf53f82912b5f127006116`);
+  the OS supplies the runtime library through the dyld shared cache.
+- The SDK header identifies the license as SPDX `curl`, carries the
+  upstream permission and warranty notice, and points to upstream
+  `COPYING`; that `COPYING` file is not present beside the installed SDK
+  header. This is license provenance, not legal clearance or proof of the
+  complete source corresponding to Apple's binary.
+- Homebrew metadata on this host offers keg-only formula `curl` 8.22.0, but
+  it is not installed and was neither linked nor tested.
+- OpenSSL 3.6.4 was used only as the loopback TLS fixture server and is not
+  a dependency of the probe executable.
 
 ## Demonstrated behavior
 
@@ -209,8 +214,11 @@ request object, strict `http,https` allowlists on both original and redirected
 URLs, proxy policy chosen explicitly, verified TLS, separate connect/total
 timeouts, header/encoded/decoded caps, cooperative cancellation, validators,
 a fixed maximum number of multi-handle transfers, and fixed content-free
-public diagnostics. This paragraph is a proposal, not implemented production
-behavior.
+public diagnostics. This paragraph was a proposal at the time it was
+written, not implemented production behavior; it is what `effects.http_fetch`
+went on to ship almost unchanged, plus one addition the proposal didn't
+anticipate — a fixed `User-Agent` (#307) — documented in
+[http-fetch.md](http-fetch.md).
 
 Dynamic adoption on the currently supported macOS arm64 target would add
 `/usr/lib/libcurl.4.dylib` as a direct runtime dependency and `-lcurl` plus D

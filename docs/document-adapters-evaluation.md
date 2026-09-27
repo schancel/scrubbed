@@ -1,11 +1,18 @@
 # Native document adapter feasibility
 
+Status: the PDF licensing question this evaluation left open was resolved in
+issue #296 — production shipped an opt-in, unintegrated Poppler `pdftotext`
+subprocess adapter; see [pdf-execve-fallback.md](pdf-execve-fallback.md). DOCX
+remains unaddressed: no production adapter exists for it, and nothing below
+has been re-run since.
+
 This bounded experiment does not adopt a parser. It asks whether specialist
 PDF and DOCX engines can be isolated behind a subprocess and whether their
 accuracy, license, dependency, startup, memory, and package costs justify a
-later production design. The result is **no production recommendation yet**:
-the PDF engines extract this corpus but both have strong-copyleft obligations,
-and no acceptable native DOCX library path was established.
+later production design. The result **at the time of this evaluation** was
+**no production recommendation yet**: the PDF engines extracted this corpus
+but both had strong-copyleft obligations, and no acceptable native DOCX
+library path was established.
 
 ## Frozen corpus and method
 
@@ -63,17 +70,19 @@ These are engineering provenance findings, not legal advice.
 
 ## Measurements
 
-Text accuracy is matched expected token occurrences over total expected
-occurrences. Order errors are inversions against the frozen semantic order.
-Geometry hits are four explicitly named, fixture-specific predicates derived
-from line structure in the preserved output bytes. PDF checks are
-`pdf_row_a_columns`, `pdf_row_b_columns`, `pdf_right_column_aligned`, and
-`pdf_footer_after_columns`. DOCX checks are `docx_row1_cells`,
-`docx_row2_cells`, `docx_right_column_aligned`, and
-`docx_footer_after_table`. They describe this command output only, not source
-document coordinates. Each footer predicate requires both terminal columns or
-cells and places the footer after the later terminal line. Times and RSS are
-single cold observations, not performance benchmarks.
+- **Text accuracy**: matched expected token occurrences over total expected
+  occurrences.
+- **Order errors**: inversions against the frozen semantic order.
+- **Geometry hits**: four explicitly named, fixture-specific predicates
+  derived from line structure in the preserved output bytes — they describe
+  this command's output only, not source-document coordinates. Each footer
+  predicate requires both terminal columns/cells and places the footer
+  after the later terminal line.
+  - PDF: `pdf_row_a_columns`, `pdf_row_b_columns`,
+    `pdf_right_column_aligned`, `pdf_footer_after_columns`.
+  - DOCX: `docx_row1_cells`, `docx_row2_cells`, `docx_right_column_aligned`,
+    `docx_footer_after_table`.
+- **Times and RSS**: single cold observations, not performance benchmarks.
 
 | Candidate / held-out sample | Text | Order errors | Geometry | Cold elapsed | Peak RSS | Malformed case |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |

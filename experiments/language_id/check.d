@@ -68,6 +68,12 @@ private void seedCorpusDigestGoldens() {
         "vi": "5678ca971c0618768b2ed9fe1148bae04c53b326f473cefab2c624e8f01f7dbb",
         "pl": "f092baf804251c945dfd46147f47beb013cc84d1cbda5c32ad2f8196ca236fbc",
         "id": "1dea1af4e267f318badb549428904a3c6a4ea9b2c4f40f13074dcc97994c32b8",
+        "hi": "c152bc8517da47a937e7456dc1a7b1512b2102f177e32cc8ca6c50fba60c9298",
+        "bn": "b0cdb273e478c80e85de975b25eb28540f8edab0feb8576f0bbf98d11feb9d98",
+        "ta": "35e7e0bf89a29c7efd0f57e37ccaae8f25151f1d7c7492e89f9f0ef3c5459f63",
+        "te": "7577c6a401a0498f73316a1949362ef2fcee0595752223fc0dd53225d94cd43d",
+        "gu": "69544e75d7781ddb86d2cdf3214ec87b8031b43bdb87de35fafd23fd72089ccd",
+        "pa": "12ed2f313da2a0b4d7566e62238c3cb69f9cf8e6c52553e9087ffdb65da531f3",
     ];
     foreach (lang, digest; expected) {
         auto bytes = cast(const(ubyte)[]) readText(buildPath(profilesRoot, lang ~ ".txt"));
@@ -94,6 +100,12 @@ private void generatorReproducibilityProof() {
     check(generated.vi == languageProfileVi, "embedded Vietnamese profile drifted from the generator");
     check(generated.pl == languageProfilePl, "embedded Polish profile drifted from the generator");
     check(generated.id == languageProfileId, "embedded Indonesian profile drifted from the generator");
+    check(generated.hi == languageProfileHi, "embedded Hindi profile drifted from the generator");
+    check(generated.bn == languageProfileBn, "embedded Bengali profile drifted from the generator");
+    check(generated.ta == languageProfileTa, "embedded Tamil profile drifted from the generator");
+    check(generated.te == languageProfileTe, "embedded Telugu profile drifted from the generator");
+    check(generated.gu == languageProfileGu, "embedded Gujarati profile drifted from the generator");
+    check(generated.pa == languageProfilePa, "embedded Punjabi profile drifted from the generator");
     // Reproducibility, not just single-run agreement: a second independent
     // run of the generator must produce the exact same tables again.
     auto generatedAgain = generateProfiles(profilesRoot);
@@ -102,7 +114,10 @@ private void generatorReproducibilityProof() {
         generatedAgain.pt == generated.pt && generatedAgain.it == generated.it &&
         generatedAgain.nl == generated.nl && generatedAgain.tr == generated.tr &&
         generatedAgain.vi == generated.vi && generatedAgain.pl == generated.pl &&
-        generatedAgain.id == generated.id,
+        generatedAgain.id == generated.id && generatedAgain.hi == generated.hi &&
+        generatedAgain.bn == generated.bn && generatedAgain.ta == generated.ta &&
+        generatedAgain.te == generated.te && generatedAgain.gu == generated.gu &&
+        generatedAgain.pa == generated.pa,
         "generator is not deterministic across repeated runs");
 }
 
@@ -121,7 +136,12 @@ private string[] linesOf(string path) {
     return lines;
 }
 
-private enum supportedLangCodes = ["en", "es", "fr", "de", "pt", "it", "nl", "tr", "vi", "pl", "id"];
+private enum supportedLangCodes = ["en", "es", "fr", "de", "pt", "it", "nl", "tr", "vi", "pl", "id",
+    "hi", "bn", "ta", "te", "gu", "pa"];
+
+/// The 6 new Brahmic-family languages this slice adds, script-disjoint from
+/// each other and from all 11 existing Latin-script languages.
+private enum brahmicLangCodes = ["hi", "bn", "ta", "te", "gu", "pa"];
 
 private SupportedLanguage langCodeToEnum(string code) {
     switch (code) {
@@ -136,6 +156,12 @@ private SupportedLanguage langCodeToEnum(string code) {
         case "vi": return SupportedLanguage.vi;
         case "pl": return SupportedLanguage.pl;
         case "id": return SupportedLanguage.id;
+        case "hi": return SupportedLanguage.hi;
+        case "bn": return SupportedLanguage.bn;
+        case "ta": return SupportedLanguage.ta;
+        case "te": return SupportedLanguage.te;
+        case "gu": return SupportedLanguage.gu;
+        case "pa": return SupportedLanguage.pa;
         default: assert(0, "unknown supported language code: " ~ code);
     }
 }
@@ -147,8 +173,8 @@ private void disjointnessProof() {
         seedLines ~= linesOf(buildPath(profilesRoot, lang ~ ".txt"));
         heldoutLines ~= linesOf(buildPath(heldoutRoot, lang ~ ".txt"));
     }
-    check(seedLines.length >= 220, "seed corpus suspiciously small");
-    check(heldoutLines.length >= 110, "held-out corpus suspiciously small");
+    check(seedLines.length >= 340, "seed corpus suspiciously small");
+    check(heldoutLines.length >= 170, "held-out corpus suspiciously small");
     size_t overlap;
     foreach (seedLine; seedLines) foreach (heldoutLine; heldoutLines)
         if (seedLine == heldoutLine) ++overlap;
@@ -211,6 +237,118 @@ private void scriptAbstentionGolden() {
     check(result.status == LanguageDetectionStatus.abstained &&
         result.reason == LanguageAbstentionReason.unsupportedScript,
         "non-Latin script text must abstain via unsupportedScript, got " ~ result.reason.to!string);
+
+    // Kannada is immediately adjacent to Telugu's recognized block
+    // (Telugu 0x0C00-0x0C7F, Kannada 0x0C80-0x0CFF) and is explicitly out of
+    // scope for this slice. An authored Kannada sentence, unrelated to any
+    // topic elsewhere in this fixture set, must still abstain via
+    // unsupportedScript -- proving isBrahmicLetter's widening is additive
+    // (Devanagari/Bengali/Gurmukhi/Gujarati/Tamil/Telugu only), not a
+    // general loosening that accidentally admits the next adjacent block.
+    enum kannada = "ಇಂದು ಹವಾಮಾನ ಚೆನ್ನಾಗಿದೆ ಮತ್ತು ನಾವು ಉದ್ಯಾನದಲ್ಲಿ ನಡೆಯುತ್ತೇವೆ.";
+    auto kannadaResult = detectLanguage(cast(const(ubyte)[]) kannada);
+    check(kannadaResult.status == LanguageDetectionStatus.abstained &&
+        kannadaResult.reason == LanguageAbstentionReason.unsupportedScript,
+        "Kannada text (immediately adjacent to Telugu's recognized block) must still abstain via " ~
+        "unsupportedScript, got " ~ kannadaResult.reason.to!string);
+}
+
+// ---------------------------------------------------------------------------
+// Brahmic-family goldens (this slice): the virama/nukta word-internal-joiner
+// fix (required fix #1) and the isBrahmicLetter script-gate widening
+// (required fix #2, owner-approved beyond the original ticket's scope).
+// ---------------------------------------------------------------------------
+
+/// Required fix #1, end-to-end proof via the public API (wordsOf itself is
+/// private to domain.language_id and is tested directly by that module's own
+/// unittest block for all 6 scripts' virama and 4 scripts' nukta cases; this
+/// golden additionally proves the effect through the public
+/// `totalNgramCount`, exactly the function the `tooShort` boundary depends
+/// on). The accepted contract's own example: Hindi क्षत्र ("kṣatra") has 2
+/// viramas (U+094D). Constructed via explicit \u escapes so the exact code
+/// points under test are unambiguous.
+///
+/// Without the fix, U+094D fails `isAlpha` and acts as a separator, so this
+/// single word fragments into 3 pieces ("क", "षत", "र" -- consonants
+/// adjacent across a dropped virama merge into one fragment): word lengths
+/// 1, 2, 1 contribute `(4*1+2) + (4*2+2) + (4*1+2) = 6 + 10 + 6 = 22` total
+/// n-grams. With the fix, it is one 6-codepoint word: `4*6+2 = 26`.
+private void viramaNuktaJoinerGolden() {
+    enum kshatra = "क्षत्र"; // क्षत्र
+    auto count = totalNgramCount(kshatra);
+    check(count == 26,
+        "virama word-internal-joiner fix: क्षत्र must round-trip as one 6-codepoint word " ~
+        "(4*6+2 = 26 total n-grams), got " ~ count.to!string);
+    check(count != 22,
+        "virama word-internal-joiner fix regressed: क्षत्र fragmented into 3 pieces again " ~
+        "(the pre-fix count, 22)");
+}
+
+/// Required fix #2, direct proof: a plain, ordinary-length Devanagari
+/// sentence (well above the `tooShort` cutoff) must NOT abstain via
+/// `unsupportedScript` -- it must actually reach `wordsOf`/scoring. Before
+/// this fix, `scriptCountsOf` measured 100% of this sentence's letters as
+/// non-Latin (Devanagari was entirely unrecognized), so it would abstain
+/// here before `wordsOf` ever ran, exactly the "ships dead code" finding
+/// grooming discovered. The first 3 lines of the authored Hindi held-out set
+/// are concatenated so the text is unambiguously well above `minNgramCount`.
+private void brahmicScriptGateGolden() {
+    auto lines = linesOf(buildPath(heldoutRoot, "hi.txt"));
+    check(lines.length >= 3, "Hindi held-out fixture too small for the script-gate golden");
+    auto text = lines[0] ~ " " ~ lines[1] ~ " " ~ lines[2];
+    auto result = detectLanguage(cast(const(ubyte)[]) text);
+    check(result.reason != LanguageAbstentionReason.unsupportedScript,
+        "isBrahmicLetter script-gate widening fix: plain Devanagari text must not abstain via " ~
+        "unsupportedScript, got status=" ~ result.status.to!string ~ " reason=" ~ result.reason.to!string);
+    check(result.status == LanguageDetectionStatus.detected && result.language == SupportedLanguage.hi,
+        "isBrahmicLetter script-gate widening fix: plain Devanagari text must reach scoring and " ~
+        "classify as Hindi, got status=" ~ result.status.to!string ~ " reason=" ~ result.reason.to!string ~
+        " language=" ~ result.language.to!string);
+}
+
+/// `tooShort` boundary re-derived for a Brahmic language (Hindi), mirroring
+/// the Latin-script boundary goldens above with the identical `4*L + 2`
+/// word-length formula, now proving joiner-inclusive word lengths still
+/// produce a correct, exact boundary. Plain short Devanagari words, not a
+/// natural sentence, exactly as the Latin-script boundary fixtures are.
+private void brahmicShortTextBoundaryGolden() {
+    // 3+3+3+2+1 letters => (14+14+14+10+6) = 58, two below the cutoff.
+    enum belowCutoff = "कलम कमल नयन जल अ";
+    // 3+3+3+4 letters => (14+14+14+18) = 60, exactly at the cutoff.
+    enum atCutoff = "कलम कमल नयन कमला";
+    check(totalNgramCount(belowCutoff) == minNgramCount - 2,
+        "Hindi below-cutoff fixture must land exactly 2 below the pinned cutoff");
+    check(totalNgramCount(atCutoff) == minNgramCount,
+        "Hindi at-cutoff fixture must land exactly on the pinned cutoff");
+
+    auto below = detectLanguage(cast(const(ubyte)[]) belowCutoff);
+    check(below.status == LanguageDetectionStatus.abstained &&
+        below.reason == LanguageAbstentionReason.tooShort,
+        "Hindi text one increment below the pinned tooShort cutoff must abstain via tooShort, got " ~
+        below.reason.to!string);
+
+    auto at = detectLanguage(cast(const(ubyte)[]) atCutoff);
+    check(at.status != LanguageDetectionStatus.abstained ||
+        at.reason != LanguageAbstentionReason.tooShort,
+        "Hindi text exactly at the pinned tooShort cutoff must not abstain via tooShort");
+}
+
+/// Mixed-*script* golden (new territory beyond the existing mixed-*language*
+/// golden above): an authored sentence blending an English clause ("The cat
+/// sat quietly") with a roughly balanced Hindi/Devanagari clause ("पर कुत्ता
+/// बहुत तेज़ दौड़ा", "but the dog ran very fast") must abstain via
+/// `mixedOrAmbiguous` or `belowConfidenceThreshold`, never arbitrarily
+/// force-classify as either English or Hindi.
+private void mixedScriptGolden() {
+    enum mixed = "The cat sat quietly पर कुत्ता बहुत तेज़ दौड़ा।";
+    auto result = detectLanguage(cast(const(ubyte)[]) mixed);
+    check(result.status == LanguageDetectionStatus.abstained &&
+        (result.reason == LanguageAbstentionReason.mixedOrAmbiguous ||
+            result.reason == LanguageAbstentionReason.belowConfidenceThreshold),
+        "balanced Hindi/English mixed-script text must abstain via mixedOrAmbiguous or " ~
+        "belowConfidenceThreshold, got status=" ~ result.status.to!string ~
+        " reason=" ~ result.reason.to!string ~
+        (result.status == LanguageDetectionStatus.detected ? " language=" ~ result.language.to!string : ""));
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +537,7 @@ private void heldOutConfusionMatrix() {
             else confusion[key] = 1;
         }
     }
-    writeln("language id check: full 11x11 held-out confusion matrix (actual -> predicted/abstain counts):");
+    writeln("language id check: full 17x17 held-out confusion matrix (actual -> predicted/abstain counts):");
     foreach (key, count; confusion) writeln("  ", key, ": ", count);
     writeln("language id check: held-out total=", total, " correct=", correct,
         " misclassified=", misclassified, " abstained=", abstained,
@@ -435,19 +573,71 @@ private void heldOutConfusionMatrix() {
         "misclassified as another es/fr/it/pt language) = ", romanceCrossConfusion,
         " (disclosed for owner attention, not gated to an unaccepted target number)");
 
+    // Brahmic sub-table (hi/bn/ta/te/gu/pa), mirroring the Romance sub-table
+    // precedent: these 6 languages are new to each other even though
+    // script-disjoint from the 11 Latin languages and from each other's
+    // Unicode blocks, per the accepted contract's confirmed disjoint-block
+    // reasoning. Printed as a full 6x6 grid, including zero cells.
+    writeln("language id check: Brahmic sub-table (hi/bn/ta/te/gu/pa actual -> hi/bn/ta/te/gu/pa " ~
+        "predicted; own-language diagonal is correct classification, off-diagonal is " ~
+        "cross-Brahmic confusion, expected to be zero since these 6 scripts occupy disjoint " ~
+        "Unicode blocks):");
+    size_t brahmicCrossConfusion;
+    foreach (actual; brahmicLangCodes) {
+        string row = "  " ~ actual ~ " -> [";
+        foreach (predicted; brahmicLangCodes) {
+            auto count = confusion.get(actual ~ "|" ~ predicted, 0);
+            if (predicted != actual) brahmicCrossConfusion += count;
+            row ~= " " ~ predicted ~ "=" ~ count.to!string;
+        }
+        size_t brahmicAbstained;
+        foreach (key, count; confusion)
+            if (key.startsWith(actual ~ "|abstain:")) brahmicAbstained += count;
+        row ~= " ] abstained=" ~ brahmicAbstained.to!string;
+        writeln(row);
+    }
+    writeln("language id check: Brahmic sub-table cross-confusion total (off-diagonal hi/bn/ta/te/gu/pa ",
+        "misclassified as another Brahmic language) = ", brahmicCrossConfusion,
+        " (disclosed for owner attention; script-block disjointness makes this a much stronger ",
+        "discriminator than the same-script Romance case above, so 0 is expected by design, not ",
+        "merely assumed -- see below)");
+
+    // Cross-family confusion: a Latin held-out line predicted as a Brahmic
+    // language, or vice versa. Per the accepted contract, this is expected
+    // to be exactly zero by construction (disjoint Unicode blocks mean zero
+    // n-gram overlap between a document in one family and a profile built
+    // from the other), but is computed and disclosed here, not merely
+    // asserted from theory.
+    size_t crossFamilyConfusion;
+    foreach (lang; supportedLangCodes) {
+        bool langIsBrahmic = brahmicLangCodes.canFind(lang);
+        foreach (otherLang; supportedLangCodes) {
+            if (langIsBrahmic == brahmicLangCodes.canFind(otherLang)) continue;
+            crossFamilyConfusion += confusion.get(lang ~ "|" ~ otherLang, 0);
+        }
+    }
+    writeln("language id check: cross-family confusion total (a Latin held-out line predicted as " ~
+        "Brahmic, or a Brahmic held-out line predicted as Latin) = ", crossFamilyConfusion,
+        " (expected 0 by disjoint-Unicode-block construction, computed and disclosed rather than " ~
+        "assumed)");
+
     // Pinned as an exact reproducibility golden: the currently embedded
     // profile tables and thresholds produce this exact outcome on this
-    // small, disjoint, authored 11-language held-out set. This is not an
+    // small, disjoint, authored 17-language held-out set. This is not an
     // accuracy target this checker gates future changes on; a deliberate
     // algorithm/threshold/profile change is free to move these numbers, as
     // long as they are updated here deliberately rather than silently
-    // drifting. Disclosure: 106/110 correct, 0 misclassified (including 0
-    // cross-Romance misclassification), 4 abstained (2 Portuguese, 2 Dutch,
-    // both via mixedOrAmbiguous) at the currently embedded profile tables.
-    check(total == 110, "held-out fixture size changed");
-    check(correct == 106 && misclassified == 0 && abstained == 4,
-        "held-out confusion matrix golden changed");
+    // drifting.
+    check(total == 170, "held-out fixture size changed");
+    check(misclassified == 0, "held-out confusion matrix golden changed: unexpected misclassification");
     check(romanceCrossConfusion == 0, "Romance sub-table cross-confusion golden changed");
+    check(brahmicCrossConfusion == 0, "Brahmic sub-table cross-confusion golden changed");
+    check(crossFamilyConfusion == 0, "cross-family confusion golden changed: Latin/Brahmic bled into " ~
+        "each other despite disjoint Unicode blocks");
+    check(correct == 166 && abstained == 4,
+        "held-out confusion matrix golden changed: 166/170 correct, 0 misclassified, 4 abstained " ~
+        "(2 Portuguese and 2 Dutch, both via mixedOrAmbiguous, unchanged from the 11-language slice) " ~
+        "expected at the currently embedded profile tables");
 }
 
 // ---------------------------------------------------------------------------
@@ -512,10 +702,12 @@ private void exhaustiveLanguageValueRoundTrip() {
     static immutable SupportedLanguage[] allLanguages = [
         SupportedLanguage.en, SupportedLanguage.es, SupportedLanguage.fr, SupportedLanguage.de,
         SupportedLanguage.pt, SupportedLanguage.it, SupportedLanguage.nl, SupportedLanguage.tr,
-        SupportedLanguage.vi, SupportedLanguage.pl, SupportedLanguage.id,
+        SupportedLanguage.vi, SupportedLanguage.pl, SupportedLanguage.id, SupportedLanguage.hi,
+        SupportedLanguage.bn, SupportedLanguage.ta, SupportedLanguage.te, SupportedLanguage.gu,
+        SupportedLanguage.pa,
     ];
-    check(allLanguages.length == 11, "exhaustive language list golden assumes eleven languages");
-    check(SupportedLanguage.max == SupportedLanguage.id, "SupportedLanguage.max golden changed");
+    check(allLanguages.length == 17, "exhaustive language list golden assumes seventeen languages");
+    check(SupportedLanguage.max == SupportedLanguage.pa, "SupportedLanguage.max golden changed");
     foreach (lang; allLanguages) {
         LanguageDetectionResult result;
         result.status = LanguageDetectionStatus.detected;
@@ -533,7 +725,7 @@ private void exhaustiveLanguageValueRoundTrip() {
         check(decoded == record, "exhaustive round trip failed for language " ~ lang.to!string);
     }
 
-    // The byte value one past the new max (`SupportedLanguage.max + 1 == 11`)
+    // The byte value one past the new max (`SupportedLanguage.max + 1 == 17`)
     // must still be rejected as a malformed language value. The decoder
     // checks the whole-record checksum before the language-range check, so
     // a raw single-byte corruption of an otherwise-valid encoded record
@@ -554,7 +746,7 @@ private void exhaustiveLanguageValueRoundTrip() {
     payload.put(currentProfileTableIdentity()[]);
     foreach_reverse (shift; [0, 8, 16, 24]) payload.put(cast(ubyte)(languageIdAlgorithmVersion >> shift));
     payload.put(cast(ubyte) LanguageDetectionStatus.detected);
-    payload.put(cast(ubyte)(SupportedLanguage.max + 1)); // 11: one past the new valid range
+    payload.put(cast(ubyte)(SupportedLanguage.max + 1)); // 17: one past the new valid range
     foreach_reverse (shift; [0, 8, 16, 24]) payload.put(cast(ubyte)(500 >> shift));
     payload.put(cast(ubyte) LanguageAbstentionReason.none);
     auto overflowRecordBytes = payload.data ~ sha256Of(payload.data)[];
@@ -700,7 +892,11 @@ void main(string[] args) {
     boundaryGoldens();
     scriptAbstentionGolden();
     vietnameseDiacriticDensityGolden();
+    viramaNuktaJoinerGolden();
+    brahmicScriptGateGolden();
+    brahmicShortTextBoundaryGolden();
     mixedLanguageGolden();
+    mixedScriptGolden();
     excludedNeighborAbstentionGoldens();
     thresholdRoutingGoldens();
     heldOutConfusionMatrix();

@@ -1,25 +1,32 @@
 # Language identification: pure n-gram classifier with abstention (v1)
 
-**Status: next slice of issue #34 (C03), extending the shipped first slice
-(`805d7d3`, PR #291) from four to eleven Latin-script languages.** This is
-still a pure, repository-local seam, not a completion of #34. It is a
-deterministic character-n-gram language classifier, now covering eleven
+**Status: issue #299's slice, extending #34's two shipped Latin-script
+slices (`805d7d3`/PR #291, four languages; a later slice, seven more) with
+this classifier's first non-Latin script family.** This is still a pure,
+repository-local seam, not a completion of #34. It is a deterministic
+character-n-gram language classifier, now covering the original eleven
 Latin-script languages (English, Spanish, French, German, Portuguese,
-Italian, Dutch, Turkish, Vietnamese, Polish, Indonesian), a typed
-result/abstention value, and a revision-bound identity/wire idiom. It does
-**not** parse HTML, register a pipeline stage, expose CLI/config, or publish
-local/JSONL/durable/overlay output. `domain.language_id` is self-contained:
-nothing else in `source/` imports it, and the ordinary shipping binary has
-no language-id stage/CLI/config reachability. The parent issue #34 stays
-open for a separately reviewed successor
-(`source/effects/language_overlay.d`, persisting via the existing C01
-`OverlayWriter`), for any decision to
-route `domain.topical_tags`'s own caller-supplied `language` parameter from
-this module's output, and for the broader ~25-language, 13-script-family
-roadmap this slice's contract recorded (Han/Chinese, Japanese, Korean,
-Devanagari, Bengali, Arabic script, Cyrillic, Tamil, Telugu, Gujarati,
-Gurmukhi, Thai) — none of that is decided or touched here; this slice stays
-within the Latin script family the first slice already handled.
+Italian, Dutch, Turkish, Vietnamese, Polish, Indonesian) plus six Brahmic-
+family languages (Hindi/Devanagari, Bengali, Tamil, Telugu, Gujarati,
+Punjabi/Gurmukhi) — seventeen languages total, a typed result/abstention
+value, and a revision-bound identity/wire idiom. It does **not** parse HTML,
+register a pipeline stage, expose CLI/config, or publish local/JSONL/
+durable/overlay output. `domain.language_id` is self-contained: nothing else
+in `source/` imports it, and the ordinary shipping binary has no
+language-id stage/CLI/config reachability. The parent issue #34 stays open
+for a separately reviewed successor (`source/effects/language_overlay.d`,
+persisting via the existing C01 `OverlayWriter`), for any decision to route
+`domain.topical_tags`'s own caller-supplied `language` parameter from this
+module's output, and for the broader ~25-language, 13-script-family roadmap
+recorded in #34's own next-slice contract (Han/Chinese, Japanese, Korean,
+Arabic script, Cyrillic, Thai remain untouched) — none of that is decided or
+touched here. Per this slice's accepted contract, the recorded roadmap order
+(script-family-detection front end before Brahmic) was deliberately skipped
+in favor of doing Brahmic now, on the owner-approved grounds that these 6
+scripts are fully disjoint Unicode blocks from each other and from Latin, so
+the existing per-language `distanceTo` scoring already discriminates
+correctly by construction — see "Notes: roadmap-sequencing deviation" in the
+accepted contract on issue #299 for the full disclosure.
 
 ## Files
 
@@ -30,25 +37,30 @@ within the Latin script family the first slice already handled.
   checker.
 - `experiments/language_id/check.d` — release-active D checker: provenance
   (seed-corpus digests, generator reproducibility, seed/held-out
-  disjointness), goldens, the full 11x11 held-out confusion matrix (with a
-  separately surfaced Romance sub-table), the excluded-neighbor abstention
+  disjointness), goldens (including this slice's virama/nukta and
+  script-gate-widening goldens below), the full 17x17 held-out confusion
+  matrix (with separately surfaced Romance and Brahmic sub-tables, plus a
+  disclosed cross-family confusion count), the excluded-neighbor abstention
   probes, decoder rejection, a privacy boundary, and a benchmark matrix.
 - `experiments/language_id/fixtures/profiles/<lang>.txt` for
-  `<lang>` in `en/es/fr/de/pt/it/nl/tr/vi/pl/id` — the authored seed corpus
-  (twenty original sentences per language) the embedded profile tables are
-  generated from. The seven added by this slice (pt/it/nl/tr/vi/pl/id)
-  follow the exact same discipline as the original four.
-- `experiments/language_id/fixtures/heldout/<lang>.txt` for the same eleven
-  language codes — a disjoint authored held-out set (ten original sentences
-  per language, never copied from the seed corpus) used for the
+  `<lang>` in `en/es/fr/de/pt/it/nl/tr/vi/pl/id/hi/bn/ta/te/gu/pa` — the
+  authored seed corpus (twenty original sentences per language) the embedded
+  profile tables are generated from. The six added by this slice
+  (hi/bn/ta/te/gu/pa) follow the exact same discipline as the original
+  eleven.
+- `experiments/language_id/fixtures/heldout/<lang>.txt` for the same
+  seventeen language codes — a disjoint authored held-out set (ten original
+  sentences per language, never copied from the seed corpus) used for the
   confusion-matrix report.
 - `experiments/language_id/fixtures/heldout/excluded/{ro,ca-or-gl,sw}.txt` —
   authored "excluded-neighbor" probes: ten original sentences each in
   Romanian, Catalan (the accepted contract's "Catalan-or-Galician" choice —
   Catalan was picked; the file keeps the generic `ca-or-gl` name from the
-  contract), and Swahili. These are close linguistic neighbors of languages
-  now in the supported eleven, but are themselves **not** supported; see
-  "Excluded-neighbor abstention" below.
+  contract), and Swahili. These are close linguistic neighbors of Latin-
+  script languages now in the supported set, but are themselves **not**
+  supported; see "Excluded-neighbor abstention" below. Not extended by this
+  slice — script-block disjointness makes an analogous excluded-neighbor
+  probe unnecessary for the 6 new Brahmic languages (see "Non-goals" below).
 - This document.
 
 Rollback is deleting these files; no existing job, source shard, or other
@@ -59,8 +71,8 @@ separately authorized shipping landing exists.
 
 Cavnar & Trenkle-style out-of-place character-n-gram rank distance
 (n=1..4), unchanged by this slice. Chosen over single-character frequency
-(rejected: these Latin-script languages share the Latin alphabet with
-heavily overlapping letter-frequency distributions, giving poor
+(rejected: these languages share alphabets/scripts with heavily overlapping
+letter-frequency distributions within their own family, giving poor
 discrimination) and stopword/tokenizer approaches (rejected: they require
 word-boundary assumptions and degrade sharply on short or malformed text).
 No embedded ML/statistical model and no network/model-download dependency.
@@ -73,6 +85,35 @@ broken by ascending n-gram string (UTF-8 byte order) — a fully deterministic
 total order that never depends on hash-table iteration order. Each
 language's profile keeps the top `profileCap` (300) ranked n-grams; a scored
 document's own text is ranked the same way and also capped at 300.
+
+**This slice's required word-boundary fix.** "Maximal run of Unicode
+letters" is defined by `std.uni.isAlpha`, which follows Unicode's derived
+`Alphabetic` property — true for ordinary letters and, usefully, also true
+for Devanagari-family dependent vowel signs (matras, e.g. Devanagari `ा`/
+`ि`/`ी`), anusvara, candrabindu, and visarga, so those already tokenized
+correctly with no change needed. But `isAlpha` is `false` for two mark
+categories that are common inside real words in these 6 scripts: the
+virama/halant sign (Devanagari `U+094D`, Bengali `U+09CD`, Gurmukhi `U+0A4D`,
+Gujarati `U+0ACD`, Tamil "pulli" `U+0BCD`, Telugu `U+0C4D`), which suppresses
+a consonant's inherent vowel to form a conjunct cluster, and the nukta sign
+(Devanagari `U+093C`, Bengali `U+09BC`, Gurmukhi `U+0A3C`, Gujarati `U+0ABC`
+— Tamil and Telugu have no nukta code point in Unicode at all, so there is
+no nukta case for those two scripts), which modifies a base consonant for
+loanword sounds. Without a fix, `wordsOf` treats both as word separators and
+fragments real conjunct/loanword words into multiple pieces — mechanically
+confirmed against the accepted contract's own example, Hindi क्षत्र
+("kṣatra", 2 viramas), which fragmented into 3 pieces under the pre-fix
+logic. The fix adds a private `isWordInternalJoiner` predicate (the same
+hardcoded-Unicode-range/codepoint idiom `isLatinLetter` already uses) for
+exactly these 10 code points, and `wordsOf`'s per-codepoint test becomes
+`isAlpha(c) || isWordInternalJoiner(c)`; a joiner is appended to the current
+word exactly like a letter (case-folding via `toLower` is a no-op for these
+code points), so it never terminates a word and is never dropped. See the
+"virama/nukta word-internal-joiner" unit test in `source/domain/
+language_id.d` (all 6 scripts' virama cases and all 4 scripts' nukta cases,
+tested directly against the private `wordsOf`) and the corresponding golden
+in `experiments/language_id/check.d` (proven through the public
+`totalNgramCount` instead, since `wordsOf` itself is private).
 
 The out-of-place distance from a document to a language profile sums, for
 every one of the document's ranked n-grams, the absolute difference between
@@ -103,20 +144,29 @@ comparable across differently sized documents in any absolute sense.
    - `vi`: `5678ca971c0618768b2ed9fe1148bae04c53b326f473cefab2c624e8f01f7dbb`
    - `pl`: `f092baf804251c945dfd46147f47beb013cc84d1cbda5c32ad2f8196ca236fbc`
    - `id`: `1dea1af4e267f318badb549428904a3c6a4ea9b2c4f40f13074dcc97994c32b8`
+   - `hi`: `c152bc8517da47a937e7456dc1a7b1512b2102f177e32cc8ca6c50fba60c9298`
+   - `bn`: `b0cdb273e478c80e85de975b25eb28540f8edab0feb8576f0bbf98d11feb9d98`
+   - `ta`: `35e7e0bf89a29c7efd0f57e37ccaae8f25151f1d7c7492e89f9f0ef3c5459f63`
+   - `te`: `7577c6a401a0498f73316a1949362ef2fcee0595752223fc0dd53225d94cd43d`
+   - `gu`: `69544e75d7781ddb86d2cdf3214ec87b8031b43bdb87de35fafd23fd72089ccd`
+   - `pa`: `12ed2f313da2a0b4d7566e62238c3cb69f9cf8e6c52553e9087ffdb65da531f3`
 2. **Deterministic generator.** `experiments/language_id/generate_profiles.d`
    reads the seed corpus and calls `domain.language_id.rankedNgramProfile` —
    the exact same pure function the production module exposes — to produce
    each language's ranked n-gram table. There is only one ranking algorithm
    to drift, because the generator and the checker both call it directly
    rather than re-implementing it. The result is embedded as the
-   `static immutable string[] languageProfileEn/Es/Fr/De/Pt/It/Nl/Tr/Vi/Pl/Id`
-   tables in `source/domain/language_id.d`, mirroring
+   `static immutable string[] languageProfileEn/Es/Fr/De/Pt/It/Nl/Tr/Vi/Pl/Id/
+   Hi/Bn/Ta/Te/Gu/Pa` tables in `source/domain/language_id.d`, mirroring
    `effects.html_main_content`'s fixed drift-checked table idiom. `check.d`'s
    `generatorReproducibilityProof` re-runs the generator (twice, to also
    confirm run-to-run determinism) and asserts byte-identical output against
    those embedded tables — the drift-detection proof this contract requires,
-   now covering all eleven languages. To regenerate after an intentional
-   seed-corpus change:
+   now covering all seventeen languages. `rankedNgramProfile` calls the same
+   `wordsOf` this slice fixed for virama/nukta joiners, so the six new
+   Brahmic tables were generated through the corrected tokenizer from the
+   start, not regenerated after a separate fix. To regenerate after an
+   intentional seed-corpus change:
    ```sh
    ldc2 -O3 -release -Isource -Iexperiments -d-version=LanguageIdGenerateProfilesMain \
      -of=/tmp/language-id-generate-profiles \
@@ -131,13 +181,15 @@ comparable across differently sized documents in any absolute sense.
    original sentences per language, never copied or derived from the seed
    corpus. `check.d`'s `disjointnessProof` asserts zero exact-line overlap
    between every seed sentence and every held-out sentence, across all
-   eleven languages. `heldOutConfusionMatrix` then reports (and, per this
+   seventeen languages. `heldOutConfusionMatrix` then reports (and, per this
    codebase's usual exact-digest reproducibility convention, pins as a
    golden rather than treating as a soft/statistical assertion) the
    per-language confusion matrix and abstention counts over that held-out
-   set — currently 106/110 correct, 0 misclassified, 4 abstained (2
-   Portuguese and 2 Dutch held-out lines, both via `mixedOrAmbiguous`). This
-   is small authored boundary evidence only, **not** a web-scale, universal-
+   set — currently 166/170 correct, 0 misclassified, 4 abstained (2
+   Portuguese and 2 Dutch held-out lines, both via `mixedOrAmbiguous`,
+   unchanged from the 11-language slice; all 6 new Brahmic languages'
+   held-out lines classify correctly with 0 abstentions). This is small
+   authored boundary evidence only, **not** a web-scale, universal-
    language-coverage, or accuracy-target claim; a deliberate future
    algorithm/threshold/profile change is free to move this number as long as
    the golden is updated deliberately rather than silently drifting.
@@ -154,6 +206,27 @@ comparable across differently sized documents in any absolute sense.
    This is disclosed as the current observed result, not gated to an
    externally accepted target number.
 
+   **Brahmic sub-table (hi/bn/ta/te/gu/pa), added by this slice.** Mirroring
+   the Romance precedent, the cross-confusion cells among these six new
+   languages are computed and printed as their own separate 6x6 sub-table,
+   even though they are new to each other (unlike the Romance case, they are
+   not close linguistic relatives sharing a script — each occupies its own
+   disjoint Unicode block). At the currently embedded profile tables, this
+   sub-table's off-diagonal cross-Brahmic-confusion total is **0**: every
+   held-out line for all 6 languages classifies correctly as its own
+   language, with 0 abstentions.
+
+   **Cross-family confusion, added by this slice.** Per the accepted
+   contract's own framing, script-block disjointness is expected to fully
+   discriminate the Latin and Brahmic families — a document's n-grams from
+   one script trivially fail to match a profile built from a disjoint
+   script's codepoints, since every one of a document's n-grams absent from
+   a profile incurs `distanceTo`'s maximal out-of-place penalty. `check.d`
+   computes this directly rather than asserting it from theory: of all 170
+   held-out lines, **zero** Latin-family lines predict as a Brahmic language
+   and zero Brahmic-family lines predict as a Latin language. This confirms
+   the expected-by-design separation is real, not merely assumed.
+
 ## Result type and abstention
 
 `LanguageIdentity` binds the typed `DocumentId`, the exact 32-byte SHA-256
@@ -166,10 +239,11 @@ separates its `TopicalTagsIdentity` from the full
 
 `LanguageDetectionResult` carries a status (`detected`/`abstained`); if
 `detected`, a `SupportedLanguage` (`en`/`es`/`fr`/`de`/`pt`/`it`/`nl`/`tr`/
-`vi`/`pl`/`id` — the seven added by this slice appended after the original
-four, so the wire byte value of every existing supported language is
-unchanged) and the relative, uncalibrated confidence described above; if
-`abstained`, one typed reason (unchanged by this slice):
+`vi`/`pl`/`id`/`hi`/`bn`/`ta`/`te`/`gu`/`pa` — the six Brahmic-family
+languages this slice adds (`hi`/`bn`/`ta`/`te`/`gu`/`pa`, values `11`-`16`)
+are appended after the eleven Latin-script languages, so the wire byte value
+of every existing supported language is unchanged) and the relative,
+uncalibrated confidence described above; if `abstained`, one typed reason:
 
 - `emptyText` — zero-byte input.
 - `invalidUtf8` — the bytes do not decode as UTF-8.
@@ -183,26 +257,57 @@ unchanged) and the relative, uncalibrated confidence described above; if
 - `tooShort` — fewer than `minNgramCount` (**60**, pinned; see "Flagged for
   owner sign-off" below) total n-gram occurrences (n=1..4 combined, i.e. the
   sum of every n-gram's count, not the count of distinct n-gram types).
+  Re-derived for a Brahmic language (Hindi) by this slice's
+  `brahmicShortTextBoundaryGolden` in `experiments/language_id/check.d`,
+  using the identical `4*L + 2` formula with joiner-inclusive word lengths
+  (see the word-boundary fix above) — the boundary is still exact.
 - `unsupportedScript` — a cheap pre-check, run before any n-gram scoring:
   if more than `nonLatinScriptBound` (30%) of the text's Unicode letters are
-  outside the Latin script ranges this module recognizes, abstain rather
-  than force-fit non-Latin text into a Latin-script classifier. **This
-  slice's required code fix**: the recognized ranges now also include Latin
-  Extended Additional (`U+1E00`-`U+1EFF`), in addition to the original Basic
-  Latin, Latin-1 Supplement, and Latin Extended-A/B. This was necessary for
-  Vietnamese: many of its precomposed tone-marked vowels (e.g. `ệ`, `ọ`,
-  `ữ`, and, as it turns out, several plain hook-above/dot-below/tilde-y
-  tone marks with no circumflex/breve at all, e.g. `ả`, `ạ`, `ỹ`) live in
-  this block, not in the ranges the first slice recognized. Verified against
-  real, dense Vietnamese text: without the fix, an authored sentence with a
-  non-Latin-under-the-old-ranges letter fraction of ~30.1% (22 of 73
-  letters) false-abstained via `unsupportedScript`; with the fix, the same
-  sentence correctly detects as Vietnamese (see the "Vietnamese diacritic
-  density" golden in `experiments/language_id/check.d`, and the "Excluded-
-  neighbor abstention" section below for what this fix does *not* change).
+  outside the script ranges this module recognizes, abstain rather than
+  force-fit unrecognized-script text into this classifier. The prior slice's
+  required fix added Latin Extended Additional (`U+1E00`-`U+1EFF`) for
+  Vietnamese, in addition to the original Basic Latin, Latin-1 Supplement,
+  and Latin Extended-A/B (many of Vietnamese's precomposed tone-marked
+  vowels, e.g. `ệ`, `ọ`, `ữ`, `ả`, `ạ`, `ỹ`, live in that block — see the
+  "Vietnamese diacritic density" golden in `experiments/language_id/
+  check.d`).
+
+  **This slice's required second code fix (found during grooming, beyond
+  the original ticket's ask).** The virama/nukta word-boundary fix above is
+  necessary but not sufficient on its own: `detectLanguage`'s
+  `unsupportedScript` pre-check runs *before* `wordsOf` is ever reached, and
+  under the pre-fix `isLatinLetter`-only gate, every Devanagari-family
+  document measured 100% non-Latin letters — far past the 30% bound — so it
+  would abstain here regardless of the word-boundary fix, shipping dead
+  code. The fix adds a private `isBrahmicLetter` helper (the same
+  hardcoded-Unicode-range idiom `isLatinLetter` uses) covering the 6 new
+  scripts' real Unicode blocks — Devanagari (`0x0900`-`0x097F`), Bengali
+  (`0x0980`-`0x09FF`), Gurmukhi (`0x0A00`-`0x0A7F`), Gujarati
+  (`0x0A80`-`0x0AFF`), Tamil (`0x0B80`-`0x0BFF`), Telugu
+  (`0x0C00`-`0x0C7F`) — deliberately excluding the immediately adjacent
+  Oriya (`0x0B00`-`0x0B7F`) and Kannada (`0x0C80`-`0x0CFF`) blocks, which are
+  out of scope for this slice. `scriptCountsOf`'s per-letter test changed
+  from "is Latin" to "is Latin or is recognized-Brahmic" when deciding what
+  counts toward the abstention fraction. Verified directly, both ways:
+  `isBrahmicLetter`'s own unit test in `source/domain/language_id.d` probes
+  every recognized range's boundaries plus the adjacent Oriya/Kannada
+  boundaries (both ends of each, both just-inside and just-outside), and
+  `experiments/language_id/check.d`'s `brahmicScriptGateGolden` proves a
+  plain Devanagari sentence now reaches scoring instead of abstaining, while
+  its `scriptAbstentionGolden` re-confirms both the existing Cyrillic
+  (Russian) case *and* a new authored Kannada sentence — immediately
+  adjacent to Telugu's block — both still correctly abstain, proving the
+  widening is additive (Latin plus exactly these 6 Brahmic scripts), not a
+  general loosening.
 - `mixedOrAmbiguous` — the best and second-best language's out-of-place
   distances are within `mixedMarginBound` (2% of the worst-case distance) of
-  each other; the two top candidates are too close to call.
+  each other; the two top candidates are too close to call. This slice adds
+  a mixed-*script* golden (`mixedScriptGolden` in `experiments/language_id/
+  check.d`) alongside the existing mixed-*language* (English/Spanish)
+  golden: an authored sentence blending an English clause with a roughly
+  balanced Hindi/Devanagari clause abstains via `mixedOrAmbiguous`, proving
+  the existing mixed-language mechanism generalizes to mixed-script text
+  without a bespoke new mechanism.
 - `belowConfidenceThreshold` — the best candidate clears the margin check
   above but its own relative confidence is still below
   `internalConfidenceFloor` (0.15). This is an **internal** detection floor,
@@ -299,72 +404,116 @@ it's tested and any residual gap is disclosed"), and is flagged here for
 owner sign-off, the same way the original German-vs-Dutch 0.315/0.316
 finding was.
 
+**Not extended to the 6 new Brahmic languages by this slice.** Per the
+accepted contract, the excluded-neighbor mechanism exists to catch close
+*statistical* neighbors of a supported language sharing the *same*
+script/alphabet (e.g. Catalan vs. Spanish, both Latin script). Script-block
+disjointness is a structurally different and much stronger discriminator:
+a document in an unsupported Brahmic-adjacent or altogether different
+script either falls outside all 6 recognized Brahmic ranges (and abstains
+via `unsupportedScript`, as confirmed for Kannada above) or, if it somehow
+shared a script family with a supported language, would need its own
+authored probe corpus in that language to test — not attempted here, since
+no such close non-supported neighbor in these 6 specific scripts was
+identified during grooming. The nearest analogous risk for this slice is
+the cross-family confusion count in "Provenance" above, which is measured
+at exactly 0.
+
 ## Wire format
 
-**Unchanged by this slice.** `encodeLanguageIdentity`/
-`decodeLanguageIdentity`: a canonical fixed-field layout (domain tag, schema
-version, document ID, text revision, profile table identity, algorithm
-version, status, language, per-mille confidence, abstention reason) plus a
-whole-record SHA-256 checksum trailer, directly mirroring
-`domain.topical_tags`'s `encodeTopicalTags`/`decodeTopicalTags` idiom. The
-`language` field is still a single byte; it now accepts the seven new
-`SupportedLanguage` values (`4`-`10`) in addition to the original four
-(`0`-`3`), with `SupportedLanguage.max` now `10`. `decodeLanguageIdentity`
-binds to a caller-supplied `expectedId`/`expectedTextRevision` obtained
-independently (e.g. a future C01 join), so a record cannot silently attach
-to another document or revision; it also re-validates the profile-table
-identity against the currently embedded tables (which changed with this
-slice's seven new profiles, so a record built under the four-language
-tables is correctly rejected as a profile-table mismatch), rejecting a
-record built under a different profile version. Truncation, trailing data,
-and any single-byte corruption anywhere in the record are all rejected.
+**No shape change; the recognized `language` byte range widens.**
+`encodeLanguageIdentity`/`decodeLanguageIdentity`: a canonical fixed-field
+layout (domain tag, schema version, document ID, text revision, profile
+table identity, algorithm version, status, language, per-mille confidence,
+abstention reason) plus a whole-record SHA-256 checksum trailer, directly
+mirroring `domain.topical_tags`'s `encodeTopicalTags`/`decodeTopicalTags`
+idiom, unchanged by this slice. The `language` field is still a single byte;
+it now additionally accepts the six new `SupportedLanguage` values
+(`11`-`16`) on top of the eleven Latin-script values (`0`-`10`), with
+`SupportedLanguage.max` now `16`. `decodeLanguageIdentity` binds to a
+caller-supplied `expectedId`/`expectedTextRevision` obtained independently
+(e.g. a future C01 join), so a record cannot silently attach to another
+document or revision; it also re-validates the profile-table identity
+against the currently embedded tables (which changed with this slice's six
+new profiles, so a record built under the eleven-language tables is
+correctly rejected as a profile-table mismatch), rejecting a record built
+under a different profile version. Truncation, trailing data, and any
+single-byte corruption anywhere in the record are all rejected.
 
 ## Proof (release-active checker)
 
 `experiments/language_id/check.d`:
 
-- **Seed-corpus digests** — pinned SHA-256 per language, all eleven (above).
+- **Seed-corpus digests** — pinned SHA-256 per language, all seventeen
+  (above).
 - **Generator reproducibility** — the byte-identical drift-detection proof
   described under Provenance, run twice for run-to-run determinism, now
-  covering all eleven embedded tables.
+  covering all seventeen embedded tables.
 - **Seed/held-out disjointness** — zero exact-line overlap, both corpora
-  above their expected minimum sizes, across all eleven languages.
+  above their expected minimum sizes, across all seventeen languages.
 - **Boundary goldens** — the exact `tooShort` cutoff transition (58 vs. 60
-  total n-grams), plus empty/oversize/invalid-UTF-8 abstention (unchanged
-  `minNgramCount == 60`).
-- **Script-abstention golden** — an authored Russian (Cyrillic) sentence
-  abstains via `unsupportedScript` (unchanged non-Latin case).
+  total n-grams) for English, plus empty/oversize/invalid-UTF-8 abstention
+  (unchanged `minNgramCount == 60`); re-derived separately for Hindi (see
+  next item).
+- **Brahmic short-text boundary golden** — the identical 58-vs-60 `tooShort`
+  transition re-derived for Hindi (`brahmicShortTextBoundaryGolden`), using
+  plain short Devanagari words and the same `4*L + 2` formula, proving the
+  boundary is still exact with joiner-inclusive word lengths.
+- **Script-abstention golden** — an authored Russian (Cyrillic) sentence,
+  and this slice's authored Kannada sentence (immediately adjacent to
+  Telugu's recognized block), both abstain via `unsupportedScript` —
+  confirming `isBrahmicLetter`'s widening is additive, not a general
+  loosening.
 - **Vietnamese diacritic-density golden** — an authored, deliberately dense
   Vietnamese sentence (~30.1% of its letters in Latin Extended Additional)
-  is correctly detected as Vietnamese, proving the `isLatinLetter` range fix
-  required by this slice actually works; verified against the pre-fix
-  behavior (false-abstains via `unsupportedScript` without it).
+  is correctly detected as Vietnamese (unchanged from the prior slice).
+- **Virama/nukta word-internal-joiner golden** (this slice's required fix
+  #1) — the accepted contract's own example, Hindi क्षत्र (2 viramas),
+  proven via the public `totalNgramCount` to round-trip as one 6-codepoint
+  word (26 total n-grams), not the 3-fragment pre-fix count (22). All 6
+  scripts' virama cases and all 4 scripts' nukta cases are additionally
+  tested directly against the private `wordsOf` in `source/domain/
+  language_id.d`'s own unit test.
+- **Brahmic script-gate widening golden** (this slice's required fix #2,
+  found during grooming) — a plain, ordinary-length Devanagari sentence must
+  not abstain via `unsupportedScript` and must reach scoring, classifying
+  correctly as Hindi (`brahmicScriptGateGolden`). `isBrahmicLetter`'s own
+  Oriya/Kannada boundary-codepoint unit test lives in `source/domain/
+  language_id.d` (private helper).
 - **Mixed-language golden** — an authored English/Spanish blend abstains via
   `mixedOrAmbiguous`.
+- **Mixed-script golden** (new territory this slice adds) — an authored
+  English/Hindi (Latin/Devanagari) blend also abstains via
+  `mixedOrAmbiguous` or `belowConfidenceThreshold` (`mixedScriptGolden`),
+  proving the existing mixed-language mechanism generalizes to mixed-script
+  text.
 - **Excluded-neighbor abstention goldens** — the Romanian/Catalan/Swahili
-  probes described above, with the exact observed abstain/force-classify
-  counts pinned per probe language and every force-classified line's
-  confidence disclosed in the checker's own output.
+  probes described above (unchanged by this slice; not extended to
+  Brahmic — see "Excluded-neighbor abstention"), with the exact observed
+  abstain/force-classify counts pinned per probe language and every
+  force-classified line's confidence disclosed in the checker's own output.
 - **Threshold-routing goldens** — `routeLanguage` at, above, and below one
   exact declared threshold, plus the always-unrouted abstained case.
-- **Full 11x11 held-out confusion matrix**, with the Romance (es/fr/it/pt)
-  sub-table printed as its own separate, explicitly reviewed block —
-  described under Provenance.
+- **Full 17x17 held-out confusion matrix**, with the Romance (es/fr/it/pt)
+  and, added by this slice, Brahmic (hi/bn/ta/te/gu/pa) sub-tables each
+  printed as their own separate, explicitly reviewed block, plus a disclosed
+  cross-family (Latin vs. Brahmic) confusion count — described under
+  Provenance.
 - **Identity and decoder rejection** — round trip, wrong document/revision,
   truncation, trailing data, and every single byte of one fixture's encoded
   record corrupted and confirmed rejected.
 - **Exhaustive `SupportedLanguage` wire round trip** — every one of the
-  eleven enum values (including the seven added by this slice)
+  seventeen enum values (including the six added by this slice)
   independently round-trips through encode/decode, and a hand-constructed
-  record with the language byte set to `SupportedLanguage.max + 1` (with an
-  otherwise-correct checksum, isolating the range-check path from the
-  checksum check) is rejected.
+  record with the language byte set to `SupportedLanguage.max + 1` (`17`,
+  with an otherwise-correct checksum, isolating the range-check path from
+  the checksum check) is rejected.
 - **Privacy boundary** — a synthetic canary embedded in input text is
   confirmed absent from the encoded record; only the bounded language code,
   per-mille confidence, and abstention reason travel.
 - **Benchmark matrix** — a D-only child-process matrix over `many-small`
   (64 documents) and `few-large` (4 documents) shapes at the same total
-  512 KiB of synthetic text, now re-run at the eleven-language embedded
+  512 KiB of synthetic text, now re-run at the seventeen-language embedded
   table size. Each shape runs twice as a separate child process; an exact
   digest line must match byte-for-byte across the two runs before the
   parent reports wall time, `RUSAGE_CHILDREN` CPU and peak RSS, and the
@@ -393,20 +542,27 @@ provenance, the confusion matrix, and the benchmark matrix.
 ## What this is not
 
 Not a calibrated-probability, universal-language-coverage, or web-scale
-accuracy claim — the held-out split above is 110 authored sentences across
-eleven languages. Not coverage of any script beyond these eleven
-Latin-script languages: no Han/Japanese/Korean/Devanagari/Bengali/Arabic
-script/Cyrillic/Thai work is included or referenced by code here — that is
-a separate, not-yet-scoped future research track (see the "Notes" recorded
-in this slice's accepted contract on issue #34). Not a script-family-
-detection front-end rework — the single binary Latin/non-Latin gate
-structure from the first slice is unchanged; only its recognized ranges
-were widened. Not a guarantee that the excluded-neighbor mechanism achieves
-zero false-classification for languages outside the supported set — see
-"Excluded-neighbor abstention" above. Not HTML parsing, a pipeline stage,
-CLI/config surface, or any local/JSONL/durable/overlay publication path;
-those are explicitly out of scope for this slice and belong to a separately
-groomed successor. Not a change to `domain.topical_tags`'s existing
-`language` parameter — whether or how a later slice wires this module's
-output into that parameter is an explicitly deferred integration decision,
-not made here.
+accuracy claim — the held-out split above is 170 authored sentences across
+seventeen languages. Not coverage of any script beyond these two families
+(11 Latin-script languages, 6 Brahmic-family languages): no Han/Japanese/
+Korean/Arabic script/Cyrillic/Thai work is included or referenced by code
+here, and Kannada and Malayalam (other Brahmic-family scripts, noted as
+likely-same-virama-pattern but explicitly not verified) are also out of
+scope — that is a separate, not-yet-scoped future research track (see the
+~25-language, 13-script-family roadmap recorded in #34's own next-slice
+contract). Not a script-family-detection front-end rework — the gate
+structure from the first slice (now a small closed set of recognized script
+families: Latin, plus these 6 Brahmic scripts) is otherwise unchanged; see
+"Status" above for the explicit, owner-approved roadmap-sequencing deviation
+this slice took (Brahmic before the general front end). Not a guarantee
+that the excluded-neighbor mechanism achieves zero false-classification for
+languages outside the supported set — see "Excluded-neighbor abstention"
+above, including why that mechanism was not extended to the 6 new Brahmic
+languages. Not HTML parsing, a pipeline stage, CLI/config surface, or any
+local/JSONL/durable/overlay publication path; those are explicitly out of
+scope for this slice and belong to a separately groomed successor. Not a
+change to `domain.topical_tags`'s existing `language` parameter — whether or
+how a later slice wires this module's output into that parameter is an
+explicitly deferred integration decision, not made here. Not a change to
+`routeLanguage`, the wire record layout, or the `LanguageIdentity`/
+`LanguageIdentityRecord` shapes — only `SupportedLanguage` widens.

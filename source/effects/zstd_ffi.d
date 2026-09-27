@@ -1,4 +1,11 @@
-/// ABI declarations for the pinned zstd 1.5.7 decompressor archive.
+/// ABI declarations for the pinned zstd 1.5.7 archive: the original
+/// decompressor declarations, plus the compression-side one-shot buffer API
+/// (`ZSTD_compressBound`/`ZSTD_compress`) added for `effects
+/// .compressibility_annotate_stage`. Both sides link the same pinned 1.5.7
+/// release (`third_party/zstd/README.md`); the compression side additionally
+/// requires `.dub/zstd/libzstd_compress.a` (see that archive's own doc
+/// comment in `third_party/zstd/Makefile` for why it depends on
+/// `libzstd_decompress.a` also being linked).
 module effects.zstd_ffi;
 
 // ABI declarations for pinned zstd 1.5.7, third_party/zstd/zstd.h.
@@ -31,7 +38,13 @@ extern(C) @nogc nothrow {
     }
 
     uint ZSTD_versionNumber();
-    uint ZSTD_isError(size_t result);
+    // Declared `pure`: deterministic given `result` alone, no reachable
+    // mutable state -- required so `effects.compressibility_annotate_stage`'s
+    // `StageApply` (which the registry requires to be `pure`) can call it.
+    // Existing non-pure callers (e.g. `effects.warc_compressed`) are
+    // unaffected: a pure-declared function may always be called from
+    // impure code.
+    pure uint ZSTD_isError(size_t result);
     const(char)* ZSTD_getErrorName(size_t result);
     size_t ZSTD_getFrameHeader(ZstdFrameHeader* header, const(void)* src, size_t srcSize);
     ZstdDStream* ZSTD_createDStream();
@@ -39,6 +52,18 @@ extern(C) @nogc nothrow {
     size_t ZSTD_initDStream(ZstdDStream* stream);
     size_t ZSTD_DCtx_setParameter(ZstdDStream* stream, int parameter, int value);
     size_t ZSTD_decompressStream(ZstdDStream* stream, ZstdOutBuffer* output, ZstdInBuffer* input);
+
+    // Compression-side one-shot buffer API (`third_party/zstd/zstd.h`'s
+    // "Simple API"): sufficient for a single bounded in-memory document, so
+    // no streaming compressor/explicit `ZSTD_CCtx` is declared here. Level is
+    // always a fixed schema constant at every call site (19, "bounded
+    // standard max, not ultra" per the accepted contract) -- never a
+    // caller-tunable parameter. Both declared `pure` for the same reason as
+    // `ZSTD_isError` above: deterministic given their arguments, with no
+    // dictionary, no multithreading, and no reachable mutable state.
+    pure size_t ZSTD_compressBound(size_t srcSize);
+    pure size_t ZSTD_compress(void* dst, size_t dstCapacity, const(void)* src,
+        size_t srcSize, int compressionLevel);
 }
 
 enum zstdWindowLogMax = 100;
@@ -84,4 +109,54 @@ unittest {
     enforce(ZSTD_decompressStream(stream, &output, &input) == 0, "zstd decode failed");
     enforce(input.pos == frame.length && output.pos == 5, "zstd buffer ABI mismatch");
     enforce(memcmp(outputBytes.ptr, "hello".ptr, 5) == 0, "zstd output mismatch");
+}
+
+// Compression-side ABI: round-trips a real payload through
+// `ZSTD_compressBound`/`ZSTD_compress` (level 19) and back through the
+// already-proven streaming decompressor above, checking both the produced
+// bytes and byte-for-byte determinism across two independent compress calls.
+unittest {
+    import std.exception : enforce;
+
+    string original = "hello hello hello hello hello world";
+    auto srcBytes = cast(const(ubyte)[]) original;
+    auto bound = ZSTD_compressBound(srcBytes.length);
+    enforce(!ZSTD_isError(bound), "compressBound failed");
+    auto compressed = new ubyte[bound];
+    auto compressedSize = ZSTD_compress(compressed.ptr, compressed.length,
+        srcBytes.ptr, srcBytes.length, 19);
+    enforce(!ZSTD_isError(compressedSize), "zstd compress failed");
+    enforce(compressedSize > 0 && compressedSize < srcBytes.length,
+        "level-19 compression of a repetitive payload did not shrink it");
+
+    // Determinism: a second independent call over the same bytes is
+    // byte-identical, not merely same-length.
+    auto compressedAgain = new ubyte[bound];
+    auto compressedSizeAgain = ZSTD_compress(compressedAgain.ptr,
+        compressedAgain.length, srcBytes.ptr, srcBytes.length, 19);
+    enforce(compressedSizeAgain == compressedSize &&
+        compressed[0 .. compressedSize] == compressedAgain[0 .. compressedSizeAgain],
+        "zstd compression is not deterministic across repeated calls");
+
+    // Round-trip through the streaming decompressor already proven above.
+    auto stream = ZSTD_createDStream();
+    enforce(stream !is null, "cannot create zstd stream");
+    scope(exit) enforce(ZSTD_freeDStream(stream) == 0, "cannot free zstd stream");
+    enforce(ZSTD_isError(ZSTD_initDStream(stream)) == 0, "cannot initialize zstd stream");
+    ubyte[128] decompressed;
+    ZstdInBuffer input = ZstdInBuffer(compressed.ptr, compressedSize, 0);
+    ZstdOutBuffer output = ZstdOutBuffer(decompressed.ptr, decompressed.length, 0);
+    enforce(ZSTD_decompressStream(stream, &output, &input) == 0, "zstd decode failed");
+    enforce(output.pos == srcBytes.length &&
+        decompressed[0 .. output.pos] == srcBytes, "compress/decompress round trip mismatch");
+
+    // An empty input still produces a valid, decodable frame -- exercised
+    // directly here since `compressibility-annotate`'s floor abstention still
+    // runs compression on empty content (see that stage's own fixtures).
+    auto emptyBound = ZSTD_compressBound(0);
+    auto emptyCompressed = new ubyte[emptyBound];
+    auto emptyCompressedSize = ZSTD_compress(emptyCompressed.ptr,
+        emptyCompressed.length, null, 0, 19);
+    enforce(!ZSTD_isError(emptyCompressedSize), "zstd failed to compress empty input");
+    enforce(emptyCompressedSize > 0, "empty-input zstd frame must still occupy some bytes");
 }

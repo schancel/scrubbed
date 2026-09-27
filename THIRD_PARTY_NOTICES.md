@@ -1,18 +1,28 @@
 # Third-party notices
 
-## Zstandard decompressor
+## Zstandard decompressor and compressor
 
-The pinned Zstandard v1.5.7 decompression-only source is statically compiled
-for macOS arm64. The source is dual-offered under BSD-style or GPLv2 terms;
-this project explicitly selects the BSD-style alternative and does **not**
-select GPLv2. The complete upstream [`LICENSE`](third_party/zstd/LICENSE),
-source-file copyright notices, exact release tarball SHA-256, per-file hash
-manifest, omitted modules, and no-network build are documented in
-[`third_party/zstd/README.md`](third_party/zstd/README.md). The included xxHash
-implementation is credited to Yann Collet / Meta in its source files and
-shares that license alternative. No separately licensed transitive library
-is included in the linked decompression graph. The compressed-WARC adapter
-uses the same pinned static archive; it does not add a dynamic libzstd.
+The pinned Zstandard v1.5.7 source -- both the original decompression-only
+subset and, for issue #168's `compressibility-annotate` stage, an added
+compression-side subset pinned to the exact same `v1.5.7` release -- is
+statically compiled for macOS arm64. The source is dual-offered under
+BSD-style or GPLv2 terms; this project explicitly selects the BSD-style
+alternative and does **not** select GPLv2. The complete upstream
+[`LICENSE`](third_party/zstd/LICENSE), source-file copyright notices, exact
+release tarball SHA-256, per-file hash manifest (now covering both the
+decompression and compression subsets), omitted modules, and no-network build
+are documented in [`third_party/zstd/README.md`](third_party/zstd/README.md).
+The included xxHash implementation is credited to Yann Collet / Meta in its
+source files and shares that license alternative. No separately licensed
+transitive library is included in the linked decompression or compression
+graph. The compressed-WARC adapter uses the same pinned decompression static
+archive; it does not add a dynamic libzstd. The new compression archive
+(`libzstd_compress.a`) omits the compressor's multithreading translation unit
+entirely (this project never defines `ZSTD_MULTITHREAD`) and omits the
+dictionary builder, legacy decoder, and x86 assembly, matching the
+decompression archive's own existing omissions; `effects
+.compressibility_annotate_stage` uses only the fixed-level (19), non-streaming,
+non-dictionary one-shot buffer compression API from it.
 
 The compressed adapter dynamically opens macOS system
 `/usr/lib/libz.1.dylib` with `dlopen`/`RTLD_FIRST`, resolves only that image's

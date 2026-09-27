@@ -115,5 +115,57 @@ after project dependencies are built. Its small, pinned synthetic hold-out
 reports field precision among selected values and abstention — a regression
 fixture, not a live-web quality estimate.
 
+`experiments/metadata/fetch_held_out.sh` is a separate, held-out real-page
+evaluation tier alongside that synthetic fixture — deliberately outside the
+`dub build`/`dub test`/release-active-checker path, with no pass/fail gate,
+mirroring `experiments/html_main_content/fetch_held_out.sh`'s exact
+acquisition idiom (issue #229's acquisition-boundary decision: real
+third-party content usable for test-only reporting, pinned by an exact
+upstream commit, fetched transiently, never vendored). It clones
+`adbar/trafilatura` at the same pinned commit #26 already uses
+(`1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6`) and scores this module's real,
+unmodified `extractHtmlMetadata`/`parseHtml` against a fixed 43-URL subset
+of that corpus's own `tests/evaldata.json` gold annotations: every 20th
+entry (by lexicographic key order) among the 851 of 990 total entries (at
+that commit) whose value has all three of `"author"`, `"title"`, and
+`"date"` present as keys — a fresh selection from the metadata-bearing
+entries, not a reuse of #26's own 20-URL main-content subset. Multi-value
+`"author"` gold (a JSON array) is joined with `"; "` before comparison,
+matching trafilatura's own `tests/eval_authors.py` convention.
+
+A real run of that 43-URL subset measured: `title` 21/41 exact matches with
+gold present (51.2%, 40/43 selected, 2 ambiguous), `date` 16/37 (43.2%,
+17/43 selected, 1 invalid), `author` 3/28 (10.7%, 9/43 selected), and `url`
+39/42 (92.9%, 41/43 selected) — one of the 43 pages
+(`maescot.de.schafskunde.html`) failed this codebase's own `HtmlTree`
+decode step (quarantine reason `decode`) and is excluded from every
+field's count (42 resolved). `url`'s gold is each entry's own corpus dict key, which a correct
+`link:canonical`/`og:url` extraction can legitimately disagree with
+(redirects, scheme/`www` normalization, tracking-parameter stripping), so
+that field's number is a lower bound on real canonical-extraction quality,
+not a defect count in itself — its high match rate here is a genuine
+result, not a sign the metric is too easy. `author` and `date`'s low
+numbers are real too, and this slice does not investigate why (a plausible
+factor, not independently confirmed here: this stage only reads `<head>`
+evidence against a fixed, narrow set of meta/link names, while a real
+page's byline or dateline is often only present in body text or under a
+tag name this priority table doesn't match) — this is an honest measurement
+of how the shipped, unmodified rule set performs on real third-party pages,
+not a live-web ceiling estimate, and nothing here is acted on: no
+threshold, priority, or extraction-logic change follows from these numbers
+in this slice.
+
+Gold-set quirks disclosed by that run (see the script's own header comment
+and its report's `quirks` object for the full accounting): one corpus entry
+that has all three gold keys present but an empty string for some of them
+(counted as `goldEmpty`, excluded from that field's accuracy denominator);
+one entry whose evaldata.json dict key carries a verbatim trailing space
+(the driver intentionally does not trim `urls_file` lines before corpus
+lookup, unlike #26's driver, specifically so this key still resolves); and
+elsewhere in the corpus, a small number of gold `date` values that are not
+zero-padded ISO shape (e.g. `"2022-11-1"`) — this module's own `validDate`
+never emits such a value, so those can only ever miss on exact-match,
+independent of extraction quality.
+
 Rollback is removing this opt-in module and its registration; no persisted
 record or existing CLI behavior changes.

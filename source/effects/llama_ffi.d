@@ -103,6 +103,17 @@
 /// dispatch's own scope); the real proof was run manually against the
 /// pinned artifacts and is reported alongside this module's landing, not
 /// re-executed by CI.
+///
+/// Portability (issue #353): excluded from the Linux build via `dub.json`'s
+/// `excludedSourceFiles-linux`, for the same reason as `effects.pdfium_ffi`
+/// (see that module's own portability note): this wraps an
+/// operator-supplied prebuilt binary artifact (`ggml-org/llama.cpp` release
+/// binaries) independently evaluated and pinned specifically for macOS
+/// arm64, not this repo's own vendored/locally-built source or an
+/// OS-provided system library. A real Linux llama.cpp binary evaluation is
+/// separate, unstarted follow-up work, not part of this ticket's scope.
+/// Nothing yet imports this module, so the exclusion changes no observable
+/// Linux behavior.
 module effects.llama_ffi;
 
 import core.sys.posix.dlfcn : dlclose, dlopen, dlsym, RTLD_LOCAL, RTLD_NOW;

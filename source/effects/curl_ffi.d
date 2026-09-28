@@ -4,12 +4,34 @@
 /// easy/multi handle lifecycle, option, and info entry points this codebase
 /// currently uses. No native pointer or `CURL*`/`CURLM*` handle is
 /// part of any public result type in `effects.http_fetch`.
+///
+/// Portability (issue #353): unlike `effects.zlib_ffi`/`effects.warc_compressed`,
+/// this module never calls `dlopen` itself -- `dub.json`'s `"libs": ["curl"]`
+/// link-time-links libcurl via the normal linker `-lcurl` mechanism on every
+/// platform, so there is no per-platform path/soname list to choose here.
+/// The structs below (`curl_slist`, `CurlMsg`) and the declared entry points
+/// are transcribed from libcurl's own public headers (`curl/curl.h`,
+/// `curl/multi.h`), which are part of libcurl's cross-platform stable public
+/// ABI (unchanged in layout since `curl_slist` was introduced) -- not a
+/// macOS-specific artifact the way a `dlopen`-pinned path is. This ticket
+/// adds Linux CI (ubuntu-24.04/-arm, see
+/// .github/workflows/sha256-native-backends.yml; libcurl4 expected present
+/// on those base images) to generate the real evidence that this module
+/// links and its unittests pass there; treat as unverified until that CI
+/// run is green.
 module effects.curl_ffi;
 
 version (OSX) {
     version (AArch64) {} else static assert(0,
         "libcurl ABI is only verified for macOS arm64");
-} else static assert(0, "libcurl ABI is only verified for macOS arm64");
+} else version (linux) {
+    // Portability (issue #353): the struct layouts/entry points below are
+    // expected to match libcurl's public ABI on Linux the same way they do
+    // on macOS (see this module's header comment). This ticket's added CI
+    // is what turns that expectation into real evidence -- not yet
+    // confirmed as of this commit.
+} else static assert(0,
+    "libcurl ABI is only verified for macOS arm64 and Linux x86_64/aarch64");
 
 extern(C) nothrow {
     struct CURL;

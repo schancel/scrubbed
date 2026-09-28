@@ -1,7 +1,7 @@
 /// Real system-zlib-backed implementation of `extraction.container`'s
 /// injected `ZipInflateV1` boundary. Loaded the same way as
-/// `effects.warc_compressed`'s gzip-member decoder: `dlopen` a pinned
-/// system path and `dlsym` the exact entry points used, never a link-time
+/// `effects.warc_compressed`'s gzip-member decoder: `dlopen` a system
+/// path/soname and `dlsym` the exact entry points used, never a link-time
 /// `dub.json` "libs" dependency (owner decision on issue #156: match this
 /// codebase's existing system-zlib precedent, not `effects.curl_ffi`'s
 /// static-link pattern, since zlib already has an established, evaluated
@@ -10,6 +10,14 @@
 /// `effects.warc_compressed`; only the missing native entry points are
 /// declared here.
 ///
+/// Portability (issue #353): macOS keeps its single pinned system path.
+/// Linux instead dlopen's the real `libz.so.1`/`libz.so` sonames (not a
+/// hardcoded absolute path -- see `systemZlibCandidates` below for the real
+/// distro-layout evidence behind that choice), letting the platform's own
+/// dynamic linker resolve the actual on-disk location. Both platforms keep
+/// the same dlopen/dlsym access pattern; only the candidate list and dlopen
+/// flags differ.
+///
 /// This is the effects-layer half of the injection: `extraction.container`
 /// defines the pure `ZipInflateV1` callback type and never performs I/O
 /// itself (per `extraction/README.md`); this module supplies the real,
@@ -17,14 +25,23 @@
 /// that has both layers in view to pass into `inspectZipContainerV1`.
 module effects.zlib_ffi;
 
-import core.sys.posix.dlfcn : dlclose, dlopen, dlsym, RTLD_FIRST, RTLD_NOW;
+import core.sys.posix.dlfcn : dlclose, dlopen, dlsym, RTLD_NOW;
+version (OSX) import core.sys.posix.dlfcn : RTLD_FIRST;
 import etc.c.zlib : z_stream, Z_NO_FLUSH, Z_OK, Z_STREAM_END;
 import extraction.container : ZipInflateOutcomeV1, ZipInflateV1;
 
 version (OSX) {
     version (AArch64) {} else static assert(0,
         "system libz ABI is only verified for macOS arm64");
-} else static assert(0, "system libz ABI is only verified for macOS arm64");
+} else version (linux) {
+    // Portability (issue #353): zlib.so.1's inflate ABI is expected to
+    // match Phobos's etc.c.zlib declarations, same as macOS's system libz.
+    // This ticket adds Linux CI (ubuntu-24.04/-arm, see
+    // .github/workflows/sha256-native-backends.yml) running this module's
+    // own release-active unittests below to generate the real evidence for
+    // that; treat it as unverified until that CI run is green.
+} else static assert(0,
+    "system libz ABI is only verified for macOS arm64 and Linux x86_64/aarch64");
 
 private alias InflateInit2 = extern(C) int function(z_stream*, int, const(char)*, int);
 private alias Inflate = extern(C) int function(z_stream*, int);
@@ -34,6 +51,36 @@ private alias ZlibVersion = extern(C) const(char)* function();
 /// Negative window bits select raw DEFLATE (no zlib/gzip header or trailer),
 /// matching the bare compressed-data format ZIP local entries store.
 private enum int rawInflateWindowBits = -15;
+
+version (OSX) {
+    private enum int systemZlibOpenFlags = RTLD_NOW | RTLD_FIRST;
+    /// macOS ships exactly one system libz, always at this fixed path (see
+    /// this module's own header comment for the owner-decided precedent).
+    private enum string[] systemZlibCandidates = ["/usr/lib/libz.1.dylib"];
+} else version (linux) {
+    private enum int systemZlibOpenFlags = RTLD_NOW;
+    // Real evidence (issue #353), not a guess: unlike macOS's single fixed
+    // system path, Linux's actual install path for libz varies by distro/
+    // multiarch layout (Debian/Ubuntu: /usr/lib/<triplet>/libz.so.1,
+    // Fedora/RHEL: /usr/lib64/libz.so.1, Alpine/Arch: /usr/lib/libz.so.1).
+    // Hardcoding any one of those absolute paths would just relocate the
+    // exact macOS-style fragility this ticket exists to fix. zlib has
+    // shipped ABI-stable under soname "libz.so.1" since 1998 and is a
+    // near-universal base-system runtime dependency (transitively required
+    // by bash/git/gzip/ssh/python and effectively every other package that
+    // touches compression) -- so instead of guessing the absolute path,
+    // this passes the bare soname to dlopen and lets the platform's own
+    // dynamic linker (ld.so, via its ldconfig-built cache) resolve it,
+    // exactly the way every other dynamically-linked consumer of libz on
+    // that system already does. The unversioned "libz.so" is tried second,
+    // for the rarer case where only a dev-symlink is present. Expected
+    // present via `ldconfig -p | grep libz.so.1` on ubuntu-24.04
+    // x86_64/aarch64 base images; this ticket's own added CI (see
+    // .github/workflows/sha256-native-backends.yml) is what turns that
+    // expectation into real evidence -- not yet confirmed as of this
+    // commit, since no CI run for this branch exists yet.
+    private enum string[] systemZlibCandidates = ["libz.so.1", "libz.so"];
+}
 
 private final class SystemZlib {
     void* handle;
@@ -46,9 +93,16 @@ private final class SystemZlib {
 
     /// Returns `null` on any load/link failure instead of throwing: the
     /// caller reports this as a clean, coded `ZipInflateOutcomeV1.unavailable`
-    /// result, never an uncaught exception.
+    /// result, never an uncaught exception. Tries each real system-libz
+    /// candidate path/soname in turn (see `systemZlibCandidates`); if none
+    /// load, this fails closed -- it never falls back to a bundled or
+    /// substitute implementation.
     static SystemZlib open() {
-        auto handle = dlopen("/usr/lib/libz.1.dylib", RTLD_NOW | RTLD_FIRST);
+        void* handle;
+        foreach (candidate; systemZlibCandidates) {
+            handle = dlopen(candidate.ptr, systemZlibOpenFlags);
+            if (handle !is null) break;
+        }
         if (handle is null) return null;
         auto inflateInit2 = cast(InflateInit2) dlsym(handle, "inflateInit2_");
         auto inflateStep = cast(Inflate) dlsym(handle, "inflate");

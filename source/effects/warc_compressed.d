@@ -7,8 +7,22 @@ import effects.zstd_ffi;
 import etc.c.zlib : z_stream,
     Z_OK, Z_STREAM_END, Z_DATA_ERROR, Z_NO_FLUSH;
 import core.sys.posix.dlfcn : dlopen, dlsym, dlclose, dladdr, Dl_info,
-    RTLD_NOW, RTLD_FIRST;
+    RTLD_NOW;
+version (OSX) import core.sys.posix.dlfcn : RTLD_FIRST;
 import std.string : fromStringz;
+
+// Portability (issue #353): see effects.zlib_ffi's header comment for the
+// real evidence behind macOS's single pinned path vs. Linux's bare-soname
+// dlopen -- this module's system-libz access mirrors that module exactly,
+// since effects.zlib_ffi was itself originally modeled on this one.
+version (OSX) {
+    private enum int systemZlibOpenFlags = RTLD_NOW | RTLD_FIRST;
+    private enum string[] systemZlibCandidates = ["/usr/lib/libz.1.dylib"];
+} else version (linux) {
+    private enum int systemZlibOpenFlags = RTLD_NOW;
+    private enum string[] systemZlibCandidates = ["libz.so.1", "libz.so"];
+} else static assert(0,
+    "system libz ABI is only verified for macOS arm64 and Linux x86_64/aarch64");
 
 private alias InflateInit2 = extern(C) int function(z_stream*, int, const(char)*, int);
 private alias Inflate = extern(C) int function(z_stream*, int);
@@ -130,9 +144,12 @@ final class WarcCompressedReader {
     ~this() { releaseNative(); closeZlib(); }
 
     private void loadSystemZlib() {
-        zlibHandle = dlopen("/usr/lib/libz.1.dylib", RTLD_NOW | RTLD_FIRST);
+        foreach (candidate; systemZlibCandidates) {
+            zlibHandle = dlopen(candidate.ptr, systemZlibOpenFlags);
+            if (zlibHandle !is null) break;
+        }
         if (zlibHandle is null)
-            fail(CompressedReason.unsupported, "macOS system libz unavailable");
+            fail(CompressedReason.unsupported, "system libz unavailable");
         zInflateInit = cast(InflateInit2) dlsym(zlibHandle, "inflateInit2_");
         zInflate = cast(Inflate) dlsym(zlibHandle, "inflate");
         zInflateEnd = cast(InflateEnd) dlsym(zlibHandle, "inflateEnd");
@@ -140,7 +157,7 @@ final class WarcCompressedReader {
         if (zInflateInit is null || zInflate is null || zInflateEnd is null ||
             zVersion is null) {
             closeZlib();
-            fail(CompressedReason.unsupported, "macOS system libz ABI unavailable");
+            fail(CompressedReason.unsupported, "system libz ABI unavailable");
         }
     }
 

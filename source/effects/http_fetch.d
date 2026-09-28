@@ -28,6 +28,14 @@ enum size_t defaultMaxHeaderBytes = 64 * 1024;
 enum long defaultMaxEncodedBytes = 16 * 1024 * 1024;
 enum size_t defaultMaxDecodedBytes = 32 * 1024 * 1024;
 enum size_t defaultMaxConcurrentFetches = 8;
+/// Cap on `FetchRequest.requestBody` (issue #355). An unbounded
+/// caller-supplied request body is a resource-exhaustion vector in its own
+/// right, independent of the response-side `maxEncodedBytes`/
+/// `maxDecodedBytes` caps above -- so it gets its own typed limit rather than
+/// reusing either of those. 8 MiB comfortably covers a JSON API request body
+/// (#65's own motivating use case) with headroom, while still being a real,
+/// enforced bound rather than `size_t.max`.
+enum size_t defaultMaxRequestBodyBytes = 8 * 1024 * 1024;
 
 /// Sent as `User-Agent` on every request (issue #305 review found real
 /// Wikipedia fetches came back HTTP 403 for having none at all). Honest
@@ -51,6 +59,7 @@ struct FetchLimits {
     long maxEncodedBytes = defaultMaxEncodedBytes;
     size_t maxDecodedBytes = defaultMaxDecodedBytes;
     size_t maxConcurrentFetches = defaultMaxConcurrentFetches;
+    size_t maxRequestBodyBytes = defaultMaxRequestBodyBytes;
 }
 
 /// A cooperative cancellation probe, checked on libcurl's progress callback.
@@ -61,8 +70,9 @@ alias CancellationCheck = bool delegate() nothrow;
 /// (which composes one hardcoded `If-None-Match` line), this is a generic
 /// `(name, value)` pair validated by `fetchHttp` before it is ever composed
 /// into a `curl_slist` entry -- see `isHeaderNameToken`/`isSafeHeaderValue`.
-/// GET/header-list only: this type carries no request body (see #65 for the
-/// separate, not-yet-built request-body gap).
+/// Works unchanged for either a GET or a POST (`FetchRequest.requestBody`,
+/// issue #355): a caller sending a JSON POST body still supplies its
+/// `Content-Type` via this same generic list.
 struct FetchHeader {
     string name;
     string value;
@@ -86,6 +96,25 @@ struct FetchRequest {
     /// `FetchFailureReason.invalidHeader` returned before any request is
     /// attempted -- never a silent drop and never a crash.
     FetchHeader[] headers;
+    /// Optional POST request body (issue #355). Empty (the default, `null`
+    /// or a zero-length array -- both have `.length == 0`) means an
+    /// unconditional GET, exactly as this module behaved before #355: no
+    /// separate GET/POST method field exists because presence of a body is
+    /// itself the only signal `CURLOPT_POST` actually needs (libcurl has no
+    /// notion of a required non-empty POST body; a deliberately empty POST
+    /// is out of scope for this HTTP-transport-prerequisite ticket -- see
+    /// #65 -- and would be indistinguishable from "no body" under this
+    /// design, so it is left to a future ticket to add an explicit method
+    /// field if that ever becomes a real need). When non-empty, `fetchHttp`
+    /// sends exactly these bytes as the request body via
+    /// `CURLOPT_POST`/`CURLOPT_POSTFIELDS`/`CURLOPT_POSTFIELDSIZE`, bounded
+    /// by `FetchLimits.maxRequestBodyBytes` (checked before any request is
+    /// attempted, the same content-free-rejection discipline as
+    /// `headerCapExceeded`/`encodedBodyCapExceeded`/`decodedBodyCapExceeded`
+    /// below). Named `requestBody` rather than `body` -- `body` is a
+    /// deprecated-but-still-reserved D keyword (function-contract syntax)
+    /// and would shadow-collide with it.
+    immutable(ubyte)[] requestBody;
     /// Optional `host:port:address` IP pins (`CURLOPT_RESOLVE`). Pins the
     /// connection target only; verification is never weakened by this list.
     string[] resolveEntries;
@@ -108,6 +137,11 @@ enum FetchFailureReason : ubyte {
     headerCapExceeded,
     encodedBodyCapExceeded,
     decodedBodyCapExceeded,
+    /// `FetchRequest.requestBody.length` exceeded `FetchLimits.
+    /// maxRequestBodyBytes` (issue #355). Returned before `curl_easy_init`
+    /// is ever reached and before any request is attempted -- the same
+    /// before-any-attempt discipline `invalidHeader` below already uses.
+    requestBodyCapExceeded,
     tlsVerificationFailed,
     cancelled,
     transportError,
@@ -141,6 +175,7 @@ FetchFailureCategory categoryOf(FetchFailureReason reason) pure nothrow @safe @n
     case FetchFailureReason.headerCapExceeded: return FetchFailureCategory.permanent;
     case FetchFailureReason.encodedBodyCapExceeded: return FetchFailureCategory.permanent;
     case FetchFailureReason.decodedBodyCapExceeded: return FetchFailureCategory.permanent;
+    case FetchFailureReason.requestBodyCapExceeded: return FetchFailureCategory.permanent;
     case FetchFailureReason.tlsVerificationFailed: return FetchFailureCategory.permanent;
     case FetchFailureReason.cancelled: return FetchFailureCategory.permanent;
     case FetchFailureReason.invalidResponse: return FetchFailureCategory.permanent;
@@ -409,6 +444,9 @@ private void validateLimits(FetchLimits limits) {
     enforce(limits.maxEncodedBytes > 0, "http fetch: encoded-body cap must be positive");
     enforce(limits.maxDecodedBytes > 0, "http fetch: decoded-body cap must be positive");
     enforce(limits.maxConcurrentFetches > 0, "http fetch: concurrency cap must be positive");
+    enforce(limits.maxRequestBodyBytes > 0, "http fetch: request-body cap must be positive");
+    enforce(limits.maxRequestBodyBytes <= cast(size_t) long.max,
+        "http fetch: request-body cap exceeds representable range");
     enforce(limits.maxRedirects <= cast(size_t) long.max,
         "http fetch: redirect cap exceeds representable range");
 }
@@ -496,6 +534,10 @@ FetchOutcome fetchHttp(FetchRequest request) {
         outcome.failure_ = FetchFailure(FetchFailureReason.invalidHeader, 0, 0);
         return outcome;
     }
+    if (request.requestBody.length > request.limits.maxRequestBodyBytes) {
+        outcome.failure_ = FetchFailure(FetchFailureReason.requestBodyCapExceeded, 0, 0);
+        return outcome;
+    }
     if (!acquireConcurrencySlot(request.limits.maxConcurrentFetches)) {
         outcome.failure_ = FetchFailure(FetchFailureReason.concurrencyLimit, 0, 0);
         return outcome;
@@ -568,6 +610,21 @@ FetchOutcome fetchHttp(FetchRequest request) {
     }
     if (resolveList !is null)
         setOption(curl_easy_setopt(easy, CURLOPT_RESOLVE, resolveList));
+    if (request.requestBody.length) {
+        // Already bounded by `FetchLimits.maxRequestBodyBytes` at the top of
+        // this function (`requestBodyCapExceeded` returns before this point
+        // is ever reached). `CURLOPT_POST` must be set before
+        // `CURLOPT_POSTFIELDS`/`CURLOPT_POSTFIELDSIZE` per libcurl's own
+        // documented requirement for a fixed-length POST. `request` (and so
+        // the `ubyte[]` `requestBody` slices) outlives `curl_easy_perform`
+        // below -- both are still in scope on this same stack frame -- so
+        // libcurl reading `CURLOPT_POSTFIELDS` without copying it (the
+        // default; `CURLOPT_COPYPOSTFIELDS` is not used here) is safe.
+        setOption(curl_easy_setopt(easy, CURLOPT_POST, 1L));
+        setOption(curl_easy_setopt(easy, CURLOPT_POSTFIELDS, request.requestBody.ptr));
+        setOption(curl_easy_setopt(easy, CURLOPT_POSTFIELDSIZE,
+            cast(long) request.requestBody.length));
+    }
 
     auto code = curl_easy_perform(easy);
     auto finishedAt = Clock.currTime;
@@ -880,4 +937,192 @@ unittest {
         "http fetch: second caller-supplied header not found on the wire");
     assert(capturedRequest.indexOf("If-None-Match: \"abc123\"\r\n") >= 0,
         "http fetch: ifNoneMatch header not found on the wire alongside generic headers");
+}
+
+unittest {
+    // Real proof, per issue #355's acceptance criteria: a `FetchRequest`
+    // with `requestBody` set actually reaches the wire as a genuine POST
+    // (method line, not just a setopt call), with the exact body bytes
+    // following the header block -- not a mocked assertion. Mirrors this
+    // module's established real-loopback-TCP pattern (the `User-Agent` and
+    // header-transmission proofs above) rather than trusting curl's own
+    // behavior on faith. The server keeps reading past the header/body
+    // boundary until it has collected the full expected body length, since
+    // the body may not arrive in the same `recv` as the headers.
+    import core.thread : Thread;
+    import std.conv : to;
+    import std.socket : AddressFamily, InternetAddress, SocketOption,
+        SocketOptionLevel, TcpSocket;
+    import std.string : indexOf;
+
+    auto listener = new TcpSocket(AddressFamily.INET);
+    scope(exit) listener.close();
+    listener.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+    listener.bind(new InternetAddress("127.0.0.1", 0));
+    listener.listen(1);
+    immutable port = (cast(InternetAddress) listener.localAddress).port;
+
+    enum string requestBodyText = `{"hello":"world","n":42}`;
+    immutable requestBodyBytes = cast(immutable(ubyte)[]) requestBodyText;
+
+    string capturedRequest;
+    auto worker = new Thread({
+        auto client = listener.accept();
+        scope(exit) client.close();
+        ubyte[16_384] buffer;
+        string received;
+        while (received.indexOf("\r\n\r\n") < 0) {
+            auto count = client.receive(buffer[]);
+            if (count <= 0) break;
+            received ~= cast(string) buffer[0 .. count].idup;
+        }
+        auto headerEnd = received.indexOf("\r\n\r\n") + 4;
+        while (received.length - headerEnd < requestBodyBytes.length) {
+            auto count = client.receive(buffer[]);
+            if (count <= 0) break;
+            received ~= cast(string) buffer[0 .. count].idup;
+        }
+        capturedRequest = received;
+        enum string responseBody = "ok";
+        client.send(cast(const(ubyte)[])("HTTP/1.1 200 OK\r\nContent-Length: " ~
+            responseBody.length.to!string ~ "\r\nConnection: close\r\n\r\n" ~ responseBody));
+    });
+    worker.start();
+
+    auto rawUrl = "http://127.0.0.1:" ~ port.to!string ~ "/probe";
+    auto resolved = resolveWebUrl(rawUrl, rawUrl);
+    assert(resolved.isResolved);
+
+    FetchRequest request;
+    request.url = resolved.value;
+    request.limits.connectTimeoutMs = 500;
+    request.limits.totalTimeoutMs = 2_000;
+    request.requestBody = requestBodyBytes;
+    request.headers = [FetchHeader("Content-Type", "application/json")];
+
+    auto outcome = fetchHttp(request);
+    worker.join();
+
+    assert(outcome.succeeded);
+    assert(outcome.evidence.status == 200);
+    assert(capturedRequest.indexOf("POST /probe HTTP/1.1\r\n") == 0,
+        "http fetch: request line is not a real POST to the expected path");
+    assert(capturedRequest.indexOf("GET ") < 0,
+        "http fetch: a GET line leaked into a POST request");
+    assert(capturedRequest.indexOf("Content-Length: " ~
+        requestBodyBytes.length.to!string ~ "\r\n") >= 0,
+        "http fetch: Content-Length does not match the real request-body length");
+    assert(capturedRequest.indexOf("Content-Type: application/json\r\n") >= 0,
+        "http fetch: caller-supplied Content-Type header not found on the wire");
+    assert(capturedRequest[$ - requestBodyBytes.length .. $] == requestBodyText,
+        "http fetch: exact request-body bytes not found at the tail of the wire request");
+}
+
+unittest {
+    // Regression proof, per issue #355's acceptance criteria: a
+    // `FetchRequest` with no `requestBody` set (the zero-value default)
+    // still issues a plain GET exactly as before #355, on the same real
+    // loopback pattern used for the POST proof above -- not merely "the
+    // field is empty" but that the real wire request line still reads GET.
+    import core.thread : Thread;
+    import std.conv : to;
+    import std.socket : AddressFamily, InternetAddress, SocketOption,
+        SocketOptionLevel, TcpSocket;
+    import std.string : indexOf;
+
+    auto listener = new TcpSocket(AddressFamily.INET);
+    scope(exit) listener.close();
+    listener.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+    listener.bind(new InternetAddress("127.0.0.1", 0));
+    listener.listen(1);
+    immutable port = (cast(InternetAddress) listener.localAddress).port;
+
+    string capturedRequest;
+    auto worker = new Thread({
+        auto client = listener.accept();
+        scope(exit) client.close();
+        ubyte[4_096] buffer;
+        string received;
+        while (received.indexOf("\r\n\r\n") < 0) {
+            auto count = client.receive(buffer[]);
+            if (count <= 0) break;
+            received ~= cast(string) buffer[0 .. count].idup;
+        }
+        capturedRequest = received;
+        enum string responseBody = "ok";
+        client.send(cast(const(ubyte)[])("HTTP/1.1 200 OK\r\nContent-Length: " ~
+            responseBody.length.to!string ~ "\r\nConnection: close\r\n\r\n" ~ responseBody));
+    });
+    worker.start();
+
+    auto rawUrl = "http://127.0.0.1:" ~ port.to!string ~ "/probe";
+    auto resolved = resolveWebUrl(rawUrl, rawUrl);
+    assert(resolved.isResolved);
+
+    // Deliberately a default-initialized `FetchRequest` beyond `url`/
+    // `limits`: `requestBody` is left at its zero value (`null`, `.length
+    // == 0`).
+    FetchRequest request;
+    request.url = resolved.value;
+    request.limits.connectTimeoutMs = 500;
+    request.limits.totalTimeoutMs = 2_000;
+
+    auto outcome = fetchHttp(request);
+    worker.join();
+
+    assert(outcome.succeeded);
+    assert(outcome.evidence.status == 200);
+    assert(capturedRequest.indexOf("GET /probe HTTP/1.1\r\n") == 0,
+        "http fetch: a FetchRequest with no body set did not issue a plain GET");
+    assert(capturedRequest.indexOf("POST ") < 0,
+        "http fetch: a FetchRequest with no body set unexpectedly issued a POST");
+    assert(capturedRequest.indexOf("Content-Length:") < 0,
+        "http fetch: a bodyless GET unexpectedly carried a Content-Length header");
+}
+
+unittest {
+    // Real proof, per issue #355's acceptance criteria: a request body
+    // exceeding `FetchLimits.maxRequestBodyBytes` produces the typed
+    // `requestBodyCapExceeded` failure, not a crash and not a silent
+    // truncation -- and it does so *before* any request is attempted, using
+    // this module's own established `http://127.0.0.1:1/`
+    // guaranteed-connection-refused target (the same technique the
+    // `invalidHeader` proof above uses): if the cap were checked first, the
+    // outcome is `requestBodyCapExceeded` with no curl code at all; if the
+    // cap were skipped and the oversized body actually reached curl, the
+    // outcome would instead be `transportError` with a real nonzero curl
+    // code from the refused connection.
+    auto resolved = resolveWebUrl("http://127.0.0.1:1/", "http://127.0.0.1:1/");
+    assert(resolved.isResolved);
+
+    FetchRequest oversized;
+    oversized.url = resolved.value;
+    oversized.limits.maxRequestBodyBytes = 4;
+    oversized.requestBody = cast(immutable(ubyte)[]) "this body is way over the cap";
+    auto oversizedOutcome = fetchHttp(oversized);
+    assert(!oversizedOutcome.succeeded);
+    assert(oversizedOutcome.failure.reason == FetchFailureReason.requestBodyCapExceeded);
+    assert(oversizedOutcome.failure.curlCode == 0);
+    assert(oversizedOutcome.failure.httpStatus == 0);
+
+    // Exactly at the cap must pass the gate (and then hit the real refused
+    // connection, proving the gate isn't off-by-one in the wrong direction).
+    FetchRequest atCap;
+    atCap.url = resolved.value;
+    atCap.limits.maxRequestBodyBytes = 4;
+    atCap.requestBody = cast(immutable(ubyte)[]) "abcd";
+    auto atCapOutcome = fetchHttp(atCap);
+    assert(!atCapOutcome.succeeded);
+    assert(atCapOutcome.failure.reason == FetchFailureReason.transportError);
+
+    // Control: a body comfortably under the cap must also actually reach
+    // curl and fail with `transportError`, not `requestBodyCapExceeded` --
+    // proving the rejection above is really about the oversized body, not
+    // about the unreachable target.
+    FetchRequest underCap;
+    underCap.url = resolved.value;
+    underCap.requestBody = cast(immutable(ubyte)[]) "small";
+    auto underCapOutcome = fetchHttp(underCap);
+    assert(!underCapOutcome.succeeded);
+    assert(underCapOutcome.failure.reason == FetchFailureReason.transportError);
 }

@@ -93,6 +93,18 @@ enum : int {
     CURLOPT_XFERINFOFUNCTION = 20_219,
     CURLOPT_PROTOCOLS_STR = 10_318,
     CURLOPT_REDIR_PROTOCOLS_STR = 10_319,
+    // POST support (issue #355). Re-verified directly against curl's current
+    // public header (`include/curl/curl.h` on `curl/curl`'s `master` branch,
+    // fetched at implementation time): the header computes each enum value
+    // as `#define CURLOPT(na, t, nu) na = ((t) + (nu))`, and declares
+    // `CURLOPT(CURLOPT_POST, CURLOPTTYPE_LONG, 47)`,
+    // `CURLOPT(CURLOPT_POSTFIELDS, CURLOPTTYPE_OBJECTPOINT, 15)`, and
+    // `CURLOPT(CURLOPT_POSTFIELDSIZE, CURLOPTTYPE_LONG, 60)` -- i.e. `47`,
+    // `10_000 + 15 = 10_015`, and `60`, matching this codebase's existing
+    // OBJECTPOINT-base-10000/raw-numbering convention above.
+    CURLOPT_POST = 47,
+    CURLOPT_POSTFIELDS = 10_015,
+    CURLOPT_POSTFIELDSIZE = 60,
 
     // CURLINFO values, include/curl/curl.h.
     CURLINFO_RESPONSE_CODE = 0x20_0002,

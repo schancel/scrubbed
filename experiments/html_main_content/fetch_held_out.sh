@@ -87,7 +87,7 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-set -- "${positional_args[@]}"
+if [ ${#positional_args[@]} -gt 0 ]; then set -- "${positional_args[@]}"; else set --; fi
 
 TRAFILATURA_REPO="https://github.com/adbar/trafilatura.git"
 # Pinned exact commit (adbar/trafilatura, tests/evaldata.json + tests/cache

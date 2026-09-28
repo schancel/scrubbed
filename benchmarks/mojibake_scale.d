@@ -80,7 +80,7 @@ void main(string[] args) {
     foreach (tool; ["scrubbed", "ftfy", "ftfy", "scrubbed", "scrubbed", "ftfy"]) {
         if (exists(output)) remove(output);
         auto command = tool == "scrubbed" ?
-            [args[1], "--input", input, "--output", output,
+            [args[1], "run", "--input", input, "--output", output,
                 "--filters", "fix-mojibake", "--threads", "1"] :
             [args[2], "--preserve-entities", "-n", "none", "-o", output, input];
         auto watch = StopWatch(AutoStart.yes);

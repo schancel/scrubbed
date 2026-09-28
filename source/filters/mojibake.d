@@ -1,6 +1,7 @@
-/// Conservative repair of UTF-8 text mis-decoded through Latin-1/CP1252.
-/// The byte transforms are exact; a badness model decides whether applying
-/// one is safer than leaving the input alone. See THIRD_PARTY_NOTICES.md.
+/// Conservative repair of UTF-8 text mis-decoded through Latin-1/CP1252 or
+/// Windows-1251 (Cyrillic). The byte transforms are exact; a badness model
+/// decides whether applying one is safer than leaving the input alone.
+/// See THIRD_PARTY_NOTICES.md.
 module filters.mojibake;
 
 import pipeline : ConfiguredFilter, FilterConfiguration, FilterOptionDeclaration,
@@ -31,20 +32,91 @@ dchar cp1252ToUnicode(ubyte b) pure {
     return cast(dchar) b;
 }
 
-private enum LegacyEncoding { latin1, cp1252 }
+/// Windows-1251 bytes 0x80..0xFF mapped to Unicode. Zero means undefined.
+/// Verified against Python's standard-library `cp1251` codec (`encodings/
+/// cp1251.py`), which is itself sourced from Unicode's own VENDORS/MICSFT/
+/// WINDOWS/CP1251.TXT -- the same lineage `cp1252HighRange` above cites,
+/// reached here without a live network fetch. Unlike CP1252, Windows-1251
+/// diverges from Latin-1 across the entire 0x80-0xFF range, not only
+/// 0x80-0x9F, so this table (and `legacyByte` below) cover all 128 bytes.
+///
+/// Design decision (byte 0x98): Windows-1251 has exactly one undefined
+/// byte, 0x98. ftfy's own "sloppy-windows-1251" codec deliberately
+/// identity-maps every undefined byte to its own codepoint number, but this
+/// table instead follows `cp1252HighRange`'s existing strict-undefined
+/// convention (0 for a real gap) for two reasons: it is consistent with
+/// this module's already-stated philosophy that a byte transform is either
+/// exact or refused, never invented; and identity-mapping 0x98 would
+/// materialize a C1 control codepoint (U+0098) as "repaired" text, which is
+/// not a plausible repair target. The practical cost is small -- a legacy
+/// sequence that spans an 0x98 byte simply does not qualify as a repair
+/// candidate at that position, the same conservative abstention CP1252
+/// already exhibits at its five gaps (0x81, 0x8D, 0x8F, 0x90, 0x9D).
+immutable dchar[128] windows1251HighRange = [
+    0x0402, 0x0403, 0x201A, 0x0453, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x20AC, 0x2030, 0x0409, 0x2039, 0x040A, 0x040C, 0x040B, 0x040F,
+    0x0452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0,      0x2122, 0x0459, 0x203A, 0x045A, 0x045C, 0x045B, 0x045F,
+    0x00A0, 0x040E, 0x045E, 0x0408, 0x00A4, 0x0490, 0x00A6, 0x00A7,
+    0x0401, 0x00A9, 0x0404, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x0407,
+    0x00B0, 0x00B1, 0x0406, 0x0456, 0x0491, 0x00B5, 0x00B6, 0x00B7,
+    0x0451, 0x2116, 0x0454, 0x00BB, 0x0458, 0x0405, 0x0455, 0x0457,
+    0x0410, 0x0411, 0x0412, 0x0413, 0x0414, 0x0415, 0x0416, 0x0417,
+    0x0418, 0x0419, 0x041A, 0x041B, 0x041C, 0x041D, 0x041E, 0x041F,
+    0x0420, 0x0421, 0x0422, 0x0423, 0x0424, 0x0425, 0x0426, 0x0427,
+    0x0428, 0x0429, 0x042A, 0x042B, 0x042C, 0x042D, 0x042E, 0x042F,
+    0x0430, 0x0431, 0x0432, 0x0433, 0x0434, 0x0435, 0x0436, 0x0437,
+    0x0438, 0x0439, 0x043A, 0x043B, 0x043C, 0x043D, 0x043E, 0x043F,
+    0x0440, 0x0441, 0x0442, 0x0443, 0x0444, 0x0445, 0x0446, 0x0447,
+    0x0448, 0x0449, 0x044A, 0x044B, 0x044C, 0x044D, 0x044E, 0x044F,
+];
+
+dchar windows1251ToUnicode(ubyte b) pure {
+    if (b >= 0x80) {
+        const c = windows1251HighRange[b - 0x80];
+        return c == 0 ? dchar.init : c;
+    }
+    return cast(dchar) b;
+}
+
+private enum LegacyEncoding { latin1, cp1252, windows1251 }
 
 private bool legacyByte(dchar c, LegacyEncoding encoding, out ubyte result) pure {
-    if (c <= 0xFF && (encoding == LegacyEncoding.latin1 || c <= 0x7F || c >= 0xA0)) {
+    // Windows-1251 diverges from Latin-1 across the whole 0x80-0xFF range
+    // (unlike CP1252, which only diverges at 0x80-0x9F), so ASCII is the
+    // only byte range every encoding maps by direct passthrough.
+    if (c <= 0x7F) {
         result = cast(ubyte) c;
         return true;
     }
+    if (encoding == LegacyEncoding.latin1) {
+        if (c <= 0xFF) {
+            result = cast(ubyte) c;
+            return true;
+        }
+        return false;
+    }
     if (encoding == LegacyEncoding.cp1252) {
+        if (c <= 0xFF && c >= 0xA0) {
+            result = cast(ubyte) c;
+            return true;
+        }
         foreach (i, mapped; cp1252HighRange) {
             if (mapped == c) {
                 result = cast(ubyte)(0x80 + i);
                 return true;
             }
         }
+        return false;
+    }
+    if (encoding == LegacyEncoding.windows1251) {
+        foreach (i, mapped; windows1251HighRange) {
+            if (mapped == c) {
+                result = cast(ubyte)(0x80 + i);
+                return true;
+            }
+        }
+        return false;
     }
     return false;
 }
@@ -113,6 +185,7 @@ private string roundTrip(string text, LegacyEncoding encoding) {
 
 string latin1RoundTrip(string text) { return roundTrip(text, LegacyEncoding.latin1); }
 string cp1252RoundTrip(string text) { return roundTrip(text, LegacyEncoding.cp1252); }
+string windows1251RoundTrip(string text) { return roundTrip(text, LegacyEncoding.windows1251); }
 
 private bool oneOf(string members)(dchar c) pure {
     // The scorer's sets are compile-time non-ASCII literals. Keep the hot
@@ -320,26 +393,31 @@ private struct MojibakeOptions {
     size_t maxPasses = 4;
     bool useLatin1 = true;
     bool useCp1252 = true;
+    bool useWindows1251 = true;
 }
 
 private class MojibakeConfiguration : FilterConfiguration {
     size_t maxPasses;
     bool useLatin1;
     bool useCp1252;
+    bool useWindows1251;
 
     this(MojibakeOptions options) immutable {
         maxPasses = options.maxPasses;
         useLatin1 = options.useLatin1;
         useCp1252 = options.useCp1252;
+        useWindows1251 = options.useWindows1251;
     }
 }
 
 private void selectEncodings(ref MojibakeOptions result, string encoded) {
     result.useLatin1 = false;
     result.useCp1252 = false;
+    result.useWindows1251 = false;
     foreach (name; encoded.split(',')) {
         if (name == "latin1") result.useLatin1 = true;
         else if (name == "cp1252") result.useCp1252 = true;
+        else if (name == "windows1251") result.useWindows1251 = true;
         else throw new Exception("fix-mojibake unknown encoding: " ~ name);
     }
 }
@@ -408,9 +486,12 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
         size_t bestEnd;
         LegacyEncoding bestEncoding;
         long bestGain;
-        foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
+        foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252,
+                LegacyEncoding.windows1251]) {
             if ((encoding == LegacyEncoding.latin1 && !options.useLatin1) ||
-                (encoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                (encoding == LegacyEncoding.cp1252 && !options.useCp1252) ||
+                (encoding == LegacyEncoding.windows1251 && !options.useWindows1251))
+                continue;
             auto end = legacySequenceEnd(text, at, encoding);
             if (end == at) continue;
             // Standalone C2 pairs are ambiguous; permit one only when joined
@@ -440,9 +521,12 @@ private string repairLocal(string text, MojibakeOptions options, size_t remainin
                 const span = text[at .. end];
                 if (!scoreCandidate(span, encoding, decodedScore)) continue;
                 const intermediate = materializeValidatedCandidate(span, encoding);
-                foreach (nextEncoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
+                foreach (nextEncoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252,
+                        LegacyEncoding.windows1251]) {
                     if ((nextEncoding == LegacyEncoding.latin1 && !options.useLatin1) ||
-                        (nextEncoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                        (nextEncoding == LegacyEncoding.cp1252 && !options.useCp1252) ||
+                        (nextEncoding == LegacyEncoding.windows1251 &&
+                            !options.useWindows1251)) continue;
                     long nextScore;
                     if (scoreCandidate(intermediate, nextEncoding, nextScore)) {
                         const improvement = nextScore - plausibilityScore(span);
@@ -497,9 +581,12 @@ private string repairMojibake(string text, MojibakeOptions options) pure {
         // candidate for the overwhelmingly common already-clean case.
         if (bestScore == 0) break;
 
-        foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
+        foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252,
+                LegacyEncoding.windows1251]) {
             if ((encoding == LegacyEncoding.latin1 && !options.useLatin1) ||
-                (encoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                (encoding == LegacyEncoding.cp1252 && !options.useCp1252) ||
+                (encoding == LegacyEncoding.windows1251 && !options.useWindows1251))
+                continue;
             long candidateScore;
             if (scoreCandidate(text, encoding, candidateScore) && candidateScore > bestScore) {
                 winner = encoding;
@@ -512,7 +599,9 @@ private string repairMojibake(string text, MojibakeOptions options) pure {
             // repertoire. Local repair is for an unmappable surrounding
             // codepoint that prevented that decision from being made.
             if ((options.useLatin1 && canEncodeLegacy(text, LegacyEncoding.latin1)) ||
-                (options.useCp1252 && canEncodeLegacy(text, LegacyEncoding.cp1252))) break;
+                (options.useCp1252 && canEncodeLegacy(text, LegacyEncoding.cp1252)) ||
+                (options.useWindows1251 &&
+                    canEncodeLegacy(text, LegacyEncoding.windows1251))) break;
             const local = repairLocal(text, options, options.maxPasses - pass);
             if (local == text) break;
             text = local;
@@ -543,6 +632,7 @@ version (MojibakeWorkProbe) {
         ulong legacyByteCalls;
         ulong legacyByteScalars;
         ulong cp1252TableEntries;
+        ulong windows1251TableEntries;
         ulong legacyByteMapped;
         ulong legacyByteUnmapped;
         ulong sequenceCalls;
@@ -578,6 +668,7 @@ version (MojibakeWorkProbe) {
         ulong unchangedExits;
         MojibakeEncodingWork latin1;
         MojibakeEncodingWork cp1252;
+        MojibakeEncodingWork windows1251;
     }
 
     struct MojibakeWorkEvidence {
@@ -587,7 +678,11 @@ version (MojibakeWorkProbe) {
 
     private ref MojibakeEncodingWork probeEncoding(ref MojibakePassWork pass,
             LegacyEncoding encoding) pure {
-        return encoding == LegacyEncoding.latin1 ? pass.latin1 : pass.cp1252;
+        final switch (encoding) {
+            case LegacyEncoding.latin1: return pass.latin1;
+            case LegacyEncoding.cp1252: return pass.cp1252;
+            case LegacyEncoding.windows1251: return pass.windows1251;
+        }
     }
 
     private bool probeLegacyByte(dchar c, LegacyEncoding encoding,
@@ -599,6 +694,12 @@ version (MojibakeWorkProbe) {
                 !(c <= 0xFF && (c <= 0x7F || c >= 0xA0))) {
             foreach (candidate; cp1252HighRange) {
                 ++work.cp1252TableEntries;
+                if (candidate == c) break;
+            }
+        }
+        if (encoding == LegacyEncoding.windows1251 && c > 0x7F) {
+            foreach (candidate; windows1251HighRange) {
+                ++work.windows1251TableEntries;
                 if (candidate == c) break;
             }
         }
@@ -780,9 +881,12 @@ version (MojibakeWorkProbe) {
             size_t bestEnd;
             LegacyEncoding bestEncoding;
             long bestGain;
-            foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252]) {
+            foreach (encoding; [LegacyEncoding.latin1, LegacyEncoding.cp1252,
+                    LegacyEncoding.windows1251]) {
                 if ((encoding == LegacyEncoding.latin1 && !options.useLatin1) ||
-                    (encoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                    (encoding == LegacyEncoding.cp1252 && !options.useCp1252) ||
+                    (encoding == LegacyEncoding.windows1251 && !options.useWindows1251))
+                    continue;
                 auto work = &probeEncoding(pass, encoding);
                 auto end = probeSequenceEnd(text, at, encoding, *work);
                 if (end == at) continue;
@@ -810,11 +914,13 @@ version (MojibakeWorkProbe) {
                     if (!probeScoreCandidate(span, encoding, decodedScore, *work)) continue;
                     const intermediate = probeMaterialize(span, encoding, *work);
                     foreach (nextEncoding; [LegacyEncoding.latin1,
-                            LegacyEncoding.cp1252]) {
+                            LegacyEncoding.cp1252, LegacyEncoding.windows1251]) {
                         if ((nextEncoding == LegacyEncoding.latin1 &&
                                 !options.useLatin1) ||
                             (nextEncoding == LegacyEncoding.cp1252 &&
-                                !options.useCp1252)) continue;
+                                !options.useCp1252) ||
+                            (nextEncoding == LegacyEncoding.windows1251 &&
+                                !options.useWindows1251)) continue;
                         auto nextWork = &probeEncoding(pass, nextEncoding);
                         long nextScore;
                         if (probeScoreCandidate(intermediate, nextEncoding,
@@ -855,11 +961,12 @@ version (MojibakeWorkProbe) {
     /// merging or allocating buckets.
     MojibakeWorkEvidence measureMojibakeWork(string text,
             size_t maxPasses = 4, bool useLatin1 = true,
-            bool useCp1252 = true) pure {
+            bool useCp1252 = true, bool useWindows1251 = true) pure {
         enforce(maxPasses <= mojibakeWorkProbePasses,
             "mojibake work probe pass count exceeds fixed capacity");
         MojibakeWorkEvidence evidence;
-        auto options = MojibakeOptions(maxPasses, useLatin1, useCp1252);
+        auto options = MojibakeOptions(maxPasses, useLatin1, useCp1252,
+            useWindows1251);
         const original = text;
         if (allASCII(text)) {
             evidence.output = text;
@@ -878,9 +985,11 @@ version (MojibakeWorkProbe) {
                 break;
             }
             foreach (encoding; [LegacyEncoding.latin1,
-                    LegacyEncoding.cp1252]) {
+                    LegacyEncoding.cp1252, LegacyEncoding.windows1251]) {
                 if ((encoding == LegacyEncoding.latin1 && !options.useLatin1) ||
-                    (encoding == LegacyEncoding.cp1252 && !options.useCp1252)) continue;
+                    (encoding == LegacyEncoding.cp1252 && !options.useCp1252) ||
+                    (encoding == LegacyEncoding.windows1251 &&
+                        !options.useWindows1251)) continue;
                 auto work = &probeEncoding(*pass, encoding);
                 long candidateScore;
                 if (probeScoreCandidate(text, encoding, candidateScore,
@@ -898,6 +1007,9 @@ version (MojibakeWorkProbe) {
                 if (!encodable && options.useCp1252)
                     encodable = probeCanEncode(text, LegacyEncoding.cp1252,
                         pass.cp1252);
+                if (!encodable && options.useWindows1251)
+                    encodable = probeCanEncode(text, LegacyEncoding.windows1251,
+                        pass.windows1251);
                 if (encodable) {
                     ++pass.unchangedExits;
                     break;
@@ -930,7 +1042,7 @@ private string applyConfiguredMojibake(string text,
     auto configured = cast(immutable(MojibakeConfiguration)) raw;
     enforce(configured !is null, "invalid fix-mojibake configuration");
     auto options = MojibakeOptions(configured.maxPasses,
-        configured.useLatin1, configured.useCp1252);
+        configured.useLatin1, configured.useCp1252, configured.useWindows1251);
     return repairMojibake(text, options);
 }
 
@@ -976,6 +1088,33 @@ unittest {
 }
 
 unittest {
+    // Windows-1251 mirrors the CP1252 range/roundtrip coverage above.
+    auto bytes = legacyBytes("РџСЂРёРІРµС‚", LegacyEncoding.windows1251);
+    static assert(isInputRange!(typeof(bytes)));
+    static assert(isForwardRange!(typeof(bytes)));
+    auto decoded = decodedCandidate("РџСЂРёРІРµС‚", LegacyEncoding.windows1251);
+    static assert(isInputRange!(typeof(decoded)));
+    static assert(isForwardRange!(typeof(decoded)));
+    assert(decoded.to!string == "Привет");
+    assert(windows1251RoundTrip("РџСЂРёРІРµС‚") == "Привет");
+
+    import pipeline : FilterOption, Pipeline, TypedFilterSpec;
+    assert(Pipeline.buildTyped([TypedFilterSpec("fix-mojibake", [
+        "encodings": FilterOption.text("windows1251"),
+        "max-passes": FilterOption.integer(2)])]).run("РџСЂРёРІРµС‚") ==
+        "Привет");
+
+    // Design decision: byte 0x98 is Windows-1251's one undefined byte, and
+    // this table follows the strict-undefined convention (see the doc
+    // comment above windows1251HighRange), not ftfy's sloppy identity map.
+    ubyte ignored;
+    assert(!legacyByte(0x98, LegacyEncoding.windows1251, ignored));
+    assert(windows1251HighRange[0] == 0x0402);
+    assert(windows1251HighRange[$ - 1] == 0x044F);
+    assert(windows1251HighRange[0x98 - 0x80] == 0);
+}
+
+unittest {
     immutable fixes = [
         "schÃ¶n" : "schön", "donâ€™t" : "don’t", "âœ” No problems" : "✔ No problems",
         "HÄ±rsÄ±zÄ± BÃ¼yÃ¼ Korkuttu" : "Hırsızı Büyü Korkuttu",
@@ -991,6 +1130,36 @@ unittest {
 }
 
 unittest {
+    // Independently authored Windows-1251/Cyrillic fixtures (not copied
+    // from any third-party corpus): each broken string is its repaired
+    // counterpart's UTF-8 bytes mis-decoded as Windows-1251. Written as
+    // explicit \u escapes to keep the pairing exact and reviewable.
+    immutable fixes = [
+        "РџСЂРёРІРµС" ~
+        "‚, РјРёСЂ!" :
+            "Привет, мир!",
+        "Р”РѕР±СЂРѕ Р" ~
+        "їРѕР¶Р°Р»Рѕ" ~
+        "РІР°С‚СЊ РґР" ~
+        "ѕРјРѕР№." :
+            "Добро пожал" ~
+            "овать домой.",
+        "РЎРїР°СЃРёР" ~
+        "±Рѕ Р·Р° РїРѕ" ~
+        "РјРѕС‰СЊ!" :
+            "Спасибо за п" ~
+            "омощь!",
+        "РњРѕСЃРєРІР" ~
+        "° вЂ” СЃС‚РѕР" ~
+        "»РёС†Р° Р Рѕ" ~
+        "СЃСЃРёРё." :
+            "Москва — сто" ~
+            "лица России.",
+    ];
+    foreach (broken, repaired; fixes) assert(fixMojibake(broken) == repaired, broken);
+}
+
+unittest {
     immutable clean = [
         "café", "IL Y MARQUÉ…", "I'm not such a fan of Charlotte Brontë…”",
         "AHÅ™, the new sofa from IKEA", "higher values (“+” and “×” curves)",
@@ -999,6 +1168,12 @@ unittest {
         "L’épisode 8 est trop fou ouahh", "Ôôô VIDA MINHA", "2012—∞",
         "NESTLÉ® requiere contratar personal", "(-1/2)! = √π",
         "日本語 Ελληνικά русский العربية",
+        // Already-correct Cyrillic text must not be re-decoded as
+        // Windows-1251 mojibake; strict UTF-8 validity of the reinterpreted
+        // legacy bytes is what keeps this safe (see legacySequenceEnd).
+        "Привет, мир!",
+        "Спасибо за по" ~
+        "мощь!",
     ];
     foreach (text; clean) assert(fixMojibake(text) == text, text);
 }
@@ -1022,4 +1197,30 @@ unittest {
     MojibakeOptions onePass;
     onePass.maxPasses = 1;
     assert(repairMojibake("🙂 ÃƒÂ¶ 🐈", onePass) != "🙂 ö 🐈");
+}
+
+unittest {
+    // useWindows1251 gates whole-string repair exactly like useLatin1/
+    // useCp1252 already do: disabling it leaves an otherwise-repairable
+    // Windows-1251 string untouched.
+    immutable windows1251Privet = "РџСЂРёРІРµС‚";
+    assert(fixMojibake(windows1251Privet) == "Привет");
+    MojibakeOptions disabled;
+    disabled.useWindows1251 = false;
+    assert(repairMojibake(windows1251Privet, disabled) == windows1251Privet);
+
+    // Known architecture property, not a Windows-1251-specific regression:
+    // legacySequenceEnd() matches one minimal legacy-decoded UTF-8 sequence
+    // at a time (mirroring CP1252's own repairLocal wiring exactly), and
+    // repairLocal only scores that minimal atom (plus multi-pass
+    // regroupings) against the badness heuristic. CP1252's ported rules
+    // happen to trip on some of its own two-character atoms (accented-Latin
+    // next to specific punctuation); the ported Windows-1251 signal instead
+    // needs three or more characters of context (see the "ВГРС" trigram
+    // rule above), so a Windows-1251 island isolated by unmappable Unicode
+    // is not locally repaired today, even though the identical run repairs
+    // correctly as a whole string above. The adjacent CP1252 island in the
+    // same local pass is unaffected.
+    assert(fixMojibake("🐈schÃ¶n🐈 " ~ windows1251Privet ~ " donâ€™t") ==
+        "🐈schön🐈 " ~ windows1251Privet ~ " don’t");
 }

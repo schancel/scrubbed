@@ -2200,8 +2200,20 @@ int runApp(string[] args) {
     }
     if (durableLedger !is null) durableLedger.checkpoint();
     const failures = counts.failed;
-    if (!errorJournalPath.length)
-        writeln("done. ", counts.succeeded, " succeeded, ", failures, " failed.");
+    // counts.succeeded (from BoundedInput) counts every document whose worker
+    // callback returned without throwing, which includes terminal
+    // (quarantine/reject) decisions -- those aren't exceptional at that
+    // layer. Subtract terminalDecisions here, at the reporting layer only,
+    // so the printed message agrees with the exit code below rather than
+    // claiming unqualified success for documents that were quarantined.
+    const displaySucceeded = counts.succeeded - terminalDecisions;
+    if (!errorJournalPath.length) {
+        if (terminalDecisions)
+            writeln("done. ", displaySucceeded, " succeeded, ", failures,
+                " failed, ", terminalDecisions, " quarantined.");
+        else
+            writeln("done. ", displaySucceeded, " succeeded, ", failures, " failed.");
+    }
     return failures == 0 && terminalDecisions == 0 ? 0 : 1;
 }
 
@@ -2219,6 +2231,40 @@ unittest {
     assert(runApp(["scrubbed", "run", "--input", same, "--output", same,
         "--filters", "fix-mojibake", "--threads", "1"]) == 0);
     assert(readText(same) == "already clean");
+
+    // #381 regression: a trivially short/thin document (the issue's own
+    // `printf '<p>hi</p>'` repro) is correctly quarantined by
+    // html-main-content ("no extractable content") -- a terminal decision,
+    // not a throw, so BoundedInput's worker still counts it toward
+    // `counts.succeeded`. Before the fix, the printed "done." message
+    // reported only `counts.succeeded`/`counts.failed` ("1 succeeded, 0
+    // failed") while the exit code additionally gated on
+    // `terminalDecisions`, so a success-sounding message accompanied a
+    // nonzero exit and no output was written. The message and the exit
+    // code must agree.
+    {
+        import job.presets : cleanWebDocumentTokensV1;
+
+        auto thin = buildPath(root, "tiny.html");
+        write(thin, "<p>hi</p>");
+        auto thinOut = buildPath(root, "tiny-out.txt");
+        auto thinSidecar = thinOut ~ ".document-metadata.json";
+        auto invocation = invokeJsonl(["scrubbed", "run", "--input", thin,
+            "--output", thinOut, "--sidecar-output", thinSidecar,
+            "--threads", "1"] ~ cleanWebDocumentTokensV1, []);
+        auto message = cast(string) invocation.stdoutBytes;
+        assert(invocation.code == 1,
+            "quarantined-only run must exit nonzero: " ~ message);
+        assert(!message.canFind("1 succeeded"),
+            "message must not claim success for a quarantined document: " ~
+            message);
+        assert(message.canFind("quarantined"),
+            "message must explain the nonzero exit: " ~ message);
+        assert(!exists(thinOut),
+            "quarantined document must not publish output");
+        assert(!exists(thinSidecar),
+            "quarantined document must not publish a metadata sidecar");
+    }
     {
         auto priorMetrics =
             environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");

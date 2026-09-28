@@ -1,0 +1,29 @@
+{
+	"name": "lexbor-d",
+	"description": "Bounded, D-idiomatic wrapper over the vendored Lexbor HTML5 parser: typed HtmlTree/HtmlNode results, bounded depth/nodes/attributes/observation bytes, native bytes always copied and UTF-8-validated before they reach D, no raw Lexbor pointer in any public type.",
+	"authors": ["Shammah Chancellor"],
+	"license": "MIT",
+	"copyright": "Copyright © 2026, Shammah Chancellor",
+	"targetType": "library",
+	"sourcePaths": ["source"],
+	"importPaths": ["source"],
+	"dflags": ["-preview=dip1000"],
+	"preBuildCommands": [
+		"cmake -S third_party/lexbor -B .dub/lexbor -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_TESTS=OFF -DLEXBOR_BUILD_EXAMPLES=OFF -DLEXBOR_BUILD_BENCHMARKS=OFF -DLEXBOR_BUILD_UTILS=OFF -DLEXBOR_BUILD_SEPARATELY=OFF",
+		"cmake --build .dub/lexbor --target lexbor_static -j4"
+	],
+	"sourceFiles": [".dub/lexbor/liblexbor_static.a"],
+	"configurations": [
+		{
+			"name": "library",
+			"targetType": "library"
+		},
+		{
+			"name": "unittest",
+			"targetType": "library",
+			"sourcePaths": ["source", "tests"],
+			"importPaths": ["source", "tests"],
+			"versions": ["htmlTreeProductionCheck"]
+		}
+	]
+}

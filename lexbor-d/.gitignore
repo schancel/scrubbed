@@ -1,0 +1,8 @@
+.dub
+*.o
+*.obj
+*.a
+*.lib
+lexbor-d-test-*
+__test__library__
+.DS_Store

@@ -1,0 +1,6 @@
+.dub/
+libhttpfetch.a
+httpfetch-test-*
+*.o
+*.obj
+.DS_Store

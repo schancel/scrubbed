@@ -1,4 +1,11 @@
-/// Self-registering terminal four-class PII stage and content-free audit.
+/// Self-registering four-class PII stage and content-free audit. As of
+/// issue #300 Slice 3, this stage is no longer terminal: it writes its
+/// audit into the shared `DocumentMetadata` accumulator (a
+/// `document-metadata:v2` structured section, see `domain.document_metadata`)
+/// instead of emitting its own standalone `TerminalSideOutput`. A later
+/// `document-metadata-publish` stage in the same job publishes it, alongside
+/// whatever else (e.g. `html-metadata-annotate`) wrote into the same
+/// accumulator.
 module stages.pii_four_class;
 
 import content.pieces : Content, ContentPiece;
@@ -9,7 +16,7 @@ import domain.pii_patterns : PiiCategory, PiiConfidence, PiiFinding,
 import domain.pii_policy : PiiAuditSpan, PiiLocale, PiiOutcome, PiiPolicy,
     PiiPolicyResult, PiiRule, applyPiiPolicy;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
-    StageDeclaration, StageDocument, TerminalSideOutput;
+    StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
     OptionDeclaration, OptionType, SideOutputCapability, StageCardinality,
     StageConfiguration, StageOptions, StageRegistration, registerStage;
@@ -26,6 +33,19 @@ enum piiAnalyzerNameV1 = "pii.four-class";
 enum piiAnalyzerVersionV1 = "four-class:v1";
 enum piiPolicyVersionV1 = "pii-policy:v1";
 enum size_t maxPiiAuditBytesV1 = 1024 * 1024;
+
+/// The stage's own static implementation-key literal (#300 Slice 3):
+/// `applyPiiFourClass` no longer emits its own `TerminalSideOutput` -- the
+/// audit now lands in the shared `DocumentMetadata` accumulator via
+/// `withStructuredSection`, and this is the `sourceStage` provenance bound
+/// to that write, mirroring `html_metadata_annotate_stage.d`'s
+/// `htmlMetadataAnnotateStageKeyV1` and `language_id_detect_stage.d`'s
+/// `languageIdDetectStageKeyV1` exactly. `piiAuditKeyV1` (unchanged, still
+/// used by `encodePiiAuditV1`'s callers/`effects.pii_audit`'s facade) is
+/// reused unmodified as the structured section's own identity string: the
+/// same stable name, now naming a section instead of a standalone terminal
+/// side output.
+enum piiFourClassStageKeyV1 = "pii-four-class";
 
 /// Already-normalized finite configuration. The stage factory owns validation.
 struct PiiAuditOptionsV1 {
@@ -370,9 +390,17 @@ private StageDecision applyPiiFourClass(StageDocument input,
         result.audit, auditOptions);
     if (configured.policy != PiiPolicy.report)
         input.content = new Content([ContentPiece.retainImmutable(result.output.idup)]);
-    auto sideOutput = TerminalSideOutput(piiAuditKeyV1, piiAuditSchemaV1,
-        piiAuditSuffixV1, audit);
-    return StageDecision.map(input, [sideOutput]);
+    // #300 Slice 3: the audit no longer becomes its own standalone
+    // `TerminalSideOutput` -- it is written into the shared `DocumentMetadata`
+    // accumulator as a structured section, so a later `document-metadata-
+    // publish` stage in the same job can publish it alongside whatever
+    // other stage (e.g. `html-metadata-annotate`) already wrote into
+    // `input.metadata`. The content-rewrite branch immediately above is
+    // completely unchanged by this: it is orthogonal to where the audit
+    // bytes end up.
+    input.metadata = input.metadata.withStructuredSection(piiAuditKeyV1,
+        audit, piiFourClassStageKeyV1);
+    return StageDecision.map(input);
 }
 
 static this() {
@@ -387,5 +415,5 @@ static this() {
             OptionDeclaration("audit-sink", OptionType.text),
             OptionDeclaration("allow-redact", OptionType.boolean),
         ], null, null, &factory, FilterPlacement.none,
-        StageCardinality.oneToOne, SideOutputCapability.terminal));
+        StageCardinality.oneToOne, SideOutputCapability.none));
 }

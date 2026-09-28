@@ -52,8 +52,14 @@ private CompiledJob plan(string options = `{}`) {
 private auto run(CompiledJob compiled, const(ubyte)[] bytes,
         string record = "root") {
     auto events = runCompiledJob(input(bytes, record), compiled);
-    enforce(events.length == 1 && events[0].sideOutputs.length == 1,
-        "stage did not emit one terminal audit");
+    // #300 Slice 3: pii-four-class is no longer terminal (registers
+    // `SideOutputCapability.none`) -- it writes its audit into
+    // `payload.metadata` as a `document-metadata:v2` structured section
+    // instead of emitting its own `TerminalSideOutput`. No side output
+    // exists at all for a plan containing only this one stage.
+    enforce(events.length == 1 && events[0].sideOutputs.length == 0 &&
+        events[0].payload.metadata.structuredSectionCount == 1,
+        "stage did not write exactly one structured-section audit");
     return events[0];
 }
 
@@ -65,8 +71,16 @@ private string digestText(const(ubyte)[] bytes) pure {
     return toHexString!(LetterCase.lower)(sha256Of(bytes)).idup;
 }
 
+/// The audit bytes now live in `payload.metadata`'s one structured section
+/// (identity `piiAuditKeyV1`, source stage `piiFourClassStageKeyV1`) instead
+/// of a standalone `TerminalSideOutput` -- same bytes, same
+/// `encodePiiAuditV1` shape, different destination.
 private string auditText(StageEvent event) {
-    return cast(string) event.sideOutputs[0].bytes;
+    auto sections = event.payload.metadata.structuredSections;
+    enforce(sections.length == 1 && sections[0].sectionId == piiAuditKeyV1 &&
+        sections[0].sourceStage == piiFourClassStageKeyV1,
+        "audit structured section identity/provenance changed");
+    return cast(string) sections[0].payload;
 }
 
 private bool rejects(scope void delegate() operation) {
@@ -223,7 +237,7 @@ private void proveLocalesSelectionsAndBounds() {
     auto maximum = "a@b.co ".replicate(4096);
     auto capped = run(plan(), cast(const(ubyte)[]) maximum, "exact-cap");
     enforce(auditText(capped).canFind(`"max_findings":4096`) &&
-        capped.sideOutputs[0].bytes.length <= 1024 * 1024,
+        auditText(capped).length <= 1024 * 1024,
         "exact finding/audit cap failed");
     auto overflow = maximum ~ "a@b.co ";
     enforce(rejects(() { run(plan(), cast(const(ubyte)[]) overflow,
@@ -295,9 +309,11 @@ private void proveV3V4CommonEquivalence() {
     enum fixture = "+44 20 7946 0958";
     auto v3Event = run(compileJob(common), cast(const(ubyte)[]) fixture, "same");
     auto v4Event = runDispatchJobV1(input(cast(const(ubyte)[]) fixture, "same"), v4);
+    auto v4Sections = v4Event.output.metadata.structuredSections;
     enforce(text(v4Event.output.content) == text(v3Event.payload.content) &&
-        v4Event.sideOutputs.length == 1 &&
-        v4Event.sideOutputs[0].bytes == v3Event.sideOutputs[0].bytes,
+        v4Event.sideOutputs.length == 0 && v4Sections.length == 1 &&
+        v4Sections[0].sectionId == piiAuditKeyV1 &&
+        v4Sections[0].payload == cast(immutable(ubyte)[]) auditText(v3Event),
         "v3 and v4-common stage behavior diverged");
 }
 

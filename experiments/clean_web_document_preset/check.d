@@ -5,19 +5,21 @@
 ///
 ///   A. token-list/CLI/JSON equivalence (the preset's fixed token list
 ///      lowers to the same `JobSpec`/canonical JSON a hand-written
-///      `run --stage ...` invocation of the same four stages would),
+///      `run --stage ...` invocation of the same five stages would),
 ///   B. `--emit-config` performs no filesystem mutation at all and is
 ///      byte-stable/deterministic across repeated invocations,
 ///   C. every sealed composition-flag attempt and unknown/malformed option
 ///      fails before any I/O, with an error naming `run` as the escape
 ///      hatch,
 ///   D. real execution through `clean-web-document` produces byte-identical
-///      primary output and PII-audit sidecar bytes to the equivalent
-///      hand-written `run --stage ...` invocation of the same four stages,
-///   E. the automatically derived PII-audit sidecar path never silently
-///      clobbers a pre-existing file or directory there -- it fails closed,
-///      before any I/O, leaving the pre-existing content untouched and the
-///      primary output never created.
+///      primary output and document-metadata sidecar bytes to the equivalent
+///      hand-written `run --stage ...` invocation of the same five stages
+///      (#300 Slice 3: the sidecar is now `document-metadata-publish`'s
+///      output, carrying both the annotated metadata and the PII audit),
+///   E. the automatically derived document-metadata sidecar path never
+///      silently clobbers a pre-existing file or directory there -- it fails
+///      closed, before any I/O, leaving the pre-existing content untouched
+///      and the primary output never created.
 module experiments.clean_web_document_preset.check;
 
 import job.json : canonicalJobJson;
@@ -25,11 +27,29 @@ import job.presets : cleanWebDocumentTokensV1, expandCleanWebDocumentPresetV1;
 import std.algorithm.searching : canFind;
 import std.file : SpanMode, dirEntries, exists, mkdir, mkdirRecurse,
     read, readText, rmdirRecurse, tempDir, write;
+import std.json : parseJSON;
 import std.path : buildPath;
 import std.process : execute;
 import std.uuid : randomUUID;
 
 private int failures;
+
+/// The structured section's `payload` field is hex-encoded opaque bytes
+/// (`domain.document_metadata`'s wire convention); decode it back to text so
+/// this black-box, real-subprocess proof can inspect the actual PII audit
+/// JSON the same way a human operator reading the sidecar off disk would.
+private string hexDecode(string hex) {
+    ubyte hexNibble(char c) {
+        if (c >= '0' && c <= '9') return cast(ubyte) (c - '0');
+        if (c >= 'a' && c <= 'f') return cast(ubyte) (c - 'a' + 10);
+        assert(false, "not a lowercase hex digit");
+    }
+    assert(hex.length % 2 == 0, "hex payload has odd length");
+    char[] result;
+    for (size_t i; i < hex.length; i += 2)
+        result ~= cast(char) ((hexNibble(hex[i]) << 4) | hexNibble(hex[i + 1]));
+    return result.idup;
+}
 
 /// Not `assert`: this checker builds with LDC `-O3 -release`, which elides
 /// the `assert` language construct. Every check here is a plain runtime
@@ -140,7 +160,7 @@ private void proveEmitConfigNoMutation(string exe) {
         "proof B: --emit-config created no file or directory anywhere (directory snapshot unchanged)");
     expect(!exists(missingInput), "proof B: --emit-config never created the input path");
     expect(!exists(missingOutput), "proof B: --emit-config never created the output path");
-    expect(!exists(missingOutput ~ ".pii-audit.json"),
+    expect(!exists(missingOutput ~ ".document-metadata.json"),
         "proof B: --emit-config never created the derived sidecar path");
 }
 
@@ -201,11 +221,15 @@ private void proveSealedRejectionBeforeIo(string exe) {
 }
 
 /// Proof D: real execution through `clean-web-document` produces
-/// byte-identical primary output AND PII-audit sidecar bytes to the
+/// byte-identical primary output AND document-metadata sidecar bytes to the
 /// equivalent hand-written `run --stage id=text-transform=text-transform
 /// --filter fix-mojibake --stage id=html-metadata-annotate=... --stage
-/// id=html-main-content=... --stage id=pii-four-class=...` invocation of
-/// the same four stages against the same input file.
+/// id=html-main-content=... --stage id=pii-four-class=... --stage
+/// id=document-metadata-publish=...` invocation of the same five stages
+/// against the same input file. Also the real, black-box, end-to-end
+/// #300 Slice 3 bug-fix proof: the one published sidecar is decoded and
+/// shown to carry BOTH the annotated title/author AND the PII audit
+/// together -- what `clean-web-document` silently dropped before this slice.
 private void proveByteIdenticalRealExecution(string exe) {
     auto root = freshRoot("byte-identical");
     scope(exit) if (exists(root)) rmdirRecurse(root);
@@ -216,7 +240,7 @@ private void proveByteIdenticalRealExecution(string exe) {
     auto presetResult = runSplit([exe, "clean-web-document", "--input",
         input, "--output", presetOutput, "--threads", "1"]);
     expect(presetResult.status == 0, "proof D: clean-web-document real execution exits 0");
-    auto presetSidecar = presetOutput ~ ".pii-audit.json";
+    auto presetSidecar = presetOutput ~ ".document-metadata.json";
     expect(exists(presetOutput), "proof D: clean-web-document wrote its primary output");
     expect(exists(presetSidecar), "proof D: clean-web-document wrote its derived sidecar");
 
@@ -233,21 +257,44 @@ private void proveByteIdenticalRealExecution(string exe) {
     expect(cast(ubyte[]) read(presetOutput) == cast(ubyte[]) read(handOutput),
         "proof D: primary output bytes are byte-identical between the preset and the hand-written run invocation");
     expect(cast(ubyte[]) read(presetSidecar) == cast(ubyte[]) read(handSidecar),
-        "proof D: PII-audit sidecar bytes are byte-identical between the preset and the hand-written run invocation");
+        "proof D: document-metadata sidecar bytes are byte-identical between the preset and the hand-written run invocation");
 
     // The printed job identity line (derived from the compiled JobSpec) is
     // also byte-identical, since both invocations compile the exact same
-    // four-stage v3 job.
+    // five-stage v3 job.
     auto presetJobLine = presetResult.output.canFind("job: job:v3:");
     auto handJobLine = handResult.output.canFind("job: job:v3:");
     expect(presetJobLine && handJobLine, "proof D: both invocations print a v3 job identity line");
     expect(presetResult.output == handResult.output,
         "proof D: full stdout (job identity + done-count line) is byte-identical between the preset and the hand-written run invocation");
+
+    // THE BUG FIX, proven end to end through the real subprocess and the
+    // real bytes it wrote to disk: the one published sidecar decodes to
+    // carry both the annotated metadata and the PII audit together.
+    auto sidecarJson = parseJSON(readText(presetSidecar));
+    expect(sidecarJson["version"].str == "document-metadata:v2",
+        "proof D (THE BUG FIX): sidecar is a document-metadata:v2 record " ~
+        "(a structured section is present)");
+    expect(sidecarJson["standard"]["title"]["value"].str == "Café Culture",
+        "proof D (THE BUG FIX): sidecar carries the annotated title -- " ~
+        "silently discarded by clean-web-document before #300 Slice 3");
+    expect(sidecarJson["standard"]["author"]["value"].str == "René García",
+        "proof D (THE BUG FIX): sidecar carries the annotated author -- " ~
+        "also silently discarded before #300 Slice 3");
+    auto sections = sidecarJson["structuredSections"].array;
+    expect(sections.length == 1 && sections[0]["sectionId"].str == "pii-audit",
+        "proof D: the same sidecar also carries exactly one pii-audit " ~
+        "structured section");
+    auto decodedAudit = parseJSON(hexDecode(sections[0]["payload"].str));
+    expect(decodedAudit["schema"].str == "scrubbed-pii-audit-v1" &&
+        decodedAudit["unions"].array.length == 1,
+        "proof D: the structured section's payload decodes to a real " ~
+        "pii-four-class audit record with the expected finding");
 }
 
-/// Proof E: the automatically derived PII-audit sidecar path never silently
-/// clobbers a pre-existing file or directory -- both for a file `--output`
-/// and for a directory (tree) `--output`.
+/// Proof E: the automatically derived document-metadata sidecar path never
+/// silently clobbers a pre-existing file or directory -- both for a file
+/// `--output` and for a directory (tree) `--output`.
 private void proveDerivedSidecarSafety(string exe) {
     // File-output case.
     {
@@ -256,7 +303,7 @@ private void proveDerivedSidecarSafety(string exe) {
         auto input = buildPath(root, "article.html");
         write(input, articleHtml());
         auto output = buildPath(root, "out.txt");
-        auto sidecar = output ~ ".pii-audit.json";
+        auto sidecar = output ~ ".document-metadata.json";
         enum sentinel = "PRE-EXISTING UNRELATED CONTENT, MUST SURVIVE";
         write(sidecar, sentinel);
 
@@ -280,7 +327,7 @@ private void proveDerivedSidecarSafety(string exe) {
         mkdir(inputDir);
         write(buildPath(inputDir, "article.html"), articleHtml());
         auto outputDir = buildPath(root, "out");
-        auto sidecarRoot = outputDir ~ ".pii-audit";
+        auto sidecarRoot = outputDir ~ ".document-metadata";
         mkdir(sidecarRoot);
         enum sentinelName = "unrelated-preexisting-file.txt";
         enum sentinel = "PRE-EXISTING UNRELATED TREE CONTENT, MUST SURVIVE";
@@ -307,7 +354,7 @@ private void proveDerivedSidecarSafety(string exe) {
         auto input = buildPath(root, "article.html");
         write(input, articleHtml());
         auto output = buildPath(root, "out.txt");
-        auto sidecar = output ~ ".pii-audit.json";
+        auto sidecar = output ~ ".document-metadata.json";
 
         auto result = runSplit([exe, "clean-web-document", "--input", input,
             "--output", output, "--threads", "1"]);
@@ -315,7 +362,11 @@ private void proveDerivedSidecarSafety(string exe) {
             "proof E (control): clean-web-document succeeds when the derived sidecar path is free");
         expect(exists(output), "proof E (control): primary output was created");
         expect(exists(sidecar), "proof E (control): derived sidecar was created at the documented path");
-        expect(readText(sidecar).canFind("scrubbed-pii-audit-v1"),
+        auto controlJson = parseJSON(readText(sidecar));
+        expect(controlJson["structuredSections"].array.length == 1 &&
+            controlJson["structuredSections"].array[0]["sectionId"].str == "pii-audit" &&
+            parseJSON(hexDecode(controlJson["structuredSections"].array[0]["payload"].str))
+                ["schema"].str == "scrubbed-pii-audit-v1",
             "proof E (control): derived sidecar actually holds a real PII-audit record");
     }
 }
@@ -335,7 +386,7 @@ void main(string[] args) {
         "root --help lists clean-web-document");
     auto commandHelp = run([exe, "clean-web-document", "--help"]);
     expect(commandHelp.status == 0, "clean-web-document --help exits 0");
-    expect(commandHelp.output.canFind("pii-audit") &&
+    expect(commandHelp.output.canFind("document-metadata") &&
         commandHelp.output.canFind("already exist"),
         "clean-web-document --help plainly documents the automatic sidecar file and its fail-closed behavior");
     expect(commandHelp.output.canFind("emit-config"),

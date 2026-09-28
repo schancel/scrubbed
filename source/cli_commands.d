@@ -5,6 +5,8 @@ import argparse;
 import cli : runApp, runExtract;
 import composition.compiler : compileJob;
 import effects.crawl_cli : runCrawl;
+import effects.document_metadata_publish_stage : documentMetadataPublishKeyV1,
+    documentMetadataPublishSuffixV1;
 import effects.error_cli : runErrorCommand;
 import effects.metadata_route_cli : runMetadataRoute;
 import job.json : canonicalJobJson;
@@ -109,18 +111,20 @@ struct Extract {
 @(Command("clean-web-document").Description(
     "Run the sealed clean-web-document/v1 preset: text-transform's " ~
     "fix-mojibake filter, then html-metadata-annotate, html-main-content, " ~
-    "and terminal pii-four-class. No --stage/--filter overrides; use 'run' " ~
-    "for custom composition. Automatically writes a PII-audit sidecar " ~
-    "beside --output (see --output help); fails before touching anything " ~
-    "if that derived path already exists."))
+    "pii-four-class, and terminal document-metadata-publish. No " ~
+    "--stage/--filter overrides; use 'run' for custom composition. " ~
+    "Automatically writes a document-metadata sidecar (annotated " ~
+    "title/author/date/url plus the PII audit, in one blob) beside " ~
+    "--output (see --output help); fails before touching anything if that " ~
+    "derived path already exists."))
 struct CleanWebDocument {
     @(NamedArgument("input", "i").Description("Input file or directory tree"))
     string input;
     @(NamedArgument("output", "o").Description(
-        "Output path. Also fixes the automatic PII-audit sidecar path: " ~
-        "'<output>.pii-audit.json' for a file, or '<output>.pii-audit/' " ~
-        "(mirroring the input tree) for a directory. That derived path " ~
-        "must not already exist."))
+        "Output path. Also fixes the automatic document-metadata sidecar " ~
+        "path: '<output>.document-metadata.json' for a file, or " ~
+        "'<output>.document-metadata/' (mirroring the input tree) for a " ~
+        "directory. That derived path must not already exist."))
     string output;
     @(NamedArgument.Description("Worker thread count"))
     size_t threads;
@@ -424,13 +428,25 @@ private bool cleanWebDocumentKnownValueFlag(string flag) {
     return false;
 }
 
-/// The automatic PII-audit sidecar path derived from `--output`. A file
-/// output gets a sibling `.pii-audit.json` file (matching `pii-four-class`'s
-/// own per-document suffix); a directory (tree) output gets a sibling
-/// `.pii-audit` directory that mirrors the input tree, exactly like a
-/// hand-written `--sidecar-output` directory root would.
+/// The automatic document-metadata sidecar path derived from `--output`.
+/// #300 Slice 3: `pii-four-class` converged onto the shared `DocumentMetadata`
+/// accumulator and is no longer its own terminal stage -- `clean-web-document`'s
+/// chain now ends in the shared `document-metadata-publish` stage (see
+/// `job.presets.cleanWebDocumentTokensV1`), so the derived sidecar now uses
+/// that stage's own already-established convention instead of a
+/// `pii-four-class`-specific one: a file output gets a sibling
+/// `document_metadata_publish_stage.d`'s `documentMetadataPublishSuffixV1`
+/// (`.document-metadata.json`) file; a directory (tree) output gets a
+/// sibling `.document-metadata` directory (derived from that same stage's
+/// `documentMetadataPublishKeyV1` identity, exactly as the prior
+/// `.pii-audit` directory name was derived from `pii-four-class`'s own key)
+/// that mirrors the input tree, exactly like a hand-written
+/// `--sidecar-output` directory root would. The published blob now carries
+/// both the annotated title/author/date/url metadata (previously silently
+/// discarded -- the bug this slice fixes) and the PII audit together.
 private string cleanWebDocumentSidecarPath(string output, bool inputIsDir) {
-    return output ~ (inputIsDir ? ".pii-audit" : ".pii-audit.json");
+    return output ~ (inputIsDir ? "." ~ documentMetadataPublishKeyV1 :
+        documentMetadataPublishSuffixV1);
 }
 
 private bool cleanWebDocumentPathOccupied(string path) {
@@ -517,7 +533,7 @@ private int runCleanWebDocument(const string[] rawArgs) {
     auto sidecarPath = cleanWebDocumentSidecarPath(output, inputIsDir);
     if (cleanWebDocumentPathOccupied(sidecarPath))
         return cleanWebDocumentError(
-            "derived PII-audit sidecar path already exists: " ~ sidecarPath ~
+            "derived document-metadata sidecar path already exists: " ~ sidecarPath ~
             " (clean-web-document writes it automatically beside --output " ~
             "and refuses to overwrite an unexpected existing path there; " ~
             "move it aside or choose a different --output, then retry)");

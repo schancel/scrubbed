@@ -1,7 +1,19 @@
 /// Release-binary proof for generic terminal side-output publication.
+///
+/// #300 Slice 3: `pii-four-class` converged onto the shared `DocumentMetadata`
+/// accumulator and is no longer terminal itself (`SideOutputCapability.none`).
+/// This proof exercises the *generic* side-output publication machinery
+/// (aliasing, tree mode, JSONL, durable manifest/error-journal routes) using
+/// `pii-four-class` only for its still-real content-masking behavior; the
+/// actual terminal side-output producer in every stage list below is now the
+/// chained `document-metadata-publish` stage, matching the real
+/// `pii-four-class -> document-metadata-publish` production pattern
+/// (`job.presets.cleanWebDocumentTokensV1`).
 module experiments.side_output_publication.check;
 
+import std.algorithm.iteration : filter;
 import std.algorithm.searching : canFind;
+import std.array : array;
 import std.conv : to;
 import std.exception : enforce;
 import std.file : SpanMode, dirEntries, exists, mkdir, mkdirRecurse, read,
@@ -12,6 +24,20 @@ import std.stdio : File, writeln;
 import std.string : splitLines;
 import std.uuid : randomUUID;
 
+/// `document-metadata-publish`'s own already-shipped, unmodified wire format
+/// (`domain.document_metadata.encodeDocumentMetadataV1`/`V2`) always ends
+/// its payload in an embedded trailing `"\n"`, on top of which
+/// `JsonlSidecarWriter` (`source/cli.d`) appends its own record-separator
+/// `"\n"`. Using it as a JSONL sidecar's terminal producer (this proof's
+/// #300 Slice 3 substitution) therefore legitimately writes one blank line
+/// after every real record -- a pre-existing property of that stage's own
+/// wire shape, not something this slice changes or is in scope to change.
+/// Counting non-blank lines is the record-cardinality-preserving way to
+/// assert against a JSONL sidecar built from this stage.
+private size_t nonBlankLineCount(string text) {
+    return text.splitLines.filter!(line => line.length != 0).array.length;
+}
+
 version (Posix) {
     import core.sys.posix.unistd : link;
     import std.string : toStringz;
@@ -19,7 +45,7 @@ version (Posix) {
 
 private string[] stageArgs() {
     return ["--stage", "pii=pii-four-class", "--stage-option",
-        "policy=text:mask"];
+        "policy=text:mask", "--stage", "publish=document-metadata-publish"];
 }
 
 private void runOkay(string binary, string[] args) {
@@ -92,9 +118,9 @@ private void treeIdentityProof(string binary, string root) {
             auto name = ordinal.to!string ~ ".txt";
             enforce(read(buildPath(primary, name)) == read(buildPath(root,
                 "tree-primary-1", name)), "thread count changed primary bytes");
-            enforce(read(buildPath(side, name ~ ".pii-audit.json")) ==
+            enforce(read(buildPath(side, name ~ ".document-metadata.json")) ==
                 read(buildPath(root, "tree-side-1",
-                    name ~ ".pii-audit.json")),
+                    name ~ ".document-metadata.json")),
                 "thread count changed side-output bytes");
         }
     }
@@ -135,7 +161,7 @@ private void jsonlProof(string binary, string root) {
         "1048576"] ~ stageArgs(), input, output, diagnostics);
     enforce(wait(child) == 0, "JSONL side-output run failed");
     enforce(readText(outputPath).splitLines.length == 2 &&
-        readText(sidePath).splitLines.length == 4,
+        nonBlankLineCount(readText(sidePath)) == 4,
         "JSONL input/field order or cardinality changed");
     enforce(!readText(sidePath).canFind("alice@example.com"),
         "JSONL side output leaked selected content");
@@ -198,7 +224,8 @@ private void durableProof(string binary, string root) {
 
     auto changedOptions = execute([binary, "run"] ~ args ~
         ["--stage", "pii=pii-four-class", "--stage-option",
-            "policy=text:report"]);
+            "policy=text:report", "--stage",
+            "publish=document-metadata-publish"]);
     enforce(changedOptions.status != 0 && read(primary) == primaryBytes &&
         read(side) == sideBytes, "changed options verified-skipped old sinks");
     write(input, "Contact changed@example.com.\n");

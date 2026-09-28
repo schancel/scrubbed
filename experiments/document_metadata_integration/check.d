@@ -24,10 +24,11 @@ import composition.job_executor : CompiledJobFailure, runCompiledJob;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, OutputName, SourceLocator;
 import domain.document_metadata : DocumentMetadata, StandardMetadataKey,
-    encodeDocumentMetadataV1;
-import domain.pii_patterns : scanPii;
+    decodeDocumentMetadataV2, encodeDocumentMetadataV1;
+import domain.pii_patterns : maxPiiFindings, maxPiiInputBytes, scanPii;
 import domain.pii_policy : applyPiiPolicy, PiiPolicy;
-import effects.document_metadata_publish_stage : documentMetadataPublishSchemaV1;
+import effects.document_metadata_publish_stage : documentMetadataPublishSchemaV1,
+    documentMetadataPublishSchemaV2;
 import effects.html_main_content : extractMainContent, MainContentStatus;
 import effects.html_metadata : extractHtmlMetadata;
 import effects.html_metadata_annotate_stage : htmlMetadataAnnotateStageKeyV1;
@@ -49,6 +50,7 @@ import stages.pii_four_class;
 import effects.html_metadata_annotate_stage;
 import effects.document_metadata_publish_stage;
 import effects.html_main_content_stage;
+import effects.html_metadata_stage;
 
 private int failures;
 
@@ -109,6 +111,15 @@ private StageRegistry integrationRegistry() {
         *availableStages().find("html-main-content"));
     registry.add(cast(StageRegistration)
         *availableStages().find("pii-four-class"));
+    // #300 Slice 3: `pii-four-class` is no longer terminal-capable, so
+    // `proveDualTerminalStillRejected`'s regression coverage of the compiler's
+    // "at most one terminal-capable stage per job" cap needs a genuinely
+    // still-terminal second candidate; `html-metadata` (issue #284's
+    // separate, disjoint stage) still registers `SideOutputCapability
+    // .terminal` unchanged and is otherwise unused by this file's other
+    // proofs, so it is copied in unmodified for that purpose only.
+    registry.add(cast(StageRegistration)
+        *availableStages().find("html-metadata"));
     return registry;
 }
 
@@ -145,7 +156,11 @@ private DocumentMetadata expectedAnnotateMetadata(string repairedHtml,
 }
 
 /// Proof A: `[text-transform(fix-mojibake), html-metadata-annotate,
-/// pii-four-class(terminal, last)]`.
+/// pii-four-class]`. #300 Slice 3: `pii-four-class` is no longer terminal --
+/// it writes its audit into `payload.metadata` as a structured section
+/// instead of emitting a standalone `TerminalSideOutput`, so this three-stage
+/// job now has zero side outputs, and `payload.metadata` carries both what
+/// `html-metadata-annotate` wrote AND what `pii-four-class` wrote.
 private void proveProofA(ref StageRegistry registry) {
     auto spec = parseJobJson(`{"version":3,"stages":[` ~
         `{"id":"repair","implementation":"text-transform",` ~
@@ -182,10 +197,23 @@ private void proveProofA(ref StageRegistry registry) {
     expect(event.payload.content.copy() != rawBasedOutput,
         "proof A: final content is NOT what PII would have produced from raw mojibake");
 
-    expect(event.sideOutputs.length == 1,
-        "proof A: exactly one TerminalSideOutput exists");
-    expect(event.sideOutputs[0].schema == "scrubbed-pii-audit-v1",
-        "proof A: the one side output is PII's own, unchanged schema");
+    expect(event.sideOutputs.length == 0,
+        "proof A: no TerminalSideOutput exists -- pii-four-class is no " ~
+        "longer terminal (#300 Slice 3)");
+    expect(event.payload.metadata.structuredSectionCount == 1 &&
+        event.payload.metadata.structuredSections[0].sectionId == piiAuditKeyV1 &&
+        event.payload.metadata.structuredSections[0].sourceStage == piiFourClassStageKeyV1,
+        "proof A: pii-four-class wrote exactly one structured section, " ~
+        "correctly identified and attributed");
+    auto proofAAuditOptions = PiiAuditOptionsV1("US", "mask",
+        "email,phone,card,ip", "high,ambiguous", maxPiiInputBytes,
+        maxPiiFindings, piiAuditSinkV1, false);
+    auto expectedAudit = encodePiiAuditV1(document.id, repairedBytes,
+        repairedBasedOutput, applyPiiPolicy(repairedBytes, repairedFindings,
+            PiiPolicy.mask, false).audit, proofAAuditOptions);
+    expect(event.payload.metadata.structuredSections[0].payload == expectedAudit,
+        "proof A: the structured section's payload is exactly " ~
+        "encodePiiAuditV1's own output, independently recomputed");
 
     auto expectedMetadata = expectedAnnotateMetadata(repaired,
         document.source.recordKey);
@@ -194,20 +222,28 @@ private void proveProofA(ref StageRegistry registry) {
         !expectedMetadata.hasStandardField(StandardMetadataKey.date) &&
         !expectedMetadata.hasStandardField(StandardMetadataKey.url),
         "proof A: fixture sanity -- title/author selected, date/url absent");
-    expect(event.payload.metadata == expectedMetadata,
-        "proof A: payload.metadata carries what the annotate stage wrote, " ~
-        "still present after PII's stage runs (PII never touches .metadata: " ~
-        "confirmed both by source inspection of stages.pii_four_class.d, " ~
-        "which references .metadata nowhere, and by this exact-equality check " ~
-        "against annotate's own independently-computed output)");
+    expect(event.payload.metadata.hasStandardField(StandardMetadataKey.title) &&
+        event.payload.metadata.standardValue(StandardMetadataKey.title) ==
+            expectedMetadata.standardValue(StandardMetadataKey.title) &&
+        event.payload.metadata.hasStandardField(StandardMetadataKey.author) &&
+        event.payload.metadata.standardValue(StandardMetadataKey.author) ==
+            expectedMetadata.standardValue(StandardMetadataKey.author),
+        "proof A: payload.metadata still carries what the annotate stage " ~
+        "wrote, surviving pii-four-class's own stage unchanged, alongside " ~
+        "(not instead of) pii-four-class's own structured-section write");
 }
 
-/// Proof D (issue #26 next-slice): `[text-transform(fix-mojibake),
-/// html-metadata-annotate, html-main-content, pii-four-class(terminal,
-/// last)]`. Extends Proof A with `html-main-content` inserted in its
-/// contract-required position -- after metadata-annotation, since
-/// annotation reads `<head>` evidence that main-content-extraction's
-/// content-replacing map would otherwise have already discarded.
+/// Proof D (#300 Slice 3's real bug-fix proof): `[text-transform(fix-mojibake),
+/// html-metadata-annotate, html-main-content, pii-four-class,
+/// document-metadata-publish(terminal, last)]` -- exactly
+/// `job.presets.cleanWebDocumentTokensV1`'s real, sealed five-stage chain
+/// (same stage order, same implementations). Before #300 Slice 3,
+/// `html-metadata-annotate`'s annotated title/author was computed and then
+/// silently discarded every run, because the chain ended in
+/// `pii-four-class`'s own standalone terminal side output, which never
+/// carried it. This proof runs the real converged chain end to end and
+/// decodes the one published wire record to confirm it now carries BOTH the
+/// annotated title/author AND the PII audit together -- the actual fix.
 private void proveProofD(ref StageRegistry registry) {
     string sentence = `SchÃ¶n weather today. `;
     string articleBody;
@@ -225,9 +261,10 @@ private void proveProofD(ref StageRegistry registry) {
         `{"id":"annotate","implementation":"html-metadata-annotate"},` ~
         `{"id":"maincontent","implementation":"html-main-content"},` ~
         `{"id":"pii","implementation":"pii-four-class",` ~
-        `"options":{"policy":"mask"}}]}`);
+        `"options":{"policy":"mask"}},` ~
+        `{"id":"publish","implementation":"document-metadata-publish"}]}`);
     auto plan = compileJob(spec, &registry);
-    expect(plan.stages.length == 4, "proof D: job compiles with all four stages");
+    expect(plan.stages.length == 5, "proof D: job compiles with all five stages");
 
     auto document = Document(SourceLocator("document-metadata-integration",
         "proof-d", "fixture"), OutputName("out"));
@@ -269,28 +306,62 @@ private void proveProofD(ref StageRegistry registry) {
     expect(event.payload.content.copy() != rawBasedOutput,
         "proof D: final content is NOT what PII would have produced from raw HTML");
 
+    // The core #300 Slice 3 bug-fix proof: exactly one TerminalSideOutput,
+    // now `document-metadata-publish`'s (not PII's own standalone schema),
+    // and its wire decodes to carry BOTH the annotated title/author AND the
+    // PII audit together in the same published blob.
     expect(event.sideOutputs.length == 1 &&
-        event.sideOutputs[0].schema == "scrubbed-pii-audit-v1",
-        "proof D: exactly one TerminalSideOutput, PII's own unchanged schema");
+        event.sideOutputs[0].schema == documentMetadataPublishSchemaV2,
+        "proof D: exactly one TerminalSideOutput, document-metadata-publish's " ~
+        "v2 schema (a structured section is present)");
 
     auto expectedMetadata = expectedAnnotateMetadata(repaired,
         document.source.recordKey);
     expect(expectedMetadata.hasStandardField(StandardMetadataKey.title) &&
         expectedMetadata.hasStandardField(StandardMetadataKey.author),
         "proof D: fixture sanity -- title/author selected");
-    expect(event.payload.metadata == expectedMetadata,
-        "proof D: payload.metadata still carries what html-metadata-annotate " ~
-        "wrote, surviving both html-main-content's content replacement and " ~
-        "pii-four-class's own stage, unchanged");
+
+    auto decoded = decodeDocumentMetadataV2(document.id,
+        cast(string) event.sideOutputs[0].bytes);
+    expect(decoded.hasStandardField(StandardMetadataKey.title) &&
+        decoded.standardValue(StandardMetadataKey.title) ==
+            expectedMetadata.standardValue(StandardMetadataKey.title) &&
+        decoded.standardSourceStage(StandardMetadataKey.title) ==
+            htmlMetadataAnnotateStageKeyV1,
+        "proof D (THE BUG FIX): the published sidecar carries the " ~
+        "annotated title -- before #300 Slice 3 this was silently " ~
+        "discarded every clean-web-document run");
+    expect(decoded.hasStandardField(StandardMetadataKey.author) &&
+        decoded.standardValue(StandardMetadataKey.author) ==
+            expectedMetadata.standardValue(StandardMetadataKey.author) &&
+        decoded.standardSourceStage(StandardMetadataKey.author) ==
+            htmlMetadataAnnotateStageKeyV1,
+        "proof D (THE BUG FIX): the published sidecar carries the " ~
+        "annotated author -- also previously silently discarded");
+    expect(decoded.structuredSectionCount == 1 &&
+        decoded.structuredSections[0].sectionId == piiAuditKeyV1 &&
+        decoded.structuredSections[0].sourceStage == piiFourClassStageKeyV1,
+        "proof D: the same published sidecar also carries the PII audit, " ~
+        "in one blob alongside the metadata");
+    auto proofDAuditOptions = PiiAuditOptionsV1("US", "mask",
+        "email,phone,card,ip", "high,ambiguous", maxPiiInputBytes,
+        maxPiiFindings, piiAuditSinkV1, false);
+    auto expectedAudit = encodePiiAuditV1(document.id, selectedBytes,
+        expectedOutput, applyPiiPolicy(selectedBytes, selectedFindings,
+            PiiPolicy.mask, false).audit, proofDAuditOptions);
+    expect(decoded.structuredSections[0].payload == expectedAudit,
+        "proof D: the published PII audit bytes round-trip to exactly " ~
+        "encodePiiAuditV1's own independently-recomputed output");
 }
 
 /// Owner decision proof (issue #26): when `html-main-content` abstains, the
 /// whole document is quarantined together -- any metadata
 /// `html-metadata-annotate` already wrote is discarded along with it, and
-/// `pii-four-class` never runs. Proven structurally as well as by absence of
-/// output: `composition.job_executor.runCompiledJob` only ever re-invokes a
-/// later stage's transform on an `EventKind.emitted` event -- a quarantined
-/// event is carried through unchanged -- so this also confirms no
+/// neither `pii-four-class` nor `document-metadata-publish` ever runs.
+/// Proven structurally as well as by absence of output:
+/// `composition.job_executor.runCompiledJob` only ever re-invokes a later
+/// stage's transform on an `EventKind.emitted` event -- a quarantined event
+/// is carried through unchanged -- so this also confirms no
 /// `TerminalSideOutput` (and therefore no publish point) is ever reached.
 private void proveMainContentAbstentionDropsMetadataTogether(
         ref StageRegistry registry) {
@@ -326,9 +397,12 @@ private void proveMainContentAbstentionDropsMetadataTogether(
     expect(prefixEvents.length == 1 && prefixEvents[0].sideOutputs.length == 0,
         "abstention (no terminal stage in job): no side output exists");
 
-    // Second, the full four-stage chain ending in the terminal
-    // pii-four-class stage. **Test-oracle correction (issue #295 fix)**:
-    // this case previously asserted that `runCompiledJob`
+    // Second, the full five-stage chain ending in the terminal
+    // document-metadata-publish stage (#300 Slice 3: pii-four-class is no
+    // longer terminal itself, so this is now the real
+    // cleanWebDocumentTokensV1 chain, not a four-stage variant ending on
+    // pii-four-class). **Test-oracle correction (issue #295 fix)**: this
+    // case previously asserted that `runCompiledJob`
     // (`source/composition/job_executor.d`, out of this slice's allowed
     // scope) threw `CompiledJobFailure` here -- a disclosed, pre-existing
     // gap in the executor's post-loop invariant, which required *any* job
@@ -340,23 +414,24 @@ private void proveMainContentAbstentionDropsMetadataTogether(
     // is `EventKind.quarantined`, so this exact prefix now returns a clean
     // quarantined event instead of throwing. Either way -- clean
     // quarantine now, or the hard failure this case previously asserted --
-    // `pii-four-class` categorically never produces a side output for
-    // this document, so no metadata ever reaches a later stage or
-    // publish point.
+    // `document-metadata-publish` categorically never runs (and therefore
+    // never produces a side output) for this document, so no metadata or
+    // audit ever reaches a publish point.
     auto fullSpec = parseJobJson(`{"version":3,"stages":[` ~
         `{"id":"repair","implementation":"text-transform",` ~
         `"filters":[{"name":"fix-mojibake"}]},` ~
         `{"id":"annotate","implementation":"html-metadata-annotate"},` ~
         `{"id":"maincontent","implementation":"html-main-content"},` ~
         `{"id":"pii","implementation":"pii-four-class",` ~
-        `"options":{"policy":"mask"}}]}`);
+        `"options":{"policy":"mask"}},` ~
+        `{"id":"publish","implementation":"document-metadata-publish"}]}`);
     auto fullPlan = compileJob(fullSpec, &registry);
     auto fullEvents = runCompiledJob(StageDocument(document, owned(html)), fullPlan);
     expect(fullEvents.length == 1 && fullEvents[0].kind == EventKind.quarantined,
         "abstention (terminal stage present): the corrected executor " ~
         "invariant returns a clean quarantined event instead of raising " ~
-        "CompiledJobFailure -- pii-four-class never emits a side output " ~
-        "for this document either way");
+        "CompiledJobFailure -- document-metadata-publish never emits a " ~
+        "side output for this document either way");
     expect(fullEvents.length == 1 && fullEvents[0].sideOutputs.length == 0,
         "abstention (terminal stage present): no side output exists, " ~
         "consistent with the terminal stage's transform never running");
@@ -434,17 +509,37 @@ private void provePublishWithNoMetadataWritten(ref StageRegistry registry) {
 /// stages in one job is unchanged now that a second terminal stage
 /// (`document-metadata-publish`) exists in the registry.
 private void proveDualTerminalStillRejected(ref StageRegistry registry) {
-    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+    // #300 Slice 3 changed which stages are genuinely terminal-capable:
+    // `pii-four-class` no longer is (it registers `SideOutputCapability
+    // .none` now), so `[pii-four-class, document-metadata-publish]` is no
+    // longer "two terminal stages" -- it is exactly the real
+    // `cleanWebDocumentTokensV1` tail, and now compiles cleanly. That is
+    // itself a real, positive regression proof of this slice's core
+    // mechanism, checked first.
+    auto converged = parseJobJson(`{"version":3,"stages":[` ~
         `{"id":"pii","implementation":"pii-four-class"},` ~
+        `{"id":"publish","implementation":"document-metadata-publish"}]}`);
+    auto convergedPlan = collectException!Exception(compileJob(converged, &registry));
+    expect(convergedPlan is null,
+        "regression (#300 Slice 3): pii-four-class ahead of " ~
+        "document-metadata-publish now compiles -- pii-four-class is no " ~
+        "longer its own terminal-capable stage");
+
+    // The pre-existing "at most one terminal-capable stage per job" cap
+    // itself is unchanged: `html-metadata` (issue #284's separate stage)
+    // still registers `SideOutputCapability.terminal` unmodified, so pairing
+    // it with `document-metadata-publish` still exercises the real cap.
+    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"legacy","implementation":"html-metadata"},` ~
         `{"id":"publish","implementation":"document-metadata-publish"}]}`);
     auto error = collectException!Exception(compileJob(spec, &registry));
     expect(error !is null,
-        "regression: compiling pii-four-class and document-metadata-publish " ~
+        "regression: compiling html-metadata and document-metadata-publish " ~
         "both terminal in one job is still rejected (pre-existing cap, unchanged)");
 
     auto reversed = parseJobJson(`{"version":3,"stages":[` ~
         `{"id":"publish","implementation":"document-metadata-publish"},` ~
-        `{"id":"pii","implementation":"pii-four-class"}]}`);
+        `{"id":"legacy","implementation":"html-metadata"}]}`);
     auto reversedError = collectException!Exception(compileJob(reversed, &registry));
     expect(reversedError !is null,
         "regression: rejected in either stage order");

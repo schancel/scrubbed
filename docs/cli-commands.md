@@ -39,14 +39,23 @@ compiled from canonical v3 configuration.
 ## `clean-web-document`
 
 `clean-web-document` is the first named top-level preset command: a fixed,
-versioned (`clean-web-document/v1`), **sealed** four-stage v3 job --
+versioned (`clean-web-document/v1`), **sealed** five-stage v3 job --
 `text-transform`'s `fix-mojibake` filter, then `html-metadata-annotate`,
-`html-main-content`, and terminal `pii-four-class` -- run through the same
-compiler and job executor `run` uses. It shares one generic preset-dispatch
-mechanism with `run`/`repair`/`extract`, not a parallel implementation: the
-fixed token list lives in `source/job/presets.d` and lowers through the same
-`job.cli_tokens` parser and `composition.compiler.compileJob` that a
-hand-written `run --stage ...` invocation of the same four stages does.
+`html-main-content`, `pii-four-class`, and terminal
+`document-metadata-publish` -- run through the same compiler and job executor
+`run` uses. It shares one generic preset-dispatch mechanism with
+`run`/`repair`/`extract`, not a parallel implementation: the fixed token list
+lives in `source/job/presets.d` and lowers through the same `job.cli_tokens`
+parser and `composition.compiler.compileJob` that a hand-written
+`run --stage ...` invocation of the same five stages does.
+
+(Issue #300 Slice 3: before this, the chain ended in `pii-four-class`'s own
+standalone terminal side output, so `html-metadata-annotate`'s annotated
+title/author/date/url was computed and then silently discarded on every run.
+`pii-four-class` now writes its audit into the shared `DocumentMetadata`
+accumulator instead, and the chain ends in the shared
+`document-metadata-publish` stage, which publishes everything any prior
+stage wrote -- fixing that live bug.)
 
 ```sh
 scrubbed clean-web-document --input page.html --output page.txt
@@ -60,16 +69,28 @@ accept `--stage`, `--filter`, `--stage-option`, `--filter-option`, or any
 other composition/dispatch token -- the chain is fixed for this version; use
 `run` for custom stage/filter composition.
 
-**Automatic PII-audit sidecar.** `pii-four-class` always produces a terminal
-audit record, which `run`'s local-file execution path always requires an
+**Automatic document-metadata sidecar.** `document-metadata-publish` always
+produces a terminal record -- the annotated title/author/date/url (from
+`html-metadata-annotate`) together with the PII audit (from `pii-four-class`),
+in one blob -- which `run`'s local-file execution path always requires an
 explicit `--sidecar-output` destination for. Since `clean-web-document`'s
 flag list is deliberately fixed and has no `--sidecar-output` flag,
 `clean-web-document` derives that destination automatically from `--output`:
 
-- `--output` a file: the sidecar is written to `<output>.pii-audit.json`.
-- `--output` a directory (tree mode): the sidecar root is `<output>.pii-audit/`,
-  mirroring the input tree exactly like a hand-written `--sidecar-output`
-  directory root would (one `<name>.pii-audit.json` per processed file).
+- `--output` a file: the sidecar is written to `<output>.document-metadata.json`.
+- `--output` a directory (tree mode): the sidecar root is
+  `<output>.document-metadata/`, mirroring the input tree exactly like a
+  hand-written `--sidecar-output` directory root would (one
+  `<name>.document-metadata.json` per processed file).
+
+(Before issue #300 Slice 3, this was `<output>.pii-audit.json` /
+`<output>.pii-audit/`, and it carried only the PII audit -- the annotated
+metadata was never published at all. Existing tooling that reads the old
+path or expects only a `scrubbed-pii-audit-v1`-shaped record at the top level
+needs to move to the new path and the new
+`document-metadata:v1`/`document-metadata:v2` envelope, which nests the PII
+audit inside a `structuredSections[].payload` hex-encoded field instead of
+being the top-level record itself.)
 
 This is a new pattern with no other precedent in this codebase: it creates a
 file the user did not name on the command line. To make sure that is never a

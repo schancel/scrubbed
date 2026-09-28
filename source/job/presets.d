@@ -26,10 +26,16 @@ enum string cleanWebDocumentPresetIdentity =
 
 /// Fixed, ordered v3 composition tokens for `clean-web-document/v1`:
 /// mojibake-repairing `text-transform` -> `html-metadata-annotate` ->
-/// `html-main-content` -> terminal `pii-four-class`. Each pair is the same
+/// `html-main-content` -> `pii-four-class` -> terminal
+/// `document-metadata-publish` (#300 Slice 3: `pii-four-class` converged
+/// onto the shared `DocumentMetadata` accumulator and is no longer terminal
+/// itself, so the chain now ends in the shared publish stage -- this is the
+/// fix for clean-web-document's live metadata-loss bug, since
+/// `html-metadata-annotate`'s annotated title/author/date/url is finally
+/// published instead of being silently discarded). Each pair is the same
 /// `--stage ID=IMPLEMENTATION` / `--filter NAME` shape `job.cli_tokens`
 /// already parses from a hand-written `run --stage ... --filter ...
-/// --stage ...` invocation of the same four stages. Sealed for v1: no
+/// --stage ...` invocation of the same five stages. Sealed for v1: no
 /// `--stage-option`/`--filter-option` tokens are ever added here, and every
 /// stage relies entirely on its own registered defaults.
 immutable string[] cleanWebDocumentTokensV1 = [
@@ -38,6 +44,7 @@ immutable string[] cleanWebDocumentTokensV1 = [
     "--stage", "html-metadata-annotate=html-metadata-annotate",
     "--stage", "html-main-content=html-main-content",
     "--stage", "pii-four-class=pii-four-class",
+    "--stage", "document-metadata-publish=document-metadata-publish",
 ];
 
 /// Expand the sealed `clean-web-document/v1` preset into the same pure v3
@@ -52,7 +59,7 @@ unittest {
     import job.json : canonicalJobJson, jobIdentity, parseJobJson;
 
     auto spec = expandCleanWebDocumentPresetV1();
-    assert(spec.stages.length == 4);
+    assert(spec.stages.length == 5);
 
     assert(spec.stages[0].id == "text-transform");
     assert(spec.stages[0].implementation == "text-transform");
@@ -72,6 +79,10 @@ unittest {
     assert(spec.stages[3].implementation == "pii-four-class");
     assert(spec.stages[3].filters.length == 0);
 
+    assert(spec.stages[4].id == "document-metadata-publish");
+    assert(spec.stages[4].implementation == "document-metadata-publish");
+    assert(spec.stages[4].filters.length == 0);
+
     foreach (stage; spec.stages) assert(stage.options.length == 0);
 
     // Deterministic, byte-stable expansion for a fixed preset version.
@@ -89,7 +100,9 @@ unittest {
         `{"id":"html-metadata-annotate",` ~
         `"implementation":"html-metadata-annotate"},` ~
         `{"id":"html-main-content","implementation":"html-main-content"},` ~
-        `{"id":"pii-four-class","implementation":"pii-four-class"}]}`);
+        `{"id":"pii-four-class","implementation":"pii-four-class"},` ~
+        `{"id":"document-metadata-publish",` ~
+        `"implementation":"document-metadata-publish"}]}`);
     assert(canonicalJobJson(spec) == canonicalJobJson(equivalentJson));
     assert(jobIdentity(spec) == jobIdentity(equivalentJson));
 }

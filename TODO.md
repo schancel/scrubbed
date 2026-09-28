@@ -56,6 +56,19 @@ for explicitly supported document formats are tracked separately (#67, #156).
       1-MiB payload and maximum 65,536 accepted chunks, including all JSONL
       rows, under an explicit 256-MiB RSS ceiling. Pipeline/CLI wiring is a
       separate integration concern; the accepted opt-in #42 outcome is complete.
+      A #233 evidence probe (`experiments/structured_chunk_validation/
+      check.d`, commit `bc2809c`) measured the cost of this module's current
+      `span.path.to!string`-keyed duplicate/sibling-order validation against
+      a candidate that keys the same associative arrays directly on the
+      `uint[]` path slice: on maximum-span, maximum-depth adversarial
+      fixtures the candidate cuts validation-block GC allocation by
+      41-60% and CPU time by roughly 2.5x-7x, and that validation block
+      accounts for ~83% of full-pipeline CPU on that adversarial shape but
+      under 30% on an ordinary document
+      (`docs/structured-chunk-path-validation-evaluation.md`). Per this
+      ticket's own evidence-only grooming scope, no change was made to
+      `source/domain/structured_chunks.d`; a production rewrite is a
+      separate, still-open follow-on decision.
 - [x] Document stage contracts cover ordered map, reject,
       quarantine, split, cancellation and resource declarations, with tagged
       derived-child IDs. Typed stage self-registration and canonical v3
@@ -197,10 +210,15 @@ for explicitly supported document formats are tracked separately (#67, #156).
       current, narrower contract instead ships a sealed, versioned top-level
       `clean-web-document` preset command (`source/job/presets.d`) that
       expands through the same `job.cli_tokens`/`composition.compiler.compileJob`
-      machinery `run` uses, wiring the already-shipped four-stage chain
+      machinery `run` uses, wiring the already-shipped five-stage chain
       (`fix-mojibake` -> `html-metadata-annotate` -> `html-main-content` ->
-      `pii-four-class`) with an implicit PII-audit sidecar path derived from
-      `--output`. The chain is sealed: any attempt to override stages,
+      `pii-four-class` -> `document-metadata-publish`, the last stage added
+      by #300 Slice 3 to fix a live metadata-loss bug -- see #300 below) with
+      an implicit `.document-metadata.json`/`.document-metadata` sidecar path
+      (carrying both the annotated metadata and the PII audit together,
+      renamed from the old standalone `.pii-audit.json` by that same slice)
+      derived from `--output`. The chain is sealed: any attempt to override
+      stages,
       filters, options, or routes exits 2 before I/O, naming `run` as the
       escape hatch. `run`, `repair`, and `extract` remain the configurable,
       general-purpose pipeline path; presets are friendly top-level commands
@@ -233,6 +251,17 @@ for explicitly supported document formats are tracked separately (#67, #156).
       distributed/multi-machine/sharded crawling, no JS rendering. This is
       fetch/discover/save-raw only, not #240's canonical-plan-compiled
       `crawl` ambition described above.
+- [x] Extract a shared CLI option tokenizer, closing a NUL-byte rejection
+      gap (#351, CLOSED). `crawl_cli.d`, `error_cli.d`, and
+      `metadata_route_cli.d` each hand-rolled an identical `--flag`/
+      `--flag=value` tokenizer loop; `error_cli.d`'s copy was missing the
+      NUL-byte/empty-value rejection the other two had. The shared logic is
+      now `effects.cli_option_parsing.nextOption`
+      (`source/effects/cli_option_parsing.d`, commit `dd6d086`), which all
+      three call for their flag decoding while keeping their own per-flag
+      switch dispatch; the helper enforces the NUL-byte/empty-value check
+      uniformly, closing `error_cli.d`'s gap, with regression tests added to
+      all three call sites plus unit tests on the shared module itself.
 
 ## Phase 4 — HTML->Markdown (mechanical CLI route exists)
 - [~] Evaluate existing D/native HTML parsers before writing one. A D-only
@@ -414,16 +443,36 @@ is useful, but it is not sufficient on its own.
       evidence (`docs/atomic-piece-output.md`). Parent-directory crash
       durability, concurrent writers, and S3 commits remain open; the separate
       mapped-window input is not integrated into CLI admission.
-- [~] Evaluate a direct S3 client/auth/capability boundary. A D-only local
-      probe now tests fake credential precedence, fail-closed options, loopback
-      endpoint/TLS behavior, and publication-safe error labels
-      (`docs/s3-capability-evaluation.md`). No production client, AWS SigV4,
-      real-service compatibility, or secret-bearing credential path exists yet.
-      Direct S3 support is intentionally off the near-term critical path:
-      prefer optional local staging/manifest wrappers around a specialized
-      parallel transfer tool such as s5cmd. Its multi-object `cat` stream is
-      unframed, so only framed formats (for example WARC) may safely use that
-      route without an explicit manifest/framing adapter.
+- [~] Evaluate a direct S3 client/auth/capability boundary (S01/#46, still
+      OPEN/NEEDS_SPECIFICATION -- the adoption decision remains @schancel's).
+      A D-only local probe now tests fake credential precedence, fail-closed
+      options, loopback endpoint/TLS behavior, and publication-safe error
+      labels (`docs/s3-capability-evaluation.md`), weighing three real
+      candidates (an AWS SDK for C++ bridge, an AWS Common Runtime C client
+      bridge, and a legacy D `s3`/libs3 binding whose source 404'd and is
+      unverifiable). A follow-up evaluation closes that comparison's named
+      gap ("cannot prove AWS SigV4 canonicalization"): a pure HMAC-SHA256
+      primitive (`source/crypto/hmac_sha256.d`, RFC 4231-verified) plus a
+      pure-D AWS SigV4 signer (`experiments/sigv4_check/`) verified
+      byte-exact against 8 fixtures from AWS's own published SigV4 test
+      suite (`docs/sigv4-evaluation.md`). Verdict: "defer, leaning toward
+      viable candidate worth carrying into #46's decision" -- evidence-only,
+      not an adoption; no path normalization, STS tokens, SigV4a, or
+      end-to-end exercise against any real or fake S3 endpoint exists.
+      Separately, `source/effects/http_fetch.d` gained two adopt-independent
+      capabilities usable regardless of which S3 approach is eventually
+      chosen: generic caller-supplied request headers with RFC 7230
+      token/CR-LF-NUL injection validation (`24f9891`, #46), and
+      POST/JSON-body support with a bounded `maxRequestBodyBytes` cap
+      (`1c89a5c`, #355) built on that same header mechanism. Neither commit
+      is S3-specific or resolves #46; no production client, AWS SigV4
+      wiring, real-service compatibility, or secret-bearing credential path
+      exists yet. Direct S3 support is intentionally off the near-term
+      critical path: prefer optional local staging/manifest wrappers around
+      a specialized parallel transfer tool such as s5cmd. Its multi-object
+      `cat` stream is unframed, so only framed formats (for example WARC)
+      may safely use that route without an explicit manifest/framing
+      adapter.
 - [~] Add a durable run manifest with input identity/checksum, selected filter
       config, per-sink state and safe resume/retry. The retained statically
       linked SQLite v1 API is archival/predecessor-only; live file/tree
@@ -469,29 +518,81 @@ is useful, but it is not sufficient on its own.
       opt-in effects adapter now commits caller-supplied payloads with
       separate F09 state and per-destination atomicity
       (`docs/independent-sinks.md`). A deterministic HTML metadata stage
-      supplies title/author/date/URL candidates with evidence (#28), and
-      `route-metadata` now uses that stage as its primary metadata source
-      (`docs/metadata-route.md`). The opt-in CLI mirrors input-relative
-      paths under both output roots; paired input is not required. Direct
-      model-backed extraction remains separately scoped (#65). Its accepted
-      backend contract is a primary `llama-server` endpoint for resident-model,
-      parallel/GPU deployments plus an optional in-process llama.cpp backend
-      requiring an explicit local GGUF path for offline single-machine use.
-      Both must implement one metadata port/schema with model/version,
-      provenance, timeout and failure fields; deterministic heuristic metadata
-      remains model-free. A typed `DocumentMetadata` domain value with
-      standard and extension fields (#285) now carries this data across
+      supplies title/author/date/URL candidates with evidence (#28); #28's
+      own held-out real-page evaluation tier (commit `73d9a7b`) mirrors
+      #26/#229's acquisition idiom against a fresh 43-URL subset of
+      `tests/evaldata.json`'s gold values and measured exact-match accuracy
+      of title 51.2% (21/41), date 43.2% (16/37), author 10.7% (3/28), and
+      url 92.9% (39/42), 42/43 resolved (`docs/metadata-extraction.md`).
+      This is evidence only, with no pass/fail gate and no extraction-code
+      change; #28 stays open pending an owner decision on whether the low
+      author-accuracy number needs improving. #352 (`407cbf1`) then migrated
+      `route-metadata` onto the shared `document-metadata` accumulator
+      pattern: it now compiles `[html-metadata-annotate,
+      document-metadata-publish]` instead of the standalone `html-metadata`
+      stage, so its metadata sink's wire format is `document-metadata:v1`
+      instead of `metadata-json:v2` (`docs/metadata-route.md`); external CLI
+      flags and the two-sink output shape are unchanged, and the old
+      `html-metadata` stage stays live and unmodified for its own separate
+      generic `--stage id=html-metadata` composition path. The opt-in CLI
+      mirrors input-relative paths under both output roots; paired input is
+      not required. Direct model-backed extraction remains separately
+      scoped (#65). Per #65's own 2026-09-27 owner correction, its accepted
+      backend contract runs the other way from this entry's prior framing:
+      **in-process local GGUF inference via llama.cpp is the default
+      backend**, with a configurable OpenAI-compatible API endpoint as the
+      slower, network-round-trip alternative. #65's real evaluation
+      (`docs/llama-inference-evaluation.md`, commit `65d22c9`) verified a
+      pinned `ggml-org/llama.cpp` release (`b11222`) two ways (upstream CLI
+      and a new D `dlopen()` harness) against a tiny non-production GGUF
+      model, and is adopt-leaning on the core technical question -- the real
+      open risk is llama.cpp's own API-surface volatility (build-numbered
+      releases, routinely deprecated/`[EXPERIMENTAL]` symbols), not
+      licensing or functionality. A first implementation slice,
+      `source/effects/llama_ffi.d` (commit `82871b0`), is a bounded `dlopen`
+      FFI binding mirroring `pdfium_ffi.d`'s operator-supplied-path trust
+      pattern (extended to two paths: library and `.gguf` model), with real
+      enforced context-size, generation-token-cap, and wall-clock-timeout
+      limits the evaluation's own harness lacked. It is standalone -- not
+      wired into any stage or CLI dispatch. Both backends must still
+      implement one typed metadata port/schema with model/version,
+      provenance, timeout and failure fields, none of which exists yet;
+      both remain open scope for #65. Deterministic heuristic metadata
+      remains model-free. A typed `DocumentMetadata` domain value
+      with standard and extension fields (#285) now carries this data across
       stages via `StageDocument.metadata`, consumed by
       `document-metadata-publish` and by the new `compressibility-annotate`
-      stage below. #300 Slice 1 (`3192c77`) added an additive
+      stage below. #300 Slice 1 (`3192c77`) added the additive
       `document-metadata:v2` structured-section capability to this same
       domain value (domain-only, proven via synthetic fixtures, byte-
-      identical v1 regression preserved); it stays deliberately unwired --
-      no stage/CLI consumes it yet. #300's broader goal (letting
-      `pii-four-class`, `document-metadata-publish`, and
-      `topical-tags-extract` coexist as terminal outputs in one job, instead
-      of each being exclusively terminal today) remains open at later,
-      unaccepted slices.
+      identical v1 regression preserved). The owner's #300 decision rejected
+      the ticket's original literal ask (relaxing the executor's
+      one-terminal-side-output-per-job rule so multiple stages could each
+      stay independently terminal) in favor of converging every candidate
+      stage onto that v2 capability as a non-terminal annotator, with one
+      shared `document-metadata-publish` terminal stage publishing whatever
+      all of them wrote. All three named candidates have since converged
+      this way: #300 Slice 2 (`499bb8a`) converged `language-id-detect`
+      (`SideOutputCapability.none`, `withExtensionField`); #300 Slice 3
+      (`384f404`) converged `pii-four-class` (`withStructuredSection`,
+      section id `pii-audit`) and, in the same commit, fixed a live bug --
+      `clean-web-document`'s preset chain used to end at `pii-four-class`
+      itself, so the title/author/date/url `html-metadata-annotate` already
+      computed was silently discarded every run; the chain now ends at
+      `document-metadata-publish` instead, so that metadata is finally
+      published (sidecar path moved from `.pii-audit.json`/`.pii-audit` to
+      `.document-metadata.json`/`.document-metadata`). #300 Slice 4
+      (`1197cd3`) converged `topical-tags-extract` the same way, with no
+      live bug involved and no preset wiring change (it is not part of
+      `clean-web-document`). #358 (`13f690e`) fixed
+      `docs/pii-four-class-stage.md`/`docs/document-metadata.md` staleness
+      left over from Slice 3's landing. What remains open: a deferred,
+      not-yet-needed Slice 5 (actually relaxing the executor's
+      one-side-output-per-event invariant, for a hypothetical caller that
+      wants an annotate-only job with no terminal publisher -- no real
+      caller needs this yet) and, unrelated to #300 itself, the separate,
+      later product decision of whether to wire `topical-tags-extract` into
+      any real preset.
 - [~] Add provenance-bearing topical tags (#167) after the common extracted
       text-document boundary. Source-declared tags/categories and inferred
       tags must remain distinct candidates; inferred values carry a named
@@ -518,6 +619,28 @@ is useful, but it is not sufficient on its own.
       via `StageDocument.metadata` (#285), to be published by the existing,
       unmodified `document-metadata-publish` terminal stage; not wired into
       any default chain (`docs/compressibility-annotate.md`).
+- [x] Add Gopher/C4-style deterministic heuristic quality ratios alongside
+      the entropy/compression signal above (#347, CLOSED). The opt-in,
+      non-terminal `quality-ratios-annotate` v3 stage
+      (`source/effects/quality_ratios_annotate_stage.d`,
+      `source/domain/quality_ratios.d`, commit `8d8b316`) mirrors
+      `compressibility-annotate`'s exact shape: one versioned
+      `quality-ratios` extension field written via the #285
+      `StageDocument.metadata` API, published unmodified by
+      `document-metadata-publish`, content passed through unchanged. It
+      computes word count, mean word length, hash/ellipsis symbol-to-word
+      ratios, alphabetic-word fraction, stop-word presence, and
+      multi-scale repetition fractions (duplicate-line/-paragraph fraction,
+      top-n-gram and duplicate-n-gram character fractions for n=2..10) as
+      raw, named, versioned numeric fields with zero threshold/decision
+      logic. The stop-word list and repetition formulas were independently
+      verified against HuggingFace datatrove's `GopherQualityFilter`/
+      `GopherRepetitionFilter` (a checkable Gopher-paper reference
+      implementation), with disclosed, deliberate deviations documented in
+      `docs/quality-ratios-annotate.md`. Distinct from, and does not feed,
+      the separate, pre-existing `quality_features`/quality-decision gate
+      (`docs/quality-annotations.md`). Not wired into any default chain; a
+      caller must name it explicitly.
 - [x] Evaluate embedding-space intrinsic dimension separately (#169) after
       #66. The repository-only TwoNN evidence attaches results to an evaluated
       population with estimator/model/metric/sample/stability provenance and
@@ -536,10 +659,19 @@ is useful, but it is not sufficient on its own.
       `source/domain` imports it. #311 added a thin terminal v3 stage,
       `language-id-detect`, giving the shipping binary a real reachability
       path via `run --stage id=language-id-detect`; #301 added a benchmark
-      comparator case against Python `langdetect`. The separately reviewed
-      persistence overlay (`source/effects/language_overlay.d`, via the
-      existing C01 `OverlayWriter`) and the broader ~25-language,
-      13-script-family roadmap remain open; #34 stays open for them.
+      comparator case against Python `langdetect`. #300 Slice 2 (`499bb8a`)
+      then converged this stage onto the shared metadata accumulator
+      (`SideOutputCapability.none`, writing via `withExtensionField`)
+      instead of its own standalone terminal side output. Per #34's own
+      2026-09-27 tracker-hygiene correction, the persistence-overlay route
+      this entry previously named (`source/effects/language_overlay.d` via
+      C01's `OverlayWriter`) never happened and no such file exists; that
+      framing is retired. What genuinely remains open: the pinned
+      `tooShort = 60` n-gram-count cutoff and the disclosed
+      Catalan/Romanian/Swahili false-classification gap for close linguistic
+      neighbors of supported languages (`docs/language-id.md`), plus the
+      broader ~25-language, 13-script-family roadmap; #34 stays open for
+      them.
 - [~] Build disk-backed similarity signatures and buckets (C05/#36). Stage 1
       (`source/domain/similarity_signature.d`, PR #142) is a pure, versioned
       near/segment signature API. A disk-backed successor,
@@ -567,8 +699,27 @@ is useful, but it is not sufficient on its own.
       connected components, and worker-order/restart invariance via
       manually permuted input. No I/O and no C01 overlay wiring in this
       slice (matching #36's own "no duplicate decision happens here"
-      boundary); cross-bucket/full-corpus graph closure and CLI/C01 wiring
-      remain #37's open scope.
+      boundary). A second slice, `source/effects/near_dedup_overlay.d`
+      (commit `2b0c6da`), closes most of that gap: it reads
+      `similarity_buckets.d`'s persisted per-document band-membership
+      overlay, rejoins each surviving member against its C01 source shard to
+      recompute a real `SimilaritySignature` (the persisted overlay stores
+      only a one-way hash of each band, not the MinHash lanes themselves,
+      so this is a genuine recompute-and-verify, not a trust-the-cache
+      read), groups members by `(bandIndex, bandKeyValue)` one
+      already-capped bucket at a time, and calls the existing, unmodified
+      `nearDuplicateLinksInBucket` per bucket, publishing the results as a
+      new `near-dedup` C01 overlay analyzer distinct from exact-dedup and
+      similarity-buckets, with the same canonical field-ordered encode/
+      decode and fail-closed decode discipline as
+      `exact_dedup_overlay.d`. A document that lands in more than one
+      band bucket can get conflicting representative outcomes; this is
+      resolved by taking the lexicographically smallest representative
+      across all of that document's bucket outcomes, reusing the existing
+      smallest-ID tie-break rather than inventing a second policy. Full
+      cross-bucket/full-corpus graph closure (a candidate can only be
+      resolved within the bucket it was found in here) and CLI/stage
+      wiring into a composed job remain #37's open scope.
 - [~] Extract baseline main content from saved HTML (W03/#26). A pure,
       deterministic scoring/selection algorithm,
       `effects.html_main_content.extractMainContent`
@@ -577,12 +728,18 @@ is useful, but it is not sufficient on its own.
       `html_tree` representation. A second slice registered it as the
       self-registering v3 stage `html-main-content`, sequenced
       `text-transform -> html-metadata-annotate -> html-main-content ->
-      pii-four-class`; on abstention the whole document, including
-      metadata, quarantines together. This stage is one of the four wired
-      into the shipped `clean-web-document` preset (see #240 below). Held-out
-      precision/recall against a pinned trafilatura reference and the #229
-      comparator case remain the open acceptance gates; #26 stays open for
-      them. In practice, this means main-content selection work has already
+      pii-four-class -> document-metadata-publish` (the last stage added by
+      #300 Slice 3, see #300 below); on abstention the whole document,
+      including metadata, quarantines together. This stage is one of the
+      five wired into the shipped `clean-web-document` preset (see #240
+      below). Held-out
+      precision/recall against a pinned trafilatura reference via the #229
+      comparator case has landed and is regularly re-run (`docs/html-main-
+      content.md`), so that plumbing is no longer an open gate; per #26's own
+      2026-09-27 tracker-hygiene correction, what remains open is a product
+      call on whether the measured precision is acceptable (see the #27
+      numbers below), not the comparator's existence. #26 stays open for that
+      call. In practice, this means main-content selection work has already
       begun ahead of the Phase 6 "begin only after Phase 5A gates are
       complete" framing below, though full trafilatura parity is still
       gated as described there. Two real quality bugs found by #303's
@@ -595,14 +752,33 @@ is useful, but it is not sufficient on its own.
       whitespace-only text nodes from inflating a parent's score; this is
       the exact fix for this file's own named `france.attac.org` failure
       case (a `<select>` picker outscoring the real article purely on
-      pretty-printed whitespace). `docs/html-main-content.md`'s own corpus
-      report (mean recall ~=0.78, 8/20 parse failures) predates both fixes
-      and has not been regenerated against them yet -- its numbers are
-      pre-fix, not current. #335 Slice 1 (`7f333a4`) separately gave the
-      stage's flattened output real paragraph/heading structure (breaks at
-      block-element boundaries) instead of one run-on line; #335 stays open
-      for fuller Markdown-style structure and a composed
-      main-content-plus-structure output path.
+      pretty-printed whitespace). #27 (`a7e5c5c`) then fixed two further
+      diagnosed held-out regressions: a negative-tag-ancestor score
+      suppression (a node nested inside `nav`/`aside`/`footer`/`header`/
+      `form`/`button`/`figure` no longer collects its own positive tag/
+      keyword bonus), which fixes `france.attac.org`'s real failure -- a
+      mailing-list signup form's boilerplate text was outscoring the real
+      article lede; and a boilerplate-exclusion step in text collection
+      (skipping negative-keyword descendants the way script/style already
+      are, plus a keyword-neutral-node-between-two-negative-siblings
+      "sandwich" rule and a new `registration-banner` keyword), which fixes
+      `for-me-online.de`'s leak of promotional phrases into selected text.
+      `docs/html-main-content.md` has since been regenerated twice (after
+      #308/#309, then again after #27) and its numbers are current, not
+      stale: across the same 19 scored/1 abstained/0 parse-failed pages,
+      mean precision rose 0.051 -> 0.069, mean recall rose 0.79 -> 0.839, and
+      `withoutLeakTotal` dropped 2 -> 0, with no regression on any
+      previously-correct page. #27 itself stays open as the broader
+      "improve extraction fallback and difficult-page modes" epic beyond
+      these two named, now-fixed bugs. #356 (`546101b`) separately fixed
+      `experiments/html_main_content/fetch_held_out.sh` failing outright
+      under macOS's default bash 3.2 (`set -u` treats `"${empty_array[@]}"`
+      as an unbound variable pre-4.4) -- a portability fix to the held-out
+      harness itself, not a scoring change. #335 Slice 1 (`7f333a4`)
+      separately gave the stage's flattened output real paragraph/heading
+      structure (breaks at block-element boundaries) instead of one run-on
+      line; #335 stays open for fuller Markdown-style structure and a
+      composed main-content-plus-structure output path.
 - [~] Learn repeated site templates for multi-page chrome removal (#244).
       An evaluation slice (`experiments/template_profiles/`, PR #260)
       proved a frozen, provenance-bearing profile model -- grouping by
@@ -644,8 +820,27 @@ is useful, but it is not sufficient on its own.
       and exact-byte dedup effects overlays now consume the C01 API
       (`docs/quality-annotations.md`, `docs/exact-dedup.md`); CLI wiring,
       interchange exports, and corpus-scale storage proof remain open.
-      Near-duplicate decisions now have a first slice (C14/#37, above), not
-      yet wired into this overlay API.
+      Near-duplicate decisions (C14/#37, above) are now also wired into this
+      overlay API via `near_dedup_overlay.d` (commit `2b0c6da`, see above).
+      A read-only survey (`experiments/derivation_survey/check.d`, commit
+      `42a8d54`, evidence only, for #349) walks a directory of C01 shards and
+      overlays and reports, per document, which `(analyzerKey,
+      analyzerVersion)` pairs are present, using only each overlay's header,
+      never decoding annotation records. It found a real inventory of seven
+      C01-overlay analyzers across five files -- not the three a prior
+      grooming note had assumed -- plus a further split among the
+      manifest-job-scoped stages between those with their own
+      `TerminalSideOutput` and accumulator-only stages with none
+      (`docs/derivation-identity-survey.md`). It also demonstrates a real
+      granularity limit: header-only inspection cannot always distinguish
+      documents within a sparse-analyzer shard (two documents can show
+      identical header coverage despite holding a different number of
+      records), and it surfaces two independently-forked identity paths (the
+      C01-overlay pattern and the manifest/stage-pipeline pattern) that do
+      not currently share one identity model. No storage/index mechanism is
+      committed and no CLI/stage wiring exists; #349 gives honest,
+      non-committal adopt/defer guidance rather than a decision, and stays
+      open for the owner to make one.
 - [x] Scan deterministic PII patterns (C06/#38). A bounded pure D scanner
       reports ordered byte spans for email, phone, card, and IPv4 under
       documented locale and confidence rules (`docs/pii-patterns.md`). An
@@ -703,6 +898,31 @@ is useful, but it is not sufficient on its own.
       with no-follow path checks and release-active D on-disk tests. File
       discovery, CLI/S3 wiring, Common Crawl WARC 1.0 compatibility, full format
       conformance, real-corpus parity, and TB throughput remain open.
+- [~] Convert an already-read WARC record into a `Document` (#30). The new
+      standalone `source/effects/warc_document.d` module (commit `cd2f3e9`)
+      is not an extension of `warc_reader.d` -- that reader's existing
+      chunk-invariant behavior is untouched by construction. Identity uses
+      source namespace `warc:v1`, a caller-supplied `sourceKey` (typically
+      the WARC file's own path), and `recordKey` = the record's
+      `WARC-Record-ID` verbatim, verified against the WARC/1.1 spec's own
+      stated purpose for that field; a converter instance rejects a
+      duplicate ID from one source with a defined outcome rather than
+      silently colliding two records onto one identity. Only
+      response/resource and WET-style text/plain records produce a
+      `Document`; the spec's other five record types are skipped, not
+      errored. #357 (`c54a8c3`) then fixed a real correctness gap: a
+      response record's WARC block is a raw HTTP/1.1 message, not page
+      content itself, so `warc_document.d` now parses the embedded message
+      per RFC 9112 framing and keeps only the body as `Document` content
+      (finding the header/body boundary via `CRLFCRLF`, or `LFLF` under
+      section 2.2's bare-LF leniency), refusing via a typed outcome -- never
+      a crash or a silent wrong split -- both a message with no valid
+      boundary and one declaring `Transfer-Encoding: chunked` or a
+      non-identity `Content-Encoding`, since decoding either is out of
+      scope here; `resource` records carry no HTTP wrapper per spec and stay
+      exactly verbatim, unaffected. Both slices are standalone effects-layer
+      primitives with no stage/CLI import anywhere; #30 stays open pending
+      an owner decision on the actual CLI/orchestrator integration route.
 - [~] Evaluate then adopt bounded document-to-text adapters (#67, #156) for
       the explicitly supported Office/PDF/image families. Container or binary
       bytes must be detected and extracted before mojibake/Unicode filters;

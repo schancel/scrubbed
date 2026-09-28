@@ -119,7 +119,7 @@
 module effects.warc_document;
 
 import domain.document : Document, OutputName, SourceLocator;
-import effects.warc_reader : WarcRecord;
+import warc_reader : WarcRecord;
 
 /// The source-namespace literal for every `Document` this module produces.
 enum string warcSourceNamespaceV1 = "warc:v1";
@@ -415,7 +415,7 @@ private bool asciiEqualsCI(const(ubyte)[] a, string b) {
 
 unittest {
     import std.conv : to;
-    import effects.warc_reader : WarcReader;
+    import warc_reader : WarcReader;
 
     // Builds one raw WARC/1.1 record's bytes, mirroring the shape already
     // exercised by experiments/warc_reader/production_check.d.
@@ -536,7 +536,7 @@ unittest {
 // separate from the #30 identity/duplicate-detection unittest above so each
 // concern has its own focused fixture.
 unittest {
-    import effects.warc_reader : WarcReader;
+    import warc_reader : WarcReader;
 
     // Builds one raw WARC/1.1 `response` (or `resource`) record's bytes,
     // mirroring the helper in the unittest above.

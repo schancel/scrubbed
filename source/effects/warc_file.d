@@ -1,7 +1,7 @@
 /// Bounded local-file transport for the WARC/1.1 readers.
 module effects.warc_file;
 
-import effects.warc_reader : WarcError, WarcReader, WarcRecord, WarcVisit;
+import warc_reader : WarcError, WarcReader, WarcRecord, WarcVisit;
 import effects.warc_compressed : Compression, CompressedWarcError,
     CompressedReason, WarcCompressedReader;
 import core.sys.posix.fcntl : open, openat, O_RDONLY, O_NOFOLLOW, O_NONBLOCK;

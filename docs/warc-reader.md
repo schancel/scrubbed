@@ -7,7 +7,8 @@ yet (see [Status](#status)).
 
 ## Plain reader
 
-`effects.warc_reader.WarcReader` accepts arbitrary byte chunks through `feed`,
+`warc_reader.WarcReader` (a standalone package, [`warc-reader/`](../warc-reader),
+extracted from this codebase in #362) accepts arbitrary byte chunks through `feed`,
 then requires one `finish` call. It emits one fully validated, owned
 `WarcRecord` per callback.
 
@@ -92,7 +93,7 @@ limit.
 Production regression (D-only):
 
 ```sh
-ldc2 -O3 -release -i -Isource experiments/warc_reader/production_check.d -of=<binary> && <binary>
+ldc2 -O3 -release -i -Isource -Iwarc-reader/source experiments/warc_reader/production_check.d -of=<binary> && <binary>
 ```
 
 ## Bounded gzip/zstd adapter
@@ -153,7 +154,7 @@ Common Crawl compatibility, archive-wide rollback, or TB-scale throughput.
 ### Release check
 
 ```sh
-ldc2 -O3 -release -i -Isource experiments/warc_reader/compressed_check.d .dub/zstd/libzstd_decompress.a -of=<binary> && <binary>
+ldc2 -O3 -release -i -Isource -Iwarc-reader/source experiments/warc_reader/compressed_check.d .dub/zstd/libzstd_decompress.a -of=<binary> && <binary>
 ```
 
 It compares exact source-key/ordinal/record-ID/type/block SHA-256 output
@@ -228,14 +229,14 @@ explicit macOS runtime system-zlib dependency.
 Release-active D on-disk probe:
 
 ```sh
-ldc2 -O3 -release -i -Isource experiments/warc_reader/file_check.d .dub/zstd/libzstd_decompress.a -of=<binary> && <binary>
+ldc2 -O3 -release -i -Isource -Iwarc-reader/source experiments/warc_reader/file_check.d .dub/zstd/libzstd_decompress.a -of=<binary> && <binary>
 ```
 
 ## Status
 
 | Layer | Module | Scope |
 | --- | --- | --- |
-| Plain reader | `effects.warc_reader` | in-memory, one WARC/1.1 record stream |
+| Plain reader | `warc_reader` (standalone package, `warc-reader/`) | in-memory, one WARC/1.1 record stream |
 | Compression | `effects.warc_compressed` | one gzip member or zstd frame per record |
 | Local-file transport | `effects.warc_file` | one bounded, trusted-root local file |
 

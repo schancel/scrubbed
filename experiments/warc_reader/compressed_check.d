@@ -1,6 +1,6 @@
 // Release-active production-boundary checks; all fixture bytes are made in D.
 import effects.warc_compressed;
-import effects.warc_reader;
+import warc_reader;
 import effects.zstd_ffi : ZstdFrameHeader, ZSTD_getFrameHeader, ZSTD_isError;
 import core.memory : GC;
 import core.sys.posix.dlfcn : dlopen, dlsym, dlclose, RTLD_NOW, RTLD_FIRST;

@@ -1,7 +1,7 @@
 /// Bounded per-record gzip/zstd WARC/1.1 decoder; see docs/warc-reader.md.
 module effects.warc_compressed;
 
-import effects.warc_reader : WarcError, WarcReader, WarcRecord, WarcVisit,
+import warc_reader : WarcError, WarcReader, WarcRecord, WarcVisit,
     warcRecordLimit;
 import effects.zstd_ffi;
 import etc.c.zlib : z_stream,

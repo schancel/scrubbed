@@ -1,0 +1,6 @@
+.dub/
+libwarc-reader.a
+warc-reader-test-*
+*.o
+*.obj
+.DS_Store

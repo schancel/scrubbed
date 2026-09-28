@@ -522,8 +522,16 @@ on them.
 
 The existing [external comparator](../benchmarks/README.md)
 (`external_comparator.d`) pins `ftfy==6.3.1` and `wcwidth==0.8.4` and
-compares the observed ftfy CLI against scrubbed only on the
-exact-output-matched mojibake file task.
+compares the observed ftfy CLI against scrubbed on two exact-output-matched
+mojibake file tasks: `mojibake/scrubbed-vs-ftfy` (Latin-1/CP1252) and
+`mojibake/scrubbed-vs-ftfy-windows1251` (Cyrillic, issue #377). Both cases
+share the same shape -- a deterministic, independently authored fixture and
+expectation pinned by SHA-256 in source, scrubbed and ftfy run on the same
+fixture in A/B/A/B interleaved order, each gated on exit status 0, a 512 MiB
+peak-RSS bound, and exact byte-for-byte output equality against the pinned
+expected hash before any sample is retained. The Windows-1251 fixture is a
+short original Russian sentence written for this ticket, not copied from
+ftfy's own test corpus (`ftfy/tests/test-cases/in-the-wild.json`).
 
 A *separate* restricted single-file CRLF-only task can compare scrubbed's
 `normalize-line-endings` filter against independently sourced dos2unix. It

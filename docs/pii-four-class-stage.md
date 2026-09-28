@@ -1,6 +1,6 @@
-# `pii-four-class` terminal stage
+# `pii-four-class` stage
 
-Importing `stages.pii_four_class` registers the terminal `pii-four-class`
+Importing `stages.pii_four_class` registers the `pii-four-class`
 stage — the CLI-facing wrapper around the scanner and policy modules
 described in [pii-patterns.md](pii-patterns.md) and
 [pii-policy.md](pii-policy.md). It's bounded pattern handling for email,
@@ -37,20 +37,30 @@ without reclassifying them.
 
 ## Audit sidecar
 
-Every successful document emits one immutable terminal side output:
+**Updated for issue #300 Slice 3** (landed `384f404`): `pii-four-class` is no
+longer terminal itself (`SideOutputCapability.none`). Every successful
+document writes its audit into the shared `DocumentMetadata` accumulator as
+a structured section, keyed the same stable name this table always used:
 
 | | |
 | --- | --- |
-| key | `pii-audit` |
-| schema | `scrubbed-pii-audit-v1` |
-| suffix | `.pii-audit.json` |
+| structured-section id | `pii-audit` |
+| schema (of the section's own payload) | `scrubbed-pii-audit-v1` |
 
-The canonical JSON binds the document ID, whole-input revision SHA-256,
-analyzer and policy versions, normalized options, whole-output SHA-256, and
-ordered union/contributor offsets and finite enums. It does not contain
-matched values, snippets, source bytes or locators, per-match hashes, or
-content-derived diagnostics. An empty finding set still emits the bound
-audit record.
+A later `document-metadata-publish` stage in the same job (see
+[docs/document-metadata.md](document-metadata.md)) publishes it, alongside
+whatever else (e.g. `html-metadata-annotate`'s title/author/date/url) also
+wrote into the same accumulator, as one `document-metadata:v2` terminal side
+output. `clean-web-document`'s own sidecar path for this is
+`.document-metadata.json`/`.document-metadata` — see
+[docs/cli-commands.md](cli-commands.md).
+
+The canonical JSON payload binds the document ID, whole-input revision
+SHA-256, analyzer and policy versions, normalized options, whole-output
+SHA-256, and ordered union/contributor offsets and finite enums. It does not
+contain matched values, snippets, source bytes or locators, per-match
+hashes, or content-derived diagnostics. An empty finding set still writes
+the bound audit record into the accumulator.
 
 Publication and destination policy are owned by the generic side-output
 adapters — see [docs/cli-commands.md](cli-commands.md) for the

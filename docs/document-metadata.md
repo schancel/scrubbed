@@ -455,8 +455,19 @@ integration slice above.
 
 ## What #300 Slice 1 is not
 
+**Update (2026-09-27): Slice 3 has since landed** (`384f404`) and did exactly
+the two things this section originally described as deferred/out-of-scope
+for Slice 1 alone — `pii-four-class` now converges onto
+`.withStructuredSection`, and `clean-web-document`'s live metadata-loss bug
+is fixed. The bullets below accurately describe Slice 1's own boundaries at
+the time it landed; they are historical from Slice 3 onward, not a
+description of the current state. See the issue's own Slice 3 comment
+thread and `docs/pii-four-class-stage.md`'s "Audit sidecar" section for the
+current, landed shape.
+
 The `document-metadata:v2` structured-section capability documented above is
-domain-only and deliberately narrow. It is explicitly **not**:
+domain-only and deliberately narrow. It is explicitly **not**, as of Slice 1
+alone:
 
 - **A stage, executor, compiler, or preset change.** No file under
   `source/stages`, `source/effects`, `source/composition`, or

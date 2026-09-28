@@ -1,0 +1,9 @@
+.dub/
+libs3lite.a
+s3lite-test-*
+sigv4-fixtures
+loopback-fixture
+live-public-object
+*.o
+*.obj
+.DS_Store

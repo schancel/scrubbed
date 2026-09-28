@@ -1,6 +1,6 @@
 ---
 name: codebase-audit
-description: Occasionally audit the whole tree for modularity, dead code, earned abstractions, and collapsed seams. Use when asked to audit the codebase, review architecture across modules, find unused code, or look for patterns that should be factored. Emits tickets, not an in-place refactor. Use when the user runs /codebase-audit.
+description: Audit the whole tree, optionally since the last completed audit/refactor checkpoint, for boundary degradation, dead code, earned abstractions, and collapsed seams. Drafts or files evidence-backed tickets; never refactors in place. Use when the user runs /codebase-audit.
 ---
 
 # Codebase audit
@@ -8,6 +8,16 @@ description: Occasionally audit the whole tree for modularity, dead code, earned
 Feature work never asks whether a module is still reached. A bugfix review never sees the third copy of a helper. Run this skill occasionally, or when asked — not as part of every loop ([eligible work](../../references/queue.md#eligible-work)) — against the whole tree, not against the diff of the ticket in front of you. Load the tracker from [`.agents/binding`](../../references/load-binding.md) before filing.
 
 The questions are in [engineering judgment](../../references/engineering-judgment.md). This skill is how they get asked of code nobody is currently touching. Output is tickets via `$ticket-creation`, ranked later by `$backlog-grooming`. Do not start a refactor in place; an audit that lands a rewrite has become implementation without a contract.
+
+When the repository has opted into [boundary-load evidence](../../references/boundary-load.md), use its historical report to choose boundaries worth inspecting. An increased dependency-implementation escape rate is an audit candidate, not a root cause. Check observation coverage first; `partial` and `not_observed` claims are not zero-escape claims and are excluded from the rate.
+
+## Since the last completed pass
+
+Resolve the latest reachable annotated checkpoint with `.agents/scripts/boundary_load.py checkpoint`. Checkpoints are tags named `boundary-load-audit/v1/<UTC timestamp>` and point at the integrated tree after a clean audit or after every accepted corrective ticket from that pass landed. Ignore lightweight, unreachable, or differently named tags.
+
+Load the active binding and collect boundary-load evidence from terminal item/PR records. Give the reporter the full available history for its baseline, then run `boundary_load.py report RECORDS --since-checkpoint`; only candidates with eligible evidence newer than the checkpoint are newly actionable. If no checkpoint exists, treat this as the first pass. If evidence cannot be enumerated or remains partial, report that coverage gap and continue the structural audit without inventing zero escapes.
+
+Walk the whole tree as this skill normally requires. Use `git diff <checkpoint>..HEAD` to prioritize modules changed since the completed pass, not to exclude unchanged modules. Dedupe every finding against open and recently closed tracker items so a checkpoint never becomes permission to file the same problem twice.
 
 ## What to look for
 
@@ -36,6 +46,10 @@ An audit is a survey, not a proof of every finding. Each candidate gets:
 - the cheapest evidence that would falsify it (a caller, a test, a ticket that is *not* actually accepted);
 - a suggested ticket title and the draft shape from `$ticket-creation`.
 
+For a boundary-load candidate, also state the compared windows, eligible claim counts, observed escapes, a bounded architectural hypothesis, preserved behavior/API invariants, and the expected measurable effect. Falsify poor ticket scope or legitimate cross-subsystem work before blaming the facade.
+
 Stop when additional walking would only produce more of the same class already ticketed, or when the user-stated budget is exhausted. Prefer a short list of high-reversal-cost items over a catalog of nits.
 
-Show the draft tickets before publishing. The audit does not claim, implement, or merge.
+When the invocation explicitly says to file or publish the audit findings, that is batch publication authority for tickets that satisfy the evidence and draft requirements above; publish them through `$ticket-creation` and report every created item. Otherwise show the drafts before publishing. The audit does not claim, implement, or merge.
+
+Do not advance the checkpoint merely because an audit ran or tickets were filed. After a clean audit, or after all accepted corrective work from the pass is integrated and post-change evidence is recorded, an explicit request to complete the pass may create an annotated tag at current `main`. Use UTC `boundary-load-audit/v1/YYYYMMDDTHHMMSSZ`, include the audit and corrective item identities in the annotation, and verify the tag resolves to the intended commit. Pushing the tag requires explicit push authority. Never move or reuse an existing checkpoint tag.

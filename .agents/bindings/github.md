@@ -16,6 +16,8 @@ Skills speak this binding when `.agents/binding` sets `tracker: github` (the def
 | packet | Posted on the issue or handed to a worker; not a substitute for the issue |
 | land | `gh pr merge --squash`. The squash message carries the reviewed tip SHA and, for a fix, the base revision and both outcomes. Distinct features are not combined into one squash. |
 
+When a consuming repository opts into [boundary-load evidence](../references/boundary-load.md), post or link the separate `software-factory/boundary-load-evidence/v1` JSON from the terminal issue comment or pull request. Do not place it inside `work-claim:v1`; ownership parsers must remain unaffected. The emitter reports locally and never posts by itself.
+
 ## Scripts
 
 - `.agents/scripts/ticket_poset.py` reads open issues and native `blockedBy` edges, prints dependency waves. Pass `--repo owner/name` (defaults to `gh repo view`).

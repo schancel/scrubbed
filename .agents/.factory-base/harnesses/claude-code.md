@@ -24,3 +24,9 @@ Agent({ subagent_type: "cheap", prompt: <packet> })
 ## Fallback
 
 If `.claude/agents/<lane>.md` (and `~/.claude/agents/<lane>.md`) do not exist, do not fail the dispatch and do not guess a model. Inherit the current session's model and report `requested <lane>, ran inherited` in the handoff, per [task-packet.md](../references/task-packet.md). Never silently substitute a different named lane.
+
+## Optional boundary-load capture
+
+Claude Code `PostToolUse` command hooks receive JSON on stdin with `hook_event_name`, `cwd`, `tool_name`, and `tool_input`. Configure `.agents/scripts/boundary_path_hook.py` in `.claude/settings.json` with a narrow matcher such as `Read`, and set `SOFTWARE_FACTORY_BOUNDARY_TRACE` to an ignored local trace path. See Anthropic's [Claude Code hooks reference](https://code.claude.com/docs/en/hooks).
+
+The adapter records structured path fields only. Record its trace as `partial` with collector `structured-post-tool-use`, version `1`, harness `claude-code`. Bash commands and unrecognized tool inputs remain unobserved, so this adapter never supplies a complete inspected-path denominator.

@@ -25,6 +25,8 @@ Bugs in the same area outrank features that touch it, unless the feature is the 
 
 Do not re-score merely because a new session or worker picked up the queue. Reuse the recorded score while its facts remain current. Re-score only when new evidence materially changes scope, value, cost, certainty, or unblocking, including when actual cost crosses the guard below. Token usage may inform cost, but never overrides user value, correctness, readiness, or blocking relationships.
 
+The 1–5 cost axis is ordinal queue judgment, not additive capacity or currency. Do not sum it into a maintenance allowance or token bucket. Evidence-backed architecture work enters the same graph and competes under the same ranking function; unused willingness to perform maintenance is not a reason to manufacture work.
+
 ## Two guards, because the score is gameable
 
 - **Record the four numbers and one sentence of justification.** A score without justification is a wish. Put it on the item, not in a plan that dies with the session.

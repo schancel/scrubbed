@@ -1,13 +1,23 @@
-/// Self-registering, self-contained, TERMINAL v3 stage (`topical-tags-extract`,
-/// issue #167 next-slice contract): parses a document's own HTML exactly
-/// once (`effects.html_tree.parseHtml`), extracts source-*declared* topical-
-/// tag candidates from three evidence sources -- `<meta name="keywords">`,
-/// the `rel="tag"` microformat (`<a rel="tag">` and `<link rel="tag">`), and
-/// JSON-LD `<script type="application/ld+json">` schema.org `Article`
+/// Self-registering, self-contained, annotate-only v3 stage
+/// (`topical-tags-extract`, issue #300 Slice 4's accepted contract): parses a
+/// document's own HTML exactly once (`effects.html_tree.parseHtml`),
+/// extracts source-*declared* topical-tag candidates from three evidence
+/// sources -- `<meta name="keywords">`, the `rel="tag"` microformat
+/// (`<a rel="tag">` and `<link rel="tag">`), and JSON-LD
+/// `<script type="application/ld+json">` schema.org `Article`
 /// (`keywords`/`about`) -- maps them into `domain.topical_tags`'s frozen
 /// `DeclaredObservation`/`DeclaredCandidate` shape via the unmodified
-/// `canonicalizeDeclared`, and publishes the resulting `TopicalTagsAnnotation`
-/// as this job's own `TerminalSideOutput`.
+/// `canonicalizeDeclared`, and writes the resulting `TopicalTagsAnnotation`
+/// into the shared `DocumentMetadata` accumulator as a
+/// `document-metadata:v2` structured section
+/// (`domain.document_metadata.DocumentMetadata.withStructuredSection`),
+/// keyed `topicalTagsSideOutputKeyV1 = "topical-tags"` -- the same stable
+/// name this stage always used, now naming a structured section instead of a
+/// standalone `TerminalSideOutput`. A later `document-metadata-publish`
+/// stage in the same job publishes it, alongside whatever else (e.g.
+/// `pii-four-class`, `html-metadata-annotate`) already wrote into the same
+/// accumulator. `content` is returned completely unmodified -- this stage
+/// has no content-mutation behavior anywhere.
 ///
 /// This slice is **declared-extraction only**: no controlled-vocabulary
 /// inference is wired. `domain.topical_tags`'s only construction entry
@@ -24,44 +34,44 @@
 ///
 /// **Content-support signal.** Raw `<meta name="keywords">` extraction
 /// surfaces SEO spam (keyword-stuffed tags never actually about the page).
-/// This stage is terminal and self-parsing -- it is never sandwiched between
-/// `html-metadata-annotate` and `html-main-content` in one job (structurally
-/// impossible under `composition.compiler`'s admission rule; see below) --
-/// so the only text available to check a candidate against is the whole
-/// page's own visible text, concatenated from every `HtmlNodeKind.text` node
-/// in the parsed tree (nav/boilerplate included, head and body alike). This
-/// is deliberately named `pageTextSupport`, not "canonical-text support":
-/// it is page-text support, narrower/broader in different ways than the
-/// main-content-only canonical text `domain.topical_tags`'s own doc comment
-/// refers to. The owner-approved additive `DeclaredEvidence` schema 1->2
-/// bump (`support`/`contentMatchCount`) carries a bounded raw occurrence
-/// count of a candidate's canonical token sequence in that page text -- no
+/// This stage parses the document's own full HTML (head and body) itself,
+/// independent of any prior stage's transform, so the only text available to
+/// check a candidate against is the whole page's own visible text,
+/// concatenated from every `HtmlNodeKind.text` node in the parsed tree
+/// (nav/boilerplate included, head and body alike). This is deliberately
+/// named `pageTextSupport`, not "canonical-text support": it is page-text
+/// support, narrower/broader in different ways than the main-content-only
+/// canonical text `domain.topical_tags`'s own doc comment refers to. The
+/// owner-approved additive `DeclaredEvidence` schema 1->2 bump
+/// (`support`/`contentMatchCount`) carries a bounded raw occurrence count of
+/// a candidate's canonical token sequence in that page text -- no
 /// BM25/TF-IDF/relevance formula, just a plain bounded count (see
 /// `domain.topical_tags.DeclaredContentSupport`'s doc comment for why this
 /// does not require re-deriving `evidenceDigest`).
 ///
-/// **Architecture: terminal-stage placement (accepted, inherited
-/// limitation).** The rich `TopicalTagsAnnotation` payload cannot travel
-/// through `StageDocument.metadata` (the `html-metadata-annotate` ->
-/// `document-metadata-publish` two-phase shape): `DocumentMetadata`'s
-/// extension-field cap is 512 bytes and this annotation's own identity/
-/// digest overhead alone is already close to that before any candidate; and
-/// `composition.compiler`'s `compileJob` admits at most one
-/// `SideOutputCapability.terminal`-producing stage per compiled job, which
-/// must be last. So this stage is single, self-contained, and terminal --
-/// the same shape as `stages.pii_four_class`, not the two-phase
-/// `html-metadata-annotate` + `html-main-content` shape -- parsing its own
-/// full HTML (head and body) independent of any prior stage's transform.
-/// Being terminal, it can only ever be the pipeline's last stage, so "must
-/// run before html-main-content" is satisfied by construction: it can never
-/// run after `html-main-content` reduces `content` to plain text in the same
-/// job (its own `parseHtml` would simply fail and quarantine).
+/// **Architecture: self-contained full-HTML parse (accepted, inherited from
+/// this stage's original terminal-stage design).** This stage parses its own
+/// full HTML independent of any prior stage's transform -- the same shape
+/// `stages.pii_four_class` had before its own #300 Slice 3 convergence --
+/// rather than the two-phase `html-metadata-annotate` + `html-main-content`
+/// shape. It can never usefully run after `html-main-content` reduces
+/// `content` to plain text in the same job: its own `parseHtml` would simply
+/// fail to find the head/body evidence sources it depends on (or fail to
+/// parse at all), and quarantine.
 ///
-/// **Accepted, not resolved here:** a single job cannot currently produce
-/// both topical-tags output and PII-audit/document-metadata output at once
-/// -- the same limitation `pii-four-class` vs. `document-metadata-publish`
-/// already has today. This inherits, not resolves, that gap; a future
-/// generic multi-sink redesign remains real, still-open successor work.
+/// **#300 Slice 4 convergence.** Before this slice, this stage was
+/// `SideOutputCapability.terminal`: a job could produce either topical-tags
+/// output or PII-audit/document-metadata output but never both -- the same
+/// limitation `pii-four-class` had before its own Slice 3 convergence -- and
+/// every event, quarantined or not, had to carry exactly one placeholder
+/// `TerminalSideOutput` (`quarantinedTopicalTagsSideOutput`, now deleted, no
+/// longer needed). Neither limitation exists anymore: this stage is now
+/// `SideOutputCapability.none`, a quarantined event carries no side output
+/// at all (mirroring `html_metadata_annotate_stage.d`/
+/// `compressibility_annotate_stage.d`'s own quarantine calls), and a single
+/// job can chain this stage alongside `pii-four-class`/
+/// `html-metadata-annotate`/`language-id-detect` into one
+/// `document-metadata-publish` terminal stage.
 module effects.topical_tags_extract_stage;
 
 import content.pieces : Content;
@@ -74,7 +84,7 @@ import domain.topical_tags : DeclaredCandidate, DeclaredContentSupport,
 import effects.html_tree : HtmlFailureReason, HtmlNode, HtmlNodeKind, HtmlTree,
     checkedHtmlByteLimit, defaultExtractHtmlBytes, maxRawBytes, parseHtml;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
-    StageDeclaration, StageDocument, TerminalSideOutput;
+    StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
     OptionDeclaration, OptionType, SideOutputCapability, StageCardinality,
     StageConfiguration, StageOptions, StageRegistration, registerStage;
@@ -423,24 +433,12 @@ private class TopicalTagsExtractConfiguration : StageConfiguration {
     }
 }
 
-/// A quarantined decision carries no extracted annotation, but this stage's
-/// `SideOutputCapability.terminal` registration requires every event --
-/// quarantined ones included -- to carry exactly one `TerminalSideOutput`
-/// (`composition.executor.validateCapabilities` enforces this
-/// unconditionally). Mirrors `effects.html_metadata_stage`'s own
-/// `quarantinedMetadataSideOutput` placeholder for exactly the same reason;
-/// this placeholder is never read once a caller branches on quarantine.
-private TerminalSideOutput quarantinedTopicalTagsSideOutput() pure {
-    return TerminalSideOutput(topicalTagsSideOutputKeyV1,
-        topicalTagsSideOutputSchemaV1, topicalTagsSideOutputSuffixV1, null);
-}
-
 private StageDecision applyTopicalTagsExtract(StageDocument input,
         immutable(StageConfiguration) configuration) pure {
     auto configured = cast(immutable(TopicalTagsExtractConfiguration)) configuration;
     enforce(configured !is null, "invalid topical-tags-extract configuration");
     if (input.content.size > configured.byteLimit)
-        return StageDecision.quarantine("rawLimit", [quarantinedTopicalTagsSideOutput()]);
+        return StageDecision.quarantine("rawLimit");
     auto raw = input.content.copy();
     auto outcome = parseHtml(raw, configured.charset, input.document.source.recordKey,
         configured.byteLimit);
@@ -451,7 +449,7 @@ private StageDecision applyTopicalTagsExtract(StageDocument input,
             reason ~= ":" ~ failure.decodeReason.to!string;
             if (failure.hasOffendingOffset) reason ~= "@" ~ failure.offendingOffset.to!string;
         }
-        return StageDecision.quarantine(reason, [quarantinedTopicalTagsSideOutput()]);
+        return StageDecision.quarantine(reason);
     }
     try {
         auto extracted = extractDeclaredObservations(outcome.tree);
@@ -462,17 +460,24 @@ private StageDecision applyTopicalTagsExtract(StageDocument input,
             placeholderLanguage, MatchOptions(1000, 1));
         attachContentSupport(annotation, extracted.pageText);
         auto payload = encodeTopicalTagsPure(annotation);
-        auto sideOutput = TerminalSideOutput(topicalTagsSideOutputKeyV1,
-            topicalTagsSideOutputSchemaV1, topicalTagsSideOutputSuffixV1, payload);
-        return StageDecision.map(input, [sideOutput]);
+        // #300 Slice 4: the annotation no longer becomes its own standalone
+        // `TerminalSideOutput` -- it is written into the shared
+        // `DocumentMetadata` accumulator as a structured section, so a later
+        // `document-metadata-publish` stage in the same job can publish it
+        // alongside whatever other stage (e.g. `pii-four-class`,
+        // `html-metadata-annotate`) already wrote into `input.metadata`.
+        input.metadata = input.metadata.withStructuredSection(topicalTagsSideOutputKeyV1,
+            cast(immutable(ubyte)[]) payload, topicalTagsExtractStageKeyV1);
+        return StageDecision.map(input);
     } catch (Exception) {
         // A genuine internal-invariant failure in this stage's own mapping
         // code (not a per-item extraction issue -- those are pre-filtered
-        // above and never reach `canonicalizeDeclared`/`checkTopicalTags`).
-        // Mirrors `html-main-content`'s `catch (HtmlMainContentOutputLimit)`
-        // defensive-quarantine pattern.
-        return StageDecision.quarantine("annotationBuildFailure",
-            [quarantinedTopicalTagsSideOutput()]);
+        // above and never reach `canonicalizeDeclared`/`checkTopicalTags`),
+        // or a `DocumentMetadata` accumulator invariant already violated by
+        // a prior stage (e.g. the `topical-tags` structured-section identity
+        // already set). Mirrors `html-main-content`'s
+        // `catch (HtmlMainContentOutputLimit)` defensive-quarantine pattern.
+        return StageDecision.quarantine("annotationBuildFailure");
     }
 }
 
@@ -491,7 +496,7 @@ static this() {
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
          OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory,
-        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.terminal));
+        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none));
 }
 
 // ---------------------------------------------------------------------------
@@ -502,9 +507,13 @@ static this() {
 version (unittest) {
     import composition.compiler : compileJob;
     import composition.executor : runCompiledStage;
+    import composition.job_executor : runCompiledJob;
     import crypto.sha256 : sha256Of;
     import domain.document : Document, OutputName, SourceLocator;
+    import domain.document_metadata : decodeDocumentMetadataV2;
     import domain.topical_tags : decodeTopicalTags;
+    import effects.document_metadata_publish_stage : documentMetadataPublishKeyV1,
+        documentMetadataPublishSchemaV2;
     import job.json : parseJobJson;
     import stages.contract : EventKind, StageEvent;
 
@@ -534,13 +543,18 @@ version (unittest) {
         return result.events[0];
     }
 
+    /// #300 Slice 4: the stage is no longer terminal -- it writes its
+    /// annotation into `event.payload.metadata` as a structured section
+    /// (no more standalone `TerminalSideOutput`) -- and decodes it.
     private TopicalTagsAnnotation decodedAnnotation(StageEvent event, string html,
             size_t byteLimit = maxRawBytes) {
         assert(event.kind == EventKind.emitted);
-        assert(event.sideOutputs.length == 1);
-        auto sideOutput = event.sideOutputs[0];
-        assert(sideOutput.key == topicalTagsSideOutputKeyV1);
-        return decodeTopicalTags(sideOutput.bytes, fixtureDocument().id,
+        assert(event.sideOutputs.length == 0);
+        auto sections = event.payload.metadata.structuredSections;
+        assert(sections.length == 1);
+        assert(sections[0].sectionId == topicalTagsSideOutputKeyV1);
+        assert(sections[0].sourceStage == topicalTagsExtractStageKeyV1);
+        return decodeTopicalTags(sections[0].payload, fixtureDocument().id,
             fixtureTextRevision(html, byteLimit));
     }
 
@@ -714,7 +728,8 @@ unittest {
     auto first = runTopicalTagsExtract(html);
     auto second = runTopicalTagsExtract(html);
     assert(first.kind == EventKind.emitted && second.kind == EventKind.emitted);
-    assert(first.sideOutputs[0].bytes == second.sideOutputs[0].bytes);
+    assert(first.payload.metadata.structuredSections[0].payload ==
+        second.payload.metadata.structuredSections[0].payload);
 }
 
 // Fixture 10: more than 64 total declared candidates across all sources --
@@ -741,14 +756,15 @@ unittest {
 }
 
 // Reachability: the stage is genuinely self-registering (importing this
-// module is enough) and a job consisting of only this terminal stage
-// compiles and runs, matching the terminal-stage-alone framing.
+// module is enough), registers `SideOutputCapability.none` (not `.terminal`
+// -- issue #300 Slice 4), and a job consisting of only this annotate-only
+// stage compiles and runs.
 unittest {
     auto spec = parseJobJson(`{"version":3,"stages":[{"id":"extract",` ~
         `"implementation":"` ~ topicalTagsExtractStageKeyV1 ~ `","options":{},"filters":[]}]}`);
     auto plan = compileJob(spec);
     assert(plan.stages.length == 1);
-    assert(plan.stages[0].sideOutputCapability == SideOutputCapability.terminal);
+    assert(plan.stages[0].sideOutputCapability == SideOutputCapability.none);
     auto html = `<html><head><meta name="keywords" content="Solo"></head><body><p>Solo.</p></body></html>`;
     auto input = StageDocument(fixtureDocument(),
         new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
@@ -766,4 +782,157 @@ unittest {
     auto event = runTopicalTagsExtract(oversize);
     assert(event.kind == EventKind.quarantined);
     assert(event.reason == "rawLimit");
+    assert(event.sideOutputs.length == 0, "#300 Slice 4: no side output at all on quarantine");
+}
+
+// ---------------------------------------------------------------------------
+// #300 Slice 4 regression proofs: `[topical-tags-extract,
+// document-metadata-publish]` chained in one real compiled job, via
+// `compileJob`/`runCompiledJob` -- the actual registry/executor path.
+// ---------------------------------------------------------------------------
+
+// Real fixture proving the published structured section, once decoded, is
+// byte-identical to what `encodeTopicalTagsPure` (via the domain's own
+// `buildAnnotation`/`encodeTopicalTags`) always produced -- an independently
+// recomputed round trip, matching #300 Slice 3's own proof pattern for
+// `pii-four-class`.
+unittest {
+    auto html = `<html><head><meta name="keywords" content="Cooking, Baking">` ~
+        `<script type="application/ld+json">{"@type":"Article","about":["Recipes"]}</script>` ~
+        `</head><body><a rel="tag" href="/tags/kitchen">Kitchen</a>` ~
+        `<p>Cooking and baking in the kitchen with real recipes.</p></body></html>`;
+    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract","implementation":"` ~ topicalTagsExtractStageKeyV1 ~
+        `","options":{},"filters":[]},` ~
+        `{"id":"publish","implementation":"document-metadata-publish",` ~
+        `"options":{},"filters":[]}]}`);
+    auto plan = compileJob(spec);
+    auto document = fixtureDocument();
+    auto input = StageDocument(document, new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
+    auto events = runCompiledJob(input, plan);
+    assert(events.length == 1 && events[0].kind == EventKind.emitted);
+    auto event = events[0];
+    // `content` passed through both stages unmodified.
+    assert(event.payload.content.copy() == cast(const(ubyte)[]) html);
+
+    assert(event.sideOutputs.length == 1);
+    auto sideOutput = event.sideOutputs[0];
+    assert(sideOutput.key == documentMetadataPublishKeyV1);
+    assert(sideOutput.schema == documentMetadataPublishSchemaV2,
+        "a structured section is present, so document-metadata-publish must take its v2 path");
+
+    auto decoded = decodeDocumentMetadataV2(document.id, cast(string) sideOutput.bytes());
+    assert(decoded.structuredSectionCount == 1);
+    assert(decoded.structuredSections[0].sectionId == topicalTagsSideOutputKeyV1);
+    assert(decoded.structuredSections[0].sourceStage == topicalTagsExtractStageKeyV1);
+
+    // Independently recompute what the annotation always was: parse the same
+    // HTML directly, build the annotation with this stage's own fixed
+    // placeholder vocabulary/language/options, and encode it -- a separate
+    // code path from the compiled-job run above, not the same call reused.
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto extracted = extractDeclaredObservations(outcome.tree);
+    auto vocabulary = buildVocabularyPure([VocabularyTopic(placeholderTopicId,
+        placeholderTopicDisplay, [], [VocabularyTerm(placeholderTermId, [placeholderToken])])]);
+    auto expectedAnnotation = buildAnnotationPure(document.id,
+        cast(const(ubyte)[]) extracted.pageText, extracted.observations, vocabulary,
+        placeholderLanguage, MatchOptions(1000, 1));
+    attachContentSupport(expectedAnnotation, extracted.pageText);
+    auto expectedPayload = encodeTopicalTagsPure(expectedAnnotation);
+    assert(decoded.structuredSections[0].payload == cast(immutable(ubyte)[]) expectedPayload,
+        "the published structured section's payload is exactly encodeTopicalTagsPure's " ~
+        "own output, independently recomputed");
+
+    auto decodedAnnotationValue = decodeTopicalTags(decoded.structuredSections[0].payload,
+        document.id, sha256Of(cast(const(ubyte)[]) extracted.pageText));
+    assert(decodedAnnotationValue.declared.length == 4,
+        "fixture sanity: Cooking, Baking (meta keywords), Recipes (ld+json about), " ~
+        "Kitchen (rel=tag)");
+}
+
+// Real fixtures proving each of the three quarantine cases (`rawLimit`, HTML
+// parse failure, `annotationBuildFailure`) still quarantines correctly with
+// no side output at all when chained with `document-metadata-publish`, and
+// that this does not violate any executor invariant: the job compiles, and
+// `composition.job_executor.runCompiledJob` only ever re-invokes a later
+// stage's transform on an `EventKind.emitted` event, so a quarantined event
+// is carried through unchanged -- `document-metadata-publish` never runs,
+// matching `document_metadata_integration/check.d`'s own existing
+// abstention-proof pattern from #300 Slice 3.
+
+// rawLimit.
+unittest {
+    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract","implementation":"` ~ topicalTagsExtractStageKeyV1 ~
+        `","options":{},"filters":[]},` ~
+        `{"id":"publish","implementation":"document-metadata-publish",` ~
+        `"options":{},"filters":[]}]}`);
+    auto plan = compileJob(spec);
+    assert(plan.stages.length == 2, "job with both stages compiles");
+    string oversize;
+    foreach (_; 0 .. defaultExtractHtmlBytes + 1) oversize ~= "a";
+    auto document = fixtureDocument();
+    auto input = StageDocument(document, new Content([ContentPiece.own(cast(const(ubyte)[]) oversize)]));
+    auto events = runCompiledJob(input, plan);
+    assert(events.length == 1 && events[0].kind == EventKind.quarantined);
+    assert(events[0].reason == "rawLimit");
+    assert(events[0].sideOutputs.length == 0, "no side output at all");
+    assert(events[0].payload.metadata.structuredSectionCount == 0,
+        "the quarantined event is clean -- no structured section either");
+}
+
+// HTML parse failure (invalid UTF-8), same fixture idiom as
+// `effects.html_metadata_stage`'s own decode-failure test.
+unittest {
+    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract","implementation":"` ~ topicalTagsExtractStageKeyV1 ~
+        `","options":{},"filters":[]},` ~
+        `{"id":"publish","implementation":"document-metadata-publish",` ~
+        `"options":{},"filters":[]}]}`);
+    auto plan = compileJob(spec);
+    auto document = fixtureDocument();
+    auto input = StageDocument(document,
+        new Content([ContentPiece.own([cast(ubyte) 0xff])]));
+    auto events = runCompiledJob(input, plan);
+    assert(events.length == 1 && events[0].kind == EventKind.quarantined);
+    assert(events[0].reason.length != 0);
+    assert(events[0].sideOutputs.length == 0, "no side output at all");
+    assert(events[0].payload.metadata.structuredSectionCount == 0,
+        "the quarantined event is clean -- no structured section either");
+}
+
+// annotationBuildFailure: a real, genuine `DocumentMetadata` accumulator
+// invariant violation -- chaining this stage twice in one job, both writing
+// the same `topical-tags` structured-section identity -- reached through the
+// real production code path (`DocumentMetadata.withStructuredSection`'s own
+// "structured section id already set" rejection), not a white-box hack.
+unittest {
+    auto spec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract1","implementation":"` ~ topicalTagsExtractStageKeyV1 ~
+        `","options":{},"filters":[]},` ~
+        `{"id":"extract2","implementation":"` ~ topicalTagsExtractStageKeyV1 ~
+        `","options":{},"filters":[]},` ~
+        `{"id":"publish","implementation":"document-metadata-publish",` ~
+        `"options":{},"filters":[]}]}`);
+    auto plan = compileJob(spec);
+    assert(plan.stages.length == 3);
+    auto html = `<html><head><meta name="keywords" content="Solo"></head><body><p>Solo.</p></body></html>`;
+    auto document = fixtureDocument();
+    auto input = StageDocument(document, new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
+    auto events = runCompiledJob(input, plan);
+    assert(events.length == 1 && events[0].kind == EventKind.quarantined);
+    assert(events[0].reason == "annotationBuildFailure");
+    // No side output at all is ever produced -- `document-metadata-publish`
+    // never runs on a quarantined event (`runCompiledJob` only re-invokes a
+    // later stage's transform on an `EventKind.emitted` event, matching
+    // #300 Slice 3's own "drop together" precedent), so this violates no
+    // executor invariant even though the first instance's own successful
+    // structured-section write survives on the quarantined payload (exactly
+    // one section, from the first instance only -- the second instance's own
+    // attempted, rejected write never lands).
+    assert(events[0].sideOutputs.length == 0, "no side output at all");
+    assert(events[0].payload.metadata.structuredSectionCount == 1 &&
+        events[0].payload.metadata.structuredSections[0].sectionId == topicalTagsSideOutputKeyV1,
+        "only the first instance's own successful write survives on the quarantined payload");
 }

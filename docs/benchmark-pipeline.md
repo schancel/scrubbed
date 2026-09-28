@@ -322,10 +322,16 @@ slice back; no production format or behavior depends on it.
 **Fixture.** The independently authored cyclic table contains exactly
 524,288 fixed-width 256-byte records (134,217,728 input bytes). It covers
 unchanged ASCII, valid accented Unicode and emoji, supported
-Latin-1/CP1252 mojibake and negatives, named/numeric entities and ampersand
+Latin-1/CP1252 mojibake and negatives, supported Windows-1251 (Cyrillic)
+mojibake and negatives, named/numeric entities and ampersand
 negatives, curly/straight quotes, CRLF/bare CR, and removable controls while
 preserving tab/LF; ASCII padding does not make a transform depend on record
-boundaries. The frozen table, legacy-v1 config, scalar-v3 config, and
+boundaries. The Windows-1251 positive case is a real double-encoding (clean
+UTF-8 bytes misread as Windows-1251 and re-encoded to UTF-8) that `fix-mojibake`
+repairs back to the original Cyrillic text; the negative case is already-valid
+Cyrillic UTF-8 that must pass through both the scalar and mixed chains
+unchanged, mirroring the existing Latin-1/CP1252 repair/negative pair. The
+frozen table, legacy-v1 config, scalar-v3 config, and
 mixed-v3 config have literal SHA-256 pins in the harness. Independently
 authored expected bytes do not call project filters. The same logical
 stream is partitioned into 4,096 files of 32,768 bytes and eight files of
@@ -333,7 +339,9 @@ stream is partitioned into 4,096 files of 32,768 bytes and eight files of
 tree and canonical-concatenation hashes. The checker recomputes file counts,
 bytes, and tree hashes and binds every generated tree and concatenation hash
 to literal fixture identities; the two layouts must have equal concatenated
-input.
+input. Fixture file names are read back and sorted by their numeric file
+index (not a plain lexicographic string sort), so read-back order matches
+write order regardless of layout or table length.
 
 **Untimed equality freeze.** An untimed 8 MiB freeze requires exact output
 equality for default selection, explicit `--filters`, equivalent v1 JSON,

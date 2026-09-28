@@ -45,8 +45,8 @@ private enum historicalMergeBasePin =
 private enum recordBytes = 256L;
 private enum recordCount = 524_288L;
 private enum corpusBytes = recordBytes * recordCount;
-private enum scalarBytes = 134_086_656L;
-private enum mixedBytes = 132_579_328L;
+private enum scalarBytes = 134_112_870L;
+private enum mixedBytes = 130_705_027L;
 private enum minimumBudget = 1_800L;
 private enum minimumCapacity = 2L * 1024 * 1024 * 1024;
 private enum sampleDuration = 2L;
@@ -54,21 +54,21 @@ private enum sampleInterval = 10L;
 private enum minimumStacks = 100L;
 private enum repetitions = 3L;
 private enum unavailableToolVersion = "UNAVAILABLE";
-private enum fixtureTablePin = "34B08DAEE0547466C0EEF809A0A1BEDBDC4FEE26BEABE23F4478BBDAFFF0727E";
+private enum fixtureTablePin = "304AD8CBA6245505E417B74D45CA44C3C8915CC55D43B72A8DE1A7F77CE3C2B4";
 private enum scalarConfigPin = "C985D95C6C2B8B13C2354BEDE8649D1557A13C4E211E647F804787E002C10ED1";
 private enum mixedConfigPin = "FC1829939C5EC9347EFBD576978F3EBE017F069C525157FDCC626E8842EBD7FB";
-private enum inputConcatPin = "4538A0B393E57FA6EBEE19A7C40FC50E1F6D00FFAE80C8B2424645B8C8938B3C";
-private enum scalarConcatPin = "078DEB0171237F42A344DBA9BBCA6124647F514EED7BD5D7AD6D2C68418826B7";
-private enum mixedConcatPin = "870D401642B372263AED96C938DE8B2E1E1A466DDCEFA193085889435665A069";
+private enum inputConcatPin = "B4470B7E6AD2BC74A6D26C68DD5CE753ECCA0DCC04A6B42F8560A25A33D9CA52";
+private enum scalarConcatPin = "954572AE077BE028F4DC8B9397AB8BCFF48FD329548C2D112A5D67DCCCEAEAF0";
+private enum mixedConcatPin = "198876CC2C99F999F4B6879E58AF24714BC5AF03A77B4C0ECB8E626D3D662547";
 private immutable string[string] inputTrees = [
-    "many-small": "5B5D9E66435A5BC705152EB88C551046BE0AA37B51F4FA42A038683AAFB51167",
-    "few-large": "A69113BEE8E66CE349C620BD122821F4D0719ABC2263A143E8AA0264CF030548"];
+    "many-small": "F7BE6B68349A9A8DEB73691528CDF9696E2FC8379FDD1976D12E66B19A0FBD83",
+    "few-large": "E8452D535247F84E5F5EB755FBA3570394CAFE8321742AF47C75F009D4F5F129"];
 private immutable string[string] scalarTrees = [
-    "many-small": "69CDDA2CC549BC8D25A47536A98C45AAA74211EC563DEC0B8E0943C1A1E43BF5",
-    "few-large": "6013483B2883A00408833C17E0B5517213062D3DAA2AED3B1B4470D67CCD9FC0"];
+    "many-small": "EF7A95A5FB218872F41F48712113243FE616519B1340F09D191114F6CCE1BAD7",
+    "few-large": "D30695C5CD1540BD1D40C404DC6C0925BC8630D4F0C0D719E83D15F07F73599F"];
 private immutable string[string] mixedTrees = [
-    "many-small": "3ED0A176AA89B8B9428FD3F937042EE45781C6FF3546069BB7CF92A4FA6D9529",
-    "few-large": "9AAC92A1892B67FCADCAD16E98917446B8077ABB0F8B6826810E5767EACB6DDC"];
+    "many-small": "F9C121C166EF55E0382267C30C600465D2769D7CF155B3F8FAC3F9E28548F0D7",
+    "few-large": "432CEBD6F99B7089879E0A65BBD905985015E2BD2CE40288F21E35E515E8D786"];
 
 private void need(bool value, string message) {
     if (!value) throw new Exception(message);
@@ -99,6 +99,34 @@ private bool digestLength(string value, size_t length) {
     foreach (c; value) if (!((c >= '0' && c <= '9') ||
         (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false;
     return true;
+}
+
+// Fixture file names are shaped "doc-<fileIndex>.txt". A plain lexicographic
+// string sort only matches numeric write order when every name has the same
+// digit count (true for the 8-file "few-large" layout, false for the
+// 4,096-file "many-small" layout: "doc-10.txt" sorts before "doc-2.txt").
+// Sort by the parsed integer file index instead, falling back to a string
+// comparison for any name that does not fit the "doc-<N>.txt" shape.
+private long fileOrderIndex(string name, out bool numeric) {
+    enum prefix = "doc-";
+    enum suffix = ".txt";
+    numeric = false;
+    if (name.length <= prefix.length + suffix.length) return 0;
+    if (name[0 .. prefix.length] != prefix) return 0;
+    if (name[$ - suffix.length .. $] != suffix) return 0;
+    auto digits = name[prefix.length .. $ - suffix.length];
+    if (digits.length == 0) return 0;
+    foreach (c; digits) if (c < '0' || c > '9') return 0;
+    numeric = true;
+    return digits.to!long;
+}
+
+private bool fileOrderLess(string a, string b) {
+    bool numericA, numericB;
+    auto indexA = fileOrderIndex(a, numericA);
+    auto indexB = fileOrderIndex(b, numericB);
+    if (numericA && numericB) return indexA < indexB;
+    return a < b;
 }
 private string attestedBuildCommand() {
     return "git archive <source-sha> -> <private-source>; " ~
@@ -160,7 +188,11 @@ private immutable RecordCase[] recordTable = [
     RecordCase("entities &amp; &lt; &#33; &unknown;\n", "entities &amp; &lt; &#33; &unknown;\n", "entities & < ! &unknown;\n"),
     RecordCase("quotes “hello” ‘world’ straight \"ok\"\n", "quotes “hello” ‘world’ straight \"ok\"\n", "quotes \"hello\" 'world' straight \"ok\"\n"),
     RecordCase("lines a\r\nb\rc\n", "lines a\nb\nc\n", "lines a\nb\nc\n"),
-    RecordCase("control \x01 removed; tab\tand LF\n", "control  removed; tab\tand LF\n", "control  removed; tab\tand LF\n")
+    RecordCase("control \x01 removed; tab\tand LF\n", "control  removed; tab\tand LF\n", "control  removed; tab\tand LF\n"),
+    // Windows-1251 (Cyrillic) repair/negative pair (issue #377), kept in sync
+    // with pipeline_profile_check.d's and coordination_profile.d's copies.
+    RecordCase("РћР±СЂР°Р·РµС† РєРѕРґР° Р±РµР· РѕС€РёР±РѕРє\n", "РћР±СЂР°Р·РµС† РєРѕРґР° Р±РµР· РѕС€РёР±РѕРє\n", "Образец кода без ошибок\n"),
+    RecordCase("негатив остаётся без изменений\n", "негатив остаётся без изменений\n", "негатив остаётся без изменений\n")
 ];
 
 private string padded(string text, size_t inputLength) {
@@ -202,7 +234,7 @@ private TreeIdentity identifyTree(string root) {
         need(entry.isFile, "output contains non-file");
         names ~= relativePath(entry.name, root);
     }
-    names.sort(); SHA256 tree, concat; long bytes;
+    names.sort!fileOrderLess; SHA256 tree, concat; long bytes;
     foreach (name; names) {
         auto body = cast(const(ubyte)[])read(buildPath(root, name));
         auto hash = hashBytes(body);

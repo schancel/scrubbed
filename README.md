@@ -39,7 +39,7 @@ dub build --build=release
 ./scrubbed clean-web-document --input pages/ --output clean/ --threads 4
 
 # Or compose your own stage/filter pipeline:
-./scrubbed --list-filters
+./scrubbed run --list-filters
 ./scrubbed run --input path/to/docs --output path/to/clean \
     --filters normalize-line-endings,strip-control
 ```

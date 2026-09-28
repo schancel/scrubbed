@@ -70,6 +70,6 @@ When the ticket is about a durable record (schema, identity, public format), the
 
 ## Publishing boundary
 
-Show the proposed title, body, labels, and any related item before external publication. Creating, editing, labeling, or commenting on the tracker is an external mutation and requires the user's explicit confirmation of the prepared ticket. If the tracker is unavailable, return a copy-paste-ready draft and say that it has not been published. After publication, report the item identity and exactly what was created; do not claim that a draft or local file is a live ticket.
+Show the proposed title, body, labels, and any related item before external publication. Creating, editing, labeling, or commenting on the tracker is an external mutation and requires the user's explicit confirmation of the prepared ticket. A user who explicitly invokes a bounded `$codebase-audit` with instructions to file or publish its evidence-backed findings grants batch publication authority for tickets that meet that audit's stated evidence contract; this does not authorize unrelated findings or make them READY. If the tracker is unavailable, return a copy-paste-ready draft and say that it has not been published. After publication, report the item identity and exactly what was created; do not claim that a draft or local file is a live ticket.
 
 Ticket creation itself does not create a work claim, assign ownership, or imply approval to implement.

@@ -26,3 +26,9 @@ Spawn a subagent thread naming the custom agent whose file matches the packet's 
 ## Fallback
 
 If neither `.codex/agents/<lane>.toml` nor `~/.codex/agents/<lane>.toml` exist, do not fail the dispatch and do not guess a model. Inherit the current session's model (or the `[agents]` default, if set) and report `requested <lane>, ran inherited` in the handoff, per [task-packet.md](../references/task-packet.md). Never silently substitute a different named lane.
+
+## Optional boundary-load capture
+
+Codex `PostToolUse` hooks expose structured arguments for shell, patch, MCP, and most local function tools, but the documented hook path is not a complete enforcement boundary and shell arguments are not normalized inspected paths. See the official [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
+
+`.agents/scripts/boundary_path_hook.py` can be configured as a `PostToolUse` command hook for path-bearing MCP or local navigation tools. Set `SOFTWARE_FACTORY_BOUNDARY_TRACE` to an ignored local trace path. The adapter appends recognized structured path arguments. Record its result as `partial` with collector `structured-post-tool-use`, version `1`, harness `codex`. Shell commands and unrecognized tool inputs are deliberately not guessed; this adapter alone can never supply the complete inspected-path denominator. `codex_boundary_hook.py` remains as a compatibility entry point.

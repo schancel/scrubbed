@@ -18,6 +18,7 @@ Record:
 - when the outcome requires a refactor or migration: the stack as separate landings (tests that pin current behavior, then the refactor/migration, then the feature); the parent stays open until that stack is on main;
 - any temporary coexistence owner, immediate successor, removal trigger, and deletion proof;
 - intended subsystem facade, private internals, dependency direction, co-located context/tests, and boundary integration tests when architecture is in scope;
+- for a refactor prompted by [boundary-load evidence](boundary-load.md): the triggering historical observations, falsifiable architectural hypothesis, preserved behavior/API invariants, and expected measurable effect on dependency-implementation escapes;
 - when the change touches a durable record: the [cost-of-reversal](engineering-judgment.md) answers — current shape, target shape, known next feature the target must not paint over, and the framework being refused;
 - responsible owner for unresolved decisions; and
 - rollback or deletion plan.

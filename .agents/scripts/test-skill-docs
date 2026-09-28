@@ -44,6 +44,7 @@ for path in \
     .agents/references/load-binding.md \
     .agents/references/queue.md \
     .agents/references/parallel-coordination.md \
+    .agents/references/boundary-load.md \
     .agents/binding \
     .agents/bindings/github.md \
     .agents/bindings/pyramid.md \
@@ -51,6 +52,11 @@ for path in \
     .agents/harnesses/claude-code.md \
     .agents/harnesses/codex.md \
     .agents/harnesses/grok-build.md \
+    .agents/schemas/subsystem-manifest.v1.schema.json \
+    .agents/schemas/boundary-load-evidence.v1.schema.json \
+    .agents/scripts/boundary_load.py \
+    .agents/scripts/boundary_path_hook.py \
+    .agents/scripts/codex_boundary_hook.py \
     .agents/scripts/ticket_poset.py \
     .agents/scripts/ticket_triage.py
 do
@@ -86,6 +92,19 @@ require_pattern "kernel never chooses a vendor model" 'never (names?|chooses?)[^
 require_pattern "poset script is invoked from .agents/scripts" '\.agents/scripts/ticket_poset' "$DOCS"
 require_pattern "skills load the tracker from .agents/binding" 'load-binding' "$DOCS"
 require_pattern "Linear binding names the community CLI" 'schpet/linear-cli' "$DOCS"
+require_pattern "subsystems are explicit architectural identities" 'architectural identities[^.]{0,160}(never discovers|not infer)' "$DOCS"
+require_pattern "missing inspection is not zero" 'not_observed[^.]{0,160}(not a zero|never counted as zero|not zero)' "$DOCS"
+require_pattern "escape denominator requires complete inspection" 'only[^.]{0,120}complete[^.]{0,160}(denominator|enter)' "$DOCS"
+require_pattern "boundary reports remain advisory" 'audit candidate[^.]{0,100}not a (root cause|diagnosis)' "$DOCS"
+require_pattern "boundary evidence stays outside work claims" 'not part of `?work-claim:v1|Do not (place|embed) it (inside|in) `?work-claim:v1' "$DOCS"
+require_pattern "ordinal cost is not maintenance currency" 'cost axis is ordinal[^.]{0,100}not additive[^.]{0,100}(currency|token bucket)' "$DOCS"
+require_pattern "all supported harnesses have partial path capture" 'Codex.{0,80}Claude Code.{0,80}Grok Build' "$DOCS"
+require_pattern "partial path adapters never enter the denominator" 'adapter[^.]{0,160}(partial|never)[^.]{0,160}(never supplies|do not enter|denominator)' "$DOCS"
+require_pattern "audit checkpoint is a reachable annotated tag" 'latest reachable annotated[^.]{0,160}boundary-load-audit/v1' "$DOCS"
+require_pattern "audit checkpoint preserves historical baselines" 'full history[^.]{0,160}(baseline|rolling)' "$DOCS"
+require_pattern "filing audit tickets does not complete the pass" '(filing findings|filed tickets|batch of filed tickets)[^.]{0,120}(does not|do not)[^.]{0,80}(advance|complete)' "$DOCS"
+require_pattern "explicit audit invocation can authorize batch filing" 'explicitly invokes?[^.]{0,100}`?\$codebase-audit[^.]{0,160}(batch publication authority|file or publish)' "$DOCS"
+require_pattern "audit findings do not become ready automatically" 'batch publication authority[^.]{0,200}(not authorize unrelated|does not authorize unrelated)[^.]{0,100}(READY|ready)' "$DOCS"
 
 GH_BIND=$(normalized < "$ROOT/.agents/bindings/github.md")
 require_pattern "github binding names blocked-by write path" 'blocked-by|add-blocked-by' "$GH_BIND"

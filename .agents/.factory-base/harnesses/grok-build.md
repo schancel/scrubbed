@@ -18,3 +18,9 @@ The model calls its `spawn_subagent` tool with `subagent_type` set to the packet
 ## Fallback
 
 If no `.grok/agents/<lane>.md` or matching `config.toml` route exists, do not fail the dispatch and do not guess a model. Inherit the current session's model (a subagent inherits its parent's model when nothing else is set) and report `requested <lane>, ran inherited` in the handoff, per [task-packet.md](../references/task-packet.md). Never silently substitute a different named lane.
+
+## Optional boundary-load capture
+
+Grok Build project hooks live in `.grok/hooks/*.json`; it also reads `.claude/settings.json`. Native `PostToolUse` events send camelCase `hookEventName`, `cwd`/`workspaceRoot`, `toolName`, and `toolInput`. Configure `.agents/scripts/boundary_path_hook.py` with a narrow matcher such as `Read`, set `SOFTWARE_FACTORY_BOUNDARY_TRACE` to an ignored local trace path, and trust the project hook through Grok's normal hook-trust flow. See xAI's [Grok Build hooks reference](https://docs.x.ai/build/features/hooks).
+
+The adapter accepts native camelCase and Claude-compatible snake_case inputs but records structured path fields only. Record its trace as `partial` with collector `structured-post-tool-use`, version `1`, harness `grok-build`. Bash commands and unrecognized tool inputs remain unobserved, so this adapter never supplies a complete inspected-path denominator.

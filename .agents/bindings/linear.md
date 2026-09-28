@@ -26,6 +26,8 @@ Install: `linear auth login`, then `linear config` in the repo (writes `.linear.
 | packet | Comment or worker handoff; not a substitute for the issue |
 | land | GitHub PR via `linear issue pr` (wraps `gh pr create`). Squash-merge with `gh pr merge --squash` as in [github.md](github.md). Linear is not the VCS. |
 
+When a consuming repository opts into [boundary-load evidence](../references/boundary-load.md), attach or link the separate `software-factory/boundary-load-evidence/v1` JSON in the terminal issue comment or pull request. Do not embed it in `work-claim:v1`.
+
 ## Tool: install and auth
 
 ```sh

@@ -16,6 +16,8 @@ This binding substitutes tracker verbs when `.agents/binding` sets `tracker: pyr
 | packet | Recorded on the item; same fields as [task-packet.md](../references/task-packet.md) |
 | land | Fast-forward `main` to the exact reviewed series tip. No merge commit, no server-side squash or rebase after review — those would change the reviewed identity. |
 
+When a consuming repository opts into [boundary-load evidence](../references/boundary-load.md), store the separate `software-factory/boundary-load-evidence/v1` artifact with `pyr evidence`; keep the URI and label on the item. It is terminal evidence, not points, readiness, or ownership state.
+
 ## Verbs
 
 - `pyr ls <query>` / `pyr show <ref>` / `pyr history <ref>` — inspect

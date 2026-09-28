@@ -60,6 +60,7 @@ private immutable InventoryEntry[] expectedInventory = [
     InventoryEntry("source/effects/metadata_route_cli.d"),
     InventoryEntry("source/effects/mix_export.d"),
     InventoryEntry("source/effects/pii_policy_overlay.d"),
+    InventoryEntry("source/effects/quality_ratios_annotate_stage.d"),
     InventoryEntry("source/effects/source_rights_overlay.d"),
     InventoryEntry("source/effects/topical_tags_extract_stage.d"),
     InventoryEntry("source/effects/web_url.d"),

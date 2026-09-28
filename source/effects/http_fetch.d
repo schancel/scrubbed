@@ -57,13 +57,35 @@ struct FetchLimits {
 /// Must itself be `nothrow`: it runs inside an `extern(C) nothrow` callback.
 alias CancellationCheck = bool delegate() nothrow;
 
+/// A single caller-supplied request header. Unlike `FetchRequest.ifNoneMatch`
+/// (which composes one hardcoded `If-None-Match` line), this is a generic
+/// `(name, value)` pair validated by `fetchHttp` before it is ever composed
+/// into a `curl_slist` entry -- see `isHeaderNameToken`/`isSafeHeaderValue`.
+/// GET/header-list only: this type carries no request body (see #65 for the
+/// separate, not-yet-built request-body gap).
+struct FetchHeader {
+    string name;
+    string value;
+}
+
 struct FetchRequest {
     /// Fetch identity. `effects.web_url.WebUrl` already restricts this to
     /// `http`/`https` with no embedded userinfo credentials.
     WebUrl url;
     /// Conditional-retrieval validator; empty means an unconditional GET.
-    /// Sent as `If-None-Match`, never as a raw caller-composed header.
+    /// Sent as `If-None-Match`, never as a raw caller-composed header. Kept
+    /// exactly as-is -- not validated by the `headers` mechanism below;
+    /// additive only.
     string ifNoneMatch;
+    /// Additional caller-supplied request headers, generic beyond the single
+    /// hardcoded `ifNoneMatch` field above. Every name/value pair is
+    /// validated by `fetchHttp` (CR/LF/NUL rejected in either; the name is
+    /// further restricted to the HTTP token character set) before being
+    /// appended to the same `curl_slist`/`CURLOPT_HTTPHEADER` mechanism
+    /// `ifNoneMatch` already uses. A validation failure is a typed
+    /// `FetchFailureReason.invalidHeader` returned before any request is
+    /// attempted -- never a silent drop and never a crash.
+    FetchHeader[] headers;
     /// Optional `host:port:address` IP pins (`CURLOPT_RESOLVE`). Pins the
     /// connection target only; verification is never weakened by this list.
     string[] resolveEntries;
@@ -91,6 +113,11 @@ enum FetchFailureReason : ubyte {
     transportError,
     invalidResponse,
     storageFailure,
+    /// A caller-supplied `FetchRequest.headers` entry failed validation
+    /// (embedded CR/LF/NUL, or a name outside the HTTP token character set).
+    /// Returned before `curl_easy_init`/`curl_slist_append` is ever reached
+    /// and before any request is attempted.
+    invalidHeader,
 }
 
 enum FetchFailureCategory : ubyte { retryable, permanent }
@@ -117,6 +144,7 @@ FetchFailureCategory categoryOf(FetchFailureReason reason) pure nothrow @safe @n
     case FetchFailureReason.tlsVerificationFailed: return FetchFailureCategory.permanent;
     case FetchFailureReason.cancelled: return FetchFailureCategory.permanent;
     case FetchFailureReason.invalidResponse: return FetchFailureCategory.permanent;
+    case FetchFailureReason.invalidHeader: return FetchFailureCategory.permanent;
     }
 }
 
@@ -220,6 +248,54 @@ private bool equalsIgnoreCase(const(char)[] a, string b) pure nothrow @safe @nog
     return true;
 }
 
+/// RFC 7230 section 3.2.6 `tchar`/`token`: the character set permitted in an
+/// HTTP header field *name*. Alphanumeric plus `!#$%&'*+-.^_`|~` -- no
+/// colon, no whitespace, no control character. This alone already excludes
+/// CR/LF/NUL, but that property is also checked explicitly below so the
+/// injection-safety guarantee this function exists for is independently
+/// readable and doesn't rely solely on this charset staying exactly as
+/// written.
+private bool isHeaderNameToken(string name) pure nothrow @safe @nogc {
+    if (name.length == 0) return false;
+    foreach (ch; name) {
+        switch (ch) {
+        case 'a': .. case 'z':
+        case 'A': .. case 'Z':
+        case '0': .. case '9':
+        case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+            continue;
+        default:
+            return false;
+        }
+    }
+    return true;
+}
+
+/// A header *value* has no similarly strict grammar in general real-world
+/// use (arbitrary printable text, spaces, commas, etc. are legitimate), so
+/// this only enforces the hard requirement for this codebase's
+/// injection-safety property: no CR, LF, or NUL, any of which would let a
+/// caller-controlled value inject a second header, terminate the request
+/// line early, or otherwise smuggle content into the request.
+private bool isSafeHeaderValue(string value) pure nothrow @safe @nogc {
+    foreach (ch; value) {
+        if (ch == '\r' || ch == '\n' || ch == '\0') return false;
+    }
+    return true;
+}
+
+/// True if every entry in `headers` passes `isHeaderNameToken`/
+/// `isSafeHeaderValue`. Checked as one pass over the whole list before any
+/// entry is composed into a `curl_slist` line, so a single bad entry fails
+/// the entire request rather than silently dropping just that header.
+private bool allHeadersValid(const(FetchHeader)[] headers) pure nothrow @safe @nogc {
+    foreach (header; headers) {
+        if (!isHeaderNameToken(header.name)) return false;
+        if (!isSafeHeaderValue(header.value)) return false;
+    }
+    return true;
+}
+
 private bool parseHeaderLong(const(char)[] text, out long value) pure nothrow @safe @nogc {
     if (text.length == 0) return false;
     long result;
@@ -308,6 +384,20 @@ extern(C) private nothrow int fetchProgressCallback(void* opaque, long, long dow
 
 private void setOption(int result) {
     enforce(result == CURLE_OK, "http fetch: setopt failed");
+}
+
+/// The one place this module appends a raw header line to a `curl_slist`.
+/// Generalizes (does not duplicate) the append-and-check pattern `ifNoneMatch`
+/// already used inline: both `ifNoneMatch` and the validated entries in
+/// `FetchRequest.headers` now compose their line and call through here.
+/// Callers remain responsible for whatever validation their own header line
+/// needs before calling this -- `ifNoneMatch` deliberately does none (its
+/// existing behavior is unchanged), while `FetchRequest.headers` entries are
+/// validated by `allHeadersValid` before `fetchHttp` ever reaches this point.
+private curl_slist* appendHeaderLine(curl_slist* list, string line) {
+    auto next = curl_slist_append(list, line.toStringz);
+    enforce(next !is null, "http fetch: header list allocation failed");
+    return next;
 }
 
 private void validateLimits(FetchLimits limits) {
@@ -402,6 +492,10 @@ shared static this() {
 FetchOutcome fetchHttp(FetchRequest request) {
     validateLimits(request.limits);
     FetchOutcome outcome;
+    if (!allHeadersValid(request.headers)) {
+        outcome.failure_ = FetchFailure(FetchFailureReason.invalidHeader, 0, 0);
+        return outcome;
+    }
     if (!acquireConcurrencySlot(request.limits.maxConcurrentFetches)) {
         outcome.failure_ = FetchFailure(FetchFailureReason.concurrencyLimit, 0, 0);
         return outcome;
@@ -458,10 +552,12 @@ FetchOutcome fetchHttp(FetchRequest request) {
         setOption(curl_easy_setopt(easy, CURLOPT_CAINFO, caz));
     }
     if (request.ifNoneMatch.length) {
-        auto header = "If-None-Match: " ~ request.ifNoneMatch;
-        auto next = curl_slist_append(requestHeaders, header.toStringz);
-        enforce(next !is null, "http fetch: header list allocation failed");
-        requestHeaders = next;
+        requestHeaders = appendHeaderLine(requestHeaders, "If-None-Match: " ~ request.ifNoneMatch);
+    }
+    foreach (header; request.headers) {
+        // Already validated by `allHeadersValid` at the top of this
+        // function; no unvalidated header ever reaches this line.
+        requestHeaders = appendHeaderLine(requestHeaders, header.name ~ ": " ~ header.value);
     }
     if (requestHeaders !is null)
         setOption(curl_easy_setopt(easy, CURLOPT_HTTPHEADER, requestHeaders));
@@ -554,6 +650,33 @@ unittest {
     assert(categoryOf(FetchFailureReason.tooManyRedirects) == FetchFailureCategory.permanent);
     assert(categoryOf(FetchFailureReason.tlsVerificationFailed) == FetchFailureCategory.permanent);
     assert(categoryOf(FetchFailureReason.cancelled) == FetchFailureCategory.permanent);
+    assert(categoryOf(FetchFailureReason.invalidHeader) == FetchFailureCategory.permanent);
+}
+
+unittest {
+    // Header validation is a pure, isolated gate: exercised directly here
+    // (no curl involvement at all), independent of the end-to-end injection
+    // proof further down that shows it actually short-circuits `fetchHttp`.
+    assert(isHeaderNameToken("X-Scrubbed-Test"));
+    assert(isHeaderNameToken("Content-MD5"));
+    assert(isHeaderNameToken("x_amz_date"));
+    assert(!isHeaderNameToken(""));
+    assert(!isHeaderNameToken("X-Bad:Name"));
+    assert(!isHeaderNameToken("X Bad Name"));
+    assert(!isHeaderNameToken("X-Bad\r\nName"));
+    assert(!isHeaderNameToken("X-Bad\0Name"));
+
+    assert(isSafeHeaderValue(""));
+    assert(isSafeHeaderValue("hello world, 42; q=0.9"));
+    assert(!isSafeHeaderValue("evil\r\nX-Injected: yes"));
+    assert(!isSafeHeaderValue("evil\nX-Injected: yes"));
+    assert(!isSafeHeaderValue("evil\rX-Injected: yes"));
+    assert(!isSafeHeaderValue("evil\0value"));
+
+    assert(allHeadersValid(null));
+    assert(allHeadersValid([FetchHeader("X-A", "1"), FetchHeader("X-B", "2")]));
+    assert(!allHeadersValid([FetchHeader("X-A", "1"), FetchHeader("X-Bad\r\n", "2")]));
+    assert(!allHeadersValid([FetchHeader("X-A", "1\r\nX-Injected: yes")]));
 }
 
 unittest {
@@ -621,4 +744,140 @@ unittest {
     assert(outcome.evidence.status == 200);
     assert(capturedRequest.indexOf("User-Agent: " ~ userAgent ~ "\r\n") >= 0,
         "http fetch: exact User-Agent header not found on the wire");
+}
+
+unittest {
+    // Real proof, per issue #46's acceptance criteria: a CRLF- or
+    // NUL-containing caller-supplied header (value or name) must be rejected
+    // *before* any request is attempted -- not just that curl itself would
+    // reject a malformed request. Proven by pointing at
+    // `http://127.0.0.1:1/`, `curl_ffi.d`'s own established
+    // guaranteed-connection-refused target: if validation ran first, the
+    // outcome is `invalidHeader` with no curl code; if it were skipped and
+    // the request actually reached curl, the outcome would instead be
+    // `transportError` with a real nonzero curl code from the refused
+    // connection. Getting `invalidHeader` here is proof no request was even
+    // attempted.
+    auto resolved = resolveWebUrl("http://127.0.0.1:1/", "http://127.0.0.1:1/");
+    assert(resolved.isResolved);
+
+    FetchRequest crlfValue;
+    crlfValue.url = resolved.value;
+    crlfValue.headers = [FetchHeader("X-Test", "evil\r\nX-Injected: yes")];
+    auto crlfValueOutcome = fetchHttp(crlfValue);
+    assert(!crlfValueOutcome.succeeded);
+    assert(crlfValueOutcome.failure.reason == FetchFailureReason.invalidHeader);
+    assert(crlfValueOutcome.failure.curlCode == 0);
+    assert(crlfValueOutcome.failure.httpStatus == 0);
+
+    FetchRequest lfOnlyValue;
+    lfOnlyValue.url = resolved.value;
+    lfOnlyValue.headers = [FetchHeader("X-Test", "evil\nX-Injected: yes")];
+    auto lfOnlyOutcome = fetchHttp(lfOnlyValue);
+    assert(!lfOnlyOutcome.succeeded);
+    assert(lfOnlyOutcome.failure.reason == FetchFailureReason.invalidHeader);
+
+    FetchRequest nulValue;
+    nulValue.url = resolved.value;
+    nulValue.headers = [FetchHeader("X-Test", "bad\0value")];
+    auto nulValueOutcome = fetchHttp(nulValue);
+    assert(!nulValueOutcome.succeeded);
+    assert(nulValueOutcome.failure.reason == FetchFailureReason.invalidHeader);
+
+    FetchRequest crlfName;
+    crlfName.url = resolved.value;
+    crlfName.headers = [FetchHeader("X-Test\r\nX-Injected", "value")];
+    auto crlfNameOutcome = fetchHttp(crlfName);
+    assert(!crlfNameOutcome.succeeded);
+    assert(crlfNameOutcome.failure.reason == FetchFailureReason.invalidHeader);
+
+    FetchRequest colonName;
+    colonName.url = resolved.value;
+    colonName.headers = [FetchHeader("X-Test:Bad", "value")];
+    auto colonNameOutcome = fetchHttp(colonName);
+    assert(!colonNameOutcome.succeeded);
+    assert(colonNameOutcome.failure.reason == FetchFailureReason.invalidHeader);
+
+    FetchRequest spaceName;
+    spaceName.url = resolved.value;
+    spaceName.headers = [FetchHeader("X Test", "value")];
+    auto spaceNameOutcome = fetchHttp(spaceName);
+    assert(!spaceNameOutcome.succeeded);
+    assert(spaceNameOutcome.failure.reason == FetchFailureReason.invalidHeader);
+
+    // Control: the same target with a single *valid* header must actually
+    // reach curl and fail with `transportError` (connection refused), not
+    // `invalidHeader` -- proving the rejections above are really about the
+    // bad header content, not about the unreachable target.
+    FetchRequest validHeader;
+    validHeader.url = resolved.value;
+    validHeader.headers = [FetchHeader("X-Test", "fine")];
+    auto validHeaderOutcome = fetchHttp(validHeader);
+    assert(!validHeaderOutcome.succeeded);
+    assert(validHeaderOutcome.failure.reason == FetchFailureReason.transportError);
+}
+
+unittest {
+    // Real proof that a caller-supplied generic header actually reaches the
+    // real curl transport and is received by a real peer -- mirroring this
+    // module's own established real-loopback-TCP pattern above (the
+    // `User-Agent` proof) rather than mocking curl. Also proves, in the same
+    // real request, that `ifNoneMatch` keeps working unchanged side-by-side
+    // with the new generic `headers` mechanism.
+    import core.thread : Thread;
+    import std.conv : to;
+    import std.socket : AddressFamily, InternetAddress, SocketOption,
+        SocketOptionLevel, TcpSocket;
+    import std.string : indexOf;
+
+    auto listener = new TcpSocket(AddressFamily.INET);
+    scope(exit) listener.close();
+    listener.setOption(SocketOptionLevel.SOCKET, SocketOption.REUSEADDR, true);
+    listener.bind(new InternetAddress("127.0.0.1", 0));
+    listener.listen(1);
+    immutable port = (cast(InternetAddress) listener.localAddress).port;
+
+    string capturedRequest;
+    auto worker = new Thread({
+        auto client = listener.accept();
+        scope(exit) client.close();
+        ubyte[4_096] buffer;
+        string received;
+        while (received.indexOf("\r\n\r\n") < 0) {
+            auto count = client.receive(buffer[]);
+            if (count <= 0) break;
+            received ~= cast(string) buffer[0 .. count].idup;
+        }
+        capturedRequest = received;
+        enum string responseBody = "ok";
+        client.send(cast(const(ubyte)[])("HTTP/1.1 200 OK\r\nContent-Length: " ~
+            responseBody.length.to!string ~ "\r\nConnection: close\r\n\r\n" ~ responseBody));
+    });
+    worker.start();
+
+    auto rawUrl = "http://127.0.0.1:" ~ port.to!string ~ "/probe";
+    auto resolved = resolveWebUrl(rawUrl, rawUrl);
+    assert(resolved.isResolved);
+
+    FetchRequest request;
+    request.url = resolved.value;
+    request.limits.connectTimeoutMs = 500;
+    request.limits.totalTimeoutMs = 2_000;
+    request.ifNoneMatch = `"abc123"`;
+    request.headers = [
+        FetchHeader("X-Scrubbed-Test", "hello-world-42"),
+        FetchHeader("X-Amz-Content-Sha256", "deadbeef"),
+    ];
+
+    auto outcome = fetchHttp(request);
+    worker.join();
+
+    assert(outcome.succeeded);
+    assert(outcome.evidence.status == 200);
+    assert(capturedRequest.indexOf("X-Scrubbed-Test: hello-world-42\r\n") >= 0,
+        "http fetch: caller-supplied header not found on the wire");
+    assert(capturedRequest.indexOf("X-Amz-Content-Sha256: deadbeef\r\n") >= 0,
+        "http fetch: second caller-supplied header not found on the wire");
+    assert(capturedRequest.indexOf("If-None-Match: \"abc123\"\r\n") >= 0,
+        "http fetch: ifNoneMatch header not found on the wire alongside generic headers");
 }

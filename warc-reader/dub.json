@@ -1,0 +1,11 @@
+{
+	"name": "warc-reader",
+	"description": "Minimal, zero-dependency, pure-D incremental reader for uncompressed WARC/1.1 record streams.",
+	"authors": ["Shammah Chancellor"],
+	"license": "MIT",
+	"copyright": "Copyright © 2026, Shammah Chancellor",
+	"targetType": "library",
+	"sourcePaths": ["source"],
+	"importPaths": ["source"],
+	"dflags": ["-preview=dip1000"]
+}

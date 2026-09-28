@@ -1,6 +1,6 @@
 // Release-active, on-disk checks for the local-file WARC transport.
 import effects.warc_file;
-import effects.warc_reader;
+import warc_reader;
 import effects.warc_compressed;
 import core.memory : GC;
 import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_SELF;

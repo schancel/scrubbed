@@ -1,5 +1,6 @@
-// Release-active integration checks for effects.warc_reader.
-import effects.warc_reader;
+// Release-active integration checks for warc_reader (standalone package;
+// see ../../warc-reader).
+import warc_reader;
 import core.memory : GC;
 import std.conv : to;
 import std.digest.sha : sha256Of, toHexString;

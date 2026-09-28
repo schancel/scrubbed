@@ -1,7 +1,9 @@
 # WARC/WET compressed reader: prerequisite evidence
 
 Status: scoped **uncompressed and compressed WARC/1.1 production candidates**
-live in [`effects.warc_reader`](../source/effects/warc_reader.d) and
+live in the standalone [`warc-reader`](../warc-reader) package (extracted
+from `effects.warc_reader` in #362; scrubbed depends on it as a path
+dependency) and
 [`effects.warc_compressed`](../source/effects/warc_compressed.d), with API and
 limits in [warc-reader.md](warc-reader.md). The older experiment evidence
 below is retained as historical context; the new release-active adapter proof

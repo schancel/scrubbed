@@ -1,6 +1,6 @@
 {
 	"name": "s3lite",
-	"description": "Minimal, zero-dependency pure-D S3 GetObject client: SigV4 signing on Phobos's std.digest.hmac/sha, its own libcurl FFI transport, real S3 XML error parsing.",
+	"description": "Minimal, zero-dependency pure-D S3 client (GetObject/PutObject/ListObjectsV2) and worker-pool bulk transfer: SigV4 signing on Phobos's std.digest.hmac/sha, its own libcurl FFI transport, real S3 XML error/listing parsing.",
 	"authors": ["Shammah Chancellor"],
 	"license": "MIT",
 	"copyright": "Copyright © 2026, Shammah Chancellor",
@@ -25,6 +25,18 @@
 			"targetType": "executable",
 			"targetName": "loopback-fixture",
 			"mainSourceFile": "tests/loopback_fixture.d"
+		},
+		{
+			"name": "put-list-loopback-fixture",
+			"targetType": "executable",
+			"targetName": "put-list-loopback-fixture",
+			"mainSourceFile": "tests/put_list_loopback_fixture.d"
+		},
+		{
+			"name": "transfer-bulk-fixture",
+			"targetType": "executable",
+			"targetName": "transfer-bulk-fixture",
+			"mainSourceFile": "tests/transfer_bulk_fixture.d"
 		},
 		{
 			"name": "live-public-object",

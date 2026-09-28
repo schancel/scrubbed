@@ -18,7 +18,7 @@
 /// keep working indefinitely; if it ever moves, any other `csv.gz/<year>.csv.gz`
 /// key under the same bucket/prefix is an equally valid substitute.
 ///
-/// This program proves two things live, not just the happy path:
+/// This program proves three things live, not just the happy path:
 ///   1. A real successful GET against the object above, parsed correctly
 ///      (status, ETag, Content-Length, and real body bytes gzip-decode to
 ///      the expected size).
@@ -26,10 +26,22 @@
 ///      bucket, and a deliberately nonexistent bucket, both correctly
 ///      parsed from S3's real XML error response into `FailureKind.notFound`
 ///      -- not just inferred from the HTTP status code alone.
+///   3. (issue #367) A real, unauthenticated `ListObjectsV2` call against
+///      the same live bucket, scoped to a narrow prefix so it stays a
+///      single small page: proves `s3lite.client.listObjectsV2` really
+///      round-trips real S3 XML `ListBucketResult` bodies, not just the
+///      synthetic fixtures `tests/put_list_loopback_fixture.d` and unit
+///      tests construct. `PutObject` has no live tier here -- it's not
+///      read-only, and this package's credential-free test tiers
+///      deliberately never write to a real bucket this package doesn't own;
+///      its round-trip proof lives entirely in the SigV4 vector tests and
+///      the D-only loopback fixture.
 ///
 /// Run via: `dub run --config=live-public-object` (from this package's own
 /// directory). Requires outbound internet access to *.amazonaws.com.
-import s3lite.client : GetObjectRequest, Credentials, FailureKind, getObject;
+import s3lite.client : GetObjectRequest, Credentials, FailureKind, getObject,
+    ListObjectsV2Request, S3Object, listObjectsV2;
+import std.algorithm.searching : canFind;
 import std.stdio : writeln;
 import std.conv : to;
 
@@ -80,5 +92,29 @@ void main() {
     writeln("  2b. real nonexistent-bucket GET: HTTP ", missingBucketResult.error.httpStatus,
         ", parsed <Code>", missingBucketResult.error.code, "</Code> -> notFound -- PASS");
 
-    writeln("s3lite live public-object proof: PASS (real success + real two-shape 404 parsing)");
+    // 3. Real ListObjectsV2, scoped to a narrow prefix (this dataset's
+    // 1760s-decade archive files) so the live bucket -- which holds many
+    // thousands of objects overall -- answers with one small page rather
+    // than this proof having to page through the whole thing.
+    auto listReq = ListObjectsV2Request("noaa-ghcn-pds", "us-east-1", Credentials.init, "csv.gz/176");
+    S3Object[] found;
+    auto listResult = listObjectsV2(listReq, (S3Object obj) { found ~= obj; });
+    check(listResult.ok, "expected the real ListObjectsV2 call to succeed");
+    check(listResult.objectCount == found.length,
+        "objectCount should match the number of objects actually delivered to the sink");
+    check(found.length > 0, "expected at least one real object under csv.gz/176*");
+    bool sawKnownKey = false;
+    foreach (obj; found) {
+        if (obj.key == "csv.gz/1763.csv.gz") {
+            sawKnownKey = true;
+            check(obj.size == 3358, "csv.gz/1763.csv.gz: expected Size 3358, got " ~ obj.size.to!string);
+            check(obj.etag == `"efe18d88cfb5c3372fe0206c521b2239"`,
+                "csv.gz/1763.csv.gz: unexpected ETag " ~ obj.etag);
+        }
+    }
+    check(sawKnownKey, "expected csv.gz/1763.csv.gz (the same object GET #1 fetched) among the real listing results");
+    writeln("  3. real ListObjectsV2 (prefix=csv.gz/176): ", found.length,
+        " real objects, including csv.gz/1763.csv.gz with matching Size/ETag -- PASS");
+
+    writeln("s3lite live public-object proof: PASS (real success + real two-shape 404 parsing + real ListObjectsV2)");
 }

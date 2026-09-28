@@ -1568,6 +1568,22 @@ private ManifestOutcome processDurableOne(DurableJobLedger ledger,
     return result;
 }
 
+// Saturates at 0 rather than wrapping: `terminalDecisions` counting past
+// `succeeded` is unreachable in runApp today (#387 traced every call site),
+// but this is a display value, not a safety-critical invariant -- if that
+// ever changes, printing "0 succeeded" is a safe degradation, not a garbage
+// size_t wraparound.
+private size_t succeededDisplayCount(size_t succeeded, size_t terminalDecisions) pure nothrow @nogc {
+    return terminalDecisions <= succeeded ? succeeded - terminalDecisions : 0;
+}
+
+unittest {
+    assert(succeededDisplayCount(5, 2) == 3);
+    assert(succeededDisplayCount(3, 0) == 3);
+    assert(succeededDisplayCount(2, 5) == 0, "must saturate, not wrap");
+    assert(succeededDisplayCount(0, 0) == 0);
+}
+
 int runApp(string[] args) {
     auto metricsPath = environment.get("SCRUBBED_DURABLE_METRICS_V1", "");
     const allowVerifiedSkip =
@@ -2206,7 +2222,7 @@ int runApp(string[] args) {
     // layer. Subtract terminalDecisions here, at the reporting layer only,
     // so the printed message agrees with the exit code below rather than
     // claiming unqualified success for documents that were quarantined.
-    const displaySucceeded = counts.succeeded - terminalDecisions;
+    const displaySucceeded = succeededDisplayCount(counts.succeeded, terminalDecisions);
     if (!errorJournalPath.length) {
         if (terminalDecisions)
             writeln("done. ", displaySucceeded, " succeeded, ", failures,

@@ -4,6 +4,8 @@ s3lite-test-*
 sigv4-fixtures
 loopback-fixture
 live-public-object
+put-list-loopback-fixture
+transfer-bulk-fixture
 *.o
 *.obj
 .DS_Store

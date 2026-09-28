@@ -73,6 +73,19 @@ struct GetOptions {
     /// test point a real virtual-hosted-style URL at a loopback server
     /// without needing real DNS. Empty for real callers.
     string[] resolveOverrides;
+    /// When non-empty, a literal "scheme://host[:port]" origin substituted
+    /// in place of the caller-computed URL's own origin, while everything
+    /// from the path onward (path, query string) is preserved exactly as
+    /// computed, and the `Host` header used for SigV4 signing still reflects
+    /// the real virtual-hosted address -- the same technique
+    /// `tests/loopback_fixture.d`'s plaintext section already uses by hand,
+    /// generalized so `tests/put_list_loopback_fixture.d` and
+    /// `tests/transfer_bulk_fixture.d` can exercise the real signed
+    /// request-building path (including query strings, e.g. `ListObjectsV2`
+    /// pagination) end to end against a plaintext loopback server with no
+    /// TLS certificate machinery. Only ever set by this package's own test
+    /// fixtures; never touched by a real caller.
+    string urlOverride;
     int connectTimeoutMs = 5000;
     int totalTimeoutMs = 15000;
 }
@@ -81,6 +94,26 @@ private extern(C) size_t writeBodyCallback(const(char)* ptr, size_t size, size_t
     auto buf = cast(ubyte[]*) userdata;
     auto n = size * nmemb;
     *buf ~= cast(ubyte[]) ptr[0 .. n];
+    return n;
+}
+
+/// Read-cursor state for `CURLOPT_READFUNCTION` during a PUT upload: curl
+/// calls back repeatedly, each time wanting up to `size*nmemb` more bytes
+/// from wherever `pos` last left off.
+private struct ReadCursor {
+    const(ubyte)[] data;
+    size_t pos;
+}
+
+private extern(C) size_t readBodyCallback(char* ptr, size_t size, size_t nmemb, void* userdata) nothrow {
+    auto cur = cast(ReadCursor*) userdata;
+    auto want = size * nmemb;
+    auto remain = cur.data.length - cur.pos;
+    auto n = want < remain ? want : remain;
+    if (n > 0) {
+        ptr[0 .. n] = cast(char[]) cur.data[cur.pos .. cur.pos + n];
+        cur.pos += n;
+    }
     return n;
 }
 
@@ -102,21 +135,69 @@ private extern(C) size_t writeHeaderCallback(const(char)* ptr, size_t size, size
     return n;
 }
 
-/// Issues one synchronous HTTP(S) GET. Never throws for network-level
-/// failure -- those come back as `HttpResult.transportError(...)`.
-HttpResult httpGet(string url, const(RequestHeader)[] headers, GetOptions options) {
+/// Substitutes `urlOverride` (a literal "scheme://host[:port]" origin) for
+/// `url`'s own origin, preserving everything from the path onward
+/// unchanged. Falls back to prepending `urlOverride` verbatim if `url`
+/// doesn't parse as an absolute "scheme://..." URL (defensive only --
+/// every caller in this package always builds an absolute URL).
+private string applyUrlOverride(string url, string urlOverride) pure {
+    if (urlOverride.length == 0) return url;
+    auto schemeSep = url.indexOf("://");
+    if (schemeSep < 0) return urlOverride ~ url;
+    auto pathStart = url.indexOf('/', schemeSep + 3);
+    auto suffix = pathStart < 0 ? "" : url[pathStart .. $];
+    return urlOverride ~ suffix;
+}
+
+unittest {
+    assert(applyUrlOverride("https://bucket.s3.us-east-1.amazonaws.com/key", "") ==
+        "https://bucket.s3.us-east-1.amazonaws.com/key");
+    assert(applyUrlOverride("https://bucket.s3.us-east-1.amazonaws.com/key", "http://127.0.0.1:9000") ==
+        "http://127.0.0.1:9000/key");
+    assert(applyUrlOverride("https://bucket.s3.us-east-1.amazonaws.com/?list-type=2&max-keys=1",
+        "http://127.0.0.1:9000") == "http://127.0.0.1:9000/?list-type=2&max-keys=1");
+}
+
+private void ensureCurlGlobalInit() {
     static bool globalInitDone = false;
     if (!globalInitDone) {
         curl_global_init(curlGlobalAll);
         globalInitDone = true;
     }
+}
+
+/// Applies every option common to a GET and a PUT: destination URL (or its
+/// `urlOverride`), protocol allowlist, redirect policy, timeouts, real TLS
+/// verification (plus the test-only CA bundle/DNS-override escape hatches),
+/// request headers, and response header capture. Caller still wires up
+/// method-specific bits (`CURLOPT_WRITEFUNCTION`/`CURLOPT_WRITEDATA` for the
+/// response body always; `CURLOPT_UPLOAD`/`CURLOPT_READFUNCTION` only for a
+/// PUT) and always calls `curl_easy_perform` itself, inside the same scope
+/// that keeps `keepAlive`'s backing storage alive.
+private struct EasySetup {
+    CURL* easy;
+    curl_slist* resolveList;
+    curl_slist* headerList;
+    string caz;
+
+    void teardown() {
+        if (resolveList !is null) curl_slist_free_all(resolveList);
+        if (headerList !is null) curl_slist_free_all(headerList);
+        if (easy !is null) curl_easy_cleanup(easy);
+    }
+}
+
+private HttpResult setupCommon(string url, const(RequestHeader)[] headers, GetOptions options,
+        out EasySetup setup) {
+    ensureCurlGlobalInit();
 
     auto easy = curl_easy_init();
     if (easy is null)
         return HttpResult.transportError(TransportFailure.other, "curl_easy_init returned null");
-    scope(exit) curl_easy_cleanup(easy);
+    setup.easy = easy;
 
-    auto urlz = url.toStringz;
+    auto dispatchUrl = applyUrlOverride(url, options.urlOverride);
+    auto urlz = dispatchUrl.toStringz;
     curl_easy_setopt(easy, CURLOPT_URL, urlz);
     curl_easy_setopt(easy, CURLOPT_PROTOCOLS_STR, "http,https\0".ptr);
     curl_easy_setopt(easy, CURLOPT_REDIR_PROTOCOLS_STR, "http,https\0".ptr);
@@ -126,41 +207,34 @@ HttpResult httpGet(string url, const(RequestHeader)[] headers, GetOptions option
     curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
     curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, cast(long) options.connectTimeoutMs);
     curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, cast(long) options.totalTimeoutMs);
-    // Real TLS verification, always on. The only override this package
-    // exposes is a custom CA bundle (for its own loopback fixture) -- never
-    // a way to disable verification.
+    // Real TLS verification, always on. The only overrides this package
+    // exposes are a custom CA bundle and a literal dispatch-URL override
+    // (both for its own loopback test fixtures) -- never a way to disable
+    // verification.
     curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 1L);
     curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 2L);
 
-    string caz; // keep alive for the duration of the call
     if (options.caBundlePath.length) {
-        caz = options.caBundlePath;
-        curl_easy_setopt(easy, CURLOPT_CAINFO, caz.toStringz);
+        setup.caz = options.caBundlePath;
+        curl_easy_setopt(easy, CURLOPT_CAINFO, setup.caz.toStringz);
     }
 
-    curl_slist* resolveList = null;
-    scope(exit) if (resolveList !is null) curl_slist_free_all(resolveList);
     foreach (entry; options.resolveOverrides)
-        resolveList = curl_slist_append(resolveList, entry.toStringz);
-    if (resolveList !is null)
-        curl_easy_setopt(easy, CURLOPT_RESOLVE, resolveList);
+        setup.resolveList = curl_slist_append(setup.resolveList, entry.toStringz);
+    if (setup.resolveList !is null)
+        curl_easy_setopt(easy, CURLOPT_RESOLVE, setup.resolveList);
 
-    curl_slist* headerList = null;
-    scope(exit) if (headerList !is null) curl_slist_free_all(headerList);
     foreach (h; headers) {
         auto line = h.name ~ ": " ~ h.value;
-        headerList = curl_slist_append(headerList, line.toStringz);
+        setup.headerList = curl_slist_append(setup.headerList, line.toStringz);
     }
-    if (headerList !is null)
-        curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headerList);
+    if (setup.headerList !is null)
+        curl_easy_setopt(easy, CURLOPT_HTTPHEADER, setup.headerList);
 
-    ubyte[] body_;
-    RequestHeader[] responseHeaders;
-    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &writeBodyCallback);
-    curl_easy_setopt(easy, CURLOPT_WRITEDATA, &body_);
-    curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &writeHeaderCallback);
-    curl_easy_setopt(easy, CURLOPT_HEADERDATA, &responseHeaders);
+    return HttpResult.success(HttpResponse.init); // ok placeholder; caller ignores on success path
+}
 
+private HttpResult finishPerform(CURL* easy, ref ubyte[] body_, ref RequestHeader[] responseHeaders) {
     auto code = curl_easy_perform(easy);
     if (code != CURLE_OK) {
         auto detail = curl_easy_strerror(code).to!string;
@@ -170,6 +244,51 @@ HttpResult httpGet(string url, const(RequestHeader)[] headers, GetOptions option
     long statusCode;
     curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &statusCode);
     return HttpResult.success(HttpResponse(cast(int) statusCode, responseHeaders, body_));
+}
+
+/// Issues one synchronous HTTP(S) GET. Never throws for network-level
+/// failure -- those come back as `HttpResult.transportError(...)`.
+HttpResult httpGet(string url, const(RequestHeader)[] headers, GetOptions options) {
+    EasySetup setup;
+    auto setupResult = setupCommon(url, headers, options, setup);
+    scope(exit) setup.teardown();
+    if (!setupResult.ok) return setupResult;
+
+    ubyte[] body_;
+    RequestHeader[] responseHeaders;
+    curl_easy_setopt(setup.easy, CURLOPT_WRITEFUNCTION, &writeBodyCallback);
+    curl_easy_setopt(setup.easy, CURLOPT_WRITEDATA, &body_);
+    curl_easy_setopt(setup.easy, CURLOPT_HEADERFUNCTION, &writeHeaderCallback);
+    curl_easy_setopt(setup.easy, CURLOPT_HEADERDATA, &responseHeaders);
+
+    return finishPerform(setup.easy, body_, responseHeaders);
+}
+
+/// Issues one synchronous HTTP(S) PUT with `body_` as the full request
+/// payload (never chunked/streamed from disk -- this package's callers
+/// already hold the bytes in memory, matching `PutObjectRequest.body_` in
+/// `s3lite.client`). Never throws for network-level failure, same contract
+/// as `httpGet`.
+HttpResult httpPut(string url, const(RequestHeader)[] headers, const(ubyte)[] body_, GetOptions options) {
+    EasySetup setup;
+    auto setupResult = setupCommon(url, headers, options, setup);
+    scope(exit) setup.teardown();
+    if (!setupResult.ok) return setupResult;
+
+    curl_easy_setopt(setup.easy, CURLOPT_UPLOAD, 1L);
+    curl_easy_setopt(setup.easy, CURLOPT_INFILESIZE_LARGE, cast(long) body_.length);
+    auto cursor = ReadCursor(body_, 0);
+    curl_easy_setopt(setup.easy, CURLOPT_READFUNCTION, &readBodyCallback);
+    curl_easy_setopt(setup.easy, CURLOPT_READDATA, &cursor);
+
+    ubyte[] responseBody;
+    RequestHeader[] responseHeaders;
+    curl_easy_setopt(setup.easy, CURLOPT_WRITEFUNCTION, &writeBodyCallback);
+    curl_easy_setopt(setup.easy, CURLOPT_WRITEDATA, &responseBody);
+    curl_easy_setopt(setup.easy, CURLOPT_HEADERFUNCTION, &writeHeaderCallback);
+    curl_easy_setopt(setup.easy, CURLOPT_HEADERDATA, &responseHeaders);
+
+    return finishPerform(setup.easy, responseBody, responseHeaders);
 }
 
 private TransportFailure classifyCurlError(int code) pure {

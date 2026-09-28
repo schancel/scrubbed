@@ -102,8 +102,13 @@ combined-order tests proving that fusion and barriers preserve exact results.
    fallback modes, benchmarked rather than assumed.
 4. [#28](https://github.com/schancel/scrubbed/issues/28) then
    [#65](https://github.com/schancel/scrubbed/issues/65): deterministic
-   metadata first; optional `llama-server` primary and explicit local-GGUF
-   backend behind the same schema/provenance contract.
+   metadata first; in-process local GGUF inference (via `llama.cpp`) as the
+   default model-assisted backend, with a configurable OpenAI-compatible API
+   endpoint (e.g. an operator-run `llama-server`) as the slower, per-request
+   network-round-trip alternative, behind the same schema/provenance
+   contract. #65's real evaluation (`docs/llama-inference-evaluation.md`)
+   and first implementation slice (`source/effects/llama_ffi.d`) have
+   landed; the typed metadata port and any stage/CLI wiring remain open.
 5. Add optional, separately identified metadata enrichments under
    [#167](https://github.com/schancel/scrubbed/issues/167),
    [#168](https://github.com/schancel/scrubbed/issues/168), and

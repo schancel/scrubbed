@@ -1,0 +1,26 @@
+{
+	"name": "httpfetch",
+	"description": "Bounded, injection-safe, cancellable D HTTP(S) fetch: one call, one fetch, typed caps on every dimension (timeouts, redirects, header/body bytes, concurrency), mandatory TLS verification with no disable path. Raw libcurl FFI bindings ship too, for callers who want low-level access.",
+	"authors": ["Shammah Chancellor"],
+	"license": "MIT",
+	"copyright": "Copyright © 2026, Shammah Chancellor",
+	"targetType": "library",
+	"sourcePaths": ["source"],
+	"importPaths": ["source"],
+	"dflags": ["-preview=dip1000"],
+	"libs": ["curl"],
+	"preBuildCommands": [
+		"uname -s | grep -qx Darwin && uname -m | grep -qx arm64",
+		"cmake -S third_party/lexbor -B .dub/lexbor -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_TESTS=OFF -DLEXBOR_BUILD_EXAMPLES=OFF -DLEXBOR_BUILD_BENCHMARKS=OFF -DLEXBOR_BUILD_UTILS=OFF -DLEXBOR_BUILD_SEPARATELY=OFF",
+		"cmake --build .dub/lexbor --target lexbor_static -j4"
+	],
+	"sourceFiles": [".dub/lexbor/liblexbor_static.a"],
+	"buildTypes": {
+		"release": {
+			"buildOptions": ["releaseMode", "optimize", "inline"]
+		},
+		"release-unittest": {
+			"buildOptions": ["unittests", "releaseMode", "optimize", "inline"]
+		}
+	}
+}

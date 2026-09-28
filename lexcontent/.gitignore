@@ -1,0 +1,6 @@
+.dub/
+liblexcontent.a
+lexcontent-test-library
+*.o
+*.obj
+.DS_Store

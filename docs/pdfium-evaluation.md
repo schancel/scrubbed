@@ -468,3 +468,194 @@ it does not extend this evaluation's disclosed open questions (the
 BSD/Apache-2.0 license co-mingling, the archived-mirror-vs-live-commits
 discrepancy, thread-safety, or the wider platform/pin-policy matrix), all of
 which stay exactly as disclosed above.
+
+## Linux x86_64/aarch64 candidate provenance (checked 2026-09-28 UTC)
+
+Issue #379's owner-confirmed scope: evaluate `bblanchon/pdfium-binaries`
+Linux x86_64/aarch64 prebuilt binaries at the same discipline as the macOS
+section above, to inform whether `source/effects/pdfium_ffi.d`'s version
+gate (currently `version (OSX) { version (AArch64) {} else static
+assert(0, ...) } else static assert(0, ...)` — macOS arm64 only) should
+widen to Linux. This machine (Darwin arm64) cannot execute Linux ELF
+binaries, so **no functional/dlopen verification was performed** here —
+only archive integrity, license text, and file-format/ABI identification,
+exactly as this section's own scope allows and discloses. Windows is out
+of scope per issue #379's own instructions (scrubbed does not build for
+Windows).
+
+Both Linux assets checked here come from **the exact same pinned release**
+this document's macOS section already pinned (`bblanchon/pdfium-binaries`
+tag `chromium/8066`, `target_commitish`
+`f2e9a1c45bb17b85b540abf1af30146ef65416ac`, PDFium 156.0.8066.0), confirmed
+still present and unmodified as of this check
+(`gh api repos/bblanchon/pdfium-binaries/releases/tags/chromium%2F8066`
+returns the identical `target_commitish` and asset list recorded above).
+It also remains the distributor's **current latest** release as of this
+check (`chromium/8066`, 2026-09-21, ahead of `chromium/8057` and
+`chromium/8044`) — this is not a stale pin.
+
+| Candidate | Exact version/source identity | License evidence | Decision status |
+| --- | --- | --- | --- |
+| `bblanchon/pdfium-binaries`, Linux x86_64 | Same release `chromium/8066` / commit `f2e9a1c45bb17b85b540abf1af30146ef65416ac` as the macOS section above; asset `pdfium-linux-x64.tgz`, SHA-256 `0b43f405477cf2cfc4dbff06905093c3309756c6bca1fb9da99234a2ca97fed2` (computed locally with `shasum -a 256`) | Bundled `LICENSE`, SHA-256 `ba26c1263131696b86c10496b5066b918a20b7161822a80c274d0080105f6c93` — byte-identical to the macOS artifact's own `LICENSE` (same hash recorded above); bundled `licenses/` directory (13 files) byte-identical to the arm64 asset below (`diff -r` empty) and matching the same permissive family list already recorded for macOS (see table below) | **Obtained, extracted, license-verified, symbol-verified via `nm`/`objdump`. Not functionally executed (cannot run Linux ELF on this Darwin arm64 host). Not adopted.** |
+| `bblanchon/pdfium-binaries`, Linux aarch64 | Same release `chromium/8066` / commit `f2e9a1c45bb17b85b540abf1af30146ef65416ac`; asset `pdfium-linux-arm64.tgz`, SHA-256 `0e6f90dccbc6b81fd5d7106abaf164c4222178f024c204d00d526b60fd2ad535` (computed locally) | Bundled `LICENSE`, SHA-256 `ba26c1263131696b86c10496b5066b918a20b7161822a80c274d0080105f6c93` — identical to both the x86_64 asset above and the macOS artifact | **Obtained, extracted, license-verified, symbol-verified via `nm`/`objdump`. Not functionally executed (same reason). Not adopted.** |
+
+### Real reproduction steps
+
+```sh
+curl -fsSL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8066/pdfium-linux-x64.tgz" -o pdfium-linux-x64.tgz
+curl -fsSL "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8066/pdfium-linux-arm64.tgz" -o pdfium-linux-arm64.tgz
+shasum -a 256 pdfium-linux-x64.tgz pdfium-linux-arm64.tgz
+# -> 0b43f405477cf2cfc4dbff06905093c3309756c6bca1fb9da99234a2ca97fed2  pdfium-linux-x64.tgz
+# -> 0e6f90dccbc6b81fd5d7106abaf164c4222178f024c204d00d526b60fd2ad535  pdfium-linux-arm64.tgz
+mkdir -p extracted/x64 extracted/arm64
+tar -xzf pdfium-linux-x64.tgz -C extracted/x64
+tar -xzf pdfium-linux-arm64.tgz -C extracted/arm64
+```
+
+Cross-checked against GitHub's cryptographic Artifact Attestation, the same
+way the macOS artifact was:
+
+```sh
+gh attestation verify pdfium-linux-x64.tgz -R bblanchon/pdfium-binaries --format json
+gh attestation verify pdfium-linux-arm64.tgz -R bblanchon/pdfium-binaries --format json
+```
+
+Both verified successfully (exit 0). Both attestations' signed subject
+lists are the **same statement** already verified for the macOS asset —
+one signed provenance document per release covering all 44 platform
+assets, workflow `bblanchon/pdfium-binaries/.github/workflows/
+build-all.yml@refs/heads/master`, build commit
+`f2e9a1c45bb17b85b540abf1af30146ef65416ac`, run
+`https://github.com/bblanchon/pdfium-binaries/actions/runs/35584475700/attempts/1`
+— and each Linux asset's listed digest in that statement
+(`pdfium-linux-x64.tgz` → `0b43f405...`, `pdfium-linux-arm64.tgz` →
+`0e6f90dc...`) matches the locally computed hash above byte-for-byte. This
+is the same build run that produced the already-pinned macOS artifact, not
+a different or later build — genuine same-release, cross-platform
+provenance, not a coincidental version match.
+
+### File format / ABI identification (`file`(1), `nm`, `objdump`)
+
+This machine cannot execute either binary (Darwin arm64 host, Linux ELF
+targets). What **was** checked, directly, on the real downloaded files:
+
+```sh
+file extracted/x64/lib/libpdfium.so
+# -> ELF 64-bit LSB shared object, x86-64, version 1 (SYSV), dynamically linked, BuildID[xxHash]=00712f33a57647fa, not stripped
+file extracted/arm64/lib/libpdfium.so
+# -> ELF 64-bit LSB shared object, ARM aarch64, version 1 (SYSV), dynamically linked, BuildID[xxHash]=923d75f47f35fd04, not stripped
+```
+
+Both report the correct, distinct target architecture for their file name
+— no cross-arch mislabeling. Neither is a `Mach-O` (the macOS section's
+`libpdfium.dylib` format) nor stripped.
+
+Runtime dependency closure (`objdump -p`, since this host has no
+`readelf`):
+
+```sh
+objdump -p extracted/x64/lib/libpdfium.so | grep -i needed
+# -> libpthread.so.0  libm.so.6  libgcc_s.so.1  libc.so.6  ld-linux-x86-64.so.2
+```
+
+The aarch64 asset's `NEEDED` list is the architecture-appropriate
+equivalent set (glibc, libm, libgcc_s, libpthread — no separate `readelf`
+was available to print aarch64's dynamic loader name, but `objdump -p`
+confirmed the same four library-name entries). Both are ordinary glibc-ABI
+shared objects with **no third-party dynamic dependency** — the same
+clean-dependency finding the macOS `otool -L` check already made (only
+Apple/AppKit system frameworks there; only glibc/libgcc here), just for a
+different OS's system libraries.
+
+Symbol resolution (`nm -D`, dynamic symbol table — this machine's `nm`
+handles ELF exports without needing to load the library): all thirteen
+symbols `experiments/pdfium_check/evaluate.d` resolves and
+`source/effects/pdfium_ffi.d` `dlsym`s were confirmed **present and
+exported** in both Linux artifacts:
+
+```
+FPDF_InitLibrary FPDF_DestroyLibrary FPDF_GetLastError FPDF_LoadDocument
+FPDF_LoadMemDocument FPDF_CloseDocument FPDF_GetPageCount FPDF_LoadPage
+FPDF_ClosePage FPDFText_LoadPage FPDFText_ClosePage FPDFText_CountChars
+FPDFText_GetText
+```
+
+All thirteen present (`nm -D ... | grep " T <symbol>$"` matched) in both
+`pdfium-linux-x64.tgz` and `pdfium-linux-arm64.tgz`. This confirms the
+exact symbol surface this codebase's existing macOS FFI module already
+depends on is exported by the Linux binaries too — **this is static
+evidence the same symbol names link, not proof the calling convention,
+struct layouts, or runtime behavior match**, since no call was actually
+made through either library on this host.
+
+### Bundled license family (identical to the macOS finding)
+
+The Linux archives' `licenses/` directory is byte-for-byte identical
+between the x86_64 and aarch64 assets (`diff -r` empty) and contains the
+same thirteen files, same family assignments, already recorded in this
+document's macOS section (`pdfium.txt` BSD-3-Clause/Apache-2.0 co-mingled,
+twelve further permissive third-party licenses — Apache-2.0, MIT, BSD,
+zlib, FreeType, Unicode, IJG, PNG Reference — none copyleft). Individually
+hashed and confirmed present:
+
+```
+abseil.txt agg23.txt fast_float.txt freetype.txt icu.txt lcms.txt
+libjpeg_turbo.ijg libjpeg_turbo.md libopenjpeg.txt libpng.txt
+llvm-libc.txt pdfium.txt simdutf.txt zlib.txt
+```
+
+The same unresolved BSD/Apache-2.0 co-mingling this document already
+flagged for PDFium's own top-level `LICENSE` file applies identically
+here — this evaluation did not re-derive or resolve that question, it is
+the same license text, byte-identical, just redistributed inside a
+different platform's tarball.
+
+### Cost summary (Linux, both architectures)
+
+| Path | Download size (this host) | Toolchain required | Network at build time | Functional verification performed |
+| --- | --- | --- | --- | --- |
+| `bblanchon/pdfium-binaries`, linux-x64 | 3.74 MB compressed | None beyond `curl`/`tar` | One-time download only | **None** — archive integrity, license text, `file`/`nm`/`objdump` static identification only; cannot execute Linux ELF on this Darwin arm64 host |
+| `bblanchon/pdfium-binaries`, linux-arm64 | 3.66 MB compressed | None beyond `curl`/`tar` | One-time download only | **None** — same reason |
+
+### What this Linux section does and does not establish
+
+**Checked and confirmed real**: both assets exist at the exact pinned
+release already used for macOS, download and extract cleanly, carry a
+GitHub Artifact Attestation verifying the same build run that produced the
+macOS asset, ship the byte-identical MIT `LICENSE` plus the same
+byte-identical twelve-file permissive third-party `licenses/` directory,
+report the correct distinct target architecture via `file`(1), depend only
+on ordinary glibc/libgcc/libpthread system libraries with no third-party
+dynamic dependency, and statically export every one of the thirteen C
+symbols this codebase's existing macOS FFI module (`pdfium_ffi.d`) and its
+evaluation harness (`experiments/pdfium_check/evaluate.d`) already rely
+on.
+
+**Not checked, and not claimed**: no Linux binary was ever loaded, called,
+or executed on any machine during this evaluation — no `dlopen`, no
+`FPDF_InitLibrary` call, no PDF text extraction, on either architecture.
+This machine's inability to run foreign-arch/foreign-OS ELF binaries is
+the reason, disclosed here rather than worked around or silently skipped.
+A real adoption decision should not treat this section's static evidence
+as equivalent to the macOS section's `dlopen`-based functional proof —
+it is a real but strictly weaker form of verification, and an actual
+`x86_64-linux-gnu`/`aarch64-linux-gnu` host (or QEMU user-mode emulation,
+neither of which was attempted here) would be needed to close that gap
+before treating Linux PDFium as functionally proven the way macOS PDFium
+now is.
+
+### Recommendation (not a decision)
+
+The evidence gathered here is **adopt-leaning for further work, not yet
+adopt-ready**: license terms, dependency cleanliness, and static symbol
+surface are all identical or equivalent to the already-adopted-for-
+evaluation macOS artifact, and both Linux architectures are covered by
+the exact same release/attestation already trusted for macOS — there is
+no new licensing or provenance risk introduced by extending to Linux.
+The one real gap is functional verification, which this Darwin arm64
+machine cannot close; the concrete next step, if @schancel decides to
+pursue Linux support, is running `experiments/pdfium_check/evaluate.d`'s
+existing harness (or an equivalent) against these exact two artifacts on
+a real Linux x86_64 and a real Linux aarch64 host before widening
+`pdfium_ffi.d`'s version gate. No `dub.json` or `source/` change was made
+by this evaluation.

@@ -94,6 +94,19 @@ string canonicalUri(string rawPath) pure {
 /// Canonical query string: each "key=value" pair (from a raw, un-decoded
 /// query string) URI-encoded key/value-wise, then sorted by encoded key,
 /// then by encoded value.
+///
+/// Callers must only pass a `rawQuery` whose own `&`/`=` characters are
+/// already known to be structural delimiters, not caller-controlled data --
+/// this function splits on literal `&` *before* encoding anything, so a
+/// literal `&`/`=` inside what was meant to be one value's content would be
+/// misread as a delimiter and silently corrupt the result. `rawQuery` here
+/// is only ever `""` (`buildGetRequest`/`buildPutRequest`) or an AWS
+/// test-suite vector's own already-delimited request line
+/// (`tests/sigv4_fixtures.d`), both safe by construction. A caller building
+/// a query from independently-known field values (e.g. `ListObjectsV2`'s
+/// `prefix`/`delimiter`/continuation-token, which may legally contain `&`
+/// or `=`) must use `canonicalQueryStringFromPairs` instead, which never
+/// concatenates those values into one splittable string in the first place.
 string canonicalQueryString(string rawQuery) pure {
     if (rawQuery.length == 0) return "";
     struct Kv { string k; string v; }
@@ -103,6 +116,28 @@ string canonicalQueryString(string rawQuery) pure {
         if (eq < 0) pairs ~= Kv(uriEncode(part), "");
         else pairs ~= Kv(uriEncode(part[0 .. eq]), uriEncode(part[eq + 1 .. $]));
     }
+    pairs.sort!((a, b) => a.k != b.k ? a.k < b.k : a.v < b.v);
+    return pairs.map!(kv => kv.k ~ "=" ~ kv.v).join("&");
+}
+
+/// One already-separated query key/value pair, as the caller knows it --
+/// never joined into a raw "&"-delimited string.
+struct QueryParam {
+    string key;
+    string value;
+}
+
+/// Canonical query string built directly from already-known key/value
+/// pairs, sidestepping `canonicalQueryString(string)`'s "&"-split entirely.
+/// Use this whenever a query value comes from caller-controlled data that
+/// may itself legally contain `&` or `=` (S3 key prefixes, delimiters,
+/// continuation tokens): since pairs are already structurally separated,
+/// each key/value is only ever percent-encoded, never mistaken for a
+/// delimiter.
+string canonicalQueryStringFromPairs(scope const(QueryParam)[] params) pure {
+    struct Kv { string k; string v; }
+    Kv[] pairs;
+    foreach (p; params) pairs ~= Kv(uriEncode(p.key), uriEncode(p.value));
     pairs.sort!((a, b) => a.k != b.k ? a.k < b.k : a.v < b.v);
     return pairs.map!(kv => kv.k ~ "=" ~ kv.v).join("&");
 }
@@ -162,7 +197,7 @@ CanonicalHeaders canonicalizeHeaders(scope const(Header)[] headers) pure {
 struct SigningInput {
     string method;
     string rawPath;               // e.g. "/", leading '/', not URI-encoded
-    string rawQuery;               // without leading '?'; "" if none
+    string rawQuery;               // without leading '?'; "" if none; see canonicalQueryString's doc
     const(Header)[] headers;       // must include Host and X-Amz-Date
     const(ubyte)[] payload;        // raw body bytes; empty for GET
     string accessKeyId;
@@ -171,6 +206,11 @@ struct SigningInput {
     string dateStamp;               // e.g. "20150830"
     string region;
     string service;
+    // When non-empty, takes priority over `rawQuery` and is canonicalized
+    // via `canonicalQueryStringFromPairs` instead -- for callers whose query
+    // values come from independently-known fields that may themselves
+    // contain '&' or '='. See `canonicalQueryString`'s doc comment.
+    const(QueryParam)[] queryParams;
 }
 
 struct SignedRequest {
@@ -203,7 +243,9 @@ ubyte[32] deriveSigningKey(string secretAccessKey, string dateStamp, string regi
 SignedRequest signRequest(SigningInput input) pure {
     auto payloadHash = sha256Hex(input.payload);
     auto uri = canonicalUri(input.rawPath);
-    auto query = canonicalQueryString(input.rawQuery);
+    auto query = input.queryParams.length
+        ? canonicalQueryStringFromPairs(input.queryParams)
+        : canonicalQueryString(input.rawQuery);
     auto headersResult = canonicalizeHeaders(input.headers);
 
     auto canonicalRequest = input.method ~ "\n" ~ uri ~ "\n" ~ query ~ "\n" ~
@@ -227,4 +269,24 @@ unittest {
     // a bodyless request's payload hash must be the well-known empty-SHA256
     // hex constant used throughout S3 GET requests.
     assert(sha256Hex([]) == emptyPayloadSha256Hex);
+}
+
+unittest {
+    // canonicalQueryStringFromPairs: a value containing '&' or '=' is
+    // percent-encoded as ordinary content, never misread as a delimiter --
+    // the exact corruption `canonicalQueryString(string)` is documented to
+    // risk when fed unescaped caller data (see its own doc comment).
+    // Regression for the ListObjectsV2 prefix/delimiter/continuation-token
+    // query-corruption bug (issue #367 review).
+    auto q = canonicalQueryStringFromPairs([
+        QueryParam("list-type", "2"),
+        QueryParam("prefix", "foo&evil=1"),
+    ]);
+    assert(q == "list-type=2&prefix=foo%26evil%3D1", q);
+
+    auto q2 = canonicalQueryStringFromPairs([
+        QueryParam("continuation-token", "tok&en"),
+        QueryParam("delimiter", "a&b"),
+    ]);
+    assert(q2 == "continuation-token=tok%26en&delimiter=a%26b", q2);
 }

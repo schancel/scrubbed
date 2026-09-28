@@ -307,11 +307,22 @@ struct ListObjectsV2Result {
     S3Error error;       // set only when `ok` is false
 }
 
-private string rawListQuery(ListObjectsV2Request req, string continuationToken) {
-    auto q = "list-type=2&max-keys=" ~ req.maxKeysPerPage.to!string;
-    if (req.prefix.length) q ~= "&prefix=" ~ req.prefix;
-    if (req.delimiter.length) q ~= "&delimiter=" ~ req.delimiter;
-    if (continuationToken.length) q ~= "&continuation-token=" ~ continuationToken;
+/// Builds this page's query as already-separated key/value pairs, never as
+/// one concatenated raw string -- `prefix`/`delimiter`/`continuationToken`
+/// are caller/S3-controlled values that may themselves legally contain '&'
+/// or '=' (S3 key prefixes in particular), and splicing them into a raw
+/// "&"-joined string before encoding would let such a character be misread
+/// as a query delimiter instead of literal content. See
+/// `s3lite.sigv4.canonicalQueryString`'s doc comment for the corruption
+/// this sidesteps.
+private QueryParam[] listQueryParams(ListObjectsV2Request req, string continuationToken) {
+    QueryParam[] q = [
+        QueryParam("list-type", "2"),
+        QueryParam("max-keys", req.maxKeysPerPage.to!string),
+    ];
+    if (req.prefix.length) q ~= QueryParam("prefix", req.prefix);
+    if (req.delimiter.length) q ~= QueryParam("delimiter", req.delimiter);
+    if (continuationToken.length) q ~= QueryParam("continuation-token", continuationToken);
     return q;
 }
 
@@ -324,8 +335,8 @@ BuiltRequest buildListRequest(ListObjectsV2Request req, string continuationToken
     auto amzDate = amzDateOf(now);
     auto dateStamp = dateStampOf(now);
     auto payloadHash = emptyPayloadSha256Hex;
-    auto rawQuery = rawListQuery(req, continuationToken);
-    auto query = canonicalQueryString(rawQuery);
+    auto queryParams = listQueryParams(req, continuationToken);
+    auto query = canonicalQueryStringFromPairs(queryParams);
 
     Header[] signingHeaders = [
         Header("Host", route.host),
@@ -340,17 +351,17 @@ BuiltRequest buildListRequest(ListObjectsV2Request req, string continuationToken
     ];
 
     if (req.credentials.isSet) {
-        auto input = SigningInput("GET", route.encodedPath, rawQuery, signingHeaders, [],
+        auto input = SigningInput("GET", route.encodedPath, "", signingHeaders, [],
             req.credentials.accessKeyId, req.credentials.secretAccessKey,
-            amzDate, dateStamp, req.region, req.service);
+            amzDate, dateStamp, req.region, req.service, queryParams);
         auto signed = signRequest(input);
         outHeaders ~= RequestHeader("Authorization", signed.authorizationHeader);
     }
 
-    // Reuses `canonicalQueryString`'s own encoding+sort for the dispatched
-    // URL too -- S3 doesn't care about query-parameter order in the actual
-    // request, only the signature computation does, so one encoder is
-    // enough and it's guaranteed consistent with what was signed.
+    // Reuses `canonicalQueryStringFromPairs`'s own encoding+sort for the
+    // dispatched URL too -- S3 doesn't care about query-parameter order in
+    // the actual request, only the signature computation does, so one
+    // encoder is enough and it's guaranteed consistent with what was signed.
     auto url = "https://" ~ route.host ~ route.encodedPath ~
         (query.length ? "?" ~ query : "");
     return BuiltRequest(url, outHeaders);
@@ -552,10 +563,30 @@ unittest {
 }
 
 unittest {
+    // Regression (issue #367 review): a prefix/delimiter/continuation-token
+    // containing a literal '&' must be percent-encoded as ordinary content,
+    // never misread as a query-parameter delimiter. Before the fix, this
+    // silently truncated `prefix` at the '&' and injected a bogus
+    // `evil=1` parameter (`?evil=1&list-type=2&max-keys=1000&prefix=foo`)
+    // rather than a %26-encoded `foo&evil=1`.
+    import std.algorithm.searching : canFind;
+    auto req = ListObjectsV2Request("bucket", "us-east-1", Credentials.init, "foo&evil=1");
+    auto now = SysTime(DateTime(2024, 1, 2, 3, 4, 5), UTC());
+    auto built = buildListRequest(req, "", now);
+    assert(built.url.canFind("prefix=foo%26evil%3D1"), built.url);
+    assert(!built.url.canFind("evil=1&"), built.url);
+
+    auto req2 = ListObjectsV2Request("bucket", "us-east-1", Credentials.init, "", "a&b");
+    auto built2 = buildListRequest(req2, "tok&en", now);
+    assert(built2.url.canFind("delimiter=a%26b"), built2.url);
+    assert(built2.url.canFind("continuation-token=tok%26en"), built2.url);
+}
+
+unittest {
     // listObjectsV2: streams objects across two pages via a fake page
     // fetcher stitched in through a delegate is not possible here (the
     // function issues real HTTP internally), so this unit test instead
-    // exercises the pure `rawListQuery`/pagination-token plumbing indirectly
+    // exercises the pure `listQueryParams`/pagination-token plumbing indirectly
     // via `buildListRequest`'s own first/second-page shape -- the full
     // multi-page streaming drive itself is proven end to end by
     // `tests/put_list_loopback_fixture.d`.

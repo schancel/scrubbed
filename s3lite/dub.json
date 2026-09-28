@@ -1,0 +1,36 @@
+{
+	"name": "s3lite",
+	"description": "Minimal, zero-dependency pure-D S3 GetObject client: SigV4 signing on Phobos's std.digest.hmac/sha, its own libcurl FFI transport, real S3 XML error parsing.",
+	"authors": ["Shammah Chancellor"],
+	"license": "MIT",
+	"copyright": "Copyright © 2026, Shammah Chancellor",
+	"targetType": "library",
+	"sourcePaths": ["source"],
+	"importPaths": ["source"],
+	"dflags": ["-preview=dip1000"],
+	"libs": ["curl"],
+	"configurations": [
+		{
+			"name": "library",
+			"targetType": "library"
+		},
+		{
+			"name": "sigv4-fixtures",
+			"targetType": "executable",
+			"targetName": "sigv4-fixtures",
+			"mainSourceFile": "tests/sigv4_fixtures.d"
+		},
+		{
+			"name": "loopback-fixture",
+			"targetType": "executable",
+			"targetName": "loopback-fixture",
+			"mainSourceFile": "tests/loopback_fixture.d"
+		},
+		{
+			"name": "live-public-object",
+			"targetType": "executable",
+			"targetName": "live-public-object",
+			"mainSourceFile": "tests/live_public_object.d"
+		}
+	]
+}

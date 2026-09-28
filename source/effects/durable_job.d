@@ -22,6 +22,7 @@ import std.string : fromStringz, indexOf, toStringz;
 import std.uuid : UUID;
 import std.array : appender;
 import core.sys.posix.fcntl : O_NOFOLLOW, O_RDONLY, open;
+version (linux) import core.sys.posix.fcntl : AT_FDCWD;
 import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t, S_ISLNK;
 import core.sys.posix.unistd : close, pread;
 
@@ -473,8 +474,28 @@ unittest { // Known-answer ordinal encoding at digit-length transitions and
 }
 
 private extern(C) void arc4random_buf(void*, size_t);
-private extern(C) int renamex_np(const(char)*, const(char)*, uint);
-private enum RENAME_EXCL = 0x00000004;
+
+// Portability (issue #353): see effects.failure_journal's identical
+// exclusive-rename note -- `renamex_np`/`RENAME_EXCL` is Darwin-only;
+// Linux uses `renameat2(2)` with `RENAME_NOREPLACE` (glibc >= 2.28,
+// present on Ubuntu 24.04's glibc 2.39), declared directly since druntime
+// does not bind it. Discovered as a real linker failure on this ticket's
+// own Linux CI run, not a hypothetical gap.
+version (OSX) {
+    private extern(C) int renamex_np(const(char)*, const(char)*, uint);
+    private enum RENAME_EXCL = 0x00000004;
+    private bool renameExclusive(string from, string to) {
+        return renamex_np(from.toStringz, to.toStringz, RENAME_EXCL) == 0;
+    }
+} else version (linux) {
+    private extern(C) int renameat2(int, const(char)*, int, const(char)*, uint);
+    private enum RENAME_NOREPLACE = 1;
+    private bool renameExclusive(string from, string to) {
+        return renameat2(AT_FDCWD, from.toStringz, AT_FDCWD, to.toStringz,
+            RENAME_NOREPLACE) == 0;
+    }
+} else static assert(0,
+    "exclusive rename is only implemented for macOS arm64 and Linux x86_64/aarch64");
 private string uuid() {
     ubyte[16] bytes;
     arc4random_buf(bytes.ptr, bytes.length);
@@ -551,8 +572,7 @@ private void createFresh(string target, DurableKind kind) {
         "stage-companion-remained");
     foreach (suffix; ["", "-wal", "-shm"])
         need(!exists(target ~ suffix), "destination-raced");
-    need(renamex_np(stage.toStringz, target.toStringz, RENAME_EXCL) == 0,
-        "destination-raced");
+    need(renameExclusive(stage, target), "destination-raced");
     published = true;
 }
 

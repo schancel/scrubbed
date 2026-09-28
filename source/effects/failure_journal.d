@@ -12,6 +12,7 @@ import std.string : fromStringz, toStringz, indexOf;
 import std.uuid : UUID;
 import core.sys.posix.sys.stat : stat, lstat, stat_t;
 import core.sys.posix.fcntl : open, O_WRONLY, O_CREAT, O_EXCL;
+version (linux) import core.sys.posix.fcntl : AT_FDCWD;
 import core.sys.posix.unistd : close;
 import core.stdc.errno : errno, EEXIST, ENOENT;
 import std.typecons : Nullable, nullable;
@@ -216,8 +217,32 @@ private ubyte[32] columnDigest(sqlite3_stmt* s, int at) {
     return value;
 }
 private extern(C) void arc4random_buf(void*, size_t);
-private extern(C) int renamex_np(const(char)*, const(char)*, uint);
-private enum RENAME_EXCL = 0x00000004;
+
+// Portability (issue #353): `renamex_np`/`RENAME_EXCL` is a Darwin-only
+// libc extension (atomic rename that fails if the target already exists).
+// Linux's equivalent primitive is `renameat2(2)` with `RENAME_NOREPLACE`,
+// present in the kernel since 3.15 and glibc since 2.28 (Ubuntu 24.04
+// ships glibc 2.39); druntime does not bind it, so it is declared directly
+// here, matching this module's existing extern(C) pattern for
+// `arc4random_buf`. Both branches keep the same "fail if target exists,
+// never partially write" contract `createV2`/`copyV1ToV2` depend on. This
+// was discovered as a real linker failure (`undefined reference to
+// renamex_np`) on this ticket's own Linux CI run, not a hypothetical gap.
+version (OSX) {
+    private extern(C) int renamex_np(const(char)*, const(char)*, uint);
+    private enum RENAME_EXCL = 0x00000004;
+    private bool renameExclusive(string from, string to) {
+        return renamex_np(from.toStringz, to.toStringz, RENAME_EXCL) == 0;
+    }
+} else version (linux) {
+    private extern(C) int renameat2(int, const(char)*, int, const(char)*, uint);
+    private enum RENAME_NOREPLACE = 1;
+    private bool renameExclusive(string from, string to) {
+        return renameat2(AT_FDCWD, from.toStringz, AT_FDCWD, to.toStringz,
+            RENAME_NOREPLACE) == 0;
+    }
+} else static assert(0,
+    "exclusive rename is only implemented for macOS arm64 and Linux x86_64/aarch64");
 private string uuid() {
     ubyte[16] bytes;
     arc4random_buf(bytes.ptr, bytes.length);
@@ -419,8 +444,7 @@ void createV2(string newPath) {
     db.close();
     need(!exists(target) && !exists(target ~ "-wal") && !exists(target ~ "-shm"),
         "destination-raced");
-    need(renamex_np(stage.toStringz, target.toStringz, RENAME_EXCL) == 0,
-        "destination-raced");
+    need(renameExclusive(stage, target), "destination-raced");
     published = true;
 }
 
@@ -1064,7 +1088,6 @@ void copyV1ToV2(string sourcePath, string newPath) {
     src.close(); src = null;
     need(!exists(target) && !exists(target ~ "-wal") && !exists(target ~ "-shm"),
         "destination-raced");
-    need(renamex_np(stage.toStringz, target.toStringz, RENAME_EXCL) == 0,
-        "destination-raced");
+    need(renameExclusive(stage, target), "destination-raced");
     published = true;
 }

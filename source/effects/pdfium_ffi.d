@@ -39,6 +39,20 @@
 /// the PDFium APIs are thread-safe. They expect to be called from a single
 /// thread"); this module does no locking of its own and inherits that
 /// constraint onto its caller.
+///
+/// Portability (issue #353): excluded from the Linux build via `dub.json`'s
+/// `excludedSourceFiles-linux`, unlike `effects.curl_ffi`/`effects.zlib_ffi`/
+/// `effects.lexbor_ffi`. Those wrap either an OS-provided system library or
+/// this repo's own locally-compiled vendored source; this module instead
+/// wraps an *operator-supplied prebuilt binary* artifact
+/// (`bblanchon/pdfium-binaries`) that was independently evaluated and
+/// pinned specifically for macOS arm64 (`docs/pdfium-evaluation.md`, issue
+/// #297). Widening this module's version gate without an equivalent
+/// Linux-artifact evaluation would assert a verification that was never
+/// done, so it stays macOS-only for now; a real Linux PDFium binary
+/// evaluation is separate, unstarted follow-up work, not part of this
+/// ticket's scope. Since nothing yet imports this module (see above), the
+/// exclusion changes no observable Linux behavior.
 module effects.pdfium_ffi;
 
 import core.stdc.config : c_ulong;

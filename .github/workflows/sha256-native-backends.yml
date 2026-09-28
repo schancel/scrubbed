@@ -55,6 +55,30 @@ jobs:
         with:
           compiler: ldc-1.43.0
 
+      - name: Install Linux build dependencies (issue #353)
+        run: |
+          sudo apt-get update
+          # cmake/make/cc are normally preinstalled on the GitHub-hosted
+          # ubuntu-24.04 images already; installed explicitly here so this
+          # job does not silently depend on that image default.
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+          # Real evidence (issue #353): dub.json's "libs": ["curl"] passes
+          # -lcurl to the linker, which needs the unversioned libcurl.so
+          # dev symlink present, not just the runtime libcurl.so.4 -- so
+          # this is installed explicitly rather than assumed present.
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+
+      - name: Test and build production package (dub) (issue #353)
+        run: |
+          dub test --compiler=ldc2 --build=release-unittest
+          dub build --compiler=ldc2 --build=release
+          # Real evidence this ticket's Linux zlib/libcurl/lexbor portability
+          # fixes produce a binary that actually starts on Linux (dynamic
+          # linking against libcurl happens at process load time, so this
+          # alone already proves that part of the link is real, not just
+          # that `dub build` exited 0).
+          ./scrubbed --help
+
       - name: Build release-active backend harness
         run: |
           ldc2 -O3 -release -d-version=Sha256BackendO3Release -Isource \

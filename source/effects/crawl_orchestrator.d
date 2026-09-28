@@ -494,8 +494,27 @@ version (unittest) {
             return found is null ? 0 : *found;
         }
 
+        // Portability (issue #353): real evidence, not a guess -- a gdb
+        // backtrace against a genuine hang reproduced under Linux/aarch64
+        // (this codebase's first real Linux test run ever, gated off before
+        // this ticket) caught the accept thread parked in accept() and this
+        // thread parked in acceptThread_.join() forever, both blocked right
+        // here. Closing a listening socket from a different thread than the
+        // one blocked in accept() on it reliably unblocks that accept() on
+        // Darwin, but is a well-known no-op on Linux: the blocked accept()
+        // never wakes, so acceptLoop() never reaches its `stopping_` check
+        // and the join() above hangs indefinitely. A real loopback connect
+        // to our own listener forces a pending accept() to return with a
+        // (real, if unused) client socket; acceptLoop() already discards
+        // exactly this case via its own post-accept `stopping_` check right
+        // below, so this needs no other change to the accept loop itself.
         void stop() {
             atomicStore(stopping_, true);
+            try {
+                auto poke = new TcpSocket(AddressFamily.INET);
+                scope(exit) poke.close();
+                poke.connect(new InternetAddress("127.0.0.1", port));
+            } catch (Exception ignored) {}
             try listener_.close(); catch (Exception ignored) {}
             try acceptThread_.join(); catch (Exception ignored) {}
         }

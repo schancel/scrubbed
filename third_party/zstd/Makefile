@@ -2,8 +2,18 @@ CC ?= cc
 AR ?= ar
 OUT ?= ../../.dub/zstd
 
-ifneq ($(shell uname -s)-$(shell uname -m),Darwin-arm64)
-$(error This pinned native build is supported only on macOS arm64)
+# Portability (issue #353): this pinned build is generic C compiled with
+# the toolchain's own $(CC)/$(AR); no macOS-specific flags or assembly are
+# used here, so it is expected to build unmodified on Linux. This ticket
+# adds Linux CI (ubuntu-24.04/-arm, see
+# .github/workflows/sha256-native-backends.yml) to generate the real
+# evidence for that; treat as unverified until that CI run is green. Gate
+# stays a real allowlist (not simply removed) so an unverified platform
+# still fails closed with a clear error, per dub.json's own top-level
+# preBuildCommand gate.
+PLATFORM := $(shell uname -s)-$(shell uname -m)
+ifeq (,$(filter $(PLATFORM),Darwin-arm64 Linux-x86_64 Linux-aarch64))
+$(error This pinned native build is only verified for macOS arm64 and Linux x86_64/aarch64 (got $(PLATFORM)); see issue #353)
 endif
 
 # v1.5.7's common and decompression translation units, without compressors,

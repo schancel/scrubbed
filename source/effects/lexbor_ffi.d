@@ -1,11 +1,32 @@
 /// Narrow ABI for the pinned Lexbor v3.0.0 source in third_party/lexbor.
 /// Native pointers are never part of the public HTML-tree result.
+///
+/// Portability (issue #353): unlike `effects.pdfium_ffi`/`effects.llama_ffi`,
+/// this module's native library is not an operator-supplied prebuilt binary
+/// -- it is this repo's own vendored `third_party/lexbor` source, compiled
+/// fresh for the target platform by `dub.json`'s own `cmake`
+/// preBuildCommands (already portable: `third_party/lexbor/CMakeLists.txt`
+/// only special-cases `IF(APPLE)` for macOS rpath handling, with a plain
+/// `ELSEIF(UNIX)` branch for Linux). The struct layouts below are Lexbor's
+/// own C struct definitions, with no platform-conditional layout in the
+/// pinned source, so they are expected to match on Linux too. This ticket
+/// adds Linux CI (ubuntu-24.04/-arm, see
+/// .github/workflows/sha256-native-backends.yml) to generate the real
+/// evidence for that; treat as unverified until that CI run is green.
 module effects.lexbor_ffi;
 
 version (OSX) {
     version (AArch64) {} else static assert(0,
         "Lexbor ABI is only verified for macOS arm64");
-} else static assert(0, "Lexbor ABI is only verified for macOS arm64");
+} else version (linux) {
+    // Portability (issue #353): see this module's header comment -- the
+    // struct layouts below are expected to match on Linux since Lexbor's
+    // pinned source has no platform-conditional layout, and this repo
+    // compiles it locally for the target platform rather than consuming a
+    // prebuilt artifact. Not yet confirmed by a real CI run as of this
+    // commit.
+} else static assert(0,
+    "Lexbor ABI is only verified for macOS arm64 and Linux x86_64/aarch64");
 
 extern(C) {
     /// lxb_dom_node_t, source/lexbor/dom/interfaces/node.h.

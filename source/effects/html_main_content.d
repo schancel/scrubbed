@@ -35,7 +35,7 @@ immutable string[] positiveKeywords = ["content", "article", "main", "post",
     "body", "entry"];
 immutable string[] negativeKeywords = ["nav", "sidebar", "footer", "header",
     "comment", "menu", "ad", "advert", "promo", "share", "social", "related",
-    "widget", "breadcrumb"];
+    "widget", "breadcrumb", "registration-banner"];
 
 enum MainContentStatus {
     selected,
@@ -145,6 +145,28 @@ private double keywordScoreFor(const ref HtmlNode node) pure {
     return total;
 }
 
+// Issue #27 Case 1 (france.attac.org): a boilerplate <p> (a mailing-list
+// signup form's own legal/explanatory text, class="explication", no keyword
+// match either way) nested inside a <form> was outscoring the real, much
+// shorter article lede purely on its own direct-text length plus the flat
+// positive tag bonus every <p> gets. A negative-tag container (`nav`/
+// `aside`/`footer`/`header`/`form`/`button`/`figure`) already scores itself
+// down, but that penalty never reached a descendant candidate scored on its
+// own terms -- language-independent (no keyword table involved at all), so
+// it also generalizes to the French-language page that motivated it, unlike
+// a keyword-table entry would. Walks from `index`'s parent to the tree
+// root; safe from infinite loops because `parentIndex` is always strictly
+// less than a node's own index (the same invariant `endOf`'s ancestor walk
+// above already relies on).
+private bool hasNegativeTagAncestor(const ref HtmlTree tree, size_t index) pure nothrow @nogc {
+    size_t parent = tree.nodes[index].parentIndex;
+    while (parent != size_t.max) {
+        if (tagWeightFor(tree.nodes[parent].name) < 0.0) return true;
+        parent = tree.nodes[parent].parentIndex;
+    }
+    return false;
+}
+
 private void insertCandidate(ref MainContentCandidate[maxMainContentCandidates] top,
         ref size_t topCount, ref bool overflow, MainContentCandidate candidate) pure {
     size_t position = topCount;
@@ -238,18 +260,47 @@ private struct CollapsingWriter {
     }
 }
 
+// Issue #27 Case 2 (for-me-online.de-pubertaet.html): a
+// `registration-banner`/`registration-banner__text`/`registration-banner__button`
+// -classed promotional run is embedded as direct <p> siblings inside the
+// very same <li> as real article text (a malformed-markup CMS insertion,
+// not a separate sidebar/footer chrome block), so it wins as the top
+// candidate's own subtree text regardless of any per-node score. A node
+// with its own negative keyword match (now including `registration-banner`)
+// is excluded outright; a keyword-neutral node (e.g. the promo's own bare,
+// unclassed `<p>Werden Sie Mitglied...</p>`) is excluded only when BOTH its
+// immediate previous and next siblings under the same parent independently
+// carry a negative keyword match -- a real, observed structural pattern
+// (a plain paragraph sandwiched directly between two `registration-banner*`
+// siblings), not a guess, and narrow enough that an ordinary paragraph
+// standing next to a single unrelated ad/share element is never caught.
+private bool excludedFromText(const ref HtmlTree tree, const size_t[] prevSibling,
+        const size_t[] nextSibling, size_t index) pure {
+    double keyword = keywordScoreFor(tree.nodes[index]);
+    if (keyword < 0.0) return true;
+    if (keyword > 0.0) return false;
+    auto prev = prevSibling[index];
+    auto next = nextSibling[index];
+    if (prev == size_t.max || next == size_t.max) return false;
+    if (tree.nodes[prev].kind != HtmlNodeKind.element ||
+        tree.nodes[next].kind != HtmlNodeKind.element) return false;
+    return keywordScoreFor(tree.nodes[prev]) < 0.0 && keywordScoreFor(tree.nodes[next]) < 0.0;
+}
+
 // Visible text of one selected subtree, skipping the non-visible
 // script/style/template/head descendants exactly as html_markdown.d's
-// nodeText does (a bounded ancestor walk, not recursion). Also tracks each
-// text node's nearest block-level ancestor (same walk, same bound) so a
-// change of block ancestor between one text node and the next -- e.g. an
-// `</h1>` followed by a `<p>`, or one `<li>` followed by the next -- emits
-// an explicit paragraph break instead of the ordinary whitespace collapse.
-// `blockAncestor` defaults to `index` itself (the selected subtree root)
-// when no block-tag ancestor is found closer than the root, so two text
-// nodes that are both direct, unwrapped children of the root (or of the
-// same non-block wrapper) still group as one paragraph.
-private void collectText(const ref HtmlTree tree, size_t index, ref CollapsingWriter cw) pure {
+// nodeText does (a bounded ancestor walk, not recursion), plus any
+// descendant `excludedFromText` marks as boilerplate (issue #27 Case 2).
+// Also tracks each text node's nearest block-level ancestor (same walk,
+// same bound) so a change of block ancestor between one text node and the
+// next -- e.g. an `</h1>` followed by a `<p>`, or one `<li>` followed by the
+// next -- emits an explicit paragraph break instead of the ordinary
+// whitespace collapse. `blockAncestor` defaults to `index` itself (the
+// selected subtree root) when no block-tag ancestor is found closer than
+// the root, so two text nodes that are both direct, unwrapped children of
+// the root (or of the same non-block wrapper) still group as one paragraph.
+private void collectText(const ref HtmlTree tree, const size_t[] prevSibling,
+        const size_t[] nextSibling, size_t index, ref CollapsingWriter cw) pure {
     size_t lastBlockAncestor = size_t.max; // unset: index is always < size_t.max
     foreach (i; index + 1 .. endOf(tree, index)) {
         if (tree.nodes[i].kind != HtmlNodeKind.text) continue;
@@ -260,6 +311,7 @@ private void collectText(const ref HtmlTree tree, size_t index, ref CollapsingWr
              parent != index && parent != size_t.max && parent < i;
              parent = tree.nodes[parent].parentIndex) {
             if (hiddenTag(tree.nodes[parent].name)) { hidden = true; break; }
+            if (excludedFromText(tree, prevSibling, nextSibling, parent)) { hidden = true; break; }
             if (!foundBlock && blockTag(tree.nodes[parent].name)) {
                 blockAncestor = parent;
                 foundBlock = true;
@@ -286,11 +338,20 @@ private void collectText(const ref HtmlTree tree, size_t index, ref CollapsingWr
 /// paragraph-sibling clustering (the summed non-whitespace text of direct
 /// `<p>` children that individually clear `minParagraphTextBytes`). A fixed
 /// tag-name table and a fixed class/id
-/// keyword table add bounded bonuses/penalties. The final per-node score is
-/// `(ownDirectText + paragraphClusterText + clusterBonus + tagWeight +
-/// keywordWeight) * (1 - linkDensity)` — link density is the strongest
+/// keyword table add bounded bonuses/penalties -- except that a node nested
+/// at any depth inside a negative-tag container (`nav`/`aside`/`footer`/
+/// `header`/`form`/`button`/`figure`) never collects its own positive tag or
+/// keyword bonus (`hasNegativeTagAncestor`; issue #27). The final per-node
+/// score is `(ownDirectText + paragraphClusterText + clusterBonus + tagWeight
+/// + keywordWeight) * (1 - linkDensity)` — link density is the strongest
 /// established deterministic boilerplate signal, so it discounts everything
-/// else rather than being an independent term.
+/// else rather than being an independent term. Once a node is selected,
+/// collecting its text (`collectText`) additionally skips any descendant
+/// whose class/id matches a negative keyword, plus a keyword-neutral
+/// descendant sandwiched directly between two such matches (`excludedFromText`;
+/// issue #27) -- a boilerplate exclusion distinct from scoring itself, since
+/// a large winning container can still have a small embedded promotional
+/// block that never had to win a scoring contest to leak into the output.
 ///
 /// Selection is a single rule: the highest-scoring node wins. Below
 /// `minSelectableTextBytes`/`minSelectableScore`, having no element
@@ -346,8 +407,20 @@ MainContentResult extractMainContent(const ref HtmlTree tree) pure {
             ++elementCandidates;
             double clusterBonus = (paragraphCount[i] > maxParagraphClusterBonusCount ?
                 maxParagraphClusterBonusCount : paragraphCount[i]) * paragraphClusterUnit;
+            double ownTagWeight = tagWeightFor(node.name);
+            double ownKeywordScore = keywordScoreFor(node);
+            // A node nested (at any depth) inside a negative-tag container
+            // never gets credit for its own positive tag/keyword match --
+            // see hasNegativeTagAncestor's own comment (issue #27 Case 1).
+            // The negative-tag container's own penalty and any genuinely
+            // negative keyword/tag match on this node itself are untouched.
+            if ((ownTagWeight > 0.0 || ownKeywordScore > 0.0) &&
+                    hasNegativeTagAncestor(tree, i)) {
+                if (ownTagWeight > 0.0) ownTagWeight = 0.0;
+                if (ownKeywordScore > 0.0) ownKeywordScore = 0.0;
+            }
             double base = cast(double) ownDirectText[i] + cast(double) paragraphAccum[i] +
-                clusterBonus + tagWeightFor(node.name) + keywordScoreFor(node);
+                clusterBonus + ownTagWeight + ownKeywordScore;
             double score = base;
             if (cumulativeText[i] > 0) {
                 double density = cast(double) cumulativeLinkText[i] / cast(double) cumulativeText[i];
@@ -390,8 +463,46 @@ MainContentResult extractMainContent(const ref HtmlTree tree) pure {
         return result;
     }
 
+    // Sibling links for `excludedFromText`'s sandwich rule (issue #27 Case
+    // 2), computed only once selection is final. A single forward pass:
+    // because pre-order means one node's whole subtree is a contiguous run
+    // of higher indices before its next sibling begins, the last child seen
+    // so far for a given parent is always that child's true immediate
+    // previous sibling by the time the next one is reached.
+    auto prevSibling = new size_t[n];
+    auto nextSibling = new size_t[n];
+    prevSibling[] = size_t.max;
+    nextSibling[] = size_t.max;
+    // Only element nodes participate: pretty-printed whitespace between two
+    // sibling elements is its own intervening text node in the flat tree
+    // (e.g. "...</p>\n    <p>...", the exact shape between the real
+    // for-me-online.de promo <p>s), and it must not break "immediate
+    // sibling" into "immediate non-whitespace-text sibling" -- excludedFromText
+    // only ever queries an element's siblings, so a text node is simply
+    // skipped rather than recorded here.
+    auto lastChildOfParent = new size_t[n];
+    lastChildOfParent[] = size_t.max;
+    size_t lastRootChild = size_t.max;
+    foreach (i; 0 .. n) {
+        if (tree.nodes[i].kind != HtmlNodeKind.element) continue;
+        auto p = tree.nodes[i].parentIndex;
+        if (p == size_t.max) {
+            if (lastRootChild != size_t.max) {
+                nextSibling[lastRootChild] = i;
+                prevSibling[i] = lastRootChild;
+            }
+            lastRootChild = i;
+        } else {
+            if (lastChildOfParent[p] != size_t.max) {
+                nextSibling[lastChildOfParent[p]] = i;
+                prevSibling[i] = lastChildOfParent[p];
+            }
+            lastChildOfParent[p] = i;
+        }
+    }
+
     CollapsingWriter collapsing;
-    collectText(tree, best.node, collapsing);
+    collectText(tree, prevSibling, nextSibling, best.node, collapsing);
     result.status = MainContentStatus.selected;
     result.node = best.node;
     result.score = best.score;

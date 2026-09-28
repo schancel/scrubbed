@@ -59,11 +59,41 @@ Per node, purely from already-observed `HtmlNode` data, the pass tracks:
   substring of the node's `class` or `id` attribute value:
   - Adds a bonus: `content`/`article`/`main`/`post`/`body`/`entry`.
   - Subtracts it: `nav`/`sidebar`/`footer`/`header`/`comment`/`menu`/`ad`/
-    `advert`/`promo`/`share`/`social`/`related`/`widget`/`breadcrumb`.
+    `advert`/`promo`/`share`/`social`/`related`/`widget`/`breadcrumb`/
+    `registration-banner`.
   - A short keyword such as `ad` is a blunt substring match (for example
     `thread` contains `ad`); this is the fixed table the contract specifies,
     not a smarter word-boundary matcher. `experiments/html_main_content/check.d`
     pins its exact membership so an edit is caught as a drift.
+- **Negative-tag-ancestor suppression** (issue #27) — a node nested at *any*
+  depth inside a negative-tag container (`nav`/`aside`/`footer`/`header`/
+  `form`/`button`/`figure`) never gets credit for its *own* positive tag or
+  keyword match; only the positive-side contribution is zeroed, never turned
+  into a new penalty, and a node's genuinely negative tag/keyword match on
+  itself is untouched either way. Before this, a negative-tag container's own
+  score was suppressed but that suppression never reached a descendant
+  scored independently on its own terms — the real bug behind
+  `france.attac.org`'s held-out failure, where a mailing-list signup form's
+  own boilerplate legal paragraph (`<p class="explication">`, no keyword
+  match either way, but nested inside that page's `<form>`) outscored the
+  real article lede purely on raw text length plus the flat `<p>` tag bonus.
+  Language-independent by construction (it keys off tag names, not any
+  keyword table), so it also generalizes to that page's French-language
+  content, unlike a keyword-table entry would.
+- **Boilerplate exclusion during text collection** (issue #27) — collecting
+  the selected subtree's text (not scoring) now also skips any descendant
+  whose own class/id matches a negative keyword, the same way
+  script/style/template/head are already skipped, plus one narrow structural
+  case: a keyword-*neutral* element is skipped too when *both* its immediate
+  previous and next sibling (any intervening pretty-printed whitespace text
+  node is not itself a sibling for this purpose) independently carry a
+  negative keyword match. This closes `for-me-online.de`'s held-out failure:
+  a `registration-banner`/`registration-banner__text`/`registration-banner__button`
+  -classed promotional run sits as direct `<p>` siblings inside the very same
+  `<li>` as real article text (a malformed-markup CMS insertion, not a
+  separate sidebar/footer block), including one bare, unclassed `<p>` sitting
+  between two `registration-banner*`-classed ones that no keyword-table
+  entry alone could reach.
 
 Both tables and every weight/threshold constant are private to
 `source/effects/html_main_content.d`; `positiveContentTags`,
@@ -201,19 +231,88 @@ signals from this corpus's actual shape. This is quality-matched reporting,
 not a trafilatura-parity claim.
 
 **A real run against the 20 pinned pages** (2026-09-27, after #308 and #309
-landed): selected 19, abstained 1 (`homify.de-Tischdecke.html`,
-`abstainedBelowThreshold`), could not parse 0. #308's foreign-namespace-subtree
-prune eliminated every prior `parseFailed` case — all 8 pages that previously
-aborted with `unsupportedNamespace` now parse and score. Across the 19 scored
-pages: mean precision ≈0.051 (expected, per the gold-set-size caveat above),
-mean recall ≈0.79, and `withoutLeakTotal` was 2 — both leaks on the same page,
-`for-me-online.de-pubertät.html` (2 of its 3 `without` chrome phrases leaked
-into the selected text; every other scored page had zero leaks). The
-previously named `france.attc.org-privatisations.html` case no longer selects
-a `<select>` element — #309's whitespace-only-text fix removed that exact
-mechanism — but it is still a failure case, now for a different reason: it
-selects a `<p>` element with precision 0.0 and recall 0.0, still missing the
-real article content, just via a different wrong node.
+landed, before #27's fix): selected 19, abstained 1
+(`homify.de-Tischdecke.html`, `abstainedBelowThreshold`), could not parse 0.
+Across the 19 scored pages: mean precision ≈0.051 (expected, per the
+gold-set-size caveat above), mean recall ≈0.79, and `withoutLeakTotal` was
+2 — both leaks on the same page, `for-me-online.de-pubertät.html` (2 of its 3
+`without` chrome phrases leaked into the selected text; every other scored
+page had zero leaks). `france.attc.org-privatisations.html` selected a lone
+`<p>` element with precision 0.0 and recall 0.0, missing the real article
+content.
+
+**After #27's fix** (2026-09-27, negative-tag-ancestor score suppression plus
+keyword-table-and-sibling-aware text-collection exclusion, see above):
+selected 19, abstained 1 (same page, same reason), could not parse 0 —
+unchanged. Across the 19 scored pages: mean precision ≈0.069 (up from
+≈0.051), mean recall ≈0.839 (up from ≈0.79), and `withoutLeakTotal` is now
+**0** (down from 2). A real, page-by-page comparison against the pre-fix
+report confirms no regression on any of the 18 pages that were already
+correct: 13 are byte-for-byte unchanged, and 5 (including
+`france.attc.org-privatisations.html` and `for-me-online.de-pubertät.html`
+themselves) improved with recall never dropping and `withoutLeaks` never
+increasing on any page. In detail:
+
+- `france.attc.org-privatisations.html`: real root cause was different from
+  the grooming pass's own hypothesis — direct inspection (`ldc2`-compiled
+  diagnostic driver against the resolved page, not speculation) showed the
+  actual pre-fix winner was **not** the `soutenez` donation call-to-action
+  box (which scored 341, well below several other candidates) but a
+  same-site mailing-list signup dialog's own boilerplate legal/privacy
+  paragraph, `<p class="explication">` (score 621), nested inside a `<form>`
+  several levels down inside an `<aside class="aside secondary">` sidebar.
+  After the fix, that paragraph's positive `<p>` tag credit is suppressed
+  (nested inside a negative-tag `<form>` ancestor), dropping it to score
+  334.5; the real `<div class="crayon article-chapo-6869 chapo
+  surlignable"><p>...</p></div>` lede's own `<p>` (no competing keyword
+  match, but `article`+`content` both matched on its parent `div`, itself
+  unaffected) now wins outright at score 510. Precision 0.0 → 0.346, recall
+  0.0 → **1.0** (all three `with` gold phrases now present).
+- `for-me-online.de-pubertät.html`: the winning node (a large `<div>`
+  wrapping the whole article body) does not change — the fix does not touch
+  which node is *selected* here, only what text is *collected* from within
+  it. `withoutLeaks` 2 → **0**: `"Jetzt registrieren"` (inside
+  `<p class="registration-banner__button">`) is now excluded directly by the
+  extended keyword table, and `"erhalten Sie exklusive"` (inside a bare,
+  unclassed `<p>` sitting as a direct sibling between
+  `<p class="registration-banner__text">` and
+  `<p class="registration-banner__button">` inside the same `<li>` as real
+  article text) is now excluded by the sandwich rule. Recall stays 1.0;
+  precision is essentially unchanged (0.02589 → 0.02645 — this page's
+  winning node is a large container, so removing ~30 bytes of promo text out
+  of ~4,200 moves precision only slightly).
+- Five other already-correct pages (`kleinegruenemonster.wordpress.com`,
+  `utopia.de-Werbung`, `laweekly.com-Cultivation`, `tofugu.com.dezuka-suisan`)
+  show small precision deltas (all within ±0.005) from the same text-
+  collection exclusion trimming a small amount of negative-keyword-classed
+  chrome text that happened to be nested inside their own winning node;
+  recall and `withoutLeaks` are unchanged on every one of them. The
+  remaining 13 scored pages are byte-for-byte identical before and after.
+
+### Disclosed finding: `experiments/html_main_content/check.d` has pre-existing, unrelated golden drift
+
+While verifying issue #27's fix against `check.d` (the separate,
+network-free, non-gating structural checker — see Proof above), four of its
+hand-authored fixture goldens (`news-article-shaped`, `blog-post-shaped`,
+`docs-page-shaped`, `forum-thread-shaped`: both the exact `score` and exact
+`text` assertions) and one threshold assertion (`nav-heavy-near-empty`'s
+"fails on score, not length" check) were already failing against unmodified
+`origin/main`, confirmed by reverting this ticket's changes entirely and
+rerunning `check.d` unchanged. The text mismatches are consistent with
+issue #335's later paragraph-break formatting (`check.d`'s expected strings
+predate the `"\n\n"` block-boundary output); the score mismatches are
+consistent with `content`/`article` both matching the shared
+`article-content` class substring, double-counting a keyword bonus `check.d`
+last measured before that overlap existed. Confirmed this is **not**
+introduced by issue #27's own change: with `check.d`'s score/text/threshold
+assertions bypassed for isolation, every other assertion (table-membership
+drift including this fix's own `registration-banner` addition, the tag/
+keyword numeric goldens, both abstention paths, the output cap, and the
+candidate-bound proof) passes against the fixed code. Out of this ticket's
+scope to repair (a pre-existing, unrelated drift, not a regression this fix
+caused); `experiments/html_main_content/check.d`'s own `negativeKeywords`
+golden list is updated here only for the one entry this ticket intentionally
+adds.
 
 No raw held-out page bytes and no `with`/`without` annotation text are ever
 placed into the report or into any exception/diagnostic, in either the shell

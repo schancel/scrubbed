@@ -70,7 +70,7 @@ private void tableDriftProof() {
         "positive keyword table drifted");
     need(negativeKeywords == ["nav", "sidebar", "footer", "header", "comment",
         "menu", "ad", "advert", "promo", "share", "social", "related", "widget",
-        "breadcrumb"], "negative keyword table drifted");
+        "breadcrumb", "registration-banner"], "negative keyword table drifted");
 
     // A drift in the tag table's numeric weight, not just its membership,
     // must also change a directly observable score.

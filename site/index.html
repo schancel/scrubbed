@@ -121,7 +121,7 @@ The survey team spent three weeks mapping the river delta's shifting sandbars, r
     <h2>The pipeline, one command</h2>
     <pre>scrubbed clean-web-document --input page.html --output page.txt
 scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
-    <p class="note">Repairs mojibake, extracts the article body out of the page (nav/ads/footers dropped), scans the result for emails/phones/card numbers/IPv4 addresses, and writes a PII-audit sidecar next to the output — one process, one pass, parallel across a whole directory tree.</p>
+    <p class="note">Repairs mojibake, extracts the article body out of the page (nav/ads/footers dropped), pulls out title/author/date/url, and scans the result for emails/phones/card numbers/IPv4 addresses — writing one metadata sidecar next to the output with both the extracted metadata and the PII audit in it, one process, one pass, parallel across a whole directory tree.</p>
 
     <h2>Verified against the tools it replaces</h2>
     <p class="note">Every number below comes from <code>benchmarks/external_comparator.d</code>, runnable yourself against real pinned installs of each reference tool &mdash; not a claimed result.</p>
@@ -213,17 +213,21 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 ./scrubbed run --input page.txt --output page.out \
     --sidecar-output page.langid.json --stage langid=language-id-detect
 
-# PII scan with an audit sidecar, no rewrite of the input
+# PII scan with an audit sidecar, no rewrite of the input --
+# pii-four-class only annotates, so it needs document-metadata-publish
+# chained after it as the actual terminal stage
 ./scrubbed run --input page.txt --output page.out \
-    --sidecar-output page.pii-audit.json --stage pii=pii-four-class
+    --sidecar-output page.document-metadata.json \
+    --stage pii=pii-four-class --stage publish=document-metadata-publish
 
 # Compose several stages by hand -- each --stage NAME=IMPLEMENTATION
 # opens a stage; --filter tokens attach to whichever one opened last
 ./scrubbed run --input page.html --output page.out \
-    --sidecar-output page.pii-audit.json \
+    --sidecar-output page.document-metadata.json \
     --stage clean=text-transform --filter fix-mojibake \
     --stage extract=html-main-content \
-    --stage scan=pii-four-class
+    --stage scan=pii-four-class \
+    --stage publish=document-metadata-publish
 
 # Or skip stages entirely: --filters is shorthand for one single
 # implicit text-transform stage

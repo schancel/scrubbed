@@ -73,7 +73,7 @@ import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
 import std.string : indexOf, join;
-import std.utf : validate;
+import std.utf : UTFException, validate;
 import std.uuid : randomUUID;
 import crypto.sha256 : Sha256;
 import core.stdc.errno : errno, EINTR;
@@ -573,6 +573,31 @@ int runExtract(string requestedInput, string requestedOutput,
     return quarantined ? 1 : 0;
 }
 
+/// True when `error` (possibly wrapped by `EffectFailure`/`CompiledJobFailure`)
+/// ultimately stems from `std.utf.validate` rejecting non-UTF-8 input -- the
+/// text-transform stage's filter chain requires whole-text UTF-8 content
+/// (composition/executor.d's `materializeUtf8`). Walking the wrapper chain by
+/// type, rather than matching on rendered message text, keeps this immune to
+/// message wording changes in either wrapper.
+private bool isInvalidEncodingFailure(Throwable error) {
+    if (auto compiled = cast(CompiledJobFailure) error)
+        return isInvalidEncodingFailure(compiled.original);
+    if (auto effect = cast(EffectFailure) error)
+        return isInvalidEncodingFailure(effect.original);
+    return (cast(UTFException) error) !is null;
+}
+
+/// A per-document, quarantine-eligible reason string that names the actual
+/// problem (invalid UTF-8) instead of surfacing the generic wrapped-exception
+/// message a reader would otherwise see under a "FATAL"/"SKIP" prefix.
+private string invalidEncodingReason(Throwable error) {
+    if (auto compiled = cast(CompiledJobFailure) error)
+        return invalidEncodingReason(compiled.original);
+    if (auto effect = cast(EffectFailure) error)
+        return invalidEncodingReason(effect.original);
+    return "invalid encoding: input is not valid UTF-8 (" ~ error.msg ~ ")";
+}
+
 private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         string outputRoot, bool inputIsDir, ref RuntimePlanV1 job,
         ulong reservedBytes, bool dryRun, PublicationOrder publication,
@@ -707,6 +732,32 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         result.dispatchRecord = dispatchRecord;
         return result;
     } catch (Throwable error) {
+        // #400: a single non-UTF-8/binary file anywhere in a directory batch
+        // used to cancel every other queued/in-flight file -- `publication`
+        // enforces strict input-order publication, so any throw here
+        // (regardless of how BoundedInput's own isFatal delegate would have
+        // classified it) previously called `publication.fail(ordinal)`
+        // unconditionally, which stops every later-ordinal file's own
+        // `publication.enter`/`fail` with `OrderedPublicationCanceled`. Fold
+        // an invalid-UTF-8 root into the same per-document quarantine outcome
+        // "no extractable content" already uses (a terminal decision
+        // returned normally, not an exceptional one) so publication order
+        // advances past it exactly as it would past any other quarantined
+        // document, and the rest of a directory batch completes. A
+        // single-file (non-directory-batch) invocation keeps today's fatal
+        // exit-code behavior; only its message reasoning is available via
+        // `invalidEncodingReason` if ever needed here too.
+        if (inputIsDir && isInvalidEncodingFailure(error)) {
+            if (!entered) {
+                publication.enter(ordinal);
+                entered = true;
+            }
+            publication.complete();
+            LocalJobOutcome outcome;
+            outcome.quarantined = 1;
+            outcome.firstReason = invalidEncodingReason(error);
+            return outcome;
+        }
         publication.fail(ordinal);
         throw error;
     }
@@ -2281,6 +2332,60 @@ unittest {
         assert(!exists(thinSidecar),
             "quarantined document must not publish a metadata sidecar");
     }
+    // #400 regression: a single non-UTF-8/binary file anywhere in a
+    // directory batch used to print "FATAL <file>: ... Invalid UTF-8
+    // sequence ..." for that file and then "CANCELED <other file>: ordered
+    // publication canceled after an earlier fatal root" for every other
+    // queued/in-flight file, aborting the whole batch with exit code 2 and
+    // publishing nothing at all -- including files that had nothing wrong
+    // with them. Invalid UTF-8 must instead become a per-document quarantine
+    // outcome (like html-main-content's "no extractable content" above): the
+    // rest of the batch completes and the valid file's output is written.
+    {
+        import job.presets : cleanWebDocumentTokensV1;
+
+        auto mixedRoot = buildPath(root, "mixed-batch");
+        mkdir(mixedRoot);
+        // Not valid UTF-8: 0x80/0x81 are continuation bytes with no leading
+        // byte, and 0xFF/0xFE never appear in well-formed UTF-8 at all.
+        write(buildPath(mixedRoot, "bad.html"),
+            cast(ubyte[])[0x00, 0x01, 0x02, 0xFF, 0xFE, 0x80, 0x81, 0x00]);
+        write(buildPath(mixedRoot, "good.html"),
+            "<p>a perfectly normal real page with enough content to " ~
+            "survive main-content extraction thresholds and not get " ~
+            "quarantined for being too thin, repeated so it clearly " ~
+            "counts as real page text content here.</p>");
+        auto mixedOut = buildPath(root, "mixed-out");
+        auto mixedSidecar = buildPath(root, "mixed-sidecar");
+        auto invocation = invokeJsonl(["scrubbed", "run", "--input", mixedRoot,
+            "--output", mixedOut, "--sidecar-output", mixedSidecar,
+            "--threads", "2", "--explain"] ~ cleanWebDocumentTokensV1, []);
+        auto message = cast(string) invocation.stdoutBytes;
+        assert(invocation.code == 1,
+            "one bad file in a batch must fail that file only (exit 1), " ~
+            "not abort the whole batch as fatal (exit 2): " ~ message ~
+            invocation.stderrText);
+        assert(!invocation.stderrText.canFind("FATAL"),
+            "an invalid-UTF-8 file must not be reported as FATAL: " ~
+            invocation.stderrText);
+        assert(!invocation.stderrText.canFind("CANCELED"),
+            "an invalid-UTF-8 file must not cancel the rest of the batch: " ~
+            invocation.stderrText);
+        assert(message.canFind("quarantined"),
+            "message must explain the nonzero exit: " ~ message);
+        assert(message.canFind(
+            "reason=\"invalid encoding: input is not valid UTF-8"),
+            "the quarantine reason must specifically identify invalid " ~
+            "encoding, not a generic message: " ~ message);
+        auto goodOut = buildPath(mixedOut, "good.html");
+        assert(exists(goodOut),
+            "the batch's other, valid file must still be published even " ~
+            "though an earlier file in the same batch was invalid UTF-8");
+        assert(readText(goodOut).canFind("perfectly normal"),
+            "the valid file's published content must be intact");
+        assert(!exists(buildPath(mixedOut, "bad.html")),
+            "the quarantined invalid-UTF-8 file must not publish output");
+    }
     {
         auto priorMetrics =
             environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
@@ -2769,9 +2874,15 @@ unittest {
     write(buildPath(inputTree, "unchanged.txt"), "clean");
     write(buildPath(inputTree, "bad.bin"), [cast(ubyte) 0xFF]);
     auto treeOutput = buildPath(root, "tree-output");
-    assertThrown(runApp(["scrubbed", "run", "--input", inputTree, "--output", treeOutput,
+    // #400 regression: `bad.bin`'s invalid UTF-8 is a per-document quarantine
+    // outcome now (see the mixed-batch regression above), not a fatal root
+    // that cancels the rest of a directory batch -- so this multi-thread,
+    // bounded-admission run no longer throws. It still reports the batch's
+    // overall nonzero exit status (one quarantined document), and being a
+    // dry-run, it still creates no output tree either way.
+    requireCli(runApp(["scrubbed", "run", "--input", inputTree, "--output", treeOutput,
         "--dry-run", "--explain", "--threads", "4", "--max-queued-docs", "1",
-        "--max-open-inputs", "1"]));
+        "--max-open-inputs", "1"]) == 1, "multi-thread quarantine exit");
     requireCli(!exists(treeOutput), "multi-thread dry-run created output tree");
     version (Posix) {
         import std.file : symlink;

@@ -1,12 +1,12 @@
 # lexbor-d
 
 A bounded, D-idiomatic wrapper over the vendored [Lexbor](https://github.com/lexbor/lexbor)
-HTML5 parser. `effects.html_tree.parseHtml` turns validated, bounded input
+HTML5 parser. `lexbor_d.html_tree.parseHtml` turns validated, bounded input
 into a flat pre-order `HtmlTree` of D-owned nodes, or a typed `HtmlFailure` --
 never a raw Lexbor pointer or a borrowed native slice.
 
 This package is a standalone extraction of `html_tree.d` + `lexbor_ffi.d`
-(+ their `text/decoding.d` dependency) from
+(+ their `lexbor_d/decoding.d` dependency) from
 [scrubbed](https://github.com/schancel/scrubbed), a text sanitization CLI.
 It has zero dependency on scrubbed's own `dub.json` or `source/` tree and
 builds and tests entirely on its own.
@@ -38,7 +38,7 @@ built from source via `cmake` as part of this package's `preBuildCommands`
 
 ## Platform support
 
-**Verified today: macOS arm64 only.** `source/effects/lexbor_ffi.d` declares
+**Verified today: macOS arm64 only.** `source/lexbor_d/lexbor_ffi.d` declares
 the native ABI (struct layouts mirroring Lexbor's C structs, checked
 byte-for-byte via `static assert`) only for macOS arm64; every other
 platform hits a `static assert(0, "Lexbor ABI is only verified for macOS
@@ -68,7 +68,7 @@ from the vendored source with no network access, then link it into the
 library (`dub build`) or a `-unittest` test binary (`dub test`).
 
 `dub test` runs, unmodified from their scrubbed origin (aside from the
-package's own file layout): the `effects.html_tree` unittest suite (parsing,
+package's own file layout): the `lexbor_d.html_tree` unittest suite (parsing,
 attribute decoding, foreign-namespace pruning) plus `tests/html_tree_checks.d`,
 which ports scrubbed's release-active production check
 (`experiments/html_parser/production_check.d`) into `dub test`-native

@@ -54,7 +54,10 @@ Both sinks share a typed document identity but publish independently:
 
 Preflight rejects unsafe routes before publication: symlink, hardlink,
 path-overlap, and destination-owner checks. A bad UTF-8 input, an HTML
-parse quarantine, or hitting the 64 KiB raw HTML limit leaves both payloads
+parse quarantine, or hitting `html-metadata-annotate`'s raw HTML limit
+(`max-html-bytes`, defaulting to 1 MiB — issue #444 raised this from a
+previously hardcoded, unconfigurable 64 KiB; see
+[docs/metadata-extraction.md](metadata-extraction.md)) leaves both payloads
 unpublished for that document.
 
 ## Manifest

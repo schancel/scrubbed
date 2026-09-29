@@ -26,8 +26,18 @@ Import `effects.html_metadata_stage` to register the stage, then select
   #294; before that fix, the general `run` command published the
   placeholder as a spurious empty sidecar file for quarantined/rejected
   events).
-- Reads through the existing restricted `HtmlTree` boundary: 64 KiB
-  raw/decoded, plus its node, depth, and attribute limits.
+- Reads through the existing restricted `HtmlTree` boundary: a configurable
+  `max-html-bytes` raw/decoded admission bound, defaulting to 1 MiB and
+  configurable up to 8 MiB (same `OptionDeclaration`, same default and
+  ceiling as `html-main-content`'s own `--max-html-bytes` — see
+  [docs/html-main-content.md](html-main-content.md)), plus `HtmlTree`'s own
+  fixed node, depth, and attribute limits. Before issue #444's fix, this
+  stage (and `html-metadata-annotate` below) instead hardcoded the
+  unrelated, unconfigurable 64 KiB `effects.html_tree.maxRawBytes` — small
+  enough that it alone quarantined 15 of 20 real pages in this repo's own
+  bundled `examples/pipeline-benchmark/corpus/` with reason `rawLimit`,
+  even though `html-main-content` succeeded on the same 20 pages at its own
+  independent 1 MiB default the whole time.
 
 `route-metadata` (see [docs/metadata-route.md](metadata-route.md)) does
 *not* use this stage or its side output for its metadata sink — it compiles

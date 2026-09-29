@@ -2032,6 +2032,11 @@ int runApp(string[] args) {
     auto publication = durableRoute ? null : new PublicationOrder(coordination);
     auto decisionMutex = new Mutex;
     size_t terminalDecisions;
+    // #401: counts, by reason string, of every document that lands in
+    // `quarantined` (not `rejected`/`failed`) so the plain (non---explain)
+    // summary below can name *why* without printing one line per file. See
+    // the comment at the print site for the reasoning behind this shape.
+    size_t[string] quarantineReasonCounts;
     auto scheduler = new BoundedInput(
         InputLimits(maxQueuedDocuments, maxInputBytes, maxOpenInputs),
         manifestPath.length || errorJournalPath.length ? 1 : nThreads,
@@ -2060,6 +2065,13 @@ int runApp(string[] args) {
             if (decision.terminal) {
                 decisionMutex.lock();
                 ++terminalDecisions;
+                if (decision.status == "quarantined") {
+                    auto reason = decision.detail.length ?
+                        decision.detail : "unknown";
+                    if (auto existing = reason in quarantineReasonCounts)
+                        ++(*existing);
+                    else quarantineReasonCounts[reason] = 1;
+                }
                 decisionMutex.unlock();
             }
             if (explain && runtimePlan.isDispatch && decision.dispatchRecord.length)
@@ -2280,8 +2292,60 @@ int runApp(string[] args) {
                 " failed, ", terminalDecisions, " quarantined.");
         else
             writeln("done. ", displaySucceeded, " succeeded, ", failures, " failed.");
+        // #401: a plain (non---explain) invocation -- which is the *only*
+        // form sealed presets like `clean-web-document` can ever run, since
+        // their documented contract forbids adding a `--stage`/`--filter`/
+        // `--explain`-style override flag -- previously gave zero
+        // explanation for a quarantined document: "1 quarantined." and
+        // nothing else. The actual reason was already tracked internally
+        // (`local.firstReason`, threaded through as `decision.detail` above)
+        // and was the same string `--explain`'s own
+        // `EXPLAIN ... reason="..."` line prints; it just never reached this
+        // default output path. Surface it here, by default, with no new
+        // flag required.
+        //
+        // Deliberately an aggregated reason -> count roll-up rather than one
+        // line per quarantined file: `done.` is a deliberately terse,
+        // O(1)-output summary line even for directory trees with thousands
+        // of inputs, and a plain per-file listing here would both blow that
+        // budget out and duplicate what `--explain`'s per-file EXPLAIN
+        // records already do for anyone who needs that detail. Counting by
+        // distinct reason string stays small (reasons come from a bounded
+        // set of pipeline stages) while still naming the concrete,
+        // actionable cause -- e.g. "abstainedBelowThreshold" -- for the
+        // common single- or few-document case the sealed preset's own Quick
+        // Start targets, without requiring the reader to already know
+        // `--explain` exists or how to hand-reconstruct the preset's stage
+        // chain to reach it. Gated on `!explain` so `--explain`'s existing,
+        // already-more-detailed output is completely unchanged.
+        if (!explain && quarantineReasonCounts.length)
+            writeln("quarantined reasons: ",
+                formatQuarantineReasonCounts(quarantineReasonCounts));
     }
     return failures == 0 && terminalDecisions == 0 ? 0 : 1;
+}
+
+/// Deterministic (sorted by reason string) rendering of a quarantine
+/// reason -> count roll-up, e.g. `abstainedBelowThreshold (3), decode-failed (1)`.
+private string formatQuarantineReasonCounts(size_t[string] counts) {
+    auto reasons = counts.keys;
+    reasons.sort();
+    string rendered;
+    foreach (index, reason; reasons) {
+        if (index) rendered ~= ", ";
+        rendered ~= reason ~ " (" ~ counts[reason].to!string ~ ")";
+    }
+    return rendered;
+}
+
+unittest {
+    size_t[string] counts;
+    assert(formatQuarantineReasonCounts(counts) == "");
+    counts["abstainedBelowThreshold"] = 1;
+    assert(formatQuarantineReasonCounts(counts) == "abstainedBelowThreshold (1)");
+    counts["decode-failed"] = 2;
+    assert(formatQuarantineReasonCounts(counts) ==
+        "abstainedBelowThreshold (1), decode-failed (2)");
 }
 
 unittest {
@@ -2331,6 +2395,22 @@ unittest {
             "quarantined document must not publish output");
         assert(!exists(thinSidecar),
             "quarantined document must not publish a metadata sidecar");
+
+        // #401 regression: the sealed clean-web-document/v1 preset (and any
+        // other plain, non---explain invocation, which is all a sealed
+        // preset can ever run) must surface *why* a document quarantined,
+        // by default, with no `--explain`/`--stage`/`--filter` flag -- the
+        // preset's own documented contract forbids adding one. The reason
+        // string here ("abstainedBelowThreshold") is exactly what
+        // `--explain`'s `EXPLAIN ... reason="..."` line already prints for
+        // this same input; this only checks it also reaches the default,
+        // no-flags-needed output path.
+        assert(message.canFind("quarantined reasons:"),
+            "plain (non---explain) output must name the quarantine " ~
+            "reason without requiring --explain: " ~ message);
+        assert(message.canFind("abstainedBelowThreshold"),
+            "plain output must include the actual internal reason " ~
+            "string, not just the word \"quarantined\": " ~ message);
     }
     // #400 regression: a single non-UTF-8/binary file anywhere in a
     // directory batch used to print "FATAL <file>: ... Invalid UTF-8

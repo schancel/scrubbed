@@ -1,8 +1,8 @@
 /// Restricted, D-owned HTML tree boundary for validated, bounded input.
-module effects.html_tree;
+module lexbor_d.html_tree;
 
-import effects.lexbor_ffi;
-import text.decoding : decodeBytes, QuarantineReason;
+import lexbor_d.lexbor_ffi;
+import lexbor_d.decoding : decodeBytes, QuarantineReason;
 import std.exception : enforce;
 import std.utf : validate, UTFException;
 

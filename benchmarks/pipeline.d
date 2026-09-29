@@ -1109,8 +1109,8 @@ private JSONValue caseRun(string name, string[] command, string input,
     result["filter_selection_sha256"] = toHexString(
         sha256Of(cast(ubyte[])"normalize-line-endings,strip-control".dup)).to!string;
     result["command_template"] = manifest ?
-        "<scrubbed-binary> --input <fixture-input> --output <fixture-output> --filters normalize-line-endings,strip-control --threads 1 --manifest <manifest-db> --explain" :
-        "<scrubbed-binary> --input <fixture-input> --output <fixture-output> --filters normalize-line-endings,strip-control --threads 1";
+        "<scrubbed-binary> run --input <fixture-input> --output <fixture-output> --filters normalize-line-endings,strip-control --threads 1 --manifest <manifest-db> --explain" :
+        "<scrubbed-binary> run --input <fixture-input> --output <fixture-output> --filters normalize-line-endings,strip-control --threads 1";
     return result;
 }
 
@@ -1136,7 +1136,10 @@ private JSONValue manifestTransitions(string[] command, string input,
     steps ~= changedInput;
 
     auto changedConfig = command.dup;
-    changedConfig[6] = "strip-control,normalize-line-endings";
+    // Indices below are offset by one past the pre-#382 layout: command[0]
+    // is the binary and command[1] is now the "run" verb, so the value that
+    // used to sit at index N now sits at index N+1 (see #382).
+    changedConfig[7] = "strip-control,normalize-line-endings";
     auto configSample = timed(changedConfig ~ ["--manifest-retry"], mac, 0, files,
         targetHash);
     require(configSample["decisions"].integer == files &&
@@ -1149,7 +1152,7 @@ private JSONValue manifestTransitions(string[] command, string input,
 
     auto newRoute = changedConfig.dup;
     auto alternate = output ~ "-alternate";
-    newRoute[4] = alternate;
+    newRoute[5] = alternate;
     auto routeSample = timed(newRoute, mac, 0, files, targetHash);
     require(routeSample["decisions"].integer == files &&
         routeSample["changed"].integer == files,
@@ -1788,7 +1791,7 @@ private JSONValue compareDos2unix(string scrubbed, string dos2unix,
         bool useScrubbed = index % 2 == 0;
         if (exists(output)) remove(output);
         auto command = useScrubbed ?
-            [scrubbedCopy.path, "--input", input, "--output", output,
+            [scrubbedCopy.path, "run", "--input", input, "--output", output,
              "--filters", "normalize-line-endings", "--threads", "1"] :
             [dos2unixCopy.path, "-n", input, output];
         auto sample = timed(command, os == "Darwin");
@@ -1844,7 +1847,7 @@ private JSONValue compareDos2unix(string scrubbed, string dos2unix,
     report["harness_compiler_available_version"] =
         checked(["ldc2", "--version"]).splitLines[0];
     report["scrubbed_command_template"] =
-        "<scrubbed-binary> --input <fixture> --output <output> --filters normalize-line-endings --threads 1";
+        "<scrubbed-binary> run --input <fixture> --output <output> --filters normalize-line-endings --threads 1";
     report["dos2unix_command_template"] =
         "<dos2unix-binary> -n <fixture> <output>";
     report["boundary"] = "single file to fresh file; full process; CRLF-only text; exact bytes";
@@ -2086,7 +2089,7 @@ int main(string[] args) {
             auto input = buildPath(root, name ~ "-input");
             auto output = buildPath(root, name ~ "-output");
             fixture(input, files, records);
-            auto command = [binaryCopy.path, "--input", input, "--output", output,
+            auto command = [binaryCopy.path, "run", "--input", input, "--output", output,
                 "--filters", "normalize-line-endings,strip-control", "--threads", "1"];
             cases ~= caseRun(name, command, input, output, files, records,
                 os == "Darwin", false, sampleTargetHash);

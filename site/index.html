@@ -160,6 +160,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 
     <h2>Also shipped</h2>
     <ul>
+        <li>Boilerplate-stripped main content exported as real Markdown (<code>extract --format=main-content-markdown</code>) &mdash; headings, lists, links, and emphasis preserved, nav/ad/footer chrome removed first by the same selection <code>clean-web-document</code> uses. A separate <code>extract --format=markdown</code> converts an entire raw page (chrome included) for callers that want that instead.</li>
         <li>A four-class PII scanner (email/phone/card/IPv4) with report, mask, and opt-in redact modes, publishing a content-free audit record.</li>
         <li>Exact-byte deduplication across a corpus.</li>
         <li>A deterministic, model-free language identifier — no embedded model, no network call — reachable from the same generic pipeline as every other stage.</li>
@@ -201,7 +202,8 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 ./scrubbed clean-web-document --input pages/ --output clean/ --threads 4
 
 # Just extract, in whichever shape you need
-./scrubbed extract --input page.html --output page.md --format markdown
+./scrubbed extract --input page.html --output article.md --format main-content-markdown  # boilerplate stripped, real Markdown
+./scrubbed extract --input page.html --output page.md --format markdown       # whole page, unfiltered, as Markdown
 ./scrubbed extract --input page.html --output page.tree.json --format tree-json
 
 # Language ID as a standalone stage, reachable like any other

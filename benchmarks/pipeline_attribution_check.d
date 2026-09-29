@@ -877,7 +877,7 @@ private JSONValue summarizeTraces(JSONValue[] traces) {
 
 private string[] ordinaryCommand(string binary, string input, string output,
         string configPath, long threads) {
-    return [binary, "--input", input, "--output", output, "--config", configPath,
+    return [binary, "run", "--input", input, "--output", output, "--config", configPath,
         "--threads", threads.to!string, "--max-open-inputs", threads.to!string];
 }
 private string[] durableCommand(string binary, string input, string output,
@@ -957,7 +957,10 @@ private void prepareDurable(string[] command, string binary, string database,
     auto first = execute(command);
     auto files = layout == "many-small" ? 4096 : 8;
     need(first.status == 0, "durable first-publication process failed");
-    explainStatuses(first.output, command[2], files, "changed", journal);
+    // command[3] is the --input value: command[0] is the binary and
+    // command[1] is now the "run" verb (see #382), so every element that
+    // used to sit at index N now sits at index N+1.
+    explainStatuses(first.output, command[3], files, "changed", journal);
     exactTree(output, layout, true);
 }
 

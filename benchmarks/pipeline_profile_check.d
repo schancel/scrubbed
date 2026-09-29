@@ -471,7 +471,7 @@ private JSONValue runOnce(string binary, string binaryHash, string input,
         size_t statusFiles = 0, string expectedStatus = "", bool journal = false) {
     if (exists(output)) rmdirRecurse(output);
     auto log = buildPath(root, "run-" ~ randomUUID.toString ~ ".log");
-    auto command = [binary, "--input", input, "--output", output] ~
+    auto command = [binary, "run", "--input", input, "--output", output] ~
         selectorArgs(selector, config, mixed) ~
         ["--threads", "4", "--max-open-inputs", "4"] ~ durable;
     if (explain) command ~= "--explain";
@@ -675,7 +675,7 @@ private JSONValue durableCase(string binary, string binaryHash, string input,
         exactTree(output, expected);
         // Preserve destination/database for the verified skip.
         auto log = buildPath(root, "durable-skip-" ~ randomUUID.toString ~ ".log");
-        auto command = [binary, "--input", input, "--output", output,
+        auto command = [binary, "run", "--input", input, "--output", output,
             "--config", config, "--threads", "4", "--max-open-inputs", "4"] ~ durable;
         auto skip = measured(command, log, binaryHash);
         auto logText = readText(log);
@@ -726,7 +726,7 @@ private JSONValue sampleProbe(string binary, string input, string output,
     scope(exit) if (exists(output)) rmdirRecurse(output);
     auto childLog = File(buildPath(root, "sample-child-" ~ layout ~ ".log"), "wb");
     auto nullIn = File("/dev/null", "rb");
-    auto command = [binary, "--input", input, "--output", output,
+    auto command = [binary, "run", "--input", input, "--output", output,
         "--config", config, "--threads", "1", "--max-open-inputs", "1"];
     StopWatch clock;
     clock.start();
@@ -802,7 +802,7 @@ private JSONValue probes(string binary, string input, string output,
     auto gcLog = buildPath(root, "gc-profile.log");
     auto gcOut = output ~ "-gc";
     if (exists(gcOut)) rmdirRecurse(gcOut);
-    auto gc = execute([binary, "--DRT-gcopt=profile:1", "--input", input,
+    auto gc = execute([binary, "--DRT-gcopt=profile:1", "run", "--input", input,
         "--output", gcOut, "--config", config, "--threads", "1",
         "--max-open-inputs", "1"]);
     write(gcLog, gc.output);

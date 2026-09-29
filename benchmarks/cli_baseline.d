@@ -173,7 +173,7 @@ private JSONValue runTree(string binary, string root, bool darwin) {
         fixture["input_sha256"] = digest(path);
         fixtureFiles ~= fixture;
     }
-    auto command = [binary, "--input", inputRoot, "--output", outputRoot,
+    auto command = [binary, "run", "--input", inputRoot, "--output", outputRoot,
         "--filters", "normalize-line-endings,strip-control", "--threads", "1"];
     JSONValue[] samples;
     foreach (_; 0 .. 5) {
@@ -239,7 +239,7 @@ int main(string[] args) {
 
         JSONValue[] cases;
         auto outputPath = buildPath(root, "out.txt");
-        cases ~= runCase("normalization/scrubbed", [args[1], "--input",
+        cases ~= runCase("normalization/scrubbed", [args[1], "run", "--input",
             normalization, "--output", outputPath, "--filters",
             "normalize-line-endings,strip-control", "--threads", "1"],
             normalization, outputPath, normalized, darwin, 5);

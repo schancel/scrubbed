@@ -147,14 +147,9 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             <p>Precision 0.918 / recall 0.746 against trafilatura's own extraction as the reference (not authored ground truth &mdash; a cross-tool word-overlap comparison). The 2 pages that don't parse are a known, ticketed parser gap &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a>.</p>
         </div>
         <div class="stat-card">
-            <span class="big">~100&ndash;150x</span>
-            <span class="label">whole pipeline vs. the equivalent Python chain, per-file</span>
-            <p>Over a real, checked-in 20-page corpus: scrubbed's <code>clean-web-document</code> as one process vs. ftfy&rarr;trafilatura&rarr;langdetect&rarr;Presidio chained per file. At this corpus's scale scrubbed's own run finishes in tens of milliseconds of CPU time, small enough that ordinary OS scheduling noise measurably shifts the ratio run to run &mdash; real, but not a number worth quoting to two significant figures. The corpus-scale figure below is the stable one. Clone and run it yourself: <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">examples/pipeline-benchmark</a>.</p>
-        </div>
-        <div class="stat-card">
             <span class="big">~146x</span>
-            <span class="label">same comparison, corpus-scale, warm Python process, CPU time</span>
-            <p>The number above pays Python interpreter/model-load startup per page, and both of these small-corpus numbers are noisy in ways described there. Over the same corpus replicated to 400 files, with the Python chain loaded once as one warm process: ~146x steady-state, measured as actual CPU time (<code>getrusage</code>/<code>/usr/bin/time</code> user+sys) rather than wall-clock, so it isn't inflated or deflated by other work running on the same machine &mdash; verified to matter: wall-clock alone gave ~190x on the same run, a real ~30% overstatement from scheduling noise this measurement doesn't have. Single verified run, not yet averaged across a quiet machine. See <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">examples/pipeline-benchmark</a>.</p>
+            <span class="label">whole pipeline vs. the equivalent Python chain, corpus-scale</span>
+            <p>scrubbed's <code>clean-web-document</code> vs. ftfy&rarr;trafilatura&rarr;langdetect&rarr;Presidio chained, over a 400-file corpus with the Python chain warm. Measured as actual CPU time, not wall-clock, so it isn't skewed by other work on the same machine &mdash; that discipline matters: wall-clock alone gave ~190x on the same run, a ~30% overstatement from scheduling noise. Single verified run, methodology and a smaller per-file comparison in <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">examples/pipeline-benchmark</a>.</p>
         </div>
         <div class="stat-card">
             <span class="big">~25x</span>

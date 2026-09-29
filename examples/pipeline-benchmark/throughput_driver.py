@@ -80,6 +80,7 @@ for reporting both numbers separately rather than conflating them into one
 gap is startup cost rather than steady-state per-call speed.
 """
 import os
+import resource
 import sys
 import time
 
@@ -191,6 +192,12 @@ def main() -> int:
     lang_errors = 0
     pii_totals = {"email": 0, "phone": 0, "card": 0, "ip": 0}
 
+    # RUSAGE_SELF's ru_utime/ru_stime are cumulative since process start, so
+    # a before/after delta around just this loop isolates its own CPU time
+    # from interpreter startup, imports, and one-time model construction --
+    # and, unlike wall-clock, isn't inflated by scheduling delay if other
+    # processes are competing for CPU while this runs.
+    cpu_before = resource.getrusage(resource.RUSAGE_SELF)
     t_loop_start = time.monotonic()
     for name in names:
         path = os.path.join(corpus_dir, name)
@@ -206,8 +213,12 @@ def main() -> int:
         for category, count in pii_counts.items():
             pii_totals[category] += count
     t_loop_done = time.monotonic()
+    cpu_after = resource.getrusage(resource.RUSAGE_SELF)
 
     loop_seconds = t_loop_done - t_loop_start
+    loop_cpu_seconds = (cpu_after.ru_utime - cpu_before.ru_utime) + (
+        cpu_after.ru_stime - cpu_before.ru_stime
+    )
     docs_per_sec = doc_count / loop_seconds if loop_seconds > 0 else float("inf")
     kib_per_sec = (
         (total_bytes / 1024.0) / loop_seconds if loop_seconds > 0 else float("inf")
@@ -215,6 +226,7 @@ def main() -> int:
 
     print(
         f"THROUGHPUT_DRIVER_LOOP loop_seconds={loop_seconds:.6f} "
+        f"loop_cpu_seconds={loop_cpu_seconds:.6f} "
         f"doc_count={doc_count} total_bytes={total_bytes} "
         f"docs_per_sec={docs_per_sec:.4f} kib_per_sec={kib_per_sec:.4f} "
         f"extraction_failures={extraction_failures} lang_errors={lang_errors} "

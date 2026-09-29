@@ -143,6 +143,33 @@ fi
 
 now_seconds() { python3 -c 'import time; print(f"{time.time():.6f}")'; }
 
+# CPU seconds (user+sys) from a /usr/bin/time report mixed into a log file
+# (its own report lines are distinctive and safe to grep out of scrubbed's
+# ordinarily-near-empty stderr). Unlike wall-clock, this isn't inflated by
+# scheduling delay when other processes are competing for CPU on this host.
+cpu_seconds_from_time_log() {
+  local log="$1"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local user sys
+    user="$(grep -m1 '^user ' "$log" | awk '{print $2}')"
+    sys="$(grep -m1 '^sys ' "$log" | awk '{print $2}')"
+    python3 -c "print(f'{${user:-0} + ${sys:-0}:.6f}')"
+  else
+    local user sys
+    user="$(grep -m1 'User time (seconds):' "$log" | awk '{print $NF}')"
+    sys="$(grep -m1 'System time (seconds):' "$log" | awk '{print $NF}')"
+    python3 -c "print(f'{${user:-0} + ${sys:-0}:.6f}')"
+  fi
+}
+
+time_wrapper() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "/usr/bin/time -l -p"
+  else
+    echo "/usr/bin/time -v"
+  fi
+}
+
 tree_signature() {
   # Same deterministic sha256-over-relative-path-and-bytes idiom as run.sh's
   # own tree_signature, reimplemented here rather than sourced since run.sh
@@ -160,7 +187,8 @@ run_scrubbed_throughput() {
   rm -rf "$out_dir" "${out_dir}.pii-audit"
   mkdir -p "$out_dir"
   set +e
-  "$scrubbed_bin" clean-web-document --input "$replicated_dir" --output "$out_dir" --threads 4 \
+  # shellcheck disable=SC2046  # time_wrapper's two-token output is meant to split
+  $(time_wrapper) "$scrubbed_bin" clean-web-document --input "$replicated_dir" --output "$out_dir" --threads 4 \
     >"$out_dir.stdout.log" 2>"$out_dir.stderr.log"
   local status=$?
   set -e
@@ -172,7 +200,7 @@ run_scrubbed_throughput() {
 }
 
 echo "run_throughput.sh: timing scrubbed clean-web-document over $replicated_count files (2 samples)..." >&2
-declare -a scrubbed_seconds
+declare -a scrubbed_seconds scrubbed_cpu_seconds
 scrubbed_dirs=()
 for i in 0 1; do
   out_dir="$work_root/scrubbed-throughput-sample-$i"
@@ -181,7 +209,8 @@ for i in 0 1; do
   end="$(now_seconds)"
   scrubbed_dirs+=("$out_dir")
   scrubbed_seconds[i]="$(python3 -c "print(f'{$end - $start:.6f}')")"
-  echo "run_throughput.sh: scrubbed sample $i: ${scrubbed_seconds[i]}s" >&2
+  scrubbed_cpu_seconds[i]="$(cpu_seconds_from_time_log "$out_dir.stderr.log")"
+  echo "run_throughput.sh: scrubbed sample $i: wall ${scrubbed_seconds[i]}s, cpu ${scrubbed_cpu_seconds[i]}s" >&2
 done
 
 scrubbed_sig_a="$(tree_signature "${scrubbed_dirs[0]}")"
@@ -194,7 +223,7 @@ fi
 # ---- 5. Time throughput_driver.py: one warm-process invocation per ----
 # ----    sample over the whole replicated corpus -- run twice. ----
 echo "run_throughput.sh: timing throughput_driver.py over $replicated_count files (2 samples)..." >&2
-declare -a python_seconds python_model_load python_loop python_doc_count python_total_bytes
+declare -a python_seconds python_model_load python_loop python_loop_cpu python_doc_count python_total_bytes
 declare -a python_docs_per_sec python_kib_per_sec
 python_logs=()
 for i in 0 1; do
@@ -215,6 +244,7 @@ for i in 0 1; do
 
   model_load="$(grep -o 'model_load_seconds=[0-9.]*' <<<"$one_time_line" | cut -d= -f2)"
   loop_seconds="$(grep -o 'loop_seconds=[0-9.]*' <<<"$loop_line" | cut -d= -f2)"
+  loop_cpu_seconds="$(grep -o 'loop_cpu_seconds=[0-9.]*' <<<"$loop_line" | cut -d= -f2)"
   doc_count="$(grep -o 'doc_count=[0-9]*' <<<"$loop_line" | cut -d= -f2)"
   total_bytes="$(grep -o 'total_bytes=[0-9]*' <<<"$loop_line" | cut -d= -f2)"
   docs_per_sec="$(grep -o 'docs_per_sec=[0-9.]*' <<<"$loop_line" | cut -d= -f2)"
@@ -222,11 +252,12 @@ for i in 0 1; do
 
   python_model_load[i]="$model_load"
   python_loop[i]="$loop_seconds"
+  python_loop_cpu[i]="$loop_cpu_seconds"
   python_doc_count[i]="$doc_count"
   python_total_bytes[i]="$total_bytes"
   python_docs_per_sec[i]="$docs_per_sec"
   python_kib_per_sec[i]="$kib_per_sec"
-  echo "run_throughput.sh: python sample $i: wall ${python_seconds[i]}s (model_load ${model_load}s + loop ${loop_seconds}s), $doc_count docs, $total_bytes bytes" >&2
+  echo "run_throughput.sh: python sample $i: wall ${python_seconds[i]}s (model_load ${model_load}s + loop ${loop_seconds}s, loop cpu ${loop_cpu_seconds}s), $doc_count docs, $total_bytes bytes" >&2
 done
 
 # Reproducibility substitute for the python side: throughput_driver.py
@@ -246,8 +277,10 @@ echo "run_throughput.sh: both tools reproduced consistent output/counts across t
 
 # ---- 6. Report ----
 mean_scrubbed=$(python3 -c "print(f'{(${scrubbed_seconds[0]} + ${scrubbed_seconds[1]}) / 2:.4f}')")
+mean_scrubbed_cpu=$(python3 -c "print(f'{(${scrubbed_cpu_seconds[0]} + ${scrubbed_cpu_seconds[1]}) / 2:.4f}')")
 mean_model_load=$(python3 -c "print(f'{(${python_model_load[0]} + ${python_model_load[1]}) / 2:.4f}')")
 mean_loop=$(python3 -c "print(f'{(${python_loop[0]} + ${python_loop[1]}) / 2:.4f}')")
+mean_loop_cpu=$(python3 -c "print(f'{(${python_loop_cpu[0]} + ${python_loop_cpu[1]}) / 2:.4f}')")
 mean_python_amortized=$(python3 -c "print(f'{${mean_model_load} + ${mean_loop}:.4f}')")
 
 scrubbed_docs_per_sec=$(python3 -c "print(f'{$replicated_count / ${mean_scrubbed}:.2f}')")
@@ -259,6 +292,12 @@ python_amortized_kib_per_sec=$(python3 -c "print(f'{$replicated_bytes / ${mean_p
 
 speedup_steady_state=$(python3 -c "print(f'{${mean_loop} / ${mean_scrubbed}:.2f}')")
 speedup_amortized=$(python3 -c "print(f'{${mean_python_amortized} / ${mean_scrubbed}:.2f}')")
+# CPU-time speedup: robust to scheduling-delay contamination from other
+# processes competing for CPU on this host, unlike the wall-clock figures
+# above. Compare the two to see how much load contaminated this run.
+speedup_steady_state_cpu=$(python3 -c "print(f'{${mean_loop_cpu} / ${mean_scrubbed_cpu}:.2f}')")
+scrubbed_wall_vs_cpu_pct=$(python3 -c "print(f'{(${mean_scrubbed} - ${mean_scrubbed_cpu}) / ${mean_scrubbed_cpu} * 100:.1f}')")
+python_wall_vs_cpu_pct=$(python3 -c "print(f'{(${mean_loop} - ${mean_loop_cpu}) / ${mean_loop_cpu} * 100:.1f}')")
 
 cat <<REPORT
 
@@ -270,7 +309,7 @@ Replicated corpus: $replicated_count files (${replicas}x replication of the
   $replicated_dir.
 
 --- scrubbed clean-web-document (single warm process; 2 samples) ---
-samples: ${scrubbed_seconds[0]}s, ${scrubbed_seconds[1]}s (mean ${mean_scrubbed}s)
+samples: ${scrubbed_seconds[0]}s, ${scrubbed_seconds[1]}s (mean wall ${mean_scrubbed}s, mean cpu ${mean_scrubbed_cpu}s)
 throughput: ${scrubbed_docs_per_sec} docs/s, ${scrubbed_kib_per_sec} KiB/s
 Reproduced byte-identical output across its own two timed samples.
 
@@ -278,7 +317,7 @@ Reproduced byte-identical output across its own two timed samples.
 one-time model/engine construction (isolated, NOT included in loop timing):
   samples: ${python_model_load[0]}s, ${python_model_load[1]}s (mean ${mean_model_load}s)
 steady-state loop (excludes the one-time cost above):
-  samples: ${python_loop[0]}s, ${python_loop[1]}s (mean ${mean_loop}s)
+  samples: ${python_loop[0]}s, ${python_loop[1]}s (mean wall ${mean_loop}s, mean cpu ${mean_loop_cpu}s)
   throughput: ${python_steady_docs_per_sec} docs/s, ${python_steady_kib_per_sec} KiB/s
 amortized-with-startup (one-time cost + loop, as a single process would see it once):
   mean total: ${mean_python_amortized}s
@@ -288,18 +327,30 @@ timed samples (no output tree to hash: this driver processes everything
 in memory).
 
 --- Speedup: scrubbed vs. python, two different denominators ---
-steady-state (loop time only, startup excluded):    ${speedup_steady_state}x
-amortized-with-startup (one-time cost included):     ${speedup_amortized}x
+steady-state, wall-clock (loop time only, startup excluded):  ${speedup_steady_state}x
+steady-state, CPU time (robust to other load on this host):   ${speedup_steady_state_cpu}x
+amortized-with-startup (one-time cost included, wall-clock):  ${speedup_amortized}x
 
-These two numbers are reported side by side deliberately: run.sh's own
+wall-vs-CPU divergence this run (large values mean this host had other
+load competing for CPU while this ran -- trust the CPU-time speedup above
+over the wall-clock ones when this is large):
+  scrubbed: ${scrubbed_wall_vs_cpu_pct}%    python steady-state: ${python_wall_vs_cpu_pct}%
+
+These numbers are reported side by side deliberately: run.sh's own
 per-file-subprocess methodology pays the one-time Python startup/model-load
 cost on every single page, which inflates its reported gap. This script
 shows how much of that gap is genuinely steady-state per-call speed
-(the "steady-state" ratio above) versus how much was process-startup
-overhead specific to that comparison shape (the difference between the two
-ratios above). Neither number is rounded up or presented as better than
-observed; if the steady-state ratio is much smaller than run.sh's own
-reported figure, that is the honest result, not an error.
+(the "steady-state" ratios above) versus how much was process-startup
+overhead specific to that comparison shape (the difference between the
+wall-clock steady-state and amortized ratios). Neither number is rounded
+up or presented as better than observed; if the steady-state ratio is much
+smaller than run.sh's own reported figure, that is the honest result, not
+an error. CPU time (via /usr/bin/time's user+sys, and Python's own
+resource.getrusage for its in-process loop) isolates actual compute from
+scheduling-delay noise, so it stays meaningful even when this host has
+other concurrent work running -- confirmed to matter in practice (see
+benchmarks/mojibake_scale.d's commit history for a worked example where
+wall-clock alone would have understated a speedup by ~50% under load).
 
 Full intermediate artifacts are kept under: $work_root
 =======================================================================

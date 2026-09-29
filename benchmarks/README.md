@@ -384,6 +384,23 @@ run time to assert the exact pins and reject a prefix-collision version
 list, verified in that fixed order regardless of the row order `uv pip
 freeze` happens to print.
 
+`external_comparator.d`'s parsing helpers (`parseScrubbedPiiAudit` and
+friends) are ordinary `@system` code, not `@safe`, so under LDC's default
+`-release` bounds-check mode ("safeonly") an out-of-bounds array index in
+them is undefined behavior -- a SIGSEGV/exit 139, not a catchable D
+exception (issue #427, found while #420's negative-case coverage was
+teeth-checked with the guard in `parseScrubbedPiiAudit` temporarily
+removed). The build below adds `-boundscheck=on` so any out-of-bounds
+access anywhere in this file -- present or future, not just the one
+guard -- degrades to a clean, catchable `core.exception.ArrayIndexError`
+with a message and stack trace instead. This is a `-O3`/wall-clock
+timing benchmark, and LDC's `-boundscheck=on` cost is a per-array-index
+branch, not a codegen-shape change, so it does not perturb the timed
+measurements; it was chosen over marking individual helpers `@safe`
+because it protects the whole file's parsing surface at once without
+requiring @safe-compatible refactors of code that shells out and reads
+files.
+
 ```sh
 bench_env=$(mktemp -d /tmp/scrubbed-external-comparator-XXXXXX)
 uv venv "$bench_env/venv"
@@ -398,8 +415,9 @@ uv pip install --python "$bench_env/presidio-venv/bin/python" \
 uv pip install --python "$bench_env/presidio-venv/bin/python" \
   "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
 dub build --build=release --compiler=ldc2
-ldc2 -O3 -release -preview=dip1000 -i -Isource -I. benchmarks/external_comparator.d \
-  experiments/html_main_content/token_overlap.d -of="$bench_env/external_comparator"
+ldc2 -O3 -release -boundscheck=on -preview=dip1000 -i -Isource -I. \
+  benchmarks/external_comparator.d experiments/html_main_content/token_overlap.d \
+  -of="$bench_env/external_comparator"
 "$bench_env/external_comparator" --self-test
 "$bench_env/external_comparator" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" \
   "$bench_env/trafilatura-venv/bin/trafilatura" "$bench_env/langdetect-venv/bin/python" \

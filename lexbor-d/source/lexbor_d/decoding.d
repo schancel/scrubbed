@@ -1,5 +1,5 @@
 /// Strict raw-byte to Unicode boundary. No charset guessing or replacement decoding.
-module text.decoding;
+module lexbor_d.decoding;
 
 import std.exception : enforce;
 

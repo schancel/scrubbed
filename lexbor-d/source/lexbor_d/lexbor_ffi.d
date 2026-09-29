@@ -1,6 +1,6 @@
 /// Narrow ABI for the pinned Lexbor v3.0.0 source in third_party/lexbor.
 /// Native pointers are never part of the public HTML-tree result.
-module effects.lexbor_ffi;
+module lexbor_d.lexbor_ffi;
 
 version (OSX) {
     version (AArch64) {} else static assert(0,

@@ -1,17 +1,17 @@
-/// Real fixture proof for `effects.html_tree`, ported faithfully (assertions
+/// Real fixture proof for `lexbor_d.html_tree`, ported faithfully (assertions
 /// and values unchanged) from scrubbed's `experiments/html_parser/production_check.d`
 /// into `dub test`-native `unittest` blocks, so they run as part of this
 /// package's own `dub test` rather than a separately invoked D check.
 ///
 /// Covers: bounding limits (raw/decoded/depth/node/attribute/observation),
-/// fault-injection paths via `effects.html_tree`'s private `Fault` enum (through
+/// fault-injection paths via `lexbor_d.html_tree`'s private `Fault` enum (through
 /// the version-gated `verifyHtmlFaults()` entry point), foreign-namespace
 /// pruning, and native-byte-copy/UTF-8-validation (input mutated after native
 /// destroy must not affect already-copied output).
 module tests.html_tree_checks;
 
-import effects.html_tree;
-import text.decoding : QuarantineReason;
+import lexbor_d.html_tree;
+import lexbor_d.decoding : QuarantineReason;
 import std.conv : to;
 import core.thread : Thread;
 

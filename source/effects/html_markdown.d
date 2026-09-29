@@ -103,7 +103,17 @@ private bool white(char c) pure {
     return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f';
 }
 
-private string clean(string input, bool code = false) pure {
+// Exported (not just module-private) so `html_main_content_markdown.d` can
+// apply this exact same literal-character escaping (backslash-escaping
+// Markdown-significant punctuation, `&`/`<`/`>` entity-escaping, whitespace
+// collapsing) to `selectedStructuredData`'s recovered plain text -- text
+// that never passes through `renderNode`/`renderMarkdownFrom` at all
+// (issue #411's JSON-LD fallback has no tree node to render from). Using
+// this same helper, rather than a second hand-written equivalent, is what
+// keeps escaping identical between the two Markdown-producing paths; see
+// `html_main_content_markdown.d`'s own doc comment for that decision.
+// Behavior is completely unchanged -- only the access modifier moved.
+string clean(string input, bool code = false) pure {
     Writer writer;
     bool pending;
     foreach (dchar c; input) {

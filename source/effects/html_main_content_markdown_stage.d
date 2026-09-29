@@ -14,10 +14,24 @@
 /// pure transform, abstention quarantines the whole document) rather than
 /// `html_markdown_stage.d`'s (which never abstains) because -- like
 /// `html-main-content` -- this stage's success is conditional on
-/// `extractMainContent` finding a selectable candidate at all; on
-/// `MainContentStatus.selected` the content is replaced with Markdown
+/// `extractMainContent` finding a selectable candidate at all; on either
+/// success status (`MainContentStatus.selected` or, per issue #438 below,
+/// `.selectedStructuredData`) the content is replaced with Markdown
 /// (`result.markdown`) instead of `MainContentResult.text`'s flattened
 /// plain text.
+///
+/// Issue #438: `result.status == selectedStructuredData` (issue #411's
+/// JSON-LD structured-data fallback -- content recovered from a page's own
+/// `<script type="application/ld+json">` when the ordinary DOM pass
+/// abstained) used to fall through to the same quarantine branch as a
+/// genuine abstention, with the bare status name `"selectedStructuredData"`
+/// as the reason -- silently dropping real recovered content and leaving a
+/// reason string indistinguishable, by name alone, from an actual
+/// abstention. `effects.html_main_content_markdown.extractMainContentMarkdown`
+/// now populates `.markdown` for this status too (see that module's doc
+/// comment for how, given there is no tree node for this status to render
+/// from), so this stage accepts it as a second success status exactly like
+/// `html_main_content_stage.d` accepts both on the plain-text path.
 module effects.html_main_content_markdown_stage;
 
 import content.pieces : Content, ContentPiece;
@@ -68,7 +82,16 @@ private StageDecision applyHtmlMainContentMarkdown(StageDocument input,
     try result = extractMainContentMarkdown(outcome.tree);
     catch (HtmlMainContentOutputLimit) return StageDecision.quarantine("outputLimit");
     catch (HtmlMarkdownOutputLimit) return StageDecision.quarantine("outputLimit");
-    if (result.status != MainContentStatus.selected)
+    // Issue #438: accept both success statuses, matching
+    // `html_main_content_stage.d`'s own plain-text-path check
+    // (`result.status != selected && result.status != selectedStructuredData`)
+    // exactly. `extractMainContentMarkdown` now populates `.markdown` for
+    // `selectedStructuredData` too (see that module's doc comment), so
+    // quarantining it here would silently drop real recovered content under
+    // a reason indistinguishable from a genuine abstention -- the bug this
+    // issue reports.
+    if (result.status != MainContentStatus.selected &&
+            result.status != MainContentStatus.selectedStructuredData)
         return StageDecision.quarantine(result.status.to!string);
     input.content = new Content([ContentPiece.own(cast(const(ubyte)[]) result.markdown)]);
     // `input.metadata` (written by any prior stage) passes through
@@ -137,4 +160,33 @@ unittest {
         navResult.events[0].kind == EventKind.quarantined &&
         navResult.events[0].reason == "abstainedBelowThreshold",
         "abstention must quarantine with the status name");
+
+    // Issue #438 regression: a page whose only real content is recovered
+    // via issue #411's JSON-LD structured-data fallback (chrome-only DOM
+    // that abstains on its own, plus a schema.org HowTo `<script
+    // type="application/ld+json">` carrying the actual content) must be
+    // emitted with real Markdown, not silently quarantined under the bare
+    // status name `"selectedStructuredData"` the way it was before this fix
+    // (indistinguishable, by that reason string alone, from a genuine
+    // abstention).
+    string structuredParagraph;
+    foreach (_; 0 .. 25) structuredParagraph ~= "Article body sentence. ";
+    string structuredHtml = "<nav>Home About Contact</nav>" ~
+        `<script type="application/ld+json">` ~
+        `{"@type":"HowTo","step":[{"@type":"HowToStep","itemListElement":` ~
+        `{"@type":"HowToDirection","text":"<p>` ~ structuredParagraph ~ `</p>"}}]}` ~
+        `</script>`;
+    auto structuredInput = StageDocument(document,
+        new Content([ContentPiece.own(cast(const(ubyte)[]) structuredHtml)]));
+    auto structuredResult = runCompiledStage([structuredInput], plan.stages[0]);
+    enforce(structuredResult.events.length == 1 &&
+        structuredResult.events[0].kind == EventKind.emitted,
+        "selectedStructuredData must be emitted, not quarantined (issue #438)");
+    string structuredBytes;
+    foreach (piece; structuredResult.events[0].payload.content.pieces())
+        foreach (i; 0 .. piece.size) structuredBytes ~= cast(char)piece.at(i);
+    enforce(structuredBytes.canFind("Article body sentence"),
+        "recovered JSON-LD content must reach the emitted output");
+    enforce(!structuredBytes.canFind("Home") && !structuredBytes.canFind("Contact"),
+        "the abstaining <nav> DOM must not leak into structured-data-recovered output");
 }

@@ -41,6 +41,39 @@ limits and provenance behavior are documented in the HTML parser and
 Markdown guides. Its single selected HTML stage is likewise compiled from
 canonical v3 configuration.
 
+**HTML-consuming stages are not interchangeable with each other's output
+(issue #447).** `html-main-content`, `html-main-content-markdown`,
+`html-markdown`, and `html-tree-json` all parse `--stage` input as HTML,
+but each *replaces* it with something that is no longer HTML: flattened
+plain text, rendered Markdown, or a serialized JSON tree, respectively.
+`html-metadata` and `html-metadata-annotate` also parse their input as
+HTML but leave `.content` untouched (they only write a side output or
+`.metadata`), so they're safe to chain ahead of any of the four stages
+above. Composing two of the four *shape-changing* stages back to back --
+directly, or with only pass-through stages in between -- means the second
+one's HTML parser would receive the first one's plain text/Markdown/JSON
+instead of HTML. Every parser here is lenient (any bytes parse as *some*
+HTML document, typically one big text node), so this used to compile and
+run to completion with no error, silently corrupting the output instead
+(the original report: `html-main-content` piped into `html-markdown`
+backslash-escaped every literal `.`/`-` in the plain-text prose, because
+`html-markdown`'s Markdown-escaping treated it as literal text needing
+escape). `run --stage`/`--validate` now refuses this composition at
+compile time, naming both stages and why:
+
+```
+scrubbed: stage md (html-markdown) requires raw HTML input, but stage extract
+(html-main-content) earlier in this pipeline produces non-HTML output --
+HTML-processing stages cannot be chained directly (or through passthrough
+stages) after each other's own transformed output, only after a
+raw-HTML-producing stage or the original input
+```
+
+Chain one of the four shape-changing stages only after a stage that
+declares itself HTML-preserving (`html-metadata-annotate`, as
+`clean-web-document`'s own fixed chain does) or after the original raw
+HTML input -- never after another shape-changing stage's own output.
+
 ## `clean-web-document`
 
 `clean-web-document` is the first named top-level preset command: a fixed,

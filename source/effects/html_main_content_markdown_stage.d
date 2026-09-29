@@ -44,8 +44,9 @@ import effects.html_tree : HtmlFailureReason, checkedHtmlByteLimit,
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
-    OptionDeclaration, OptionType, SideOutputCapability, StageCardinality,
-    StageConfiguration, StageOptions, StageRegistration, registerStage;
+    HtmlOutputShape, OptionDeclaration, OptionType, SideOutputCapability,
+    StageCardinality, StageConfiguration, StageOptions, StageRegistration,
+    registerStage;
 import std.conv : to;
 import std.exception : enforce;
 
@@ -111,11 +112,17 @@ private ConfiguredStageTransform factory(const ref StageOptions options) {
 }
 
 static this() {
-    registerStage(StageRegistration(StageDeclaration("html-main-content-markdown",
+    // Issue #447: parses `.content` as HTML and replaces it with rendered
+    // Markdown -- a later HTML-consuming stage in the same pipeline must
+    // not receive this stage's output as if it were still HTML.
+    auto registration = StageRegistration(StageDeclaration("html-main-content-markdown",
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
          OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory,
-        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none));
+        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none);
+    registration.requiresRawHtmlInput = true;
+    registration.producesHtmlShape = HtmlOutputShape.nonHtml;
+    registerStage(registration);
 }
 
 unittest {

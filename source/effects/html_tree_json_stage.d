@@ -7,8 +7,9 @@ import effects.html_tree : HtmlFailureReason, checkedHtmlByteLimit,
 import effects.html_tree_export : HtmlTreeOutputLimit, serializeTreeJson;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
-import stages.registry : ConfiguredStageTransform, OptionDeclaration, OptionType,
-    StageConfiguration, StageOptions, StageRegistration, registerStage;
+import stages.registry : ConfiguredStageTransform, HtmlOutputShape,
+    OptionDeclaration, OptionType, StageConfiguration, StageOptions,
+    StageRegistration, registerStage;
 import std.conv : to;
 import std.exception : enforce;
 
@@ -63,10 +64,16 @@ private ConfiguredStageTransform factory(const ref StageOptions options) {
 }
 
 static this() {
-    registerStage(StageRegistration(StageDeclaration("html-tree-json",
+    // Issue #447: parses `.content` as HTML and replaces it with a
+    // serialized JSON tree -- a later HTML-consuming stage in the same
+    // pipeline must not receive this stage's output as if it were still HTML.
+    auto registration = StageRegistration(StageDeclaration("html-tree-json",
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
-         OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory));
+         OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory);
+    registration.requiresRawHtmlInput = true;
+    registration.producesHtmlShape = HtmlOutputShape.nonHtml;
+    registerStage(registration);
 }
 
 unittest {

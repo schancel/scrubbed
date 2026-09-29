@@ -13,6 +13,7 @@ module tests.html_tree_checks;
 import effects.html_tree;
 import text.decoding : QuarantineReason;
 import std.conv : to;
+import core.thread : Thread;
 
 private void expectFailure(const(ubyte)[] raw, HtmlFailureReason reason,
     string charset = null) {
@@ -31,6 +32,45 @@ private bool hasElement(ref const(HtmlTree) tree, string name) {
     foreach (ref const node; tree.nodes)
         if (node.kind == HtmlNodeKind.element && node.name == name) return true;
     return false;
+}
+
+// Independent-tree concurrency smoke test, ported from scrubd's
+// experiments/html_parser/production_check.d's `independentTreeWorker`
+// (8 threads x 100 parseHtml calls, asserting each thread's own results).
+// Here each thread parses its own distinct input carrying a marker unique
+// to that thread's index, so cross-thread contamination -- e.g. a bug in
+// the native Lexbor boundary that let one thread observe bytes belonging
+// to another thread's concurrent document -- would be directly detectable:
+// a worker only flips its own `passed[index]` once every iteration saw
+// exactly its own marker and no other thread's. `index` is a function
+// parameter (not a loop variable captured by a delegate literal) so each
+// worker's closure unambiguously owns its own copy, matching the original
+// file's pattern. Scaled down from 8x100 to 8x40 (320 parses total) to
+// keep `dub test` fast while still exercising real concurrent native
+// document create/parse/destroy cycles; threads are joined (not slept on)
+// so the test is deterministic.
+private Thread independentTreeWorker(size_t index, bool[] passed) {
+    return new Thread({
+        immutable marker = "thread-marker-" ~ index.to!string;
+        const(ubyte)[] input = cast(const(ubyte)[])
+            ("<x-note data-id='" ~ marker ~ "'>" ~ marker ~ "</x-note>");
+        foreach (_; 0 .. 40) {
+            auto result = parseHtml(input);
+            if (!result.isParsed) return;
+            auto tree = result.tree;
+            if (tree.nodes.length != 5) return;
+            if (tree.nodes[3].name != "x-note") return;
+            if (tree.nodes[3].attributes != [HtmlAttribute("data-id", marker)]) return;
+            if (!hasText(tree, marker)) return;
+            // No other worker's marker should ever surface in this thread's
+            // own parsed tree; each thread's input is otherwise disjoint.
+            foreach (other; 0 .. passed.length) {
+                if (other == index) continue;
+                if (hasText(tree, "thread-marker-" ~ other.to!string)) return;
+            }
+        }
+        passed[index] = true;
+    });
 }
 
 unittest {
@@ -116,6 +156,23 @@ unittest {
         "foreign namespace element/subtree was not pruned");
     assert(hasText(foreign.tree, "before") && hasText(foreign.tree, "after"),
         "sibling content around pruned foreign subtree was lost");
+}
+
+unittest {
+    // Several threads call parseHtml concurrently on independent,
+    // per-thread-distinct input and are joined (not slept on) before any
+    // assertion runs, so this is deterministic rather than timing-dependent.
+    // See independentTreeWorker's doc comment above for the full shape.
+    enum workerCount = 8;
+    bool[] passed = new bool[](workerCount);
+    Thread[workerCount] workers;
+    foreach (index; 0 .. workerCount) {
+        workers[index] = independentTreeWorker(index, passed);
+        workers[index].start();
+    }
+    foreach (worker; workers) worker.join();
+    foreach (index, ok; passed)
+        assert(ok, "independent native tree thread " ~ index.to!string ~ " mismatch");
 }
 
 version (htmlTreeProductionCheck) {

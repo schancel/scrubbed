@@ -13,6 +13,7 @@ import job.json : canonicalJobJson;
 import job.presets : cleanWebDocumentTokensV1, expandCleanWebDocumentPresetV1;
 import std.conv : to;
 import std.file : FileException, exists, isDir, isSymlink, thisExePath;
+import std.path : buildNormalizedPath;
 import std.stdio : stderr, stdout, writeln;
 import std.string : indexOf, startsWith;
 
@@ -450,7 +451,20 @@ private bool cleanWebDocumentKnownValueFlag(string flag) {
 /// both the annotated title/author/date/url metadata (previously silently
 /// discarded -- the bug this slice fixes) and the PII audit together.
 private string cleanWebDocumentSidecarPath(string output, bool inputIsDir) {
-    return output ~ (inputIsDir ? "." ~ documentMetadataPublishKeyV1 :
+    // `output` reaches here exactly as the user typed it (a trailing
+    // `/`/`\` is cosmetic and otherwise harmless everywhere else in this
+    // CLI -- `cli.d`'s preflight checks all normalize through
+    // `buildNormalizedPath(absolutePath(path))` before comparing paths).
+    // This is the one place that instead concatenates onto `output`
+    // directly, so a trailing separator silently changes the computed
+    // sidecar path from a *sibling* of `output` (`clean.document-metadata`)
+    // to a path *inside* it (`clean/.document-metadata`), which then
+    // legitimately fails the overlap check downstream. Normalize away the
+    // trailing separator (and any other cosmetic noise, e.g. a leading
+    // `./`) before deriving the sidecar path so the result only ever
+    // depends on the path's real identity, not its literal spelling.
+    const normalized = buildNormalizedPath(output);
+    return normalized ~ (inputIsDir ? "." ~ documentMetadataPublishKeyV1 :
         documentMetadataPublishSuffixV1);
 }
 
@@ -693,7 +707,7 @@ version (unittest) {
     import std.algorithm : canFind;
     import std.file : mkdirRecurse, readText, remove, rmdirRecurse, tempDir,
         write;
-    import std.path : buildPath;
+    import std.path : buildPath, dirSeparator;
     import std.stdio : File;
     import std.typecons : tuple;
     import std.uuid : randomUUID;
@@ -791,4 +805,67 @@ unittest {
     // bare/unrecognized-verb fallback changed.
     auto missingArgs = runCommandsCapturingStdout(["scrubbed", "run"]);
     assert(missingArgs[0] == 2);
+}
+
+// Issue #445: directory-mode `clean-web-document` used to hard-fail with
+// exit 2 ("sidecar root overlaps input or primary output") whenever
+// `--output` ended in a trailing separator -- exactly the shape of the
+// directory-mode Quick Start example in README.md/docs/cli-commands.md
+// (`--input pages/ --output clean/`). `cleanWebDocumentSidecarPath` derived
+// the sidecar path by naive string concatenation onto `--output`, so
+// `"clean/"` produced `"clean/.document-metadata"` (nested *inside* the
+// output directory, a genuine overlap) instead of `"clean.document-metadata"`
+// (a sibling of it, as with `"clean"`). Directory-mode `clean-web-document`
+// must succeed identically regardless of a trailing separator on `--input`
+// and/or `--output`, and the sidecar must always land as a sibling of the
+// (separator-stripped) output directory, never nested inside it.
+unittest {
+    string articleHtml() {
+        string sentence = "This is a real article sentence with enough " ~
+            "words in it to clear html-main-content's extraction threshold. ";
+        string body;
+        foreach (_; 0 .. 15) body ~= sentence;
+        return `<html><head><title>Trailing Slash Regression</title></head>` ~
+            `<body><nav>Home About Contact</nav><article><h1>Trailing Slash ` ~
+            `Regression</h1><p>` ~ body ~ `</p></article></body></html>`;
+    }
+
+    void runCase(string label, bool slashInput, bool slashOutput) {
+        auto root = buildPath(tempDir, "scrubbed-cwd-445-" ~ label ~ "-" ~
+            randomUUID.toString);
+        scope(exit) if (exists(root)) rmdirRecurse(root);
+
+        auto inputDir = buildPath(root, "pages");
+        mkdirRecurse(inputDir);
+        write(buildPath(inputDir, "article.html"), articleHtml());
+
+        auto outputDir = buildPath(root, "clean");
+        auto inputArg = slashInput ? inputDir ~ dirSeparator : inputDir;
+        auto outputArg = slashOutput ? outputDir ~ dirSeparator : outputDir;
+
+        auto exitCode = runCommands(["scrubbed", "clean-web-document",
+            "--input", inputArg, "--output", outputArg, "--threads", "1"]);
+        assert(exitCode == 0, label ~
+            ": clean-web-document must succeed regardless of trailing " ~
+            "separators on --input/--output (was exit " ~ exitCode.to!string ~
+            ")");
+
+        auto producedFile = buildPath(outputDir, "article.html");
+        assert(exists(producedFile), label ~
+            ": output directory must actually contain the processed document");
+
+        auto sidecarRoot = outputDir ~ "." ~ documentMetadataPublishKeyV1;
+        assert(exists(sidecarRoot) && isDir(sidecarRoot), label ~
+            ": document-metadata sidecar must exist as a sibling of the " ~
+            "output directory (" ~ sidecarRoot ~ ")");
+        assert(!exists(buildPath(outputDir, "." ~ documentMetadataPublishKeyV1)),
+            label ~ ": document-metadata sidecar must never be nested " ~
+            "inside the output directory");
+    }
+
+    // The ticket's exact repro shape: only --output trailing-slashed.
+    runCase("output-slash-only", false, true);
+    // The ticket's "ideally also --input" ask: both trailing-slashed,
+    // matching the literal README/docs Quick Start invocation verbatim.
+    runCase("both-slash", true, true);
 }

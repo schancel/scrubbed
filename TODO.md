@@ -986,6 +986,12 @@ is useful, but it is not sufficient on its own.
 
 ## Phase 6 — trafilatura-equivalent extraction
 
+**Owner decision (2026-09-29): promoted into the 1.0.0 milestone** (issue
+#471) -- no longer gated behind a later release. The correctness-corpus,
+allocation, throughput, and Phase 5A prerequisites below are still real
+prerequisites for doing this work well; only its release-milestone
+placement changed, not the technical sequencing.
+
 Begin only after the correctness corpus, allocation measurements, throughput
 benchmarks, and Phase 5A bounded-resource/resume gates are checked in and
 repeatable. This is a larger target than Phase 4's mechanical HTML-to-Markdown

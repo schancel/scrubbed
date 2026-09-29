@@ -5,7 +5,10 @@ Input is a JSON list of objects with number, title, body, and optional numeric
 value, cost, certainty, unblocking, and files fields. This script only reports;
 it does not edit issues, assign work, or authorize implementation.
 
-Score is (value × certainty × (1 + unblocking)) / cost on 1–5 axes.
+Score is (value × certainty × (1 + unblocking)) / cost. value/cost/certainty
+are 1-5; unblocking is 0-5 (0 is a real, common value: "this genuinely
+unblocks nothing else"). value/cost/certainty stay floored at 1 because 0 is
+not a meaningful score on those axes and cost=0 would divide by zero.
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ import sys
 from pathlib import Path
 
 AXES = ("value", "cost", "certainty", "unblocking")
+AXIS_RANGES = {"value": (1, 5), "cost": (1, 5), "certainty": (1, 5), "unblocking": (0, 5)}
 REQUIRED_MARKERS = ("acceptance", "owner")
 
 
@@ -27,9 +31,39 @@ def load(path: str | None) -> list[dict]:
     return payload
 
 
+def _axis_valid(axis: str, value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return False
+    low, high = AXIS_RANGES[axis]
+    return low <= value <= high
+
+
+def axis_errors(issue: dict) -> list[str]:
+    """Diagnostics for axes that are *present* but out of that axis's valid range.
+
+    An axis that is simply absent (not yet groomed) is not an error -- it is
+    the normal, silent NEEDS_SPECIFICATION path. Only a present-but-invalid
+    value (classically: an axis typed as 0 where 1 is the floor) is reported,
+    since that is the case that looks groomed but silently never scores.
+    """
+    errors = []
+    number = issue.get("number", "?")
+    for axis in AXES:
+        value = issue.get(axis)
+        if value is None:
+            continue
+        if not _axis_valid(axis, value):
+            low, high = AXIS_RANGES[axis]
+            errors.append(
+                f"issue #{number}: axis '{axis}' = {value!r} is out of range "
+                f"({low}-{high}); ticket will not score until corrected"
+            )
+    return errors
+
+
 def score(issue: dict) -> float | None:
     values = [issue.get(axis) for axis in AXES]
-    if not all(isinstance(value, int) and 1 <= value <= 5 for value in values):
+    if not all(_axis_valid(axis, value) for axis, value in zip(AXES, values)):
         return None
     value, cost, certainty, unblocking = values
     return value * certainty * (1 + unblocking) / cost
@@ -47,11 +81,13 @@ def main() -> int:
 
     rows = []
     file_owners: dict[str, list[str]] = {}
+    diagnostics: list[str] = []
     for issue in issues:
         body = str(issue.get("body") or "").lower()
         missing = [marker for marker in REQUIRED_MARKERS if marker not in body]
         current_score = score(issue)
         state = "READY" if not missing and current_score is not None else "NEEDS_SPECIFICATION"
+        diagnostics.extend(axis_errors(issue))
         for file in issue.get("files", []):
             if isinstance(file, str) and file.strip():
                 file_owners.setdefault(file.strip(), []).append(str(issue.get("number", "?")))
@@ -69,6 +105,10 @@ def main() -> int:
         print("\n## Declared scope conflicts")
         for file, numbers in conflicts.items():
             print(f"- {file}: " + ", ".join(f"#{number}" for number in numbers))
+    if diagnostics:
+        print("\n## Out-of-range axes", file=sys.stderr)
+        for message in diagnostics:
+            print(f"ticket_triage: {message}", file=sys.stderr)
     return 0
 
 

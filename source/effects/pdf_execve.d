@@ -376,10 +376,61 @@ unittest {
     assert(outcome.failure.reason == PdfExtractFailureReason.timedOut);
     assert(elapsed < 5.seconds, "timeout kill did not bound wall-clock time");
 
-    enforce(exists(heartbeat), "grandchild never started");
-    auto afterKill = timeLastModified(heartbeat);
-    Thread.sleep(400.msecs);
-    assert(timeLastModified(heartbeat) == afterKill,
+    // The grandchild may take a moment to actually start under load (its
+    // parent shell only forks it after the fake tool's own exec, all within
+    // the 800ms wall-clock budget above), so give existence a short bounded
+    // poll instead of a single immediate check.
+    {
+        const existedBy = MonoTime.currTime;
+        while (!exists(heartbeat)) {
+            enforce(MonoTime.currTime - existedBy < 1.seconds,
+                "grandchild never started");
+            Thread.sleep(20.msecs);
+        }
+    }
+
+    // `kill(-child, SIGKILL)` above enqueues the kill for every process in
+    // the group atomically, but delivery is not instantaneous: a
+    // CPU-starved grandchild only actually dies once the kernel schedules
+    // it, and can complete an already-in-flight loop iteration (fork+exec
+    // "date"+write) in the meantime. A single fixed-delay snapshot
+    // therefore risks observing a heartbeat write that lands shortly after
+    // the kill but before the grandchild is actually scheduled to die --
+    // this is a real, reproducible-under-load timing race (see issue #389:
+    // confirmed to reproduce at roughly 1 in 25 runs of this exact test
+    // under 4x CPU oversubscription -- 40 busy-loop processes pinned
+    // against a 10-core machine -- versus 0 failures in 20 unloaded runs;
+    // GitHub Actions' shared "ubuntu-24.04" runners are exactly this kind
+    // of contended, noisy-neighbor environment). It is not a bug in the
+    // process-group kill itself: `kill(-child, SIGKILL)` cannot be
+    // un-sent, blocked, or "sent harder" -- the only fix available at this
+    // layer is to distinguish "reaped, but the kernel took a moment to
+    // schedule it" from "never reaped" by polling for quiescence instead
+    // of sampling once. A genuine reap failure keeps the heartbeat
+    // updating indefinitely and will still fail this assert once the
+    // ceiling below is reached.
+    enum quietWindow = 400.msecs; // same "stopped updating" bar as before
+    enum ceiling = 5.seconds;     // matches this test's own kill-detection
+                                   // bound above; ~12x the quiet window as
+                                   // a safety factor for CI scheduling
+                                   // variance.
+    const pollStarted = MonoTime.currTime;
+    auto lastMtime = timeLastModified(heartbeat);
+    auto lastChangeAt = MonoTime.currTime;
+    bool reaped;
+    while (MonoTime.currTime - pollStarted < ceiling) {
+        if (MonoTime.currTime - lastChangeAt >= quietWindow) {
+            reaped = true;
+            break;
+        }
+        Thread.sleep(50.msecs);
+        auto mtime = timeLastModified(heartbeat);
+        if (mtime != lastMtime) {
+            lastMtime = mtime;
+            lastChangeAt = MonoTime.currTime;
+        }
+    }
+    assert(reaped,
         "grandchild survived the process-group kill (orphaned, not reaped)");
 }
 

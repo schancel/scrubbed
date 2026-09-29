@@ -7,8 +7,9 @@ import effects.html_tree : HtmlFailureReason, checkedHtmlByteLimit,
 import effects.html_markdown : HtmlMarkdownOutputLimit, renderMarkdown;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
-import stages.registry : ConfiguredStageTransform, OptionDeclaration, OptionType,
-    StageConfiguration, StageOptions, StageRegistration, registerStage;
+import stages.registry : ConfiguredStageTransform, HtmlOutputShape,
+    OptionDeclaration, OptionType, StageConfiguration, StageOptions,
+    StageRegistration, registerStage;
 import std.conv : to;
 import std.exception : enforce;
 
@@ -63,10 +64,16 @@ private ConfiguredStageTransform factory(const ref StageOptions options) {
 }
 
 static this() {
-    registerStage(StageRegistration(StageDeclaration("html-markdown",
+    // Issue #447: parses `.content` as HTML and replaces it with rendered
+    // Markdown -- a later HTML-consuming stage in the same pipeline must
+    // not receive this stage's output as if it were still HTML.
+    auto registration = StageRegistration(StageDeclaration("html-markdown",
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
-         OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory));
+         OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory);
+    registration.requiresRawHtmlInput = true;
+    registration.producesHtmlShape = HtmlOutputShape.nonHtml;
+    registerStage(registration);
 }
 
 unittest {
@@ -92,4 +99,56 @@ unittest {
     foreach (piece; result.events[0].payload.content.pieces())
         foreach (i; 0 .. piece.size) bytes ~= cast(char)piece.at(i);
     enforce(bytes == "hi\n");
+}
+
+// Issue #447 regression: `html-main-content` flattens HTML to plain text,
+// so a pipeline that hands that output straight to `html-markdown` (which
+// then parses it as if it were still HTML) must be refused at compile
+// time, naming both stages, instead of silently producing the
+// backslash-escaped garbage the original report observed (every literal
+// `.`/`-` in the plain-text prose treated as Markdown syntax to escape).
+unittest {
+    import composition.compiler : compileJob;
+    import effects.html_main_content_stage; // registers "html-main-content"
+    import job.json : parseJobJson;
+    import std.algorithm.searching : canFind;
+    import std.exception : collectException;
+
+    auto badChain = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract","implementation":"html-main-content","options":{},"filters":[]},` ~
+        `{"id":"md","implementation":"html-markdown","options":{},"filters":[]}]}`);
+    auto failure = collectException(compileJob(badChain));
+    assert(failure !is null,
+        "html-main-content -> html-markdown must be rejected at compile time");
+    assert(failure.msg.canFind("md") && failure.msg.canFind("html-markdown"),
+        "rejection must name the HTML-consuming stage");
+    assert(failure.msg.canFind("extract") && failure.msg.canFind("html-main-content"),
+        "rejection must name the non-HTML-producing stage");
+
+    // The same shape must be tracked through an intervening passthrough
+    // stage (html-metadata-annotate reads .content but never replaces it,
+    // so it must not "launder" html-main-content's non-HTML output back
+    // into looking safe for html-markdown).
+    auto badChainThroughPassthrough = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract","implementation":"html-main-content","options":{},"filters":[]},` ~
+        `{"id":"meta","implementation":"html-metadata-annotate","options":{},"filters":[]},` ~
+        `{"id":"md","implementation":"html-markdown","options":{},"filters":[]}]}`);
+    assert(collectException(compileJob(badChainThroughPassthrough)) !is null,
+        "a passthrough stage between the two must not hide the shape mismatch");
+
+    // The inverse, real-world-supported order (metadata annotation, an
+    // HTML-preserving stage, ahead of the HTML-consuming selector) must
+    // keep compiling -- this is exactly `clean-web-document`'s own chain.
+    auto goodChain = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"meta","implementation":"html-metadata-annotate","options":{},"filters":[]},` ~
+        `{"id":"extract","implementation":"html-main-content","options":{},"filters":[]}]}`);
+    assert(collectException(compileJob(goodChain)) is null,
+        "an HTML-preserving stage ahead of an HTML-consuming stage must still compile");
+
+    // html-main-content as the very first stage: its "prior" shape is
+    // whatever the caller's real input is, never second-guessed here.
+    auto firstStage = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract","implementation":"html-main-content","options":{},"filters":[]}]}`);
+    assert(collectException(compileJob(firstStage)) is null,
+        "the first stage's input shape is never rejected");
 }

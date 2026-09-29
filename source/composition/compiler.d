@@ -7,8 +7,8 @@ import pipeline : FilterOption, FilterRegistry, Pipeline, TypedFilterOptions,
     TypedFilterSpec, availableFilterRegistry;
 import stages.contract : ResourceDeclaration, StageDeclaration;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
-    SideOutputCapability, StageCardinality, StageOption, StageOptions,
-    StageRegistry, availableStages;
+    HtmlOutputShape, SideOutputCapability, StageCardinality, StageOption,
+    StageOptions, StageRegistry, availableStages;
 import std.exception : enforce;
 
 struct CompiledStage {
@@ -165,6 +165,42 @@ CompiledJob compileJob(const ref JobSpec spec,
                 stage.filters.length == 0,
                 "side-output stage cannot transform content after emission: " ~
                     stage.id);
+        }
+    }
+
+    // Issue #447: an HTML-consuming stage (`requiresRawHtmlInput`) refuses
+    // to follow, anywhere earlier in this same pipeline, a stage that
+    // declares its own `.content` output as `nonHtml` (flattened text,
+    // Markdown, or a JSON tree -- `html-main-content`, `html-main-content-
+    // markdown`, `html-markdown`, `html-tree-json` all reshape HTML into
+    // one of these). `shape` starts `unknown` (the original input's shape
+    // is whatever the caller supplied and is never second-guessed here) and
+    // is carried forward unchanged through every stage that doesn't declare
+    // a shape of its own -- most stages don't touch `.content` at all, or
+    // don't change its HTML-ness, so leaving `shape` alone rather than
+    // resetting it to `unknown` also catches an HTML-consuming stage
+    // separated from its non-HTML producer by passthrough stages, not just
+    // an immediately adjacent pair.
+    {
+        auto shape = HtmlOutputShape.unknown;
+        string shapeOriginId;
+        string shapeOriginImplementation;
+        foreach (stage; spec.stages) {
+            auto registration = stageRegistry.find(stage.implementation);
+            enforce(registration !is null, "unknown stage: " ~ stage.implementation);
+            if (registration.requiresRawHtmlInput && shape == HtmlOutputShape.nonHtml)
+                enforce(false, "stage " ~ stage.id ~ " (" ~ stage.implementation ~
+                    ") requires raw HTML input, but stage " ~ shapeOriginId ~ " (" ~
+                    shapeOriginImplementation ~ ") earlier in this pipeline produces " ~
+                    "non-HTML output -- HTML-processing stages cannot be chained " ~
+                    "directly (or through passthrough stages) after each other's " ~
+                    "own transformed output, only after a raw-HTML-producing stage " ~
+                    "or the original input");
+            if (registration.producesHtmlShape != HtmlOutputShape.unknown) {
+                shape = registration.producesHtmlShape;
+                shapeOriginId = stage.id;
+                shapeOriginImplementation = stage.implementation;
+            }
         }
     }
 

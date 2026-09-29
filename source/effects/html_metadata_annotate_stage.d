@@ -14,8 +14,9 @@ import effects.html_tree : HtmlFailureReason, checkedHtmlByteLimit,
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
-    OptionDeclaration, OptionType, SideOutputCapability, StageCardinality,
-    StageConfiguration, StageOptions, StageRegistration, registerStage;
+    HtmlOutputShape, OptionDeclaration, OptionType, SideOutputCapability,
+    StageCardinality, StageConfiguration, StageOptions, StageRegistration,
+    registerStage;
 import std.conv : to;
 import std.exception : enforce;
 
@@ -85,11 +86,20 @@ private ConfiguredStageTransform factory(const ref StageOptions options) {
 }
 
 static this() {
-    registerStage(StageRegistration(StageDeclaration(htmlMetadataAnnotateStageKeyV1,
+    // Issue #447: parses `.content` as HTML but returns it completely
+    // unmodified (the extracted fields go into `.metadata` instead), so
+    // this stage's own output is still `rawHtml`-shaped -- a later
+    // HTML-consuming stage may safely follow it, matching the sealed
+    // `clean-web-document` chain's own `html-metadata-annotate` ->
+    // `html-main-content` ordering.
+    auto registration = StageRegistration(StageDeclaration(htmlMetadataAnnotateStageKeyV1,
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
          OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory,
-        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none));
+        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none);
+    registration.requiresRawHtmlInput = true;
+    registration.producesHtmlShape = HtmlOutputShape.rawHtml;
+    registerStage(registration);
 }
 
 unittest {

@@ -12,6 +12,22 @@ enum FilterPlacement { none, before, after }
 enum StageCardinality { maySplit, oneToOne }
 enum SideOutputCapability { none, terminal }
 
+/// Issue #447: the coarse HTML "shape" a stage's own `.content` output
+/// carries, checked at compile time so an HTML-consuming stage can refuse a
+/// pipeline that hands it another stage's non-HTML output. `unknown` (the
+/// default -- every registration not naming this field gets it for free) is
+/// deliberately permissive, not "definitely still HTML": it means this
+/// stage either doesn't touch `.content` at all (an annotate-only stage) or
+/// its effect on HTML-shape isn't tracked, so pipeline compilation carries
+/// the shape already established by an earlier stage straight through it
+/// rather than resetting or rejecting on it. Only stages that actually
+/// parse-then-replace `.content` need to name `rawHtml` (still HTML
+/// afterward, e.g. `html-metadata`/`html-metadata-annotate`, which parse
+/// but pass `.content` through untouched) or `nonHtml` (flattened text,
+/// Markdown, or a JSON tree -- `html-main-content`, `html-main-content-
+/// markdown`, `html-markdown`, `html-tree-json`).
+enum HtmlOutputShape { unknown, rawHtml, nonHtml }
+
 /// Values have one active type; callers cannot reinterpret a parsed option.
 struct StageOption {
     private OptionType optionType;
@@ -92,6 +108,10 @@ struct OptionDeclaration {
 }
 
 /// `before` and `after` constrain relative order only when both stages occur.
+/// `requiresRawHtmlInput`/`producesHtmlShape` are the issue #447 pair: a
+/// stage that parses `.content` as HTML sets `requiresRawHtmlInput = true`,
+/// and a stage whose `.content` output has a known post-parse shape sets
+/// `producesHtmlShape` accordingly (see `HtmlOutputShape`'s own doc comment).
 struct StageRegistration {
     StageDeclaration declaration;
     OptionDeclaration[] options;
@@ -101,6 +121,8 @@ struct StageRegistration {
     FilterPlacement filterPlacement;
     StageCardinality cardinality;
     SideOutputCapability sideOutputCapability;
+    bool requiresRawHtmlInput;
+    HtmlOutputShape producesHtmlShape;
 }
 
 private void validKey(string key) {
@@ -130,6 +152,10 @@ struct StageRegistry {
         enforce(registration.sideOutputCapability == SideOutputCapability.none ||
             registration.sideOutputCapability == SideOutputCapability.terminal,
             "invalid side-output capability");
+        enforce(registration.producesHtmlShape == HtmlOutputShape.unknown ||
+            registration.producesHtmlShape == HtmlOutputShape.rawHtml ||
+            registration.producesHtmlShape == HtmlOutputShape.nonHtml,
+            "invalid HTML output shape");
         enforce((declaration.key in registrations) is null,
             "duplicate stage: " ~ declaration.key);
         foreach (i, option; registration.options) {
@@ -260,6 +286,13 @@ unittest {
     item.before = null;
     item.factory = null;
     assertThrown(registry.add(item));
+    item.factory = &registryTestFactory;
+    item.declaration.key = "bad-shape";
+    item.producesHtmlShape = cast(HtmlOutputShape) 99;
+    assertThrown(registry.add(item));
+    item.producesHtmlShape = HtmlOutputShape.nonHtml;
+    registry.add(item);
+    assert(registry.find("bad-shape").producesHtmlShape == HtmlOutputShape.nonHtml);
     assert(StageOption.integer(4).asInteger() == 4);
     assert(StageOption.boolean(true).asBoolean());
     assertThrown(StageOption.text("x").asInteger());

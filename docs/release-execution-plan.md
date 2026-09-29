@@ -184,6 +184,34 @@ Gate: a clean machine can install, run every advertised example, verify
 checksums/notices, and reproduce the documented supported-task results without
 D, DUB, Python, or an implicit model download.
 
+### R6 — trafilatura-equivalent extraction (promoted into scope 2026-09-29)
+
+Parent: [#471](https://github.com/schancel/scrubbed/issues/471).
+
+Owner decision, 2026-09-29: TODO.md's Phase 6 (full trafilatura-equivalent
+HTML extraction -- comment extraction, expanded structured metadata,
+structural-fidelity preservation for tables/lists/quotes/code/links/images/
+formatting, configurable precision/recall modes, segment/near-duplicate
+dedup, and CSV/XML/XML-TEI output formats) is now part of the 1.0.0 release
+critical path, not a later release. This reverses this document's prior
+"Deferred and integrated" framing for full trafilatura parity, which
+predates that decision. Technical sequencing is unchanged -- TODO.md's
+Phase 5A (terabyte-corpus operational readiness) prerequisites still gate
+Phase 6's own start.
+
+#471 itself stays open as the tracking/proposal issue; the real dispatchable
+work is its 7 slices, #475-#481 (comment extraction, metadata expansion,
+inline and block structural fidelity, precision/recall modes, near-dup
+pruning, additional output formats), each independently scored with its
+own pinned-trafilatura acceptance criteria and a real file-overlap
+dependency graph between them.
+
+Gate: a real, pinned parity benchmark against trafilatura's own published
+evaluation corpus (not just the existing #411-class 20-page benchmark),
+covering main-text precision/recall and every structural-fidelity
+dimension, with no regression to any already-verified 1.0.0-critical-path
+number.
+
 ## Deferred and integrated, not reimplemented
 
 These do not block the first public package release:

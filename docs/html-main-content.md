@@ -121,6 +121,18 @@ idiom, are explicit rather than a best-effort guess:
 - `abstainedTie` — the top score is shared by more than one candidate (for
   example, two structurally and textually identical `<article>` blocks).
 
+A fourth status, `selectedStructuredData` (issue #411), is a second success
+path, not a fourth abstention: once the DOM candidate pass above has
+abstained for any of the three reasons, a bounded JSON-LD structured-data
+fallback (`structuredDataFallbackText`) gets one more chance to recover
+real content from a `<script type="application/ld+json">` schema.org block
+the DOM pass structurally cannot see (content delivered only as JSON, not
+DOM text/elements — see "`www-homify-de.html`" below for the real page this
+was built from). It only overrides an abstention when the recovered text
+clears the same `minSelectableTextBytes` floor an ordinary candidate must
+clear; `.node` stays `size_t.max` (there is no tree node this text was
+selected from) and `.score` stays `0.0`.
+
 `MainContentResult` reuses `html_metadata.d`'s `MetadataField`-style typed
 decision shape: a status, the winning node index and score when selected, and
 a bounded top-16 candidate list (`maxMainContentCandidates`) for audit —
@@ -238,14 +250,19 @@ own resolved bytes — `adbar/trafilatura`'s pinned `tests/cache`/`tests/eval`
 copies of these pages, not a fresh fetch. `examples/pipeline-benchmark/corpus/`
 is a separate, checked-in acquisition of the identical 20-URL list that did a
 fresh **live** fetch on the same day, 2026-09-27 — see its `manifest.json`.
-Live bytes for a comments-enabled blog and a JS-rendered SPA differ from an
-older vendored test-fixture snapshot, which is why that checked-in corpus
-currently reads 18/20, not 19/20: `scienceblogs-de.html`'s live copy grew
-past the node-count/observation-byte caps that `fetch_held_out.sh`'s cached
-copy never approached, in addition to the same `homify.de` abstention this
-note already documented. See "`examples/pipeline-benchmark` corpus: current
-18/20 status" below for the current, checked-in-corpus evidence that
-`site/index.html`'s stat card actually cites.)*
+Live bytes for a comments-enabled blog and a JS-rendered-*looking* SPA
+differ from an older vendored test-fixture snapshot, which is why that
+checked-in corpus previously read 18/20, not 19/20: `scienceblogs-de.html`'s
+live copy grew past the node-count/observation-byte caps that
+`fetch_held_out.sh`'s cached copy never approached, in addition to the same
+`homify.de` abstention this note already documented. Issue #411 has since
+fixed both real root causes (a stale, unrevisited resource cap; real
+content reachable only via JSON-LD, not DOM text) on the checked-in corpus,
+which now reads 20/20 — this held-out tier's own 19/20 figure is a
+separate, differently-acquired, dated snapshot this ticket does not
+re-score. See "`examples/pipeline-benchmark` corpus: current 20/20 status"
+below for the current, checked-in-corpus evidence that `site/index.html`'s
+stat card actually cites.)*
 Across the 19 scored pages: mean precision ≈0.051 (expected, per the
 gold-set-size caveat above), mean recall ≈0.79, and `withoutLeakTotal` was
 2 — both leaks on the same page, `for-me-online.de-pubertät.html` (2 of its 3
@@ -344,25 +361,46 @@ to score the real `scrubbed` CLI's `html-main-content` v3 stage end to end
 against the real pinned trafilatura CLI — see that document for the full
 CLI-invocation and report-shape detail.
 
-## `examples/pipeline-benchmark` corpus: current 18/20 status (issue #411)
+## `examples/pipeline-benchmark` corpus: current 20/20 status (issue #411)
 
 The site's extraction stat card cites `examples/pipeline-benchmark/`'s own
-20-page checked-in corpus (not the held-out tier above), currently 18/20
+20-page checked-in corpus (not the held-out tier above), now **20/20**
 selected. Owner request (2026-09-29, explicitly "later priority, not
 urgent"): investigate the 2 non-selected pages with real evidence rather
 than leave the gap as a vague aspiration.
 
-**Correction (2026-09-29): the "working as intended" conclusion below was
-wrong.** The owner directly challenged it and both claims failed real
-verification against the actual pinned `trafilatura` tool — it extracted
-real article content from both pages without issue (4,827 bytes from
-`www-homify-de.html`; a clean pass over `scienceblogs-de.html`'s full
-397,702-byte file in 0.46s). Issue #411 is reopened with the corrected
-scope. The investigation writeup below is kept for its real, still-true
-evidence (candidate scores, node counts) but its conclusion is superseded
-— treat "working as intended" as disproven, not settled.
+**Correction (2026-09-29): the original "working as intended" conclusion for
+both pages was wrong.** The owner directly challenged it and both claims
+failed real verification against the actual pinned `trafilatura==2.2.0`
+tool — it extracted real article content from both pages without issue
+(4,826 bytes from `www-homify-de.html`; a clean pass over
+`scienceblogs-de.html`'s full 397,702-byte file in 0.46s, both reproduced
+directly against this repo's own corpus copies for issue #411's real fix,
+not just cited from the prior claim). The root cause for each page turned
+out to be real and fixable, not a corpus outlier or a JS-rendering gap:
 
-**This 18/20 count is no longer a hand-maintained citation** (issue #422,
+- **`www-homify-de.html`**: the page's real content is delivered entirely
+  as JSON — a `<script type="application/ld+json">` schema.org `HowTo`'s
+  `step[].itemListElement.text` — never as DOM text/elements at all, which
+  is exactly how real trafilatura recovers it too (its own `baseline.py`
+  walks the identical JSON-LD property as one of its extraction
+  strategies). This is not a scoring-weight/threshold miscalibration in the
+  DOM candidate pass (nothing wrong was found there); it is a second
+  content *source* the DOM-only candidate pass structurally cannot see.
+  Fixed by adding a bounded JSON-LD structured-data fallback to
+  `html_main_content.d`, invoked only once the ordinary DOM pass has
+  already abstained — see "`www-homify-de.html`" below.
+- **`scienceblogs-de.html`**: `html_tree.d`'s `maxNodes`/`maxObservationBytes`
+  caps were introduced alongside the original 64 KiB raw-byte admission
+  bound and never revisited when a later, separate change raised that bound
+  to 1 MiB default / 8 MiB configurable — a real, comment-heavy blog page
+  comfortably inside the *documented* 1 MiB default bound could still be
+  rejected by node/observation caps still sized for a bound 16x smaller.
+  Fixed by raising both caps, sized against this corpus's own real
+  per-page node/observed-byte density, not just this one page — see
+  "`scienceblogs-de.html`" below.
+
+**This 20/20 count is no longer a hand-maintained citation** (issue #422,
 opened after #411/#412 each independently found a citation like this one had
 silently gone stale between owner questions). The source of truth for the
 corpus's current per-page selected/quarantined distribution, including each
@@ -375,7 +413,7 @@ direction. It is wired into CI via
 [`.github/workflows/pipeline-benchmark-corpus-distribution.yml`](../.github/workflows/pipeline-benchmark-corpus-distribution.yml),
 triggered on changes to the check itself, the corpus, or anything in
 `source/` that could affect extraction. If that check's expected table and
-this section's "18/20" figure ever disagree, the check (and a fresh
+this section's "20/20" figure ever disagree, the check (and a fresh
 investigation of whatever page moved) is authoritative, not this prose; the
 per-page root-cause writeups below remain useful evidence for the two pages
 already investigated, but they describe *why* each page's outcome is what it
@@ -400,42 +438,90 @@ ldc2 -O -release -of=/tmp/corpus-distribution-check \
 /tmp/corpus-distribution-check ./scrubbed examples/pipeline-benchmark/corpus
 ```
 
-### `scienceblogs-de.html` — `nodeLimit`, a genuine corpus outlier
+### `scienceblogs-de.html` — was `nodeLimit`, fixed by raising stale caps
 
-`effects.html_tree.d`'s bounded-resource caps (`maxNodes = 8192`,
-`maxObservationBytes = 1 MiB`, both out of this ticket's allowed scope —
-not in issue #411's relevant-files list) protect the restricted HTML
-boundary against unbounded native-tree memory/CPU. A diagnostic build with
-both caps raised (never shipped; scratch-only) shows this page's full
-parsed tree needs **10,798 nodes** (4,432 element + 6,366 text) and
-**1,159,366 observed bytes** — 31.8% over the node cap and 10.6% over the
-byte cap. `nodeLimit` fires first because node-count is checked per-node
-before that node's bytes are charged.
+`effects.html_tree.d`'s bounded-resource caps (`maxNodes`,
+`maxObservationBytes`) protect the restricted HTML boundary against
+unbounded native-tree memory/CPU. A diagnostic build with both caps raised
+(scratch-only, not shipped) showed this page's full parsed tree needs
+**10,798 nodes** and **1,159,366 observed bytes** (a raw-to-observed
+amplification of ~2.92x) for its real 397,702-byte file — both real
+numbers, confirmed directly, not estimated. `nodeLimit` fired first because
+node-count is checked per-node before that node's bytes are charged.
 
-That is not a borderline case: measuring all 20 corpus pages against the
-same diagnostic, the next-largest page (`utopia-de.html`) needs only 2,791
-nodes / 398,658 bytes — under a third of the node cap and well under the
-byte cap. Every other page in the corpus sits comfortably inside both caps
-with real headroom; `scienceblogs-de.html` alone is ~3.9x the next-largest
-page's node count. It is a real, live-fetched blog page (comments, a large
-archive/language `<select>`, heavy `<br>`-based legacy formatting), not
-adversarial input, but it is a genuine outlier for this corpus, not a
-representative "typical large article" the cap is unfairly excluding.
-Raising both caps by the margin needed to admit this one page would more
-than double the resource budget the boundary grants to every document in
-production to accommodate a single benchmark outlier. Accepted as an
-intentional, disclosed non-goal: the cap is correctly protecting against a
-genuinely oversized document, and `html_tree.d`'s caps stay unmodified,
-consistent with this module's existing frozen-scope precedent (see
-Non-goals below).
+The original investigation (superseded — see the correction above) treated
+this as a genuine, un-fixable corpus outlier the cap correctly rejects,
+without testing that claim against a real external tool. Directly running
+pinned `trafilatura==2.2.0` against this repo's own copy of the file
+disproves it: `trafilatura.extract()` returns 1,722 bytes of real,
+on-topic German-language article text in 0.46s, no special handling, no
+error — a page a real, widely-used extractor finds completely
+unremarkable. The "10,798 nodes" figure the original writeup cited was
+scrubbed's own internal parsed-tree representation size (a D `HtmlNode`
+struct array plus each node's own string/attribute allocations), not
+anything inherent to the page itself — an internal representation-overhead
+artifact being mistaken for an external limitation.
 
-### `www-homify-de.html` — `abstainedBelowThreshold`, no real content to find
+Both caps were introduced (`ebae4ed`) alongside the original 64 KiB
+`maxRawBytes` raw-byte admission bound and never revisited when a later,
+separate change (`68e1b1c`) raised extraction's own effective raw-byte
+admission to 1 MiB by default and up to 8 MiB configurable via
+`--max-html-bytes` — that change's own TODO.md entry explicitly noted
+"other tree/output limits... remain unchanged", a known, not hidden, gap
+that was simply never closed. `scienceblogs-de.html` (397,702 raw bytes) is
+comfortably inside the *documented* 1 MiB default admission bound, yet its
+real node count exceeded a node cap still sized for a bound 16x smaller.
+
+Measuring all 20 corpus pages the same way (temporarily raising both caps
+and running every page through `parseHtml`) grounds the fix in real,
+whole-corpus evidence rather than this one page: per-raw-KiB density across
+the corpus ranges from roughly 2.3 to 27.9 nodes/KiB and 0.89x to 3.17x
+observed-vs-raw bytes (both extremes on real pages in this same corpus, not
+hypothetical). `maxNodes` is raised from 8,192 to **65,536** — comfortably
+clearing the corpus's own densest real page (27.9 nodes/KiB, `tofugu.com`)
+at a full 1 MiB (the default extract admission bound) with roughly 2x
+headroom beyond that — and `maxObservationBytes` is raised from 1 MiB to
+**4 MiB**, similarly clearing the corpus's own highest observed-byte ratio
+(3.17x) at a full 1 MiB raw with headroom. Both stay fixed bounds (not
+scaled to whatever raw-byte limit a caller configures via
+`--max-html-bytes`, which remains the pre-existing, separately documented
+"other limits do not scale with the configured raw cap" behavior — out of
+this ticket's scope) — a real, examined, evidence-grounded increase, not an
+unbounded one. Verified against the full 20-page corpus both before (18/20)
+and after (20/20) this change: the 18 pages that already selected produce
+byte-for-byte identical output, and `dub test` passes with no regressions.
+
+Not attempted here, and a reasonable follow-up if it ever becomes a real
+problem: reducing the ~1–3x raw-to-observed amplification itself (e.g. a
+more memory-efficient `HtmlTree`/`HtmlNode` representation) rather than
+raising the byte budget around it. That is a larger, structural change to
+this module's core data shape, evidence for which (this corpus's own
+amplification-ratio range, above) is now on record but which this ticket's
+timebox did not extend to attempting.
+
+**Residual, honestly disclosed (not hidden):** now that it selects, this
+page's real word-overlap score against trafilatura (`run.sh`'s own
+methodology, re-run for this ticket) is precision 0.111 / recall 0.402 —
+well below the corpus's ~0.89/0.76 mean. This is not a bug in the fix above
+(the page now parses and a real, on-topic `<div class="content">` subtree
+wins, exactly the shape a comment-heavy blog should produce). It reflects a
+separate, pre-existing scoring-*priority* question this ticket's scope does
+not cover: this page's DOM contains many legitimate `class="content"` divs
+(the article body plus many individual comment replies, all real prose),
+and the candidate pass's fixed scoring rule picks the single
+highest-scoring one by cumulative own-text/tag/keyword signal, not
+necessarily the top-level article body specifically when a long comment
+reply scores higher by the same rule. Not investigated further here — it is
+a real, disclosed nuance for a future ticket, not a claim this page's
+extraction is now perfect.
+
+### `www-homify-de.html` — was `abstainedBelowThreshold`, fixed with a JSON-LD fallback
 
 This is the same source URL as the held-out tier's own `homify.de-Tischdecke.html`
 (`https://www.homify.de/diy/20546/wie-man-eine-runde-tischdecke-in-nur-7-schritten-herstellt`
 — see `manifest.json`), so this is a previously-documented, not new,
 failure. A diagnostic dump of `extractMainContent`'s scored candidates for
-the live-fetched copy shows no candidate clears both abstention floors
+the live-fetched copy shows no DOM candidate clears both abstention floors
 (200 selectable bytes, score 150):
 
 | candidate | tag | class/id | score | textLen |
@@ -444,28 +530,67 @@ the live-fetched copy shows no candidate clears both abstention floors
 | keyword match | `<div id="js-content">` | — | 150 | 110 |
 | most text | `<div id="js-body">` | — | 115.7 | 1,020 |
 
-The top-scoring candidate is not article content: it is literally an
-app-install promo ("Millionen von Fotos in der homify App durchstöbern!"),
-which scores high on the flat `<p>` tag bonus but is far too short (64
-bytes) to select. The candidate with the most cumulative text (`js-body`,
-1,020 bytes — the entire page body wrapper) scores too low, because it is
-mostly nav/header chrome. Direct inspection of the raw HTML confirms why no
-candidate has both: this is a JavaScript-rendered page (webpack bundles,
-`js-body`/`js-content` hydration ids). The title string ("Wie man eine
-runde Tischdecke in nur 7 Schritten herstellt") is not absent: the only
-DOM text resembling the title is a 58-byte `<h1>` (`node=297 tag=h1
-score=58 textLength=58`), correctly too short to clear the 200-byte
-selection floor. The actual description prose exists only inside a
-`data-react-props` attribute payload — an ~85KB React-hydration JSON blob
-on a real `<div>` — which this stage's scoring never reads as text:
-`html_main_content.d`'s `attributeValue()` only inspects `class`/`id` for
-keyword bonuses, never arbitrary attribute values. `html-main-content`
-parses static HTML only; nothing in this pipeline executes JavaScript, so
-there is no candidate *subtree* containing the real content for any
-scoring change to find. Correctly abstaining — rather than selecting the
-highest-scoring candidate anyway, which would mean shipping an app-install ad as
-"extracted article text" — is the right behavior here, not a scoring gap.
-Accepted as an intentional, disclosed non-goal: no code change made.
+The original investigation (superseded — see the correction above) stopped
+here and concluded this was a JS-rendered page with no real content in the
+static HTML at all, without testing that claim against a real external
+tool. Directly running pinned `trafilatura==2.2.0` against this repo's own
+copy of the file disproves it: `trafilatura.extract()` returns 4,826 bytes
+of real DIY-guide article text ("Um eine runde Tischdecke anzufertigen,
+musst du die Maße des Tisches kennen...") — the content is present in the
+static HTML.
+
+It is present, but not as DOM text/elements: the page's real content lives
+entirely inside `<script type="application/ld+json">` schema.org markup —
+a `HowTo` object whose `step[].itemListElement.text` fields (8 steps,
+~5.3 KB combined, HTML-escaped) carry the full DIY-guide body. (A second,
+separate `<script>` block carries the identical prose again as a React
+`data-react-props` JSON attribute payload; the JSON-LD block is the one
+this fix reads, since attribute values are never scoring-visible text
+either way.) This is exactly how real trafilatura recovers this page too —
+not a coincidence: its own `baseline.py` module walks
+`<script type="application/ld+json">` blocks for schema.org content
+properties (`articleBody`, HowTo `step`, FAQ `acceptedAnswer`, etc.) as one
+of its extraction strategies, and this page's JSON-LD is a schema.org
+`HowTo` — precisely the shape that strategy targets.
+
+This means the original "scoring/threshold tuning issue" framing this
+ticket's corrected scope proposed as one hypothesis is not what was found:
+nothing wrong exists in the DOM candidate-scoring pass itself (no
+miscalibrated weight, no wrong tag/keyword table entry). The real content
+is delivered through a second content *source* — JSON, not DOM text/
+elements — that the DOM-only candidate pass structurally cannot see at
+all, no matter how its weights are tuned; the 64-byte promo `<p>` winning
+among DOM candidates was always going to happen once the real content
+was never in the DOM-candidate contest to begin with.
+
+Fixed by adding a bounded JSON-LD structured-data fallback to
+`html_main_content.d`, invoked only once the ordinary DOM candidate pass
+has already abstained (any of its three abstention reasons) — see
+`structuredDataFallbackText`'s doc comment there for the full mechanism
+(bounded aggregate JSON bytes scanned, bounded JSON parse depth, a fixed
+schema.org property table mirrored from trafilatura's own already-validated
+list, a small evidence-grounded HTML-entity decoder, and the same
+`minSelectableTextBytes` floor an ordinary DOM candidate must clear before
+this fallback can override an abstention). A new `MainContentStatus`
+member, `selectedStructuredData`, distinguishes this success path from an
+ordinary DOM-subtree `selected` result (`.node` stays `size_t.max`: there
+is no tree node this text was selected from). Because the fallback only
+ever runs on an abstain outcome, it cannot change behavior on any page that
+was already selecting successfully — confirmed against the full 20-page
+corpus: the 18 already-selecting pages produce byte-for-byte identical
+output before and after this change, `scienceblogs-de.html` (fixed
+separately, above) and `www-homify-de.html` now both select, and
+`dub test` passes with no regressions.
+
+Prevalence beyond this one page: 6 of this corpus's 20 real pages
+(`jobsnhire-com.html`, `utopia-de.html`, `www-be-ch.html`,
+`www-chemietechnik-de.html`, `www-laweekly-com.html`, `www-tofugu-com.html`,
+in addition to `www-homify-de.html`) carry at least one
+`application/ld+json` script block; the other 5 already select via the
+ordinary DOM pass so this fallback never runs for them (confirmed
+byte-for-byte unchanged, above), but it means the JSON-LD pattern itself is
+common in this corpus, not unique to the one page that happened to need the
+fallback to succeed.
 
 ## v3 stage registration
 
@@ -478,13 +603,14 @@ self-registering stage, `"html-main-content"`, mirroring
   convention as `html-metadata`/`html-markdown`.
 - On a successful parse, calls `extractMainContent(outcome.tree)` — this
   module's own frozen, unmodified scoring function.
-- On `MainContentStatus.selected`, replaces `input.content` with the
-  selected subtree's plain text and maps. `input.metadata` (written by any
-  prior stage) passes through completely untouched, since this stage never
-  reads or writes it.
+- On `MainContentStatus.selected` **or** `MainContentStatus.selectedStructuredData`
+  (issue #411: a second success status — see "Selection and abstention"
+  above), replaces `input.content` with the selected/recovered text and
+  maps. `input.metadata` (written by any prior stage) passes through
+  completely untouched, since this stage never reads or writes it.
 - On any abstention status, quarantines with the exact status-name string
   (`result.status.to!string`) — a single, undifferentiated code path for all
-  three statuses.
+  three abstention statuses.
 - On `HtmlMainContentOutputLimit` (the 4 MiB cap), quarantines
   `"outputLimit"`.
 - Carries no `TerminalSideOutput` and stays `SideOutputCapability.none`, so
@@ -610,18 +736,38 @@ since it is already correctly registered in production.
 
 ## Non-goals
 
-- Getting `examples/pipeline-benchmark/corpus/scienceblogs-de.html` and
-  `www-homify-de.html` selected (issue #411): both investigated with real
-  evidence and judged working as intended, not bugs — see "`examples/pipeline-benchmark`
-  corpus: current 18/20 status" above. `scienceblogs-de.html` is a genuine
-  node-count/observed-byte outlier this corpus's bounded-resource caps
-  correctly protect against; `www-homify-de.html`'s title text is present
-  but too short to select (a 58-byte `<h1>`), and its real description
-  prose lives only inside a `data-react-props` attribute payload this
-  stage's scoring never reads as text, so there is no candidate subtree to
-  select. `effects/html_tree.d`'s caps
-  stay unmodified (also out of this ticket's allowed scope), and
-  `html_main_content.d`'s scoring/thresholds stay unmodified.
+- Reducing `html_tree.d`'s ~1–3x raw-to-observed-byte representation
+  amplification itself (issue #411; see "`scienceblogs-de.html`" above for
+  the real, measured per-page ratios): fixed there by raising `maxNodes`/
+  `maxObservationBytes` against real corpus evidence instead, which is
+  sufficient for every page in this corpus today. A more memory-efficient
+  `HtmlTree`/`HtmlNode` representation remains a real, larger, structural
+  follow-up if a future page's density ever exceeds the raised caps'
+  margin, not attempted within this ticket's timebox.
+- Making `html_main_content_markdown.d`'s Markdown combinator (issue #335
+  Slice 2) render structured-data-fallback content: `extractMainContentMarkdown`
+  only renders Markdown when `.status == selected` (an ordinary DOM subtree
+  it can call `renderMarkdownFrom(tree, node)` on); a `selectedStructuredData`
+  result has no corresponding tree node, so it currently produces empty
+  `.markdown`, same as an abstention. **This is a live, currently-reachable
+  gap, not a hypothetical one:** issue #431 landed real stage/CLI wiring for
+  this combinator concurrently with this ticket's own fix
+  (`source/effects/html_main_content_markdown_stage.d`, reachable as both
+  `extract --format=main-content-markdown` and
+  `run --stage X=html-main-content-markdown`), and that stage's own
+  `result.status != MainContentStatus.selected` quarantine check treats
+  `selectedStructuredData` as a quarantine, the same as a genuine
+  abstention. Concretely: `www-homify-de.html` still quarantines
+  (`reason="selectedStructuredData"`) through
+  `extract --format=main-content-markdown` today, even though the plain-text
+  `html-main-content`/`clean-web-document` path this ticket's own fix and
+  the pinned corpus check both cover now selects it successfully. A
+  follow-up ticket is warranted to give
+  `html_main_content_markdown_stage.d` a real (rendering the recovered
+  structured-data text as a flat Markdown paragraph run, no tree node to
+  walk) or an explicitly-declined answer for `selectedStructuredData`,
+  rather than leaving it as this ticket's own incidental, undocumented
+  side effect.
 - No v4 extractor registration; no `cli.d`/`app.d` change beyond automatic
   self-registration reachability; no `benchmarks/external_comparator.d`
   change beyond what issue #229 already added.

@@ -749,10 +749,25 @@ since it is already correctly registered in production.
   only renders Markdown when `.status == selected` (an ordinary DOM subtree
   it can call `renderMarkdownFrom(tree, node)` on); a `selectedStructuredData`
   result has no corresponding tree node, so it currently produces empty
-  `.markdown`, same as an abstention. That combinator has no stage/CLI
-  wiring yet regardless (its own module doc comment), so this has no
-  production effect today, but a future wiring of it would need its own
-  Markdown rendering path for structured-data text.
+  `.markdown`, same as an abstention. **This is a live, currently-reachable
+  gap, not a hypothetical one:** issue #431 landed real stage/CLI wiring for
+  this combinator concurrently with this ticket's own fix
+  (`source/effects/html_main_content_markdown_stage.d`, reachable as both
+  `extract --format=main-content-markdown` and
+  `run --stage X=html-main-content-markdown`), and that stage's own
+  `result.status != MainContentStatus.selected` quarantine check treats
+  `selectedStructuredData` as a quarantine, the same as a genuine
+  abstention. Concretely: `www-homify-de.html` still quarantines
+  (`reason="selectedStructuredData"`) through
+  `extract --format=main-content-markdown` today, even though the plain-text
+  `html-main-content`/`clean-web-document` path this ticket's own fix and
+  the pinned corpus check both cover now selects it successfully. A
+  follow-up ticket is warranted to give
+  `html_main_content_markdown_stage.d` a real (rendering the recovered
+  structured-data text as a flat Markdown paragraph run, no tree node to
+  walk) or an explicitly-declined answer for `selectedStructuredData`,
+  rather than leaving it as this ticket's own incidental, undocumented
+  side effect.
 - No v4 extractor registration; no `cli.d`/`app.d` change beyond automatic
   self-registration reachability; no `benchmarks/external_comparator.d`
   change beyond what issue #229 already added.

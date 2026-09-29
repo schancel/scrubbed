@@ -612,14 +612,33 @@ private struct Decoder {
     }
 
     /// Reads a `list<T>` whose element type must be `elem`.
+    ///
+    /// `l.size` is only checked against the *whole* input's length (see
+    /// `Decoder.make`'s `containerSizeLimit`), not against what is actually
+    /// left to read at this point in a possibly deeply-nested structure. A
+    /// forged declared count is cheap to write on the wire, and trusting it
+    /// directly for a `new T[l.size]` pre-allocation spends `l.size *
+    /// T.sizeof` bytes before a single element has been validated -- and
+    /// `T.sizeof` can be one to two orders of magnitude larger than the
+    /// single wire byte the size check assumes per element (parquet-d#395:
+    /// a `ColumnChunk` is well over 100 bytes in memory per declared list
+    /// entry). Cap the up-front reserve at what could plausibly still be in
+    /// the transport (each element needs at least one more byte on the
+    /// wire) and grow from there as elements are actually decoded, so a
+    /// bogus declared count costs no more memory than the elements really
+    /// read before truncation is caught.
     T[] list(T)(TType elem, scope T delegate() readOne) {
+        import std.array : Appender;
+
         check(++depth <= maxNestingDepth, "thrift: metadata nested too deeply");
         const l = listBegin();
         check(l.size == 0 || l.elemType == elem, "thrift: list has unexpected element type");
-        auto result = new T[l.size];
-        foreach (ref r; result) r = readOne();
+        const remaining = trans.data.length - trans.pos;
+        Appender!(T[]) result;
+        result.reserve(l.size < remaining ? l.size : remaining);
+        foreach (_; 0 .. l.size) result.put(readOne());
         --depth;
-        return result;
+        return result.data;
     }
 
     void fileMetaData(ref FileMetaData m) {
@@ -945,4 +964,62 @@ unittest {
         try decodePageHeader(junk, c); catch (E) {}
         try decodeFileMetaData(junk); catch (E) {}
     }
+}
+
+/// GC heap growth while running `dg`, in bytes.
+private size_t heapGrowth(scope void delegate() dg) {
+    import core.memory : GC;
+
+    GC.collect();
+    const before = GC.stats().usedSize;
+    dg();
+    const after = GC.stats().usedSize;
+    return after > before ? after - before : 0;
+}
+
+// parquet-d#395: `list!T`'s size check (`Decoder.make`'s `containerSizeLimit`,
+// via the vendored protocol's `checkSize`) bounds a declared list count only
+// against the *whole* footer's byte length, a constant for every list read
+// no matter how deep or how much of that length earlier fields already
+// consumed. A `columns` list nested inside a `row_groups` entry can
+// therefore still declare a count up to the footer's total size even when
+// the footer ends right after that list's header -- and `ColumnChunk` is
+// well over 100 bytes once decoded into memory, versus the one wire byte
+// the size check assumes an element needs. Before the fix, pre-allocating
+// `new ColumnChunk[declaredCount]` up front spent that amplification
+// (roughly declaredCount * ColumnChunk.sizeof) before a single element was
+// validated; after it, the reserve is capped by what is actually left in
+// the input, so a forged count that cannot be backed by real bytes costs
+// nothing beyond the elements truly decoded.
+unittest {
+    import std.array : replicate;
+
+    // A `created_by` string pads the footer so its total length -- the
+    // `checkSize` bound applied to every list, including the nested one
+    // below -- is large enough to let a big declared count through.
+    enum padding = 50_000;
+    enum declaredColumns = 49_000; // < total footer length, so checkSize passes it
+
+    auto e = Encoder.make();
+    e.begin("FileMetaData");
+    e.i32Field("version", 1, 1);
+    e.stringField("created_by", 6, "x".replicate(padding));
+    e.listBegin("row_groups", 4, TType.STRUCT, 1);
+    e.begin("RowGroup");
+    // Declares far more columns than the (now-exhausted) input can back:
+    // the encoded buffer ends immediately after this list header, so zero
+    // real `ColumnChunk` elements follow.
+    e.listBegin("columns", 1, TType.STRUCT, declaredColumns);
+    const bytes = e.finish();
+
+    ParquetFormatException caught;
+    const grew = heapGrowth({
+        try decodeFileMetaData(bytes);
+        catch (ParquetFormatException ex) caught = ex;
+    });
+    assert(caught !is null, "forged columns count accepted instead of rejected as truncated");
+    // declaredColumns * ColumnChunk.sizeof is several MiB; a correctly
+    // bounded decode allocates nothing close to that for zero real elements.
+    assert(grew < (declaredColumns * ColumnChunk.sizeof) / 10,
+        "forged list count allocated in proportion to its declared count, not the input");
 }

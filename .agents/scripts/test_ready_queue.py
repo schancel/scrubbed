@@ -112,12 +112,71 @@ def test_script_omits_needs_specification(tmp_path: Path) -> None:
     assert 4 not in payload["waves"][1]["parallel"]
 
 
+def test_unblocking_zero_is_dispatchable() -> None:
+    # The bug this repo hit four times tonight: "unblocking: 0" on an
+    # otherwise fully-groomed ticket must reach READY, not silently stall.
+    waves = load_waves({"waves": [{"wave": 0, "parallel": [10]}]})
+    axes = dict(READY_AXES)
+    axes["unblocking"] = 0
+    issue = {"number": 10, "title": "unblocks nothing", "body": READY_BODY,
+             "trusted_ready": True, **axes}
+    filtered = ready_waves(waves, [issue])
+    assert dispatchable(filtered) == [10]
+
+
+def test_already_valid_tickets_unaffected(tmp_path: Path) -> None:
+    # Tickets already validly scored 1-5 on every axis must see the exact
+    # same dispatchable set before and after this fix.
+    waves_path = tmp_path / "waves.json"
+    triage_path = tmp_path / "triage.json"
+    waves_path.write_text(json.dumps({"waves": [{"wave": 0, "parallel": [10, 11]}]}))
+    triage_path.write_text(json.dumps([ready_issue(10, "a"), ready_issue(11, "b")]))
+    script = Path(__file__).with_name("ready_queue.py")
+    result = subprocess.run(
+        [sys.executable, str(script), "--waves", str(waves_path), "--triage", str(triage_path),
+         "--format", "json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["dispatchable"] == [10, 11]
+    assert result.stderr == ""
+
+
+def test_out_of_range_axis_surfaces_diagnostic(tmp_path: Path) -> None:
+    waves_path = tmp_path / "waves.json"
+    triage_path = tmp_path / "triage.json"
+    bad = dict(READY_AXES)
+    bad["value"] = 0
+    waves_path.write_text(json.dumps({"waves": [{"wave": 0, "parallel": [9]}]}))
+    triage_path.write_text(json.dumps([
+        {"number": 9, "title": "looks ready", "body": READY_BODY, "trusted_ready": True, **bad}
+    ]))
+    script = Path(__file__).with_name("ready_queue.py")
+    result = subprocess.run(
+        [sys.executable, str(script), "--waves", str(waves_path), "--triage", str(triage_path),
+         "--format", "json"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["dispatchable"] == []
+    assert "issue #9: axis 'value' = 0 is out of range (1-5)" in result.stderr
+
+
 def main() -> int:
     test_needs_specification_omitted()
     test_dependency_order()
     test_unready_blocker_does_not_promote()
+    test_unblocking_zero_is_dispatchable()
     with tempfile.TemporaryDirectory() as directory:
         test_script_omits_needs_specification(Path(directory))
+        test_already_valid_tickets_unaffected(Path(directory))
+        test_out_of_range_axis_surfaces_diagnostic(Path(directory))
     print("ok")
     return 0
 

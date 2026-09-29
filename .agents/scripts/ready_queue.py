@@ -18,7 +18,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ticket_triage import REQUIRED_MARKERS, score
+from ticket_triage import REQUIRED_MARKERS, axis_errors, score
 
 SCRIPTS = Path(__file__).resolve().parent
 
@@ -123,6 +123,10 @@ def main() -> int:
     except (OSError, json.JSONDecodeError, ValueError) as error:
         print(f"ready_queue: {error}", file=sys.stderr)
         return 2
+
+    for issue in issues:
+        for message in axis_errors(issue):
+            print(f"ready_queue: {message}", file=sys.stderr)
 
     filtered = ready_waves(waves, issues)
     current = dispatchable(filtered)

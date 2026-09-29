@@ -17,9 +17,22 @@ int main(string[] args) {
     // acceptance criteria for #448 treat as an acceptable baseline in its
     // own right.
     version (Posix) {
-        import core.stdc.signal : signal;
-        import core.sys.posix.signal : SIGINT;
-        signal(SIGINT, &requestInterrupt);
+        import core.sys.posix.signal : SIGINT, sigaction, sigaction_t,
+            sigemptyset;
+
+        sigaction_t newAction;
+        newAction.sa_handler = &requestInterrupt;
+        sigemptyset(&newAction.sa_mask);
+        // No SA_RESTART: `requestInterrupt` only sets a flag that
+        // `runApp`'s file walk polls between files (see above), so this
+        // handler has no in-handler work that a restarted syscall would
+        // help finish. Any blocking syscall a signal-delivery thread
+        // happens to be in (e.g. a slow read/write) should return EINTR
+        // and unwind promptly instead of transparently resuming, so the
+        // process is never left waiting on I/O the user has already asked
+        // to interrupt.
+        newAction.sa_flags = 0;
+        sigaction(SIGINT, &newAction, null);
     }
     try {
         return runCommands(args);

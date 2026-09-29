@@ -5,9 +5,12 @@
 /// Decoding (`decodeFileMetaData`, `decodePageHeader`) reads the same
 /// structs back through the same vendored `TCompactProtocol`, plus the
 /// decode-only fields a reader of externally produced files needs
-/// (dictionary pages, v2 data pages, `type_length`, annotations). Unknown
-/// fields are skipped; see the "Decoding" section below for the hostile-input
-/// guards layered around the vendored protocol.
+/// (dictionary pages, v2 data pages, `type_length`, annotations, and the
+/// Parquet modular-encryption presence markers `FileMetaData.hasEncryptionAlgorithm`
+/// / `ColumnChunk.hasCryptoMetadata` / `ColumnChunk.hasEncryptedColumnMetadata`
+/// -- contents unused, `parquet.reader` rejects any file where one is set).
+/// Unknown fields are skipped; see the "Decoding" section below for the
+/// hostile-input guards layered around the vendored protocol.
 ///
 /// This is deliberately not a general Thrift layer: it mirrors only the
 /// subset of `parquet.thrift` (apache/parquet-format) that a flat,
@@ -148,6 +151,16 @@ struct ColumnChunk {
     bool hasMetaData;
     /// `file_path` (field 1): column data lives in another file when set.
     string filePath;
+
+    // Decode-only, Parquet modular-encryption markers (the encoder never
+    // writes them; this reader does not support encrypted files -- see
+    // `parquet.reader.parseFooter`, which rejects a chunk where either is
+    // set).
+    /// Whether `crypto_metadata` (field 8, the `ColumnCryptoMetaData` union)
+    /// was present.
+    bool hasCryptoMetadata;
+    /// Whether `encrypted_column_metadata` (field 9, binary) was present.
+    bool hasEncryptedColumnMetadata;
 }
 
 /// `parquet.thrift` `RowGroup` subset.
@@ -167,6 +180,15 @@ struct FileMetaData {
     long numRows;
     RowGroup[] rowGroups;
     string createdBy;
+
+    // Decode-only (the encoder never writes it; this reader does not
+    // support encrypted files -- see `parquet.reader.parseFooter`).
+    /// Whether `encryption_algorithm` (field 8, the `EncryptionAlgorithm`
+    /// union) was present. Parquet's modular encryption sets this in
+    /// "plaintext footer" mode (footer readable, column data encrypted); the
+    /// "encrypted footer" mode instead swaps the trailing magic to `PARE`,
+    /// which is rejected before the footer is even decoded.
+    bool hasEncryptionAlgorithm;
 }
 
 /// `parquet.thrift` `DataPageHeader` subset (no statistics).
@@ -646,6 +668,12 @@ private struct Decoder {
                 }
                 break;
             case 6: if (accept(f, TType.STRING)) m.createdBy = proto.readString(); break;
+            case 8:
+                if (accept(f, TType.STRUCT)) {
+                    skip(TType.STRUCT); // contents unused: presence alone is rejected
+                    m.hasEncryptionAlgorithm = true;
+                }
+                break;
             default: skip(f.type);
             }
         }
@@ -726,6 +754,18 @@ private struct Decoder {
             case 1: if (accept(f, TType.STRING)) c.filePath = proto.readString(); break;
             case 2: if (accept(f, TType.I64)) c.fileOffset = proto.readI64(); break;
             case 3: if (accept(f, TType.STRUCT)) { columnMetaData(c.metaData); c.hasMetaData = true; } break;
+            case 8:
+                if (accept(f, TType.STRUCT)) {
+                    skip(TType.STRUCT); // contents unused: presence alone is rejected
+                    c.hasCryptoMetadata = true;
+                }
+                break;
+            case 9:
+                if (accept(f, TType.STRING)) {
+                    proto.readBinary(); // contents unused: presence alone is rejected
+                    c.hasEncryptedColumnMetadata = true;
+                }
+                break;
             default: skip(f.type);
             }
         }

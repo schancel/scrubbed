@@ -1667,6 +1667,44 @@ unittest {
     assert(succeededDisplayCount(0, 0) == 0);
 }
 
+// SIGINT graceful shutdown (fixes #448). `app.d` installs `requestInterrupt`
+// as the process's SIGINT handler before calling into this module, so the
+// flag it sets here may be stored from a signal handler running on an
+// arbitrary thread at an arbitrary point in `runApp` below (or before it
+// starts, or after it returns). Keep `requestInterrupt` to exactly this one
+// atomic store: no GC, no throwing, no locking -- anything else is unsafe to
+// run from a signal handler. `runApp`'s file walk (`submitPath`, called for
+// every discovered file and for the single-file case) polls
+// `interruptRequested()` cooperatively between files and, on a true result,
+// throws to stop admitting new work; that already flows into the same
+// graceful-cancellation path (`scheduler.cancel(); scheduler.finish();`) a
+// fatal processing failure uses below, draining already-admitted work rather
+// than dying mid-write. See docs/signal-handling.md for the chosen behavior
+// and its limits (cooperative, per-file granularity -- not preemptive).
+private shared bool interruptRequestedFlag = false;
+
+/// Async-signal-safe. Do not add anything here beyond the atomic store.
+/// The `int` parameter is the signal number `signal(2)`'s callback ABI
+/// requires; unused, since one process installs this for SIGINT alone.
+extern(C) void requestInterrupt(int) nothrow @nogc {
+    import core.atomic : atomicStore;
+    atomicStore(interruptRequestedFlag, true);
+}
+
+private bool interruptRequested() nothrow @nogc {
+    import core.atomic : atomicLoad;
+    return atomicLoad(interruptRequestedFlag);
+}
+
+version (unittest) {
+    // Test-only reset: production has exactly one process-lifetime SIGINT,
+    // so nothing outside the unittest build needs to un-flag this.
+    private void resetInterruptedForTest() nothrow @nogc {
+        import core.atomic : atomicStore;
+        atomicStore(interruptRequestedFlag, false);
+    }
+}
+
 int runApp(string[] args) {
     auto metricsPath = environment.get("SCRUBBED_DURABLE_METRICS_V1", "");
     const allowVerifiedSkip =
@@ -2199,9 +2237,21 @@ int runApp(string[] args) {
                     (cast(DurableDocumentFailure)error).fatal);
         }, coordination);
     bool workerFatalAdmission;
+    // Set once, the first time submitPath observes requestInterrupt()'s
+    // flag; distinct from workerFatalAdmission so the traversal-abort
+    // catch below (and --explain) can report "interrupted" rather than
+    // misattributing the stop to a processing failure or a plain
+    // traversal error.
+    bool interruptedRun;
     void submitPath(string file) {
         bool admissionCanceled;
         try {
+            if (interruptRequested()) {
+                admissionCanceled = true;
+                interruptedRun = true;
+                throw new Exception(
+                    "interrupted (SIGINT); canceling after in-flight work drains");
+            }
             if (errorTargeted) {
                 auto relative = inputIsDir ? relativePath(file, inputPath) : ".";
                 auto id = DocumentId.from(SourceLocator("local-files:v1",
@@ -2295,10 +2345,11 @@ int runApp(string[] args) {
                         inputIsDir, true);
                 else explainOne(file, destinationFor(file, inputPath, outputPath,
                     inputIsDir), chainLabel,
-                    workerFatalAdmission ? "canceled" : "failure",
-                    workerFatalAdmission ?
-                        "canceled after fatal processing failure" :
-                        "canceled after traversal error");
+                    (workerFatalAdmission || interruptedRun) ? "canceled" : "failure",
+                    interruptedRun ? "canceled after SIGINT" :
+                        workerFatalAdmission ?
+                            "canceled after fatal processing failure" :
+                            "canceled after traversal error");
             }
         auto workerFatal = scheduler.fatal();
         if (workerFatalAdmission && workerFatal !is null)
@@ -2876,6 +2927,42 @@ unittest {
         assertThrown(runApp(["scrubbed", "run", "--input", inputDir,
             "--output", buildPath(root, "tree-output"), "--threads", "1"]));
     }
+}
+
+// #448 regression, part 1: a deterministic, in-process proof that
+// requestInterrupt()'s flag actually reaches and stops runApp's walk --
+// no OS signal, no timing race. Pre-set the flag before the very first
+// file is ever submitted, so every discovered file must be rejected: this
+// proves the wiring (submitPath -> interruptRequested() -> the same
+// scheduler.cancel()/scheduler.finish() graceful path a fatal failure
+// uses), not the OS's signal delivery, which part 2 below covers with a
+// real subprocess and a real SIGINT.
+unittest {
+    import std.exception : collectException;
+    import std.file : rmdirRecurse, tempDir;
+    import std.range : empty;
+
+    auto root = buildPath(tempDir, "scrubbed-sigint-flag-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto inputDir = buildPath(root, "in");
+    mkdir(root);
+    mkdir(inputDir);
+    foreach (i; 0 .. 5)
+        write(buildPath(inputDir, "f" ~ i.to!string ~ ".txt"), "hello " ~ i.to!string);
+
+    resetInterruptedForTest();
+    scope(exit) resetInterruptedForTest();
+    requestInterrupt(0);
+
+    auto outputDir = buildPath(root, "out");
+    auto error = collectException!Exception(runApp(["scrubbed", "run",
+        "--input", inputDir, "--output", outputDir, "--threads", "1"]));
+    assert(error !is null, "a pre-set interrupt flag must stop runApp, not run to completion");
+    assert(error.msg.canFind("interrupted (SIGINT)"),
+        "exception message must name the actual cause: " ~ error.msg);
+    assert(!exists(outputDir) || dirEntries(outputDir, SpanMode.shallow).empty,
+        "no file should be admitted once the interrupt flag is already set: " ~
+        (exists(outputDir) ? dirEntries(outputDir, SpanMode.shallow).array.to!string : "(no output dir)"));
 }
 
 // Regression for #294: the side-output publication loop above must not

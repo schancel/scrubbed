@@ -75,7 +75,7 @@
         <div class="arrow">&rarr;</div>
         <div class="step">Train<br><span class="outside">your training run</span></div>
     </div>
-    <p class="note">scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. Collection is now a real shipped command too: <code>scrubbed crawl</code> is a local, multithreaded, resumable crawler (durable SQLite-backed frontier, bounded polite fetch, link discovery) &mdash; single-machine only, no distributed/sharded crawling yet. It writes raw pages only, no cleaning inline; run <code>clean-web-document</code> over its output as a separate pass, or point scrubbed straight at pages you already have.</p>
+    <p>scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. Collection is now a real shipped command too: <code>scrubbed crawl</code> is a local, multithreaded, resumable crawler (durable SQLite-backed frontier, bounded polite fetch, link discovery) &mdash; single-machine only, no distributed/sharded crawling yet. It writes raw pages only, no cleaning inline; run <code>clean-web-document</code> over its output as a separate pass, or point scrubbed straight at pages you already have.</p>
 
     <h2>See it work</h2>
     <p class="note">Real output from the actual binary, not a mockup.</p>
@@ -121,7 +121,7 @@ The survey team spent three weeks mapping the river delta's shifting sandbars, r
     <h2>The pipeline, one command</h2>
     <pre>scrubbed clean-web-document --input page.html --output page.txt
 scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
-    <p class="note">Repairs mojibake, extracts the article body out of the page (nav/ads/footers dropped), pulls out title/author/date/url, and scans the result for emails/phones/card numbers/IPv4 addresses — writing one metadata sidecar next to the output with both the extracted metadata and the PII audit in it, one process, one pass, parallel across a whole directory tree.</p>
+    <p>Repairs mojibake, extracts the article body out of the page (nav/ads/footers dropped), pulls out title/author/date/url, and scans the result for emails/phones/card numbers/IPv4 addresses — writing one metadata sidecar next to the output with both the extracted metadata and the PII audit in it, one process, one pass, parallel across a whole directory tree.</p>
 
     <h2>Verified against the tools it replaces</h2>
     <p class="note">Every number below comes from <code>benchmarks/external_comparator.d</code>, runnable yourself against real pinned installs of each reference tool &mdash; not a claimed result.</p>
@@ -149,7 +149,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <div class="stat-card">
             <span class="big">~146x</span>
             <span class="label">whole pipeline vs. the equivalent Python chain, corpus-scale</span>
-            <p>scrubbed's <code>clean-web-document</code> vs. ftfy&rarr;trafilatura&rarr;langdetect&rarr;Presidio chained, over a 400-file corpus with the Python chain warm. Measured as actual CPU time, not wall-clock, so it isn't skewed by other work on the same machine &mdash; that discipline matters: wall-clock alone gave ~190x on the same run, a ~30% overstatement from scheduling noise. Single verified run, methodology and a smaller per-file comparison in <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">examples/pipeline-benchmark</a>.</p>
+            <p>scrubbed's <code>clean-web-document</code> vs. ftfy&rarr;trafilatura&rarr;langdetect&rarr;Presidio chained, over a 400-file corpus with the Python chain warm, measured as CPU time. Methodology and a smaller per-file comparison in <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">examples/pipeline-benchmark</a>.</p>
         </div>
         <div class="stat-card">
             <span class="big">~25x</span>
@@ -172,7 +172,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     </ul>
 
     <h2>Status</h2>
-    <p class="note">Used today for local, single-machine corpus runs within the scope described above. Proven multi-terabyte-scale operation is still on the roadmap &mdash; see <code>TODO.md</code> in the repo for the current, specific list of what's next.</p>
+    <p>Used today for local, single-machine corpus runs within the scope described above. Proven multi-terabyte-scale operation is still on the roadmap &mdash; see <code>TODO.md</code> in the repo for the current, specific list of what's next.</p>
 
     <h2>Roadmap</h2>
     <p class="note">This section is direction, not a committed timeline or a shipped claim &mdash; only the numbers and features above are guaranteed to work today. It exists so people building on scrubbed can tell what's stable to depend on versus what's still being decided.</p>

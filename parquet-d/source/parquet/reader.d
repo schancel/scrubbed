@@ -28,6 +28,13 @@
 /// explicitly; malformed input raises `ParquetFormatException` (never a D
 /// `Error`), and decoded values never alias the input buffer, so they stay
 /// valid after the reader is closed.
+///
+/// Parquet's modular encryption is rejected explicitly, not silently
+/// misread as plaintext: an "encrypted footer" file (trailing `PARE` magic)
+/// is rejected before the footer is decoded; a "plaintext footer" file
+/// (readable footer, encrypted column data) is rejected once its
+/// `FileMetaData.encryption_algorithm` or a column's `crypto_metadata` /
+/// `encrypted_column_metadata` field is seen.
 module parquet.reader;
 
 import parquet.exception : ParquetFormatException, check;
@@ -226,6 +233,13 @@ final class ParquetReader {
         check(len <= file_.length - 12, "footer length exceeds the file");
         const footerStart = file_.length - 8 - len;
         meta_ = decodeFileMetaData(file_[footerStart .. $ - 8]);
+        // "Plaintext footer" mode (the footer decodes cleanly above, but
+        // column data is encrypted): `FileMetaData.encryption_algorithm`
+        // (field 8) is set only when Parquet modular encryption is in use.
+        // "Encrypted footer" mode is caught earlier by the `PARE` magic
+        // check; this is the other half of the format's two encryption
+        // modes.
+        check(!meta_.hasEncryptionAlgorithm, "encrypted Parquet files are not supported");
 
         // Flat schema: root group + leaves only.
         check(meta_.schema.length >= 1, "schema is empty");
@@ -269,6 +283,16 @@ final class ParquetReader {
                 ~ g.numRows.to!string ~ " is negative or exceeds ReaderOptions.maxRowGroupRows");
             check(g.columns.length == leaves,
                 "row group " ~ gi.to!string ~ ": column count disagrees with the schema");
+            // Per-column encryption: a column can carry its own key
+            // (`crypto_metadata`, field 8) or an encrypted, unreadable copy
+            // of its own metadata (`encrypted_column_metadata`, field 9)
+            // even when the file's own `encryption_algorithm` field above is
+            // absent. Checked eagerly here so an encrypted file is rejected
+            // at open, not only when a caller happens to read that column.
+            foreach (ci, ref c; g.columns)
+                check(!c.hasCryptoMetadata && !c.hasEncryptedColumnMetadata,
+                    "row group " ~ gi.to!string ~ " column " ~ ci.to!string
+                    ~ ": encrypted Parquet files are not supported");
             total += g.numRows;
         }
         check(total == meta_.numRows, "row group row counts do not sum to the file's num_rows");

@@ -208,21 +208,35 @@ tool twice over the replicated corpus, and reports:
   overhead specific to its per-file-subprocess comparison shape, versus
   genuine steady-state per-call speed. Neither ratio is rounded up or
   presented as better than observed.
+- **CPU time** (`user`+`sys`, via `/usr/bin/time` for scrubbed's subprocess
+  and Python's own `resource.getrusage(RUSAGE_SELF)` for the in-process
+  loop) alongside wall-clock, on both sides. Wall-clock alone is
+  contaminated by scheduling delay when other processes are competing for
+  CPU on the host running the benchmark; CPU time isolates actual compute
+  and stays meaningful under load. The report shows the wall-vs-CPU percent
+  difference for both sides so contamination is visible directly in the
+  output, not just inferred.
 
 A live run on this corpus (20 pages replicated 20x to 400 files,
-Apple M4/macOS) measured scrubbed's two samples at 0.59s and 0.21s
-(mean 0.40s) against `throughput_driver.py`'s one-time model/engine
-construction cost at 2.11s and 1.02s (mean 1.57s) and steady-state loop
-time at 57.75s and 59.82s (mean 58.78s) -- a steady-state speedup of about
-148x and an amortized-with-startup speedup of about 152x. The steady-state
-number is *not* dramatically smaller than the amortized one here, because
-the one-time Python cost (about 1.5 seconds) is small relative to 400 real
-documents' worth of processing (nearly a minute); this is the expected shape
-for a large-corpus, warm-process run, and is a separate observation from
-`run.sh`'s own smaller, per-file-subprocess-dominated corpus. (Run-to-run
-variance is real here -- an earlier sample on the same host measured
-152x/156x; both are genuine, reproduced-within-their-own-run results, not a
-discrepancy to resolve.)
+Apple M4/macOS, real concurrent load on the host from other work) measured
+a steady-state speedup of about 190x by wall-clock but only about 146x by
+CPU time -- confirming the contamination this measurement exists to catch:
+wall-clock alone overstated the real speedup by roughly 30% here, because
+Python's much longer per-sample run (over four minutes) absorbed more
+scheduling delay from other host activity than scrubbed's own sub-second
+run did. This is the opposite direction from what you might guess (a
+longer-running process usually looks *more* stable, not less, under
+naive wall-clock timing) -- which is exactly why CPU time, not an
+assumption about which side load affects more, is the number to trust.
+`run.sh`'s own smaller, single-pass corpus (20 unreplicated pages) is
+*not* a reliable source for a citable ratio even with CPU-time
+measurement: scrubbed's own CPU time there is small enough (tens of
+milliseconds) that ordinary OS scheduling-quantum noise dominates the
+measurement regardless of methodology -- this script's real value is the
+per-file-subprocess vs. warm-process comparison it's built for, not a
+standalone headline number. (Run-to-run variance is real and expected
+here; this single verified run has not yet been cross-checked against a
+quiet, otherwise-idle machine.)
 
 ## Corpus provenance and completeness
 

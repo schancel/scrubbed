@@ -354,12 +354,42 @@ than leave the gap as a vague aspiration. Both were investigated directly
 against the current binary. **Conclusion for both: working as intended, not
 a bug** — no code change made.
 
+**This 18/20 count is no longer a hand-maintained citation** (issue #422,
+opened after #411/#412 each independently found a citation like this one had
+silently gone stale between owner questions). The source of truth for the
+corpus's current per-page selected/quarantined distribution, including each
+quarantined page's exact reason string, is now
+[`examples/pipeline-benchmark/corpus_distribution_check.d`](../examples/pipeline-benchmark/corpus_distribution_check.d),
+a pinned-expectation regression check that runs the real `scrubbed` binary
+against the real corpus and fails loudly — non-zero exit, with a per-page
+expected-vs-actual diff — the moment any page's outcome changes in either
+direction. It is wired into CI via
+[`.github/workflows/pipeline-benchmark-corpus-distribution.yml`](../.github/workflows/pipeline-benchmark-corpus-distribution.yml),
+triggered on changes to the check itself, the corpus, or anything in
+`source/` that could affect extraction. If that check's expected table and
+this section's "18/20" figure ever disagree, the check (and a fresh
+investigation of whatever page moved) is authoritative, not this prose; the
+per-page root-cause writeups below remain useful evidence for the two pages
+already investigated, but they describe *why* each page's outcome is what it
+is, not a live claim about the current count.
+
 Repro (either page):
 
 ```sh
 ./scrubbed run --input examples/pipeline-benchmark/corpus/<file>.html \
   --output /tmp/out --sidecar-output /tmp/sidecar --explain \
   --stage extract=html-main-content --stage pub=document-metadata-publish --threads 1
+```
+
+To reproduce the pinned regression check itself after building in release
+mode (see `corpus_distribution_check.d`'s own header comment for the exact
+invocation):
+
+```sh
+dub build --compiler=ldc2 --build=release
+ldc2 -O -release -of=/tmp/corpus-distribution-check \
+  examples/pipeline-benchmark/corpus_distribution_check.d
+/tmp/corpus-distribution-check ./scrubbed examples/pipeline-benchmark/corpus
 ```
 
 ### `scienceblogs-de.html` — `nodeLimit`, a genuine corpus outlier

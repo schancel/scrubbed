@@ -1,0 +1,67 @@
+name: Pipeline benchmark corpus distribution
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/pipeline-benchmark-corpus-distribution.yml"
+      - "examples/pipeline-benchmark/corpus_distribution_check.d"
+      - "examples/pipeline-benchmark/corpus/**"
+      - "source/**/*.d"
+      - "dub.json"
+      - "dub.selections.json"
+  pull_request:
+    paths:
+      - ".github/workflows/pipeline-benchmark-corpus-distribution.yml"
+      - "examples/pipeline-benchmark/corpus_distribution_check.d"
+      - "examples/pipeline-benchmark/corpus/**"
+      - "source/**/*.d"
+      - "dub.json"
+      - "dub.selections.json"
+
+permissions:
+  contents: read
+
+jobs:
+  corpus-distribution:
+    name: real corpus per-page outcome pin (issue #422)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned LDC
+        uses: dlang-community/setup-dlang@2979e3ea011f6a234cd3a47dcbeb60f451c9635f
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Install Linux build dependencies (issue #353)
+        run: |
+          sudo apt-get update
+          # cmake/make/cc are normally preinstalled on the GitHub-hosted
+          # ubuntu-24.04 images already; installed explicitly here so this
+          # job does not silently depend on that image default.
+          sudo apt-get install -y --no-install-recommends cmake build-essential
+          # Real evidence (issue #353): dub.json's "libs": ["curl"] passes
+          # -lcurl to the linker, which needs the unversioned libcurl.so
+          # dev symlink present, not just the runtime libcurl.so.4 -- so
+          # this is installed explicitly rather than assumed present.
+          sudo apt-get install -y --no-install-recommends libcurl4-openssl-dev
+
+      - name: Build production scrubbed binary
+        run: |
+          dub build --compiler=ldc2 --build=release
+          ./scrubbed --help
+
+      - name: Build corpus distribution check
+        run: |
+          ldc2 -O -release -of=/tmp/corpus-distribution-check \
+            examples/pipeline-benchmark/corpus_distribution_check.d
+
+      - name: Pin real corpus per-page selected/quarantined distribution
+        run: |
+          /tmp/corpus-distribution-check ./scrubbed \
+            examples/pipeline-benchmark/corpus

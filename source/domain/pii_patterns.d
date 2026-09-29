@@ -2,6 +2,7 @@
 /// Offsets always refer to the original UTF-8 byte stream.
 module domain.pii_patterns;
 
+import domain.failure : InvalidUtf8Exception;
 import std.algorithm.sorting : sort;
 import std.utf : validate;
 
@@ -189,7 +190,7 @@ PiiFinding[] scanPii(const(ubyte)[] bytes, string locale) {
     if (locale != "US" && locale != "GB") throw new PiiScanException("unsupported locale");
     if (bytes.length > maxPiiInputBytes) throw new PiiScanException("input exceeds cap");
     try validate(cast(string) bytes);
-    catch (Exception) throw new PiiScanException("invalid UTF-8");
+    catch (Exception) throw new InvalidUtf8Exception("pii scan: invalid UTF-8");
     PiiFinding[] findings;
     void add(size_t start, size_t end, PiiCategory category, string rule,
              PiiConfidence confidence = PiiConfidence.high) {

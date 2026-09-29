@@ -1,0 +1,36 @@
+{
+	"name": "parquet-d",
+	"description": "Native D Parquet writer: flat schemas, single row group, PLAIN values, RLE/bit-packed definition levels for real nulls, zstd or uncompressed pages. Footer metadata is encoded with a vendored copy of Apache Thrift's own D TCompactProtocol (six files, no libevent/openssl).",
+	"authors": ["Shammah Chancellor"],
+	"license": "MIT",
+	"copyright": "Copyright © 2026, Shammah Chancellor",
+	"targetType": "library",
+	"sourcePaths": ["source"],
+	"importPaths": ["source", "third_party"],
+	"dflags": ["-preview=dip1000"],
+	"preBuildCommands": [
+		"make -C third_party/zstd",
+		"mkdir -p .dub/thrift",
+		"$DC -lib -O -oq -Ithird_party -od=.dub/thrift/obj -of=.dub/thrift/libthrift_compact.a third_party/thrift/base.d third_party/thrift/internal/endian.d third_party/thrift/protocol/base.d third_party/thrift/protocol/compact.d third_party/thrift/transport/base.d third_party/thrift/transport/memory.d"
+	],
+	"sourceFiles": [".dub/thrift/libthrift_compact.a", ".dub/zstd/libzstd_compress.a", ".dub/zstd/libzstd_decompress.a"],
+	"configurations": [
+		{
+			"name": "library",
+			"targetType": "library"
+		},
+		{
+			"name": "unittest",
+			"targetType": "library",
+			"sourcePaths": ["source", "tests"],
+			"importPaths": ["source", "tests", "third_party"],
+			"excludedSourceFiles": ["tests/external_fixture.d"]
+		},
+		{
+			"name": "external-fixture",
+			"targetType": "executable",
+			"targetName": "parquet-external-fixture",
+			"mainSourceFile": "tests/external_fixture.d"
+		}
+	]
+}

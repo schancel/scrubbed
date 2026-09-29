@@ -47,13 +47,16 @@ struct ReaderOptions {
     /// (HF exports: 1-100k rows).
     long maxRowGroupRows = 1L << 26;
 
-    /// Largest declared uncompressed page size accepted. ZSTD and GZIP pages
-    /// are inflated into a buffer of the declared size, so a few forged
-    /// header bytes could otherwise demand up to 2 GiB before the codec
-    /// notices the data is short. Real corpus pages are around 1 MiB
-    /// (pyarrow's default data and dictionary page limits); raise this only
-    /// for files with single values larger than the default.
-    long maxPageBytes = 256L << 20;
+    /// Optional ceiling on a page's declared uncompressed size. The default
+    /// is the format's own limit (a Thrift i32), because real pages are not
+    /// small: parquet-cpp checks its ~1 MiB target only every 1024 values,
+    /// so large documents routinely produce pages of hundreds of MiB. Forged
+    /// sizes are handled per codec instead: every decompressor checks the
+    /// declared size against what its compressed input can produce before
+    /// allocating (Snappy's preamble and 22x bound, zstd's frame bound,
+    /// DEFLATE's 1032x maximum ratio, exact equality when uncompressed).
+    /// Lower this to cap per-page memory for a known workload.
+    long maxPageBytes = int.max;
 }
 
 /// One leaf column of a flat schema.
@@ -317,11 +320,13 @@ private ColumnValues decodeChunk(ref const ColumnDescriptor col, CompressionCode
             const dh = header.dictionaryPageHeader;
             check(dh.encoding == Encoding.plain || dh.encoding == Encoding.plainDictionary,
                 "dictionary page encoding " ~ encodingName(dh.encoding) ~ " is not supported");
-            // A chunk's dictionary cannot usefully hold more entries than the
-            // chunk has values; this also bounds allocation for entries that
-            // take no bytes (empty strings).
-            check(dh.numValues >= 0 && dh.numValues <= rows,
-                "dictionary size is negative or exceeds the column chunk's value count");
+            // No bound against the chunk's row count: parquet-cpp writes a
+            // DictionaryArray's whole dictionary into every chunk, used or
+            // not. Entries are bounded by the page instead: every PLAIN
+            // entry takes at least one bit (BOOLEAN), four bytes
+            // (BYTE_ARRAY), or its positive fixed width, and decodePlain
+            // checks the data before appending each one.
+            check(dh.numValues >= 0, "negative dictionary size");
             const raw = decompress(codec, payload, header.uncompressedPageSize);
             decodePlain(dict, col, raw, dh.numValues);
             dictCount = dh.numValues;
@@ -551,6 +556,10 @@ private ubyte[] gunzip(const(ubyte)[] src, size_t size) {
     import etc.c.zlib;
 
     check(src.length <= uint.max, "gzip page too large");
+    // DEFLATE cannot expand beyond ~1032:1 (a 258-byte match per 2 bits,
+    // plus stored-block slack), so larger declared sizes are forged.
+    check(size <= src.length * 1032UL + 1024,
+        "gzip: page header declares more bytes than the stream can produce");
     auto dst = new ubyte[size];
     z_stream z;
     check(inflateInit2(&z, 15 + 16) == Z_OK, "gzip: inflateInit2 failed");

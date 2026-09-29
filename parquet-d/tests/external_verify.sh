@@ -107,6 +107,28 @@ for file in "$real"/*.parquet "$synth"/*.parquet; do
   checked=$((checked + 1))
 done
 
+# A page over 256 MiB, as default-settings pyarrow writes for long documents.
+# Generated on the fly (about 14 MB on disk thanks to compressible text),
+# compared by SHA-256 rather than a text dump, and deleted afterwards.
+large="$work/large"
+rm -rf "$large"
+mkdir -p "$large"
+trap 'rm -rf "$large"' EXIT
+"$py" "$pkg_dir/tests/reader_verify.py" generate-large "$large/large_page.parquet"
+"$dump_bin" digest "$large/large_page.parquet" "$large/digest.txt"
+"$py" "$pkg_dir/tests/reader_verify.py" compare-digest "$large/large_page.parquet" "$large/digest.txt"
+set +e
+msg="$("$dump_bin" digest "$large/large_page.parquet" /dev/null 268435456 2>&1)"
+rc=$?
+set -e
+if [[ $rc -ne 2 || "$msg" != *maxPageBytes* ]]; then
+  echo "external_verify.sh: large-page fixture does not contain a page over 256 MiB ($rc: $msg)" >&2
+  exit 1
+fi
+echo "large page confirmed over 256 MiB (a 256 MiB maxPageBytes rejects it: $msg)"
+rm -rf "$large"
+checked=$((checked + 1))
+
 # Negative control: the comparator must notice a single altered value.
 control="$dumps/negative-control.jsonl"
 "$py" - "$dumps/rotten_tomatoes.validation.parquet.jsonl" "$control" <<'EOF'

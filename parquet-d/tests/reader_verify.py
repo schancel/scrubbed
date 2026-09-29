@@ -17,6 +17,15 @@ Usage:
       string are distinct. Prints per-column null / empty counts and a
       SHA-256 over each column's canonical values. Exits non-zero on the
       first mismatch.
+  python reader_verify.py generate-large <file.parquet>
+      Writes, with default pyarrow settings, the smallest file of long
+      documents whose text column carries a page over 256 MiB (parquet-cpp
+      checks its page-size target only every 1024 values). Compressible
+      text keeps the file itself small on disk.
+  python reader_verify.py compare-digest <file.parquet> <digest.txt>
+      As compare, for `parquet-reader-dump digest` output: pyarrow's
+      canonical rows are serialized exactly as the dump's JSON lines and
+      hashed batch by batch, so no large text dump is ever written.
 """
 
 import hashlib
@@ -83,6 +92,62 @@ def canonical(arr, physical, where):
     fail(f"{where}: comparator does not handle physical type {physical}")
 
 
+def check_header(name, header, pf):
+    md = pf.metadata
+    schema = pf.schema
+    if header["num_rows"] != md.num_rows:
+        fail(f"{name}: rows: D {header['num_rows']}, pyarrow {md.num_rows}")
+    want_groups = [md.row_group(i).num_rows for i in range(md.num_row_groups)]
+    if header["row_groups"] != want_groups:
+        fail(f"{name}: row groups D {header['row_groups']} pyarrow {want_groups}")
+    if len(header["columns"]) != len(schema):
+        fail(f"{name}: {len(header['columns'])} columns, pyarrow {len(schema)}")
+    for ci, dcol in enumerate(header["columns"]):
+        pcol = schema.column(ci)
+        if (dcol["name"], dcol["physical"]) != (pcol.name, pcol.physical_type):
+            fail(f"{name}: column {ci}: D {dcol['name']}/{dcol['physical']}, "
+                 f"pyarrow {pcol.name}/{pcol.physical_type}")
+        if dcol["nullable"] != (pcol.max_definition_level > 0):
+            fail(f"{name}: column {pcol.name}: nullability differs")
+
+
+def compare_digest(path, digest_path):
+    name = os.path.basename(path)
+    pf = pq.ParquetFile(path)
+    with open(digest_path, encoding="utf-8") as f:
+        header = json.loads(f.readline())
+        d_digest = f.readline().strip()
+    check_header(name, header, pf)
+    schema = pf.schema
+    h = hashlib.sha256()
+    rows = 0
+    for batch in pf.iter_batches(batch_size=64):
+        cols = [canonical(batch.column(ci), schema.column(ci).physical_type,
+                          f"{name} column {schema.column(ci).name!r}")
+                for ci in range(len(schema))]
+        for row in zip(*cols):
+            h.update((json.dumps(list(row), separators=(",", ":")) + "\n").encode())
+            rows += 1
+    if h.hexdigest() != d_digest:
+        fail(f"{name}: SHA-256 of all rows differs: D {d_digest} pyarrow {h.hexdigest()}")
+    md = pf.metadata
+    biggest = max(md.row_group(g).column(c).total_uncompressed_size
+                  for g in range(md.num_row_groups) for c in range(len(schema)))
+    print(f"{name}: MATCH by SHA-256 over {rows} rows ({d_digest[:16]}); largest column "
+          f"chunk {biggest} bytes uncompressed")
+
+
+def generate_large(path):
+    # parquet-cpp's first page-size check comes after 1024 values, so the
+    # first page holds 1024 documents: 263,000 bytes each is the smallest
+    # round size that puts it over 256 MiB (1024 x 263,000 = 269,312,000).
+    base = ("The quick brown fox jumps over the lazy dog. " * 6000)[:263_000]
+    docs = [f"doc {i:05d} " + base for i in range(1100)]
+    pq.write_table(pa.table({"text": pa.array(docs, pa.string())}), path,
+                   compression="snappy")
+    print(f"generated {path}: {os.path.getsize(path)} bytes on disk")
+
+
 def compare(path, dump_path):
     name = os.path.basename(path)
     pf = pq.ParquetFile(path)
@@ -93,14 +158,9 @@ def compare(path, dump_path):
         header = json.loads(f.readline())
         d_rows = [json.loads(line) for line in f]
 
-    if header["num_rows"] != md.num_rows or len(d_rows) != md.num_rows:
-        fail(f"{name}: rows: D header {header['num_rows']}, D lines {len(d_rows)}, "
-             f"pyarrow {md.num_rows}")
-    want_groups = [md.row_group(i).num_rows for i in range(md.num_row_groups)]
-    if header["row_groups"] != want_groups:
-        fail(f"{name}: row groups D {header['row_groups']} pyarrow {want_groups}")
-    if len(header["columns"]) != len(schema):
-        fail(f"{name}: {len(header['columns'])} columns, pyarrow {len(schema)}")
+    check_header(name, header, pf)
+    if len(d_rows) != md.num_rows:
+        fail(f"{name}: rows: D lines {len(d_rows)}, pyarrow {md.num_rows}")
 
     table = pf.read()
     codecs = sorted({md.row_group(g).column(c).compression
@@ -221,6 +281,20 @@ def generate(out):
         pq.write_table(t, os.path.join(out, name + ".parquet"), **kw)
     pq.write_table(t.slice(0, 0), os.path.join(out, "edge.empty.parquet"), compression="snappy")
 
+    # Dictionaries with entries a chunk never uses: parquet-cpp writes a
+    # DictionaryArray's whole dictionary into every column chunk.
+    small_dict = pa.DictionaryArray.from_arrays(
+        pa.array([7, 42, 99], pa.int32()), pa.array([f"entry-{i}" for i in range(100)]))
+    pq.write_table(pa.table({"cat": small_dict}),
+                   os.path.join(out, "edge.dict_unused.100_entries_3_rows.parquet"),
+                   compression="snappy")
+    all_used = pa.DictionaryArray.from_arrays(
+        pa.array([i % 1000 for i in range(1050)], pa.int32()),
+        pa.array([f"category-{i:04d}" for i in range(1000)]))
+    pq.write_table(pa.table({"cat": all_used}),
+                   os.path.join(out, "edge.dict_unused.tail_row_group.parquet"),
+                   compression="snappy", row_group_size=1000)
+
     expected = {}
 
     def reject(name, table, needle, **kw):
@@ -237,7 +311,7 @@ def generate(out):
            "nested schemas are not supported")
     with open(os.path.join(unsupported, "expected.json"), "w") as f:
         json.dump(expected, f, indent=1, sort_keys=True)
-    print(f"generated {len(variants) + 1} edge fixtures and {len(expected)} unsupported "
+    print(f"generated {len(variants) + 3} edge fixtures and {len(expected)} unsupported "
           f"fixtures with pyarrow {pa.__version__}")
 
 
@@ -246,6 +320,10 @@ if __name__ == "__main__":
         generate(sys.argv[2])
     elif len(sys.argv) == 4 and sys.argv[1] == "compare":
         compare(sys.argv[2], sys.argv[3])
+    elif len(sys.argv) == 3 and sys.argv[1] == "generate-large":
+        generate_large(sys.argv[2])
+    elif len(sys.argv) == 4 and sys.argv[1] == "compare-digest":
+        compare_digest(sys.argv[2], sys.argv[3])
     else:
         print(__doc__, file=sys.stderr)
         sys.exit(64)

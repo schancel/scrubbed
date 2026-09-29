@@ -11,6 +11,13 @@
 ///     their exact little-endian bytes, so the comparison is byte-exact.
 ///     Exits 2 with the message on stderr if the reader rejects the file.
 ///
+///   parquet-reader-dump digest <in.parquet> <out.txt>
+///     As `dump`, but writes only the header line and then the lowercase
+///     hex SHA-256 of all row lines (each followed by "\n"), for fixtures
+///     too large to dump as text (pages over 256 MiB). An optional fourth
+///     argument sets `ReaderOptions.maxPageBytes`, so a run can prove a
+///     fixture really contains a page larger than that.
+///
 ///   parquet-reader-dump fuzz <in.parquet> <iterations> <seed>
 ///     Mutates the file (byte flips, footer and page-header corruption,
 ///     truncation) and reads each variant fully. Any outcome other than a
@@ -28,19 +35,30 @@ import std.format : format;
 import std.stdio : File, stderr, writeln;
 
 int main(string[] args) {
-    if (args.length == 4 && args[1] == "dump") return dump(args[2], args[3]);
+    if (args.length == 4 && args[1] == "dump") return dump(args[2], args[3], false);
+    if (args.length == 4 && args[1] == "digest") return dump(args[2], args[3], true);
+    if (args.length == 5 && args[1] == "digest")
+        return dump(args[2], args[3], true, args[4].to!long);
     if (args.length == 5 && args[1] == "fuzz")
         return fuzz(args[2], args[3].to!size_t, args[4].to!uint);
-    stderr.writeln("usage: parquet-reader-dump dump <in.parquet> <out.jsonl>\n"
+    stderr.writeln("usage: parquet-reader-dump dump|digest <in.parquet> <out>\n"
         ~ "       parquet-reader-dump fuzz <in.parquet> <iterations> <seed>");
     return 64;
 }
 
-private int dump(string input, string output) {
+private int dump(string input, string output, bool digestOnly,
+        long maxPageBytes = ReaderOptions.init.maxPageBytes) {
+    import std.digest.sha : SHA256, toHexString;
+    import std.string : toLower;
+
+    SHA256 sha;
+    sha.start();
     ParquetReader r;
     ColumnValues[][] groups;
     try {
-        r = ParquetReader.open(input);
+        ReaderOptions opts;
+        opts.maxPageBytes = maxPageBytes;
+        r = ParquetReader.open(input, opts);
         foreach (g; 0 .. r.numRowGroups) groups ~= r.readRowGroup(g);
     } catch (ParquetFormatException e) {
         stderr.writeln("parquet-reader-dump: ", input, ": ", e.msg);
@@ -86,10 +104,12 @@ private int dump(string input, string output) {
                     break;
                 }
             }
-            line.put("]");
-            f.writeln(line.data);
+            line.put("]\n");
+            if (digestOnly) sha.put(cast(const(ubyte)[]) line.data);
+            else f.write(line.data);
         }
     }
+    if (digestOnly) f.writeln(toHexString(sha.finish()).idup.toLower);
     r.close();
     return 0;
 }

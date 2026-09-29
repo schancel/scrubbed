@@ -86,11 +86,16 @@ Input is treated as hostile: every offset, length, count, and dictionary
 index from the file is checked explicitly (not left to D bounds checks,
 which release builds drop), the Thrift decode guards the vendored protocol
 against invalid type nibbles, forged sizes, and unbounded nesting, and
-`ReaderOptions.maxRowGroupRows` (default 2^26) and
-`ReaderOptions.maxPageBytes` (default 256 MiB, declared uncompressed page
-size) refuse forged row counts and page sizes before allocating for them;
-dictionary pages may not declare more entries than their chunk has values,
-and `FIXED_LEN_BYTE_ARRAY` widths must be positive. Malformed input raises `ParquetFormatException`,
+`ReaderOptions.maxRowGroupRows` (default 2^26) refuses forged row counts
+before allocating for them. Forged page sizes are refused per codec before
+the output buffer exists: Snappy's preamble must be reachable at its maximum
+22x expansion, zstd's declared size must fit `ZSTD_decompressBound`, gzip's
+must fit DEFLATE's ~1032x maximum ratio, and uncompressed pages must match
+exactly. `FIXED_LEN_BYTE_ARRAY` widths must be positive, so every dictionary
+entry costs page bytes. Pages themselves are not capped by default --
+parquet-cpp checks its ~1 MiB page target only every 1024 values, so corpora
+of long documents contain pages of hundreds of MiB -- but
+`ReaderOptions.maxPageBytes` can impose a ceiling. Malformed input raises `ParquetFormatException`,
 never a D `Error`. Decoded values never alias the input buffer.
 
 ### Why Snappy is a native decoder

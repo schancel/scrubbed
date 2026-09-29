@@ -14,7 +14,16 @@ extern(C) @nogc nothrow {
         size_t srcSize, int compressionLevel);
     size_t ZSTD_decompress(void* dst, size_t dstCapacity, const(void)* src,
         size_t compressedSize);
+    /// Upper bound on the decompressed size of all frames in `src`: exact
+    /// for frames that record their content size (parquet-cpp's do),
+    /// otherwise block count x 128 KiB. Declared in zstd.h's
+    /// `ZSTD_STATIC_LINKING_ONLY` section, which is fine against this
+    /// pinned, statically linked v1.5.7.
+    ulong ZSTD_decompressBound(const(void)* src, size_t srcSize);
 }
+
+/// `ZSTD_CONTENTSIZE_ERROR`.
+private enum ulong zstdContentSizeError = 0UL - 2;
 
 /// Pinned release this package was built and verified against.
 enum uint pinnedZstdVersion = 10_507;
@@ -42,11 +51,20 @@ ubyte[] zstdCompress(const(ubyte)[] src, int level) {
 
 /// Decompresses `src` (one or more zstd frames) into exactly
 /// `expectedLength` bytes, as Parquet page headers declare. Any zstd error
-/// or length disagreement throws `ParquetFormatException`.
+/// or length disagreement throws `ParquetFormatException`. The declared
+/// length is checked against what the frames can actually produce before
+/// the output buffer is allocated, so a forged page header cannot force a
+/// large allocation.
 ubyte[] zstdDecompress(const(ubyte)[] src, size_t expectedLength) {
     import parquet.exception : ParquetFormatException;
     import std.string : fromStringz;
 
+    const bound = ZSTD_decompressBound(src.ptr, src.length);
+    if (bound == zstdContentSizeError)
+        throw new ParquetFormatException("zstd: corrupt or truncated frame");
+    if (expectedLength > bound)
+        throw new ParquetFormatException(
+            "zstd: page header declares more bytes than the frames can produce");
     auto dst = new ubyte[expectedLength];
     const n = ZSTD_decompress(dst.ptr, dst.length, src.ptr, src.length);
     if (ZSTD_isError(n))
@@ -66,6 +84,9 @@ unittest {
     assertThrown!ParquetFormatException(zstdDecompress(frame, input.length - 1));
     assertThrown!ParquetFormatException(zstdDecompress(frame, input.length + 1));
     assertThrown!ParquetFormatException(zstdDecompress(frame[0 .. $ - 1], input.length));
+    // A forged 1 GiB size is refused before allocating.
+    assertThrown!ParquetFormatException(zstdDecompress(frame, 1 << 30));
+    assertThrown!ParquetFormatException(zstdDecompress([1, 2, 3, 4, 5, 6, 7, 8], 1 << 30));
 }
 
 unittest {

@@ -179,9 +179,14 @@ private struct Crafted {
     void structFieldEnd() { end(); p.writeFieldEnd(); }
 }
 
-/// One-column, one-row-group file: "PAR1" + `pages` + footer.
+/// `craftFile` typeLength value meaning "omit the type_length field".
+private enum omitTypeLength = int.min;
+
+/// One-column, one-row-group file: "PAR1" + `pages` + footer. When
+/// `dictionaryBytes > 0`, the first that many bytes of `pages` are a
+/// dictionary page and the data page follows.
 private ubyte[] craftFile(int physicalType, int typeLength, int codec, long rows,
-        const(ubyte)[] pages, bool hasDictionary) {
+        const(ubyte)[] pages, size_t dictionaryBytes) {
     import std.bitmanip : nativeToLittleEndian;
     import thrift.protocol.base : TType;
 
@@ -192,7 +197,7 @@ private ubyte[] craftFile(int physicalType, int typeLength, int codec, long rows
     c.begin(); c.str(4, "schema"); c.i32(5, 1); c.end();
     c.begin();
     c.i32(1, physicalType);
-    if (typeLength >= 0) c.i32(2, typeLength);
+    if (typeLength != omitTypeLength) c.i32(2, typeLength);
     c.i32(3, 0);                                    // REQUIRED
     c.str(4, "f");
     c.end();
@@ -211,8 +216,8 @@ private ubyte[] craftFile(int physicalType, int typeLength, int codec, long rows
     c.i64(5, rows);
     c.i64(6, pages.length);
     c.i64(7, pages.length);
-    c.i64(9, 4);                                    // data_page_offset
-    if (hasDictionary) c.i64(11, 4);                // dictionary_page_offset
+    c.i64(9, 4 + dictionaryBytes);                  // data_page_offset
+    if (dictionaryBytes) c.i64(11, 4);              // dictionary_page_offset
     c.structFieldEnd();
     c.end();
     c.listEnd();
@@ -225,8 +230,10 @@ private ubyte[] craftFile(int physicalType, int typeLength, int codec, long rows
         ~ nativeToLittleEndian(cast(uint) footer.length)[] ~ cast(ubyte[]) "PAR1";
 }
 
-/// Page header bytes; `dictionaryValues >= 0` makes it a dictionary page.
-private ubyte[] craftPageHeader(int uncompressed, int compressed, int dictionaryValues) {
+/// Page header bytes; `dictionaryValues >= 0` makes it a dictionary page,
+/// otherwise a v1 data page of `dataValues` values in `encoding`.
+private ubyte[] craftPageHeader(int uncompressed, int compressed, int dictionaryValues,
+        int dataValues = 1, int encoding = 0) {
     auto c = Crafted.make();
     c.begin();
     c.i32(1, dictionaryValues >= 0 ? 2 : 0);
@@ -239,7 +246,7 @@ private ubyte[] craftPageHeader(int uncompressed, int compressed, int dictionary
         c.structFieldEnd();
     } else {
         c.structField(5);
-        c.i32(1, 1); c.i32(2, 0); c.i32(3, 3); c.i32(4, 3);
+        c.i32(1, dataValues); c.i32(2, encoding); c.i32(3, 3); c.i32(4, 3);
         c.structFieldEnd();
     }
     c.end();
@@ -256,44 +263,79 @@ private string rejection(const(ubyte)[] file) {
     return null;
 }
 
-// F1: FIXED_LEN_BYTE_ARRAY with type_length 0 (or missing / negative) is
-// rejected at footer parse, before a dictionary page can claim ~int.max
-// zero-width values (previously an unbounded allocation).
+/// GC heap growth while running `dg`, in bytes.
+private size_t heapGrowth(scope void delegate() dg) {
+    import core.memory : GC;
+    GC.collect();
+    const before = GC.stats().usedSize;
+    dg();
+    const after = GC.stats().usedSize;
+    return after > before ? after - before : 0;
+}
+
+// F1: FIXED_LEN_BYTE_ARRAY with type_length 0, negative (emitted
+// explicitly on the wire), or missing is rejected at footer parse, before a
+// dictionary page can claim ~int.max zero-width entries.
 unittest {
     import std.algorithm.searching : canFind;
 
     enum flba = 7;
     auto dict = craftPageHeader(0, 0, int.max);
-    foreach (len; [0, -1, -5]) {
-        const msg = rejection(craftFile(flba, len, 0, 1, dict, true));
+    foreach (len; [0, -1, -5, omitTypeLength]) {
+        const msg = rejection(craftFile(flba, len, 0, 1, dict, dict.length));
         assert(msg !is null && msg.canFind("type_length"), msg);
     }
     // A valid width still reads.
     auto page = craftPageHeader(4, 4, -1) ~ cast(ubyte[]) "abcd";
-    auto r = new ParquetReader(craftFile(flba, 4, 0, 1, page, false));
+    auto r = new ParquetReader(craftFile(flba, 4, 0, 1, page, 0));
     assert(r.readColumn(0, 0).binaries == [cast(const(ubyte)[]) "abcd"]);
 }
 
-// F2: a dictionary page may not declare more entries than the chunk has
-// values (64M zero-byte empty strings used to be materialized), and no page
-// may declare an uncompressed size above ReaderOptions.maxPageBytes (ZSTD
-// and GZIP used to allocate the full declared size, up to 2 GiB, first).
+// Dictionary pages may hold more entries than the chunk has values
+// (parquet-cpp writes a DictionaryArray's whole dictionary into every chunk).
+// Positive: a 5-entry INT64 dictionary in a 1-row chunk reads entry 4.
+// Bounded: a dictionary claiming 64M zero-cost-looking empty strings in a
+// 16-byte page fails after decoding the 4 entries its bytes can hold.
 unittest {
-    import core.memory : GC;
-    import std.algorithm.searching : canFind;
+    enum int64 = 2, byteArray = 6, rleDictionary = 8;
+    ubyte[] entries;
+    foreach (long v; [10, 20, 30, 40, 50])
+        foreach (b; 0 .. 8) entries ~= cast(ubyte)(v >> (8 * b));
+    auto dict = craftPageHeader(40, 40, 5) ~ entries;
+    // bit width 3, one RLE run of 1 x index 4: header 1 << 1, value byte 4
+    const ubyte[] data = [3, 0x02, 0x04];
+    auto page = craftPageHeader(3, 3, -1, 1, rleDictionary) ~ data;
+    auto r = new ParquetReader(craftFile(int64, omitTypeLength, 0, 1, dict ~ page, dict.length));
+    assert(r.readColumn(0, 0).int64s == [50]);
 
-    enum byteArray = 6, int64 = 2, zstd = 6, gzip = 2;
-    // 64M empty strings would need 256 MiB of PLAIN length prefixes; the
-    // declared size here is irrelevant because the count check fires first.
-    auto dict = craftPageHeader(16, 16, 64 << 20) ~ new ubyte[16];
-    auto msg = rejection(craftFile(byteArray, -1, 0, 1, dict, true));
-    assert(msg !is null && msg.canFind("dictionary size"), msg);
+    auto forged = craftPageHeader(16, 16, 64 << 20) ~ new ubyte[16];
+    string msg;
+    const grew = heapGrowth({
+        msg = rejection(craftFile(byteArray, omitTypeLength, 0, 1, forged, forged.length));
+    });
+    assert(msg !is null, "forged dictionary accepted");
+    assert(grew < 16 << 20, "forged dictionary allocated in proportion to its claim");
+}
 
-    foreach (codec; [zstd, gzip]) {
-        const before = GC.stats().usedSize;
+// Forged uncompressed page sizes are refused by each codec's own bound
+// before the output buffer is allocated (no absolute page-size cap).
+unittest {
+    enum int64 = 2, snappy = 1, gzip = 2, zstd = 6;
+    foreach (codec; [snappy, gzip, zstd]) {
         auto page = craftPageHeader(1 << 30, 8, -1) ~ new ubyte[8];
-        msg = rejection(craftFile(int64, -1, codec, 1, page, false));
-        assert(msg !is null && msg.canFind("maxPageBytes"), msg);
-        assert(GC.stats().usedSize - before < 64 << 20, "page buffer was allocated");
+        string msg;
+        const grew = heapGrowth({
+            msg = rejection(craftFile(int64, omitTypeLength, codec, 1, page, 0));
+        });
+        assert(msg !is null, "forged page size accepted");
+        assert(grew < 64 << 20, "page buffer allocated for a forged size");
     }
+    // The opt-in ceiling still applies when set.
+    import std.algorithm.searching : canFind;
+    import std.exception : collectExceptionMsg;
+    ReaderOptions opts;
+    opts.maxPageBytes = 4;
+    auto page = craftPageHeader(8, 8, -1) ~ new ubyte[8];
+    auto r = new ParquetReader(craftFile(int64, omitTypeLength, 0, 1, page, 0), opts);
+    assert(collectExceptionMsg!ParquetFormatException(r.readColumn(0, 0)).canFind("maxPageBytes"));
 }

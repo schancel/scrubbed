@@ -65,6 +65,20 @@ private string resolveRealPath(string path) {
     return fromStringz(resolved).idup;
 }
 
+private ubyte[] hexDecodeBytes(string hex) {
+    ubyte nibble(char c) {
+        if (c >= '0' && c <= '9') return cast(ubyte)(c - '0');
+        if (c >= 'a' && c <= 'f') return cast(ubyte)(c - 'a' + 10);
+        if (c >= 'A' && c <= 'F') return cast(ubyte)(c - 'A' + 10);
+        throw new Exception("invalid hex digit: " ~ c);
+    }
+    if (hex.length % 2 != 0) throw new Exception("odd-length hex string");
+    auto bytes = new ubyte[hex.length / 2];
+    foreach (i; 0 .. bytes.length)
+        bytes[i] = cast(ubyte)((nibble(hex[i * 2]) << 4) | nibble(hex[i * 2 + 1]));
+    return bytes;
+}
+
 private int cmdMojibakeDiff(string[] args) {
     if (args.length != 2) {
         stderr.writeln("usage: score_helper mojibake-diff FILE_A FILE_B");
@@ -116,6 +130,22 @@ private int cmdTextOverlap(string[] args) {
     return 0;
 }
 
+// #300 Slice 2 converged language-id-detect onto the shared
+// document-metadata sidecar: the sidecar file is no longer the raw
+// language-id wire bytes directly, it's a document-metadata:v1/v2 JSON
+// wrapper with the original wire bytes hex-encoded under
+// extension[].value where key == "language-id" (see docs/cli-commands.md).
+// decodeLanguageIdentity's own wire format is unchanged; only how to reach
+// its bytes changed.
+private ubyte[] extractLanguageIdWireBytes(string sidecarPath) {
+    auto doc = parseJSON(readText(sidecarPath));
+    if (auto ext = "extension" in doc.object)
+        foreach (entry; ext.array)
+            if (entry["key"].str == "language-id")
+                return hexDecodeBytes(entry["value"].str);
+    throw new Exception("no language-id extension entry in " ~ sidecarPath);
+}
+
 private int cmdDecodeLangId(string[] args) {
     if (args.length != 2) {
         stderr.writeln("usage: score_helper decode-langid SIDECAR_PATH INPUT_PATH");
@@ -127,7 +157,7 @@ private int cmdDecodeLangId(string[] args) {
         resolveRealPath(inputPath), "."));
     ubyte[32] revision = sha256Of(read(inputPath));
     try {
-        auto record = decodeLanguageIdentity(cast(ubyte[]) read(sidecarPath), expectedId,
+        auto record = decodeLanguageIdentity(extractLanguageIdWireBytes(sidecarPath), expectedId,
             revision);
         if (record.result.status == LanguageDetectionStatus.detected) {
             writefln("detected %s %f", record.result.language.to!string,
@@ -141,12 +171,27 @@ private int cmdDecodeLangId(string[] args) {
     return 0;
 }
 
+// #300 Slice 3 converged pii-four-class onto the shared document-metadata
+// sidecar too: the original scrubbed-pii-audit-v1 JSON blob (still exactly
+// the shape this file already knew how to read) now lives hex-encoded
+// under structuredSections[].payload where sectionId == "pii-audit",
+// nested inside a document-metadata:v1/v2 wrapper, instead of being the
+// sidecar file's own top-level content.
+private JSONValue extractPiiAuditJson(string sidecarPath) {
+    auto outer = parseJSON(readText(sidecarPath));
+    if (auto sections = "structuredSections" in outer.object)
+        foreach (section; sections.array)
+            if (section["sectionId"].str == "pii-audit")
+                return parseJSON(cast(string) hexDecodeBytes(section["payload"].str));
+    throw new Exception("no pii-audit structured section in " ~ sidecarPath);
+}
+
 private int cmdPiiSummary(string[] args) {
     if (args.length != 1) {
         stderr.writeln("usage: score_helper pii-summary SIDECAR_PATH");
         return 2;
     }
-    auto doc = parseJSON(readText(args[0]));
+    auto doc = extractPiiAuditJson(args[0]);
     int[string] counts;
     if (auto unions = "unions" in doc.object) {
         foreach (u; unions.array) {

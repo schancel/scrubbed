@@ -130,12 +130,39 @@ fi
 # corpus's content legitimately does that for some pages (see
 # docs/html-main-content.md) -- so 0 or 1 are both a clean invocation here,
 # matching benchmarks/external_comparator.d's own main-content case.
+# CPU seconds (user+sys) from a /usr/bin/time report mixed into a log file.
+# Unlike wall-clock, this isn't inflated by scheduling delay when other
+# processes are competing for CPU on this host.
+cpu_seconds_from_time_log() {
+  local log="$1"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    local user sys
+    user="$(grep -m1 '^user ' "$log" | awk '{print $2}')"
+    sys="$(grep -m1 '^sys ' "$log" | awk '{print $2}')"
+    python3 -c "print(f'{${user:-0} + ${sys:-0}:.6f}')"
+  else
+    local user sys
+    user="$(grep -m1 'User time (seconds):' "$log" | awk '{print $NF}')"
+    sys="$(grep -m1 'System time (seconds):' "$log" | awk '{print $NF}')"
+    python3 -c "print(f'{${user:-0} + ${sys:-0}:.6f}')"
+  fi
+}
+
+time_wrapper() {
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    echo "/usr/bin/time -l -p"
+  else
+    echo "/usr/bin/time -v"
+  fi
+}
+
 run_scrubbed_pipeline() {
   local out_dir="$1"
   rm -rf "$out_dir" "${out_dir}.pii-audit"
   mkdir -p "$out_dir"
   set +e
-  "$scrubbed_bin" clean-web-document --input "$corpus_dir" --output "$out_dir" --threads 4 \
+  # shellcheck disable=SC2046  # time_wrapper's two-token output is meant to split
+  $(time_wrapper) "$scrubbed_bin" clean-web-document --input "$corpus_dir" --output "$out_dir" --threads 4 \
     >"$out_dir.stdout.log" 2>"$out_dir.stderr.log"
   local status=$?
   set -e
@@ -151,20 +178,56 @@ run_scrubbed_pipeline() {
 # scope for this slice -- see the issue's owner decision). Intermediate
 # ftfy and trafilatura outputs are kept per file so the correctness section
 # below can score each stage without a second timed pass.
+# Per-subprocess-call CPU seconds (user+sys), accumulated across every file
+# in the corpus and every one of the four tools, into $cpu_log (one file
+# per timed sample -- 80 /usr/bin/time reports for a 20-file corpus, summed
+# on read). Wrapping the whole loop with a single /usr/bin/time would be
+# simpler, but this repo's convention (external_comparator.d,
+# run_throughput.sh) wraps individual subprocess invocations, and doing the
+# same here keeps per-tool attribution possible later if it's ever wanted.
 run_python_pipeline() {
   local out_dir="$1"
+  local cpu_log="$2"
   rm -rf "$out_dir"
   mkdir -p "$out_dir"
-  local f stem status=0
+  : > "$cpu_log"
+  local f stem status=0 step_log step_status
+  step_log="$(mktemp)"
+  on_step_failure() {
+    # /usr/bin/time's report shares this file with the wrapped command's own
+    # stderr; preserve it before the next iteration overwrites step_log,
+    # since it's the only diagnostic for which of the 80 calls failed.
+    echo "run.sh: python pipeline step failed (exit $1): $2" >&2
+    cat "$step_log" >&2
+  }
   for f in "${corpus_files[@]}"; do
     stem="$(basename "$f" .html)"
-    "$ftfy_bin" --preserve-entities -n none < "$f" > "$out_dir/$stem.ftfy.html" || status=$?
-    "$trafilatura_bin" --output-format txt < "$out_dir/$stem.ftfy.html" > "$out_dir/$stem.txt" || status=$?
-    "$langdetect_python" "$repo_root/benchmarks/langdetect_driver.py" "$out_dir/$stem.txt" \
-      > "$out_dir/$stem.lang" || status=$?
-    "$presidio_python" "$repo_root/benchmarks/presidio_driver.py" "$out_dir/$stem.txt" \
-      > "$out_dir/$stem.pii" || status=$?
+    step_status=0
+    # shellcheck disable=SC2046  # time_wrapper's two-token output is meant to split
+    $(time_wrapper) "$ftfy_bin" --preserve-entities -n none < "$f" \
+      > "$out_dir/$stem.ftfy.html" 2>"$step_log" || step_status=$?
+    [[ $step_status -eq 0 ]] || { status=$step_status; on_step_failure "$step_status" "ftfy $stem"; }
+    cpu_seconds_from_time_log "$step_log" >> "$cpu_log"
+    step_status=0
+    # shellcheck disable=SC2046
+    $(time_wrapper) "$trafilatura_bin" --output-format txt < "$out_dir/$stem.ftfy.html" \
+      > "$out_dir/$stem.txt" 2>"$step_log" || step_status=$?
+    [[ $step_status -eq 0 ]] || { status=$step_status; on_step_failure "$step_status" "trafilatura $stem"; }
+    cpu_seconds_from_time_log "$step_log" >> "$cpu_log"
+    step_status=0
+    # shellcheck disable=SC2046
+    $(time_wrapper) "$langdetect_python" "$repo_root/benchmarks/langdetect_driver.py" "$out_dir/$stem.txt" \
+      > "$out_dir/$stem.lang" 2>"$step_log" || step_status=$?
+    [[ $step_status -eq 0 ]] || { status=$step_status; on_step_failure "$step_status" "langdetect $stem"; }
+    cpu_seconds_from_time_log "$step_log" >> "$cpu_log"
+    step_status=0
+    # shellcheck disable=SC2046
+    $(time_wrapper) "$presidio_python" "$repo_root/benchmarks/presidio_driver.py" "$out_dir/$stem.txt" \
+      > "$out_dir/$stem.pii" 2>"$step_log" || step_status=$?
+    [[ $step_status -eq 0 ]] || { status=$step_status; on_step_failure "$step_status" "presidio $stem"; }
+    cpu_seconds_from_time_log "$step_log" >> "$cpu_log"
   done
+  rm -f "$step_log"
   if [[ $status -ne 0 ]]; then
     echo "run.sh: python pipeline chain reported a nonzero step exit ($status)" >&2
     exit 1
@@ -184,7 +247,7 @@ now_seconds() { python3 -c 'import time; print(f"{time.time():.6f}")'; }
 
 # ---- 6. Interleaved A/B/A/B whole-pipeline timing ----
 echo "run.sh: running interleaved A/B/A/B whole-pipeline timing (scrubbed, python, scrubbed, python)..." >&2
-declare -a sample_tool sample_seconds
+declare -a sample_tool sample_seconds sample_cpu_seconds
 scrubbed_dirs=()
 python_dirs=()
 for i in 0 1 2 3; do
@@ -195,18 +258,25 @@ for i in 0 1 2 3; do
     run_scrubbed_pipeline "$out_dir"
     end="$(now_seconds)"
     scrubbed_dirs+=("$out_dir")
+    cpu_elapsed="$(cpu_seconds_from_time_log "$out_dir.stderr.log")"
   else
     tool=python
     out_dir="$work_root/python-sample-$i"
+    cpu_log="$work_root/python-sample-$i.cpu.log"
     start="$(now_seconds)"
-    run_python_pipeline "$out_dir"
+    run_python_pipeline "$out_dir" "$cpu_log"
     end="$(now_seconds)"
     python_dirs+=("$out_dir")
+    cpu_elapsed="$(python3 -c "
+import sys
+print(f'{sum(float(x) for x in open(sys.argv[1]) if x.strip()):.6f}')
+" "$cpu_log")"
   fi
   elapsed="$(python3 -c "print(f'{$end - $start:.6f}')")"
   sample_tool[i]="$tool"
   sample_seconds[i]="$elapsed"
-  echo "run.sh: sample $i ($tool): ${elapsed}s" >&2
+  sample_cpu_seconds[i]="$cpu_elapsed"
+  echo "run.sh: sample $i ($tool): wall ${elapsed}s, cpu ${cpu_elapsed}s" >&2
 done
 
 # ---- 7. Reproducibility gate: each tool's own two timed samples must ----
@@ -281,10 +351,15 @@ for f in "${corpus_files[@]}"; do
     # (c) language-id agreement: scrubbed on its own extracted text vs.
     # langdetect on trafilatura's extracted text (each tool scored on its
     # own upstream stage's output -- a true whole-chain comparison).
+    # #300 Slice 2 converged language-id-detect onto the shared
+    # document-metadata sidecar -- it's no longer independently terminal,
+    # so document-metadata-publish must be chained after it as the actual
+    # terminal stage (see docs/cli-commands.md and score_helper.d's
+    # extractLanguageIdWireBytes, which unwraps the resulting sidecar).
     "$scrubbed_bin" run --input "$score_dir/main-content/$stem.txt" \
       --output "$score_dir/langid-sidecar/$stem.out" \
       --sidecar-output "$score_dir/langid-sidecar/$stem.sidecar" \
-      --stage id=language-id-detect --threads 1 >/dev/null
+      --stage lang=language-id-detect --stage pub=document-metadata-publish --threads 1 >/dev/null
     d_lang_line="$("$score_helper" decode-langid "$score_dir/langid-sidecar/$stem.sidecar" \
       "$score_dir/main-content/$stem.txt")"
     py_lang_line="$(cat "$py_dir/$stem.lang")"
@@ -308,10 +383,13 @@ for f in "${corpus_files[@]}"; do
 
     # (d) PII agreement: scrubbed's pii-four-class on its own extracted
     # text vs. Presidio on trafilatura's extracted text, per category.
+    # Same #300 Slice 3 convergence as language-id-detect above --
+    # pii-four-class needs document-metadata-publish chained after it too
+    # (score_helper.d's extractPiiAuditJson unwraps the resulting sidecar).
     "$scrubbed_bin" run --input "$score_dir/main-content/$stem.txt" \
       --output "$score_dir/pii-sidecar/$stem.out" \
       --sidecar-output "$score_dir/pii-sidecar/$stem.sidecar" \
-      --stage id=pii-four-class --threads 1 >/dev/null
+      --stage pii=pii-four-class --stage pub=document-metadata-publish --threads 1 >/dev/null
     while read -r category count; do
       [[ -z "$category" ]] && continue
       case "$category" in
@@ -339,10 +417,16 @@ done
 # ---- 9. Report ----
 mean_scrubbed=$(python3 -c "print(f'{(${sample_seconds[0]} + ${sample_seconds[2]}) / 2:.4f}')")
 mean_python=$(python3 -c "print(f'{(${sample_seconds[1]} + ${sample_seconds[3]}) / 2:.4f}')")
+mean_scrubbed_cpu=$(python3 -c "print(f'{(${sample_cpu_seconds[0]} + ${sample_cpu_seconds[2]}) / 2:.4f}')")
+mean_python_cpu=$(python3 -c "print(f'{(${sample_cpu_seconds[1]} + ${sample_cpu_seconds[3]}) / 2:.4f}')")
 throughput_scrubbed=$(python3 -c "print(f'{$corpus_bytes / ${mean_scrubbed} / 1024:.1f}')")
 throughput_python=$(python3 -c "print(f'{$corpus_bytes / ${mean_python} / 1024:.1f}')")
 pages_per_sec_scrubbed=$(python3 -c "print(f'{$corpus_count / ${mean_scrubbed}:.2f}')")
 pages_per_sec_python=$(python3 -c "print(f'{$corpus_count / ${mean_python}:.2f}')")
+speedup_wall=$(python3 -c "print(f'{${mean_python} / ${mean_scrubbed}:.2f}')")
+speedup_cpu=$(python3 -c "print(f'{${mean_python_cpu} / ${mean_scrubbed_cpu}:.2f}')")
+scrubbed_wall_vs_cpu_pct=$(python3 -c "print(f'{(${mean_scrubbed} - ${mean_scrubbed_cpu}) / ${mean_scrubbed_cpu} * 100:.1f}')")
+python_wall_vs_cpu_pct=$(python3 -c "print(f'{(${mean_python} - ${mean_python_cpu}) / ${mean_python_cpu} * 100:.1f}')")
 
 mc_overlap_report="$score_dir/main-content-overlap-summary.py"
 main_content_summary="$(python3 - "$score_dir/main-content" "${corpus_files[@]}" <<'PYEOF'
@@ -374,14 +458,21 @@ Corpus: $corpus_count pages, $corpus_bytes bytes (examples/pipeline-benchmark/co
   see manifest.json and NOTICE.md for provenance and the 6 originally
   pinned URLs that could not be fetched).
 
---- Whole-pipeline timing (A/B/A/B interleaved, wall clock) ---
-scrubbed clean-web-document samples: ${sample_seconds[0]}s, ${sample_seconds[2]}s (mean ${mean_scrubbed}s)
-python chain (ftfy->trafilatura->langdetect->presidio) samples: ${sample_seconds[1]}s, ${sample_seconds[3]}s (mean ${mean_python}s)
+--- Whole-pipeline timing (A/B/A/B interleaved) ---
+scrubbed clean-web-document samples: ${sample_seconds[0]}s, ${sample_seconds[2]}s (mean wall ${mean_scrubbed}s, mean cpu ${mean_scrubbed_cpu}s)
+python chain (ftfy->trafilatura->langdetect->presidio) samples: ${sample_seconds[1]}s, ${sample_seconds[3]}s (mean wall ${mean_python}s, mean cpu ${mean_python_cpu}s)
 Both tools reproduced byte-identical output across their own two samples.
 
 Throughput:
   scrubbed:      ${throughput_scrubbed} KiB/s, ${pages_per_sec_scrubbed} pages/s
   python chain:  ${throughput_python} KiB/s, ${pages_per_sec_python} pages/s
+
+Speedup, wall-clock:  ${speedup_wall}x
+Speedup, CPU time:    ${speedup_cpu}x  (robust to other load on this host)
+wall-vs-CPU divergence this run (large values mean this host had other load
+competing for CPU while this ran -- trust the CPU-time speedup over the
+wall-clock one when this is large):
+  scrubbed: ${scrubbed_wall_vs_cpu_pct}%    python chain: ${python_wall_vs_cpu_pct}%
 
 --- Correctness / agreement summary (not gated; descriptive only) ---
 [ftfy-equivalent, exact-byte match style]

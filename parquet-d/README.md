@@ -86,8 +86,11 @@ Input is treated as hostile: every offset, length, count, and dictionary
 index from the file is checked explicitly (not left to D bounds checks,
 which release builds drop), the Thrift decode guards the vendored protocol
 against invalid type nibbles, forged sizes, and unbounded nesting, and
-`ReaderOptions.maxRowGroupRows` (default 2^26) refuses forged row counts
-before allocating for them. Malformed input raises `ParquetFormatException`,
+`ReaderOptions.maxRowGroupRows` (default 2^26) and
+`ReaderOptions.maxPageBytes` (default 256 MiB, declared uncompressed page
+size) refuse forged row counts and page sizes before allocating for them;
+dictionary pages may not declare more entries than their chunk has values,
+and `FIXED_LEN_BYTE_ARRAY` widths must be positive. Malformed input raises `ParquetFormatException`,
 never a D `Error`. Decoded values never alias the input buffer.
 
 ### Why Snappy is a native decoder

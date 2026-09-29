@@ -144,3 +144,156 @@ unittest {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Crafted hostile files (review findings on PR #394). Built directly with the
+// vendored TCompactProtocol, since the package's encoder never emits the
+// fields involved (type_length, dictionary page headers).
+// ---------------------------------------------------------------------------
+
+private struct Crafted {
+    import thrift.protocol.base : TField, TList, TStruct, TType;
+    import thrift.protocol.compact : TCompactProtocol;
+    import thrift.transport.memory : TMemoryBuffer;
+
+    TMemoryBuffer buf;
+    TCompactProtocol!TMemoryBuffer p;
+
+    static Crafted make() {
+        Crafted c;
+        c.buf = new TMemoryBuffer;
+        c.p = new TCompactProtocol!TMemoryBuffer(c.buf);
+        return c;
+    }
+
+    ubyte[] bytes() { return buf.getContents().dup; }
+    void begin() { p.writeStructBegin(TStruct("s")); }
+    void end() { p.writeFieldStop(); p.writeStructEnd(); }
+    void field(short id, TType t) { p.writeFieldBegin(TField("f", t, id)); }
+    void i32(short id, int v) { field(id, TType.I32); p.writeI32(v); p.writeFieldEnd(); }
+    void i64(short id, long v) { field(id, TType.I64); p.writeI64(v); p.writeFieldEnd(); }
+    void str(short id, string v) { field(id, TType.STRING); p.writeString(v); p.writeFieldEnd(); }
+    void list(short id, TType elem, size_t n) { field(id, TType.LIST); p.writeListBegin(TList(elem, n)); }
+    void listEnd() { p.writeListEnd(); p.writeFieldEnd(); }
+    void structField(short id) { field(id, TType.STRUCT); begin(); }
+    void structFieldEnd() { end(); p.writeFieldEnd(); }
+}
+
+/// One-column, one-row-group file: "PAR1" + `pages` + footer.
+private ubyte[] craftFile(int physicalType, int typeLength, int codec, long rows,
+        const(ubyte)[] pages, bool hasDictionary) {
+    import std.bitmanip : nativeToLittleEndian;
+    import thrift.protocol.base : TType;
+
+    auto c = Crafted.make();
+    c.begin();
+    c.i32(1, 1);                                    // version
+    c.list(2, TType.STRUCT, 2);                     // schema
+    c.begin(); c.str(4, "schema"); c.i32(5, 1); c.end();
+    c.begin();
+    c.i32(1, physicalType);
+    if (typeLength >= 0) c.i32(2, typeLength);
+    c.i32(3, 0);                                    // REQUIRED
+    c.str(4, "f");
+    c.end();
+    c.listEnd();
+    c.i64(3, rows);                                 // num_rows
+    c.list(4, TType.STRUCT, 1);                     // row_groups
+    c.begin();
+    c.list(1, TType.STRUCT, 1);                     // columns
+    c.begin();
+    c.i64(2, 0);
+    c.structField(3);                               // meta_data
+    c.i32(1, physicalType);
+    c.list(2, TType.I32, 1); c.p.writeI32(0); c.listEnd();
+    c.list(3, TType.STRING, 1); c.p.writeString("f"); c.listEnd();
+    c.i32(4, codec);
+    c.i64(5, rows);
+    c.i64(6, pages.length);
+    c.i64(7, pages.length);
+    c.i64(9, 4);                                    // data_page_offset
+    if (hasDictionary) c.i64(11, 4);                // dictionary_page_offset
+    c.structFieldEnd();
+    c.end();
+    c.listEnd();
+    c.i64(3, rows);
+    c.end();
+    c.listEnd();
+    c.end();
+    const footer = c.bytes();
+    return cast(ubyte[]) "PAR1" ~ pages ~ footer
+        ~ nativeToLittleEndian(cast(uint) footer.length)[] ~ cast(ubyte[]) "PAR1";
+}
+
+/// Page header bytes; `dictionaryValues >= 0` makes it a dictionary page.
+private ubyte[] craftPageHeader(int uncompressed, int compressed, int dictionaryValues) {
+    auto c = Crafted.make();
+    c.begin();
+    c.i32(1, dictionaryValues >= 0 ? 2 : 0);
+    c.i32(2, uncompressed);
+    c.i32(3, compressed);
+    if (dictionaryValues >= 0) {
+        c.structField(7);
+        c.i32(1, dictionaryValues);
+        c.i32(2, 0);                                // PLAIN
+        c.structFieldEnd();
+    } else {
+        c.structField(5);
+        c.i32(1, 1); c.i32(2, 0); c.i32(3, 3); c.i32(4, 3);
+        c.structFieldEnd();
+    }
+    c.end();
+    return c.bytes();
+}
+
+private string rejection(const(ubyte)[] file) {
+    try {
+        auto r = new ParquetReader(file);
+        foreach (g; 0 .. r.numRowGroups) r.readRowGroup(g);
+    } catch (ParquetFormatException e) {
+        return e.msg;
+    }
+    return null;
+}
+
+// F1: FIXED_LEN_BYTE_ARRAY with type_length 0 (or missing / negative) is
+// rejected at footer parse, before a dictionary page can claim ~int.max
+// zero-width values (previously an unbounded allocation).
+unittest {
+    import std.algorithm.searching : canFind;
+
+    enum flba = 7;
+    auto dict = craftPageHeader(0, 0, int.max);
+    foreach (len; [0, -1, -5]) {
+        const msg = rejection(craftFile(flba, len, 0, 1, dict, true));
+        assert(msg !is null && msg.canFind("type_length"), msg);
+    }
+    // A valid width still reads.
+    auto page = craftPageHeader(4, 4, -1) ~ cast(ubyte[]) "abcd";
+    auto r = new ParquetReader(craftFile(flba, 4, 0, 1, page, false));
+    assert(r.readColumn(0, 0).binaries == [cast(const(ubyte)[]) "abcd"]);
+}
+
+// F2: a dictionary page may not declare more entries than the chunk has
+// values (64M zero-byte empty strings used to be materialized), and no page
+// may declare an uncompressed size above ReaderOptions.maxPageBytes (ZSTD
+// and GZIP used to allocate the full declared size, up to 2 GiB, first).
+unittest {
+    import core.memory : GC;
+    import std.algorithm.searching : canFind;
+
+    enum byteArray = 6, int64 = 2, zstd = 6, gzip = 2;
+    // 64M empty strings would need 256 MiB of PLAIN length prefixes; the
+    // declared size here is irrelevant because the count check fires first.
+    auto dict = craftPageHeader(16, 16, 64 << 20) ~ new ubyte[16];
+    auto msg = rejection(craftFile(byteArray, -1, 0, 1, dict, true));
+    assert(msg !is null && msg.canFind("dictionary size"), msg);
+
+    foreach (codec; [zstd, gzip]) {
+        const before = GC.stats().usedSize;
+        auto page = craftPageHeader(1 << 30, 8, -1) ~ new ubyte[8];
+        msg = rejection(craftFile(int64, -1, codec, 1, page, false));
+        assert(msg !is null && msg.canFind("maxPageBytes"), msg);
+        assert(GC.stats().usedSize - before < 64 << 20, "page buffer was allocated");
+    }
+}

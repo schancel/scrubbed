@@ -46,6 +46,14 @@ struct ReaderOptions {
     /// anything is allocated for it. Real corpus row groups are far smaller
     /// (HF exports: 1-100k rows).
     long maxRowGroupRows = 1L << 26;
+
+    /// Largest declared uncompressed page size accepted. ZSTD and GZIP pages
+    /// are inflated into a buffer of the declared size, so a few forged
+    /// header bytes could otherwise demand up to 2 GiB before the codec
+    /// notices the data is short. Real corpus pages are around 1 MiB
+    /// (pyarrow's default data and dictionary page limits); raise this only
+    /// for files with single values larger than the default.
+    long maxPageBytes = 256L << 20;
 }
 
 /// One leaf column of a flat schema.
@@ -191,7 +199,7 @@ final class ParquetReader {
         const bytes = file_[cast(size_t) start .. cast(size_t)(start + cm.totalCompressedSize)];
 
         try {
-            return decodeChunk(*col, cm.codec, bytes, cast(size_t) rows);
+            return decodeChunk(*col, cm.codec, bytes, cast(size_t) rows, options_);
         } catch (ParquetFormatException e) {
             throw new ParquetFormatException(where ~ e.msg, e.file, e.line);
         }
@@ -236,7 +244,9 @@ final class ParquetReader {
             c.convertedType = e.convertedType;
             c.logicalType = e.logicalType;
             if (e.type == PhysicalType.fixedLenByteArray) {
-                check(e.hasTypeLength && e.typeLength >= 0,
+                // pyarrow also refuses width 0; allowing it would let a
+                // PLAIN page claim any number of values without data.
+                check(e.hasTypeLength && e.typeLength > 0,
                     "column '" ~ e.name ~ "': FIXED_LEN_BYTE_ARRAY without a valid type_length");
                 c.typeLength = e.typeLength;
             } else if (e.type == PhysicalType.int96) {
@@ -273,7 +283,7 @@ private struct Values {
 }
 
 private ColumnValues decodeChunk(ref const ColumnDescriptor col, CompressionCodec codec,
-        const(ubyte)[] chunk, size_t rows) {
+        const(ubyte)[] chunk, size_t rows, ref const ReaderOptions options) {
     ColumnValues result;
     result.type = col.type;
     result.nulls.reserve(rows);
@@ -291,6 +301,9 @@ private ColumnValues decodeChunk(ref const ColumnDescriptor col, CompressionCode
         pos += headerLen;
         check(header.compressedPageSize >= 0 && header.uncompressedPageSize >= 0,
             "negative page size");
+        check(header.uncompressedPageSize <= options.maxPageBytes,
+            "page size " ~ header.uncompressedPageSize.to!string
+            ~ " exceeds ReaderOptions.maxPageBytes");
         check(cast(size_t) header.compressedPageSize <= chunk.length - pos,
             "page extends past the column chunk");
         const payload = chunk[pos .. pos + header.compressedPageSize];
@@ -304,7 +317,11 @@ private ColumnValues decodeChunk(ref const ColumnDescriptor col, CompressionCode
             const dh = header.dictionaryPageHeader;
             check(dh.encoding == Encoding.plain || dh.encoding == Encoding.plainDictionary,
                 "dictionary page encoding " ~ encodingName(dh.encoding) ~ " is not supported");
-            check(dh.numValues >= 0, "negative dictionary size");
+            // A chunk's dictionary cannot usefully hold more entries than the
+            // chunk has values; this also bounds allocation for entries that
+            // take no bytes (empty strings).
+            check(dh.numValues >= 0 && dh.numValues <= rows,
+                "dictionary size is negative or exceeds the column chunk's value count");
             const raw = decompress(codec, payload, header.uncompressedPageSize);
             decodePlain(dict, col, raw, dh.numValues);
             dictCount = dh.numValues;
@@ -486,7 +503,7 @@ private void decodePlain(ref Values v, ref const ColumnDescriptor col,
     case PhysicalType.int96:
     case PhysicalType.fixedLenByteArray: {
         const width = cast(size_t) col.typeLength;
-        check(width == 0 || count <= data.length / width, "PLAIN values extend past the page");
+        check(width > 0 && count <= data.length / width, "PLAIN values extend past the page");
         v.binaries.reserve(v.binaries.length + count);
         foreach (i; 0 .. count) v.binaries ~= data[i * width .. (i + 1) * width];
         break;

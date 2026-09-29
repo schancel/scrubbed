@@ -21,7 +21,7 @@ module lexcontent.html_main_content_markdown;
 import lexcontent.html_main_content : extractMainContent, HtmlMainContentOutputLimit,
     MainContentCandidate, MainContentStatus;
 import lexcontent.html_markdown : HtmlMarkdownOutputLimit, renderMarkdownFrom;
-import lexcontent.html_tree : HtmlTree;
+import lexbor_d.html_tree : HtmlTree;
 
 /// Same status/candidate shape as `html_main_content.MainContentResult`, but
 /// `.markdown` (populated only when `.status == selected`) is real Markdown
@@ -57,7 +57,7 @@ MainContentMarkdownResult extractMainContentMarkdown(const ref HtmlTree tree) pu
 }
 
 unittest {
-    import lexcontent.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind;
+    import lexbor_d.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind;
 
     // This ticket's own cited repro, verbatim, wrapped in an <article> the
     // real selection algorithm actually picks (identical fixture shape to
@@ -128,7 +128,7 @@ unittest {
 unittest {
     // Abstention: no selected subtree, so no Markdown to render -- mirrors
     // `MainContentResult.text`'s own empty-on-abstention behavior.
-    import lexcontent.html_tree : HtmlNode, HtmlNodeKind;
+    import lexbor_d.html_tree : HtmlNode, HtmlNodeKind;
 
     HtmlTree nav;
     nav.nodes = [

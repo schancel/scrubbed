@@ -1,7 +1,7 @@
 /// Deterministic main-content-vs-boilerplate selection over the selected HTML tree.
 module lexcontent.html_main_content;
 
-import lexcontent.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree;
+import lexbor_d.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree;
 import std.uni : isControl, isFormat, isWhite;
 import std.utf : UseReplacementDchar, decode, encode;
 

@@ -54,8 +54,18 @@ Both sinks share a typed document identity but publish independently:
 
 Preflight rejects unsafe routes before publication: symlink, hardlink,
 path-overlap, and destination-owner checks. A bad UTF-8 input, an HTML
-parse quarantine, or hitting the 64 KiB raw HTML limit leaves both payloads
+parse quarantine, or hitting this command's own raw-HTML admission gate
+(a hardcoded 64 KiB `maxRawBytes` preflight in `metadata_route_cli.d`,
+checked before the compiled job ever runs) leaves both payloads
 unpublished for that document.
+
+Note: this preflight gate is independent of, and *not* raised by, the
+configurable `max-html-bytes` option issue #444 added to the
+`html-metadata`/`html-metadata-annotate` stages themselves (see
+[docs/metadata-extraction.md](metadata-extraction.md)). `route-metadata`
+still hard-fails (`route-incomplete`) on ordinary real pages over 64 KiB,
+same as before #444; raising this command's own gate to match is tracked
+as separate follow-up work, not covered by #444's fix.
 
 ## Manifest
 

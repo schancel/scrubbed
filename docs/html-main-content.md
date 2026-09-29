@@ -413,15 +413,19 @@ bytes) to select. The candidate with the most cumulative text (`js-body`,
 1,020 bytes — the entire page body wrapper) scores too low, because it is
 mostly nav/header chrome. Direct inspection of the raw HTML confirms why no
 candidate has both: this is a JavaScript-rendered page (webpack bundles,
-`js-body`/`js-content` hydration ids) whose actual DIY-guide prose ("Wie man
-eine runde Tischdecke in nur 7 Schritten herstellt") is **not present
-anywhere in the static server-rendered HTML** — searching the raw file for
-any text run over 80 bytes finds only inline `<script>` bodies and
-schema.org JSON-LD metadata, no article paragraphs. `html-main-content`
+`js-body`/`js-content` hydration ids). The title string ("Wie man eine
+runde Tischdecke in nur 7 Schritten herstellt") is not absent: the only
+DOM text resembling the title is a 58-byte `<h1>` (`node=297 tag=h1
+score=58 textLength=58`), correctly too short to clear the 200-byte
+selection floor. The actual description prose exists only inside a
+`data-react-props` attribute payload — an ~85KB React-hydration JSON blob
+on a real `<div>` — which this stage's scoring never reads as text:
+`html_main_content.d`'s `attributeValue()` only inspects `class`/`id` for
+keyword bonuses, never arbitrary attribute values. `html-main-content`
 parses static HTML only; nothing in this pipeline executes JavaScript, so
-there is no subtree containing the real content for any scoring change to
-find. Correctly abstaining — rather than selecting the highest-scoring
-candidate anyway, which would mean shipping an app-install ad as
+there is no candidate *subtree* containing the real content for any
+scoring change to find. Correctly abstaining — rather than selecting the
+highest-scoring candidate anyway, which would mean shipping an app-install ad as
 "extracted article text" — is the right behavior here, not a scoring gap.
 Accepted as an intentional, disclosed non-goal: no code change made.
 
@@ -573,9 +577,11 @@ since it is already correctly registered in production.
   evidence and judged working as intended, not bugs — see "`examples/pipeline-benchmark`
   corpus: current 18/20 status" above. `scienceblogs-de.html` is a genuine
   node-count/observed-byte outlier this corpus's bounded-resource caps
-  correctly protect against; `www-homify-de.html`'s real article text is
-  never present in the static HTML this stage parses (a JS-rendered page),
-  so there is no candidate subtree to select. `effects/html_tree.d`'s caps
+  correctly protect against; `www-homify-de.html`'s title text is present
+  but too short to select (a 58-byte `<h1>`), and its real description
+  prose lives only inside a `data-react-props` attribute payload this
+  stage's scoring never reads as text, so there is no candidate subtree to
+  select. `effects/html_tree.d`'s caps
   stay unmodified (also out of this ticket's allowed scope), and
   `html_main_content.d`'s scoring/thresholds stay unmodified.
 - No v4 extractor registration; no `cli.d`/`app.d` change beyond automatic

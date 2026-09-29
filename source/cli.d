@@ -756,11 +756,30 @@ private LocalJobOutcome processCompiledOne(string file, string inputRoot,
         // "no extractable content" already uses (a terminal decision
         // returned normally, not an exceptional one) so publication order
         // advances past it exactly as it would past any other quarantined
-        // document, and the rest of a directory batch completes. A
-        // single-file (non-directory-batch) invocation keeps today's fatal
-        // exit-code behavior; only its message reasoning is available via
-        // `invalidEncodingReason` if ever needed here too.
-        if (inputIsDir && isInvalidEncodingFailure(error)) {
+        // document, and the rest of a directory batch completes.
+        //
+        // #446: single-file invocation used to be excluded from this branch
+        // (`inputIsDir &&` guarded it), so the exact same invalid-UTF-8
+        // input that quarantines cleanly in a directory batch instead fell
+        // through to `publication.fail`/`throw error` below and surfaced as
+        // a `FATAL <file>: effect stage failure: compiled job ... stage
+        // clean failed: Invalid UTF-8 sequence ...` message with exit 2 --
+        // internal job/stage plumbing leaking into a single-document content
+        // problem, with no clear signal to a caller branching on exit code
+        // that this was "just" a bad document rather than a broken
+        // invocation. There is exactly one document in a single-file run, so
+        // the "let the rest of the batch continue" motivation above doesn't
+        // apply, but the *reason a caller should be given* is identical
+        // either way; there's no principled basis for single-file and
+        // directory mode to disagree on it. Treating single-file invalid
+        // UTF-8 as a quarantine outcome here — the same as directory mode —
+        // also aligns its exit code with docs/cli-commands.md's own table:
+        // invalid UTF-8 in one document is an "acknowledged per-document
+        // failure" (exit 1), not a "run-fatal invocation, config,
+        // output-policy, resource/admission, traversal, lost-acknowledgment,
+        // or unrecorded worker error" (exit 2). `inputIsDir` therefore no
+        // longer gates this branch.
+        if (isInvalidEncodingFailure(error)) {
             if (!entered) {
                 publication.enter(ordinal);
                 entered = true;
@@ -2620,6 +2639,57 @@ unittest {
         assert(!exists(buildPath(reorderedOut, "bad.txt")),
             "the quarantined invalid-UTF-8 file must not publish output");
     }
+    // #446 regression: #400 only fixed invalid-UTF-8 handling for a
+    // *directory* `run`/`clean-web-document` batch -- single-file
+    // invocation of the exact same content fell through to the generic
+    // `catch (Throwable error)` fatal path instead, and surfaced as a
+    // `FATAL <file>: effect stage failure: compiled job job:v3:<hash>
+    // stage clean failed: Invalid UTF-8 sequence ...` message (internal
+    // job/stage plumbing, not `invalidEncodingReason()`'s clean phrasing)
+    // with exit code 2. Single-file invalid UTF-8 must produce the same
+    // `invalidEncodingReason()`-phrased message directory mode already
+    // uses, and this test asserts on that message content -- not just the
+    // exit code, which alone wouldn't catch a regression back to the FATAL
+    // wrapper text with a still-nonzero code. Per docs/cli-commands.md's
+    // exit-code table, this is an "acknowledged per-document failure", so
+    // (unlike before this fix) it now exits 1, matching directory mode,
+    // not 2.
+    {
+        auto singleRoot = buildPath(root, "single-invalid-utf8");
+        mkdir(singleRoot);
+        // Same invalid-UTF-8 fixture as the #400/#402 cases above.
+        auto badFile = buildPath(singleRoot, "bad.txt");
+        write(badFile,
+            cast(ubyte[])[0x00, 0x01, 0x02, 0xFF, 0xFE, 0x80, 0x81, 0x00]);
+        auto singleOut = buildPath(root, "single-invalid-utf8-out.txt");
+        auto invocation = invokeJsonl(["scrubbed", "run", "--input", badFile,
+            "--output", singleOut, "--threads", "1", "--explain",
+            "--stage", "clean=text-transform", "--filter", "fix-mojibake"],
+            []);
+        auto message = cast(string) invocation.stdoutBytes;
+        assert(invocation.code == 1,
+            "single-file invalid UTF-8 is an acknowledged per-document " ~
+            "failure (docs/cli-commands.md exit 1), not a run-fatal " ~
+            "invocation/config/resource error (exit 2): " ~ message ~
+            invocation.stderrText);
+        assert(!invocation.stderrText.canFind("FATAL"),
+            "single-file invalid UTF-8 must not be reported as FATAL, " ~
+            "matching directory mode: " ~ invocation.stderrText);
+        assert(!message.canFind("stage clean failed") &&
+            !message.canFind("compiled job job:v3:") &&
+            !invocation.stderrText.canFind("stage clean failed") &&
+            !invocation.stderrText.canFind("compiled job job:v3:"),
+            "single-file invalid UTF-8 must not leak the internal " ~
+            "job/stage-plumbing wrapper message: " ~ message ~
+            invocation.stderrText);
+        assert(message.canFind(
+            "reason=\"invalid encoding: input is not valid UTF-8"),
+            "single-file invalid UTF-8 must use invalidEncodingReason()'s " ~
+            "phrasing, the same one directory mode already uses: " ~
+            message);
+        assert(!exists(singleOut),
+            "the quarantined invalid-UTF-8 file must not publish output");
+    }
     {
         auto priorMetrics =
             environment.get("SCRUBBED_COORDINATION_METRICS_V2", "");
@@ -2748,11 +2818,22 @@ unittest {
     assertThrown(runApp(["scrubbed", "run", "--input", same,
         "--output", buildPath(blockedParent, "out.txt"), "--threads", "1"]));
 
+    // #446: single-file invalid UTF-8 used to make `runApp` throw (the
+    // FATAL/exit-2 job/stage-plumbing path); it now quarantines the same
+    // way directory mode does (exit 1, no exception) -- see the dedicated
+    // #446 regression test below, which asserts on the actual message
+    // content using `invokeJsonl`. This plain-`runApp` call only checks the
+    // exit code and that nothing was published, since `runApp` alone
+    // doesn't capture stdout/stderr.
     auto invalidUtf8 = buildPath(root, "invalid-utf8.bin");
     write(invalidUtf8, [cast(ubyte) 0xFF]);
-    assertThrown(runApp(["scrubbed", "run", "--input", invalidUtf8,
-        "--output", buildPath(root, "invalid-output.txt"),
-        "--threads", "1"]));
+    auto invalidUtf8Output = buildPath(root, "invalid-output.txt");
+    assert(runApp(["scrubbed", "run", "--input", invalidUtf8,
+        "--output", invalidUtf8Output, "--threads", "1"]) == 1,
+        "single-file invalid UTF-8 must be an acknowledged per-document " ~
+        "failure (exit 1), not a thrown run-fatal error");
+    assert(!exists(invalidUtf8Output),
+        "the quarantined invalid-UTF-8 file must not publish output");
 
     auto sharedInput = buildPath(root, "shared-input", "nested");
     mkdirRecurse(sharedInput);

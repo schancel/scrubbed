@@ -181,7 +181,14 @@ Exit codes:
 
 - `0` — help, list, validation, or processing success.
 - `1` — an acknowledged per-document failure, or an unresolved retry decision
-  in opt-in manifest mode.
+  in opt-in manifest mode. Invalid UTF-8 input is squarely this bucket: it
+  quarantines with an `invalid encoding: input is not valid UTF-8 (...)`
+  reason (from the internal `invalidEncodingReason()` helper) and exits `1`,
+  identically for a directory-mode batch (#400) and for single-file
+  invocation (#446 -- before this, single-file invalid UTF-8 instead threw
+  a `FATAL`/exit-`2` message exposing internal job/stage-plumbing text; that
+  gap is what #446 closed, deliberately choosing exit `1` over keeping exit
+  `2`, since one bad document's encoding is not a broken invocation).
 - `2` — a run-fatal invocation, config, output-policy, resource/admission,
   traversal, lost-acknowledgment, or unrecorded worker error (including a
   late symlink or a no-manifest worker failure); this also covers a missing

@@ -56,6 +56,7 @@ this API.
 
 ```sh
 ldc2 -O3 -release -Isource -of=.dub/pii-patterns-check \
-  experiments/pii_patterns/check.d source/domain/pii_patterns.d
+  experiments/pii_patterns/check.d source/domain/pii_patterns.d \
+  source/domain/encoding_failure.d
 .dub/pii-patterns-check
 ```

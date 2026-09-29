@@ -1,7 +1,7 @@
 /// Opt-in, revision-bound C01 persistence for four-class PII findings.
 module effects.pii_overlay;
 
-import domain.failure : InvalidUtf8Exception;
+import domain.encoding_failure : InvalidUtf8Exception;
 import domain.pii_patterns;
 import domain.shard_format : AnnotationField, AnnotationRecord, ShardDocument,
     maxAnnotationPayload;

@@ -34,7 +34,7 @@ import effects.side_output_sink : SideOutputSink;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
     SourceLocator;
-import domain.failure : InvalidEncodingFailure;
+import domain.encoding_failure : InvalidEncodingFailure;
 import effects.html_tree : checkedHtmlByteLimit, defaultExtractHtmlBytes;
 import effects.html_tree_json_stage;
 import effects.html_markdown_stage;
@@ -580,7 +580,7 @@ int runExtract(string requestedInput, string requestedOutput,
 /// filter chain, composition/executor.d's `materializeUtf8`), or another
 /// stage/domain module that independently re-validates UTF-8 ahead of
 /// text-transform in a custom `run --stage` pipeline and rewraps the failure
-/// into its own exception type marked `domain.failure.InvalidEncodingFailure`
+/// into its own exception type marked `domain.encoding_failure.InvalidEncodingFailure`
 /// (#402: pii_patterns/pii_policy/structured_chunks/similarity_signature/
 /// pii_overlay all do this). Walking the wrapper chain by type, rather than
 /// matching on rendered message text, keeps this immune to message wording
@@ -2568,9 +2568,10 @@ unittest {
         // that independently re-validates and rewraps UTF-8 (e.g.
         // `pii-four-class`, via `domain.pii_patterns.scanPii`) ahead of
         // text-transform. Before the fix, that rewrapped failure
-        // (`domain.failure.InvalidUtf8Exception`, previously `PiiScanException`)
-        // failed the `UTFException` cast and fell back to the pre-#400
-        // FATAL/batch-canceling behavior for the whole directory batch.
+        // (`domain.pii_patterns.InvalidUtf8ScanException`, previously
+        // `PiiScanException`) failed the `UTFException` cast and fell back to
+        // the pre-#400 FATAL/batch-canceling behavior for the whole directory
+        // batch.
         auto reorderedRoot = buildPath(root, "reordered-batch");
         mkdir(reorderedRoot);
         // Same invalid-UTF-8 fixture as the #400 case above.

@@ -1,7 +1,7 @@
 /// Pure decisions over validated four-class PII findings and original UTF-8 bytes.
 module domain.pii_policy;
 
-import domain.failure : InvalidUtf8Exception;
+import domain.encoding_failure : InvalidEncodingFailure;
 import domain.pii_patterns : PiiCategory, PiiConfidence, PiiFinding,
     maxPiiFindings, maxPiiInputBytes;
 import std.utf : validate;
@@ -36,6 +36,17 @@ struct PiiPolicyResult {
 
 class PiiPolicyException : Exception {
     this(string reason) { super("pii policy: " ~ reason); }
+}
+
+/// Invalid-UTF-8 input detected while applying policy. A subtype of
+/// `PiiPolicyException` (not a sibling `domain.encoding_failure.InvalidUtf8Exception`)
+/// so existing callers that catch `PiiPolicyException` by name -- notably
+/// `experiments/pii_policy/check.d`'s `rejects()` helper -- keep matching
+/// it, while also implementing `InvalidEncodingFailure` so `cli.d`'s generic
+/// encoding-failure detector recognizes it without needing to know about
+/// this module.
+class InvalidUtf8PolicyException : PiiPolicyException, InvalidEncodingFailure {
+    this(string reason) { super(reason); }
 }
 
 private PiiLocale localeCode(string locale) {
@@ -90,7 +101,7 @@ PiiPolicyResult applyPiiPolicy(const(ubyte)[] source,
     if (source.length > maxPiiInputBytes) throw new PiiPolicyException("input exceeds cap");
     if (findings.length > maxPiiFindings) throw new PiiPolicyException("findings exceed cap");
     try validate(cast(string) source);
-    catch (Exception) throw new InvalidUtf8Exception("pii policy: invalid UTF-8");
+    catch (Exception) throw new InvalidUtf8PolicyException("invalid UTF-8");
 
     PiiPolicyResult result;
     result.policy = policy;

@@ -2,7 +2,7 @@
 module domain.structured_chunks;
 
 import domain.document : DocumentId;
-import domain.failure : InvalidUtf8Exception;
+import domain.encoding_failure : InvalidUtf8Exception;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import crypto.sha256 : sha256Of;

@@ -2,7 +2,7 @@
 module domain.similarity_signature;
 
 import domain.document : DocumentId;
-import domain.failure : InvalidUtf8Exception;
+import domain.encoding_failure : InvalidUtf8Exception;
 import std.exception : enforce;
 import std.utf : validate;
 

@@ -16,9 +16,27 @@ the same graceful-cancellation path a fatal processing failure already uses
 [bounded-input.md](bounded-input.md#traversal-cancellation-and-failure-reporting)):
 in-flight files finish, queued reservations release, and the process exits
 2 with `scrubbed: interrupted (SIGINT); canceling after in-flight work
-drains` on stderr. `--explain` reports each undiscovered/unsubmitted file as
-`status=canceled`, `canceled after SIGINT` -- distinct from a fatal
-processing failure or a traversal error.
+drains` on stderr.
+
+`--explain` can report a per-file `status=canceled`, `canceled after SIGINT`
+record -- distinct from a fatal processing failure or a traversal error --
+but only for a file that had already reached the pending/submitted set (via
+`pending.add(file)` in `submitPath`) before the signal landed; a file the
+walk had not yet admitted at that point is simply absent from `--explain`
+output, not reported as canceled. In practice this makes the per-file
+`canceled after SIGINT` record a multi-threaded/deep-queue phenomenon: with
+several workers and files queued ahead of them, there is reliably a batch of
+admitted-but-unfinished files at the moment SIGINT lands. Single-threaded
+(`--threads 1`) runs are the opposite case -- submission and completion track
+closely enough that there is essentially never a file sitting
+admitted-but-unfinished at signal time, so `--explain --threads 1` produces
+zero `canceled` records even though many files never got processed; those
+files are just missing from the output. (The overall exit path still prints
+an aggregate `done. N succeeded, M canceled before this fatal error.` count
+regardless of thread count, per
+[bounded-input.md](bounded-input.md#traversal-cancellation-and-failure-reporting)
+-- it is only the per-file `--explain` record that depends on admission
+timing this way.)
 
 This is **cooperative, per-file granularity, not preemptive**: a SIGINT that
 arrives while a single file is mid-transform is only observed after that

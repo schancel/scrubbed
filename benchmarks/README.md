@@ -358,13 +358,22 @@ bounded raw output hash, exit status/signal, a declared timeout, wall/CPU/RSS,
 and pinned-package acquisition order. Correctness gates (exact output,
 resource bound, exit status) run before a sample is retained; a missing,
 duplicate, or partial result fails closed, and comparator output is never
-treated as ground truth. Its first and currently only case,
+treated as ground truth. It currently has five cases. The first,
 `mojibake/scrubbed-vs-ftfy`, is the ftfy case migrated out of
 `cli_baseline.d` ("A00", below): the same generated fixture, the same
 independently authored expected repair, and the same exact command
 (`ftfy --preserve-entities -n none`) with `ftfy==6.3.1`/`wcwidth==0.8.4`
 pinned, now measured as one interleaved A/B/A/B comparator case instead of
 two separate cases.
+
+The second, `mojibake/scrubbed-vs-ftfy-windows1251` (issue #377, the
+remainder of #366's acceptance criteria that #376 left closed only by an
+in-repo unittest), is that same case's Windows-1251 (Cyrillic) sibling: an
+independently authored short Russian sentence, not copied from ftfy's own
+test corpus, generated and pinned by SHA-256 the same way, run through the
+same exact `scrubbed`/`ftfy` commands and the same exact-output/A/B/A/B
+gating as the CP1252 case above -- it exists to prove ftfy parity on a
+second, non-Latin-1-family mojibake pattern, not just the CP1252 one.
 
 Package acquisition reuses `cli_baseline.d`'s existing pattern unmodified:
 `uv venv` + `uv pip install --python <venv>/bin/python <pkg>==<exact pinned
@@ -402,7 +411,7 @@ ldc2 -O3 -release benchmarks/external_comparator_check.d \
 "$bench_env/external_comparator_check" --check "$bench_env/result.json"
 ```
 
-Its second case, `main-content/scrubbed-vs-trafilatura` (issue #229's
+Its third case, `main-content/scrubbed-vs-trafilatura` (issue #229's
 trafilatura next-slice contract), exercises the real `scrubbed` binary and
 the real, shipped `html-main-content` v3 stage end to end through
 `scrubbed run --input <dir> --output <dir> --stage content=html-main-content
@@ -466,7 +475,7 @@ names, counts, and numeric scores) -- `gold.json` itself, which legitimately
 holds that text for the two subprocesses to consume, lives only in the
 private corpus directory and is never read into the published report.
 
-Its third case, `language-id/scrubbed-vs-langdetect` (issue #301's next-slice
+Its fourth case, `language-id/scrubbed-vs-langdetect` (issue #301's next-slice
 contract), exercises the real, shipped `language-id-detect` v3 stage (issue
 #311) end to end through `scrubbed run --input FILE --output FILE
 --sidecar-output FILE --stage id=language-id-detect --threads 1` -- the same
@@ -510,7 +519,7 @@ all 11/11 fixtures correctly for both scrubbed and langdetect, with 11/11
 mutual agreement -- a small authored-fixture observation, not a
 calibrated-accuracy or web-scale claim.
 
-Its fourth case, `pii-four-class/scrubbed-vs-presidio` (issue #302's
+Its fifth case, `pii-four-class/scrubbed-vs-presidio` (issue #302's
 next-slice contract), exercises the real, shipped `pii-four-class` terminal
 stage end to end through `scrubbed run --input FILE --output FILE
 --sidecar-output FILE --stage id=pii-four-class --threads 1` (default stage
@@ -624,13 +633,21 @@ SIGTERM, then SIGKILL after a bounded grace period, and the run fails closed
 with no partial sample retained), process-group timeout (a synthetic command
 that backgrounds a long-running grandchild is timed out, and the grandchild's
 PID is confirmed gone, not just the direct child's), and resource refusal
-(a peak RSS above the declared bound fails the case). Its
+(a peak RSS above the declared bound fails the case). Its `--self-test` mode
+also assembles a synthetic report covering all five cases and proves
+`--check` itself fails closed: both mojibake cases -- CP1252's
+`mojibake/scrubbed-vs-ftfy` and its Windows-1251 sibling
+`mojibake/scrubbed-vs-ftfy-windows1251` -- are independently proven to reject
+a corrupted expected hash, a corrupted sample, a broken A/B/A/B interleave,
+or the case being omitted from the report entirely, and an otherwise-valid
+synthetic report is proven to pass. Its
 `--check <report.json>` mode also structurally validates a real run's
-report and confirms the migrated
-`mojibake/scrubbed-vs-ftfy` case reproduces `cli_baseline.d`'s prior
-correctness result for that case: the same fixture/expected SHA-256 pair and
-the same exact-output gate, even though the report format itself
-intentionally is not backward-compatible. It also validates
+report and confirms both migrated mojibake cases,
+`mojibake/scrubbed-vs-ftfy` and `mojibake/scrubbed-vs-ftfy-windows1251`,
+reproduce `cli_baseline.d`'s prior correctness result for that case: the
+same fixture/expected SHA-256 pair and the same exact-output gate, even
+though the report format itself intentionally is not backward-compatible.
+It also validates
 `main-content/scrubbed-vs-trafilatura`'s required provenance (executable
 hashes, dynamically discovered trafilatura version, held-out corpus commit
 and fixture count, package acquisition order), its four-sample A/B/A/B

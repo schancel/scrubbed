@@ -1,7 +1,7 @@
 /// Bounded mechanical Markdown rendering of the D-owned selected HTML tree.
 module lexcontent.html_markdown;
 
-import lexcontent.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
+import lexbor_d.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
 import std.conv : to;
 import std.exception : assumeUnique;
 import std.uni : isControl, isFormat, isSpace;
@@ -502,7 +502,7 @@ unittest {
     // `renderMarkdown`'s own whole-document iteration -- proving the
     // extraction changed neither `renderNode`'s behavior nor the shared
     // finalization (trim + trailing newline).
-    import lexcontent.html_tree : parseHtml;
+    import lexbor_d.html_tree : parseHtml;
 
     auto outcome = parseHtml(cast(const(ubyte)[]) (
         "<article><h1>Field notes from the delta survey</h1>" ~
@@ -530,7 +530,7 @@ unittest {
     // `renderMarkdownFrom` scoped to a non-root subtree renders only that
     // subtree's real Markdown structure, not sibling/boilerplate content
     // that sits outside it.
-    import lexcontent.html_tree : parseHtml;
+    import lexbor_d.html_tree : parseHtml;
 
     auto outcome = parseHtml(cast(const(ubyte)[]) (
         "<nav>Home About</nav>" ~

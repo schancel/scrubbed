@@ -8,11 +8,9 @@
 	"targetType": "library",
 	"sourcePaths": ["source"],
 	"importPaths": ["source"],
-	"preBuildCommands": [
-		"cmake -S third_party/lexbor -B .dub/lexbor -DLEXBOR_BUILD_SHARED=OFF -DLEXBOR_BUILD_STATIC=ON -DLEXBOR_BUILD_TESTS=OFF -DLEXBOR_BUILD_EXAMPLES=OFF -DLEXBOR_BUILD_BENCHMARKS=OFF -DLEXBOR_BUILD_UTILS=OFF -DLEXBOR_BUILD_SEPARATELY=OFF",
-		"cmake --build .dub/lexbor --target lexbor_static -j4"
-	],
-	"sourceFiles": [".dub/lexbor/liblexbor_static.a"],
+	"dependencies": {
+		"lexbor-d": { "path": "../lexbor-d" }
+	},
 	"dflags": ["-preview=dip1000"],
 	"buildTypes": {
 		"release": {

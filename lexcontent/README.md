@@ -1,8 +1,8 @@
 # lexcontent
 
 Standalone D library for HTML main-content extraction (boilerplate removal)
-and Markdown rendering, built on a vendored, statically-linked
-[Lexbor](https://github.com/lexbor/lexbor) HTML5 parser.
+and Markdown rendering, built on the [`lexbor-d`](../lexbor-d) dub package's
+statically-linked [Lexbor](https://github.com/lexbor/lexbor) HTML5 parser.
 
 Extracted from [schancel/scrubbed](https://github.com/schancel/scrubbed)
 issue [#361](https://github.com/schancel/scrubbed/issues/361) (same
@@ -32,17 +32,19 @@ See `source/lexcontent/package.d` for the full public surface.
 
 ## Platform support -- read this before depending on it
 
-`lexcontent.lexbor_ffi` hard-codes the native struct layouts (`NativeNode`,
-`NativeText`, etc.) that mirror Lexbor's own C structs, verified byte-for-byte
-against what Lexbor's C compiler actually produces. That verification has
-only been done for **macOS arm64**, which is what this package's `dub build`
-/ `dub test` were run and passed on today (2026-09-27). Every other platform
-hits a hard `static assert(0, "Lexbor ABI is only verified for macOS arm64")`
-at compile time in `lexbor_ffi.d` -- it will not silently produce wrong
-results on an unverified platform; it will not compile at all.
+`lexbor-d`'s `lexbor_d.lexbor_ffi` hard-codes the native struct layouts
+(`NativeNode`, `NativeText`, etc.) that mirror Lexbor's own C structs,
+verified byte-for-byte against what Lexbor's C compiler actually produces.
+That verification has only been done for **macOS arm64**, which is what
+this package's `dub build` / `dub test` were run and passed on today
+(2026-09-27). Every other platform hits a hard `static assert(0, "Lexbor ABI
+is only verified for macOS arm64")` at compile time in `lexbor_ffi.d` -- it
+will not silently produce wrong results on an unverified platform; it will
+not compile at all.
 
 This is **not** a `dlopen`-a-hardcoded-path problem: Lexbor's full C source
-is vendored under `third_party/lexbor` and built via `cmake` (a genuinely
+is vendored under `lexbor-d/third_party/lexbor` (this package depends on
+the `lexbor-d` dub package, issue #375) and built via `cmake` (a genuinely
 cross-platform build tool) into a static library linked at compile time, so
 the build mechanism itself is not macOS-specific. The gate exists purely
 because nobody has yet re-verified the D `extern(C)` struct layouts against
@@ -63,10 +65,11 @@ dub build
 dub test
 ```
 
-Both commands vendor and statically build Lexbor via `cmake` as a
-`preBuildCommands` step (`third_party/lexbor`, pinned Lexbor v3.0.0 source) --
-no external Lexbor installation is required, and nothing here depends on
-scrubbed's own `dub.json` or `source/` tree.
+Both commands pull in the `lexbor-d` dub package (a sibling path dependency,
+`../lexbor-d`), which vendors and statically builds Lexbor via `cmake` as its
+own `preBuildCommands` step (`lexbor-d/third_party/lexbor`, pinned Lexbor
+v3.0.0 source) -- no external Lexbor installation is required, and nothing
+here depends on scrubbed's own `dub.json` or `source/` tree.
 
 ## Publishing
 
@@ -75,5 +78,6 @@ That step is deliberately held for a separate, explicit go-ahead.
 
 ## License
 
-MIT (see `dub.json`). The vendored Lexbor source under `third_party/lexbor`
-retains its own upstream license (see `third_party/lexbor/LICENSE`).
+MIT (see `dub.json`). The vendored Lexbor source under
+`lexbor-d/third_party/lexbor` (pulled in via the `lexbor-d` dub dependency)
+retains its own upstream license (see `lexbor-d/third_party/lexbor/LICENSE`).

@@ -8,12 +8,13 @@
 ///
 /// `import lexcontent;` re-exports the small public surface most callers
 /// need. Lower-level pieces (the HTML tree builder, the raw Lexbor FFI, the
-/// byte-decoding helper) are available from their own
-/// `lexcontent.html_tree`/`lexcontent.lexbor_ffi`/`lexcontent.decoding`
+/// byte-decoding helper) live in the `lexbor-d` dub dependency (issue #375)
+/// and are available from its own
+/// `lexbor_d.html_tree`/`lexbor_d.lexbor_ffi`/`lexbor_d.decoding`
 /// modules for callers who need them directly.
 module lexcontent;
 
-public import lexcontent.html_tree : HtmlTree, HtmlNode, HtmlNodeKind,
+public import lexbor_d.html_tree : HtmlTree, HtmlNode, HtmlNodeKind,
     HtmlAttribute, HtmlOutcome, HtmlFailure, HtmlFailureReason, parseHtml;
 public import lexcontent.html_main_content : extractMainContent,
     MainContentResult, MainContentStatus, MainContentCandidate,

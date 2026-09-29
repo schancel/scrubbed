@@ -72,7 +72,7 @@ import std.process : environment;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
-import std.string : indexOf, join;
+import std.string : indexOf, join, lastIndexOf;
 import std.utf : UTFException, validate;
 import std.uuid : randomUUID;
 import crypto.sha256 : Sha256;
@@ -2068,9 +2068,18 @@ int runApp(string[] args) {
                 if (decision.status == "quarantined") {
                     auto reason = decision.detail.length ?
                         decision.detail : "unknown";
-                    if (auto existing = reason in quarantineReasonCounts)
+                    // Aggregate by category, not by the raw detail string:
+                    // some stages (e.g. html-metadata's decode failures,
+                    // `decode:binaryControl@25`) embed a document-specific
+                    // byte offset in `decision.detail`, which would
+                    // otherwise give every document its own map entry and
+                    // defeat this roll-up. `decision.detail` itself is
+                    // untouched -- `--explain`'s output still prints it in
+                    // full, offset included.
+                    auto category = quarantineReasonCategory(reason);
+                    if (auto existing = category in quarantineReasonCounts)
                         ++(*existing);
-                    else quarantineReasonCounts[reason] = 1;
+                    else quarantineReasonCounts[category] = 1;
                 }
                 decisionMutex.unlock();
             }
@@ -2310,8 +2319,9 @@ int runApp(string[] args) {
         // of inputs, and a plain per-file listing here would both blow that
         // budget out and duplicate what `--explain`'s per-file EXPLAIN
         // records already do for anyone who needs that detail. Counting by
-        // distinct reason string stays small (reasons come from a bounded
-        // set of pipeline stages) while still naming the concrete,
+        // reason *category* (see `quarantineReasonCategory`; this strips
+        // any volatile per-document `@<offset>` suffix a stage's detail
+        // string may carry) stays small while still naming the concrete,
         // actionable cause -- e.g. "abstainedBelowThreshold" -- for the
         // common single- or few-document case the sealed preset's own Quick
         // Start targets, without requiring the reader to already know
@@ -2323,6 +2333,38 @@ int runApp(string[] args) {
                 formatQuarantineReasonCounts(quarantineReasonCounts));
     }
     return failures == 0 && terminalDecisions == 0 ? 0 : 1;
+}
+
+/// Collapses a quarantine `decision.detail` string to a stable category
+/// for the `quarantined reasons:` roll-up, by stripping a trailing
+/// `@<offset>` suffix when present (e.g. html-metadata's decode failures,
+/// `decode:binaryControl@25` -> `decode:binaryControl`). Detail strings
+/// with no such suffix, and everything used for `--explain`'s own output,
+/// are returned unchanged -- this only affects the roll-up's aggregation
+/// key.
+private string quarantineReasonCategory(string detail) pure {
+    auto at = detail.lastIndexOf('@');
+    if (at < 0) return detail;
+    auto suffix = detail[at + 1 .. $];
+    if (suffix.length == 0) return detail;
+    foreach (c; suffix)
+        if (c < '0' || c > '9') return detail;
+    return detail[0 .. at];
+}
+
+unittest {
+    assert(quarantineReasonCategory("abstainedBelowThreshold") ==
+        "abstainedBelowThreshold");
+    assert(quarantineReasonCategory("decode:binaryControl@25") ==
+        "decode:binaryControl");
+    assert(quarantineReasonCategory("decode:binaryControl@0") ==
+        "decode:binaryControl");
+    // No digits after '@', or '@' embedded in something else entirely:
+    // leave it alone rather than guess.
+    assert(quarantineReasonCategory("weird@reason") == "weird@reason");
+    assert(quarantineReasonCategory("trailing@") == "trailing@");
+    assert(quarantineReasonCategory("no-at-sign") == "no-at-sign");
+    assert(quarantineReasonCategory("") == "");
 }
 
 /// Deterministic (sorted by reason string) rendering of a quarantine
@@ -2465,6 +2507,47 @@ unittest {
             "the valid file's published content must be intact");
         assert(!exists(buildPath(mixedOut, "bad.html")),
             "the quarantined invalid-UTF-8 file must not publish output");
+    }
+    // Regression for an independent review finding against #401: html-
+    // metadata's decode failures embed a document-specific byte offset in
+    // `decision.detail` (e.g. `decode:binaryControl@25`), so aggregating
+    // the `quarantined reasons:` roll-up by the *exact* detail string gave
+    // every differently-offset document its own map entry -- one line per
+    // file for a real dirty-HTML corpus, defeating the entire point of the
+    // roll-up (and the "stays small" claim in its own comment/docs). Three
+    // files, each with one stray control byte (0x01) at a different offset,
+    // must still aggregate into a single roll-up line.
+    {
+        import job.presets : cleanWebDocumentTokensV1;
+        import std.array : replicate;
+
+        auto offsetRoot = buildPath(root, "offset-batch");
+        mkdir(offsetRoot);
+        auto filler = "<html><body><p>" ~ replicate("x", 150) ~
+            "</p></body></html>";
+        foreach (i, offset; [25, 65, 105]) {
+            ubyte[] bytes = cast(ubyte[]) filler.dup;
+            bytes[offset] = 0x01;
+            write(buildPath(offsetRoot, "doc" ~ i.to!string ~ ".html"), bytes);
+        }
+        auto offsetOut = buildPath(root, "offset-out");
+        auto offsetSidecar = buildPath(root, "offset-sidecar");
+        auto invocation = invokeJsonl(["scrubbed", "run", "--input", offsetRoot,
+            "--output", offsetOut, "--sidecar-output", offsetSidecar,
+            "--threads", "1"] ~ cleanWebDocumentTokensV1, []);
+        auto message = cast(string) invocation.stdoutBytes;
+        assert(invocation.code == 1,
+            "all three offset-only files must quarantine: " ~ message);
+        assert(message.canFind("3 quarantined"),
+            "all three files must be counted as quarantined: " ~ message);
+        assert(message.canFind("quarantined reasons: decode:binaryControl (3)"),
+            "same-category reasons differing only by byte offset must " ~
+            "aggregate into a single roll-up entry, not one per offset: " ~
+            message);
+        assert(!message.canFind("@25") && !message.canFind("@65") &&
+            !message.canFind("@105"),
+            "the roll-up must not leak the volatile per-document byte " ~
+            "offset that defeats aggregation: " ~ message);
     }
     {
         auto priorMetrics =

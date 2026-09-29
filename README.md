@@ -79,8 +79,17 @@ quality-gated local-tree harness, dispatch-shipping comparisons).
   conservative badness scorer that only fixes evidenced spans and leaves
   ambiguous ones alone.
 - **HTML main-content extraction** (link-density/tag-table heuristics,
-  boilerplate/nav/ad/footer removal), plus a bounded mechanical
-  HTML→Markdown/tree-JSON export (`extract --format=markdown|tree-json`).
+  boilerplate/nav/ad/footer removal), with three bounded mechanical export
+  formats from `extract --format=...`:
+  - `main-content-markdown` — the boilerplate-stripped article **as
+    Markdown** (headings, lists, links, emphasis), not just flattened
+    plain text. Same selection as `clean-web-document`/`html-main-content`,
+    rendered by the same converter as whole-page `markdown` below, scoped
+    to only the winning subtree.
+  - `markdown` — the *whole page*, unfiltered, converted to Markdown
+    (nav/ad/footer included as-is; use `main-content-markdown` above for a
+    clean article).
+  - `tree-json` — the bounded selected parse tree as JSON.
 - **Four-class PII scanner** (email/phone/card/IPv4) with report, mask,
   and opt-in redact modes, publishing a content-free audit sidecar. This
   is deterministic pattern matching, not complete de-identification, name

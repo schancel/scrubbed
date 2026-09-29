@@ -30,11 +30,16 @@ Composition tokens are mutually exclusive with `--filters` and `--config`.
 Equivalent v3 tokens and JSON compile once to the same job. Selected-field
 JSONL and durable manifest/error-journal routes use the same compiled job.
 
-`extract` (alias `x`) exports a bounded selected HTML parse tree or Markdown.
-It requires `--input`, `--output`, and `--format=tree-json|markdown`; the
-format-specific extraction limits and provenance behavior are documented in
-the HTML parser and Markdown guides. Its single selected HTML stage is likewise
-compiled from canonical v3 configuration.
+`extract` (alias `x`) exports a bounded selected HTML parse tree, whole-page
+Markdown, or boilerplate-stripped main-content Markdown. It requires
+`--input`, `--output`, and `--format=tree-json|markdown|main-content-markdown`;
+`main-content-markdown` runs the same main-content selection as
+`html-main-content`/`clean-web-document` and renders only the winning
+subtree as Markdown, instead of `markdown`'s whole-page conversion or
+`html-main-content`'s flattened plain text. The format-specific extraction
+limits and provenance behavior are documented in the HTML parser and
+Markdown guides. Its single selected HTML stage is likewise compiled from
+canonical v3 configuration.
 
 ## `clean-web-document`
 

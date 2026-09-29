@@ -13,9 +13,14 @@
 /// rule permits an effects module importing other effects modules, so this
 /// placement is not a layering exception -- just a fresh leaf.
 ///
-/// No stage/CLI wiring here: this is a library-level addition only, per
-/// issue #335 Slice 2's explicit non-goal. A `clean-web-document`-style
-/// Markdown-output stage is a separate, later, real product decision.
+/// No stage/CLI wiring here: this was, at the time this module was written
+/// (issue #335 Slice 2), a library-level addition only, and a
+/// `clean-web-document`-style Markdown-output stage was left as a
+/// separate, later, real product decision. That decision has since been
+/// made: `effects.html_main_content_markdown_stage` (issue #431) wires
+/// this exact combinator through `extract --format=main-content-markdown`
+/// and `run --stage extract=html-main-content-markdown`. This module
+/// itself is unchanged -- the wiring lives entirely in that stage module.
 module effects.html_main_content_markdown;
 
 import effects.html_main_content : extractMainContent, HtmlMainContentOutputLimit,

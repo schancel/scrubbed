@@ -95,11 +95,16 @@ struct Repair {
     mixin ProcessingOptions;
 }
 
-@(Command("extract", "x").Description("Export a bounded selected HTML parse tree or Markdown."))
+@(Command("extract", "x").Description("Export a bounded selected HTML parse tree, whole-page Markdown, or boilerplate-stripped main-content Markdown."))
 struct Extract {
     @(NamedArgument("input", "i").Description("Input path")) string input;
     @(NamedArgument("output", "o").Description("Output path")) string output;
-    @(NamedArgument("format", "f").Description("Extraction format")) string format;
+    @(NamedArgument("format", "f").Description(
+        "Extraction format: tree-json (default), markdown (whole page), " ~
+        "or main-content-markdown (boilerplate/nav/ad/footer stripped " ~
+        "first, same selection as html-main-content/clean-web-document, " ~
+        "then rendered as Markdown instead of plain text)"))
+    string format;
     @(NamedArgument("charset").Description("Declared UTF-8/UTF-16LE/UTF-16BE charset"))
     string charset;
     @(NamedArgument("max-html-bytes").Description("Raw and decoded HTML byte limit (1..8388608; default 1048576)"))
@@ -647,9 +652,11 @@ int runCommands(string[] argv) {
     if (!result) return result.exitCode;
     return commands.command.matchCmd!((cmd) {
         static if (is(typeof(cmd) == Extract)) {
-            if ((cmd.format != "tree-json" && cmd.format != "markdown") ||
+            if ((cmd.format != "tree-json" && cmd.format != "markdown" &&
+                    cmd.format != "main-content-markdown") ||
                 !cmd.input.length || !cmd.output.length) {
-                stderr.writeln("scrubbed: extract requires --input, --output and --format=tree-json|markdown");
+                stderr.writeln("scrubbed: extract requires --input, --output and " ~
+                    "--format=tree-json|markdown|main-content-markdown");
                 return 2;
             }
             if (present(original, "--max-html-bytes") && cmd.maxHtmlBytes == 0) {

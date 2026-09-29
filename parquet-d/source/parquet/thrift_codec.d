@@ -458,6 +458,24 @@ unittest {
 /// > Statistics / LogicalType > member) is well under this.
 private enum maxNestingDepth = 32;
 
+/// Cumulative cap, across every list decoded from one footer/page, on
+/// `declaredCount * T.sizeof` summed over each list -- i.e. how much
+/// decoded-struct memory the lists seen so far have committed to, in
+/// proportion to the whole input's size (parquet-d#395 follow-up). This is
+/// deliberately not just "count vs. remaining bytes": Thrift's empty-struct
+/// encoding is a single `0x00` stop byte, so a `ColumnChunk` (well over 100
+/// bytes once decoded) can be represented by one real, validly-decoding
+/// wire byte -- no forged size or truncation involved, so a per-list
+/// remaining-bytes check never sees anything wrong. 64x is generous next to
+/// any real Parquet footer (a genuine `ColumnChunk` entry, with its
+/// required `ColumnMetaData` fields, needs on the order of 30-60 wire bytes
+/// for ~128 decoded bytes -- an expansion around 3-4x), while still
+/// rejecting a footer built almost entirely out of degenerate minimal
+/// elements. The floor keeps tiny legitimate footers (a handful of columns
+/// in a few hundred wire bytes) from tripping on multiplier rounding.
+private enum maxDeclaredListBytesPerInputByte = 64;
+private enum minDeclaredListByteBudget = 1 << 16; // 64 KiB
+
 /// Decodes a Parquet footer body (the bytes between the last data byte and
 /// the 4-byte footer length).
 FileMetaData decodeFileMetaData(const(ubyte)[] bytes) {
@@ -532,6 +550,13 @@ private struct Decoder {
     TCompactProtocol!SliceTransport proto;
     uint depth;
 
+    /// Running total of `declaredCount * T.sizeof` across every list this
+    /// `Decoder` has read so far (see `maxDeclaredListBytesPerInputByte`).
+    size_t declaredListBytes;
+    /// Ceiling for `declaredListBytes`, fixed once per decode from the
+    /// whole input's length.
+    size_t declaredListByteBudget;
+
     static Decoder make(const(ubyte)[] bytes) {
         Decoder d;
         d.trans = new SliceTransport(bytes);
@@ -539,6 +564,10 @@ private struct Decoder {
         const limit = bytes.length == 0 ? 1
             : bytes.length > int.max ? int.max : cast(int) bytes.length;
         d.proto = new TCompactProtocol!SliceTransport(d.trans, limit, limit);
+        const scaled = bytes.length > size_t.max / maxDeclaredListBytesPerInputByte
+            ? size_t.max : bytes.length * maxDeclaredListBytesPerInputByte;
+        d.declaredListByteBudget = scaled < minDeclaredListByteBudget
+            ? minDeclaredListByteBudget : scaled;
         return d;
     }
 
@@ -622,26 +651,43 @@ private struct Decoder {
     /// `T.sizeof` can be one to two orders of magnitude larger than the
     /// single wire byte the size check assumes per element (parquet-d#395:
     /// a `ColumnChunk` is well over 100 bytes in memory per declared list
-    /// entry).
+    /// entry). Two independent guards close this:
     ///
-    /// A cap keyed off "bytes remaining in the whole transport" is not
-    /// enough: that count includes bytes the attacker placed *after* this
-    /// list's header that this list's elements will never actually reach
-    /// (decoding throws on the first bad element long before they would be
-    /// consumed), so it can't tell a plausible declared count from a bogus
-    /// one padded out by trailing filler placed anywhere in the buffer.
-    /// Never reserve against the declared count or the buffer size at all:
-    /// build the result with `Appender`'s ordinary geometric growth, so
-    /// the only thing that ever grows the allocation is a `readOne()` call
-    /// that actually returned -- capping total spend to a small constant
-    /// factor over the elements truly decoded before truncation is caught,
-    /// independent of both `l.size` and where any filler bytes sit.
+    /// - A cap keyed off "bytes remaining in the whole transport" is not
+    ///   enough on its own: that count includes bytes the attacker placed
+    ///   *after* this list's header that this list's elements will never
+    ///   actually reach (decoding throws on the first bad element long
+    ///   before they would be consumed). So `list!T` never reserves against
+    ///   the declared count or the buffer size: it builds the result with
+    ///   `Appender`'s ordinary geometric growth, so the only thing that
+    ///   ever grows the allocation is a `readOne()` call that actually
+    ///   returned.
+    /// - That alone still isn't enough, because the amplification doesn't
+    ///   require a forged/truncated count at all: Thrift's empty-struct
+    ///   encoding is a single `0x00` stop byte, so N genuine, validly
+    ///   decoding minimal elements (e.g. an all-optional struct like
+    ///   `ColumnChunk`, whose caller-side required-field check can only
+    ///   fire *after* this whole list has decoded) cost N wire bytes but
+    ///   N * T.sizeof of memory -- no premature allocation involved.
+    ///   `declaredListBytes` tracks `declaredCount * T.sizeof` cumulatively
+    ///   across every list this decode has seen, checked against a budget
+    ///   set once from the whole input's length, so a list is rejected
+    ///   before a single one of its elements is read once its own
+    ///   declared size (combined with every other list already seen)
+    ///   would blow that budget -- independent of whether its elements
+    ///   would otherwise decode validly.
     T[] list(T)(TType elem, scope T delegate() readOne) {
         import std.array : Appender;
 
         check(++depth <= maxNestingDepth, "thrift: metadata nested too deeply");
         const l = listBegin();
         check(l.size == 0 || l.elemType == elem, "thrift: list has unexpected element type");
+        const declared = l.size > size_t.max / T.sizeof
+            ? size_t.max : l.size * T.sizeof;
+        declaredListBytes = declaredListBytes > size_t.max - declared
+            ? size_t.max : declaredListBytes + declared;
+        check(declaredListBytes <= declaredListByteBudget,
+            "thrift: list declares more elements than the input can plausibly back");
         Appender!(T[]) result;
         foreach (_; 0 .. l.size) result.put(readOne());
         --depth;
@@ -1074,4 +1120,42 @@ unittest {
     assert(grew < (declaredColumns * ColumnChunk.sizeof) / 10,
         "forged list count allocated in proportion to its declared count "
         ~ "regardless of where padding sits in the buffer");
+}
+
+// Layout 3 (parquet-d#395 follow-up, genuinely-valid degenerate elements):
+// no forged count, no truncation -- every declared element decodes as a
+// real, fully valid, empty `ColumnChunk`. Thrift's empty-struct encoding is
+// a single 0x00 stop byte, and `columnChunk()` (unlike `rowGroup` or
+// `columnMetaData`) has no required-field check, so N real 0x00 bytes are N
+// real elements: N wire bytes for N * ColumnChunk.sizeof of memory.
+// `RowGroup`'s own required-field check only runs after this whole list
+// has already decoded, so it cannot be what stops this -- the cumulative
+// cross-list budget in `Decoder.list!T` must reject the list itself,
+// before a single element is read.
+unittest {
+    enum declaredColumns = 100_000;
+
+    auto e = Encoder.make();
+    e.begin("FileMetaData");
+    e.i32Field("version", 1, 1);
+    e.listBegin("row_groups", 4, TType.STRUCT, 1);
+    e.begin("RowGroup");
+    e.listBegin("columns", 1, TType.STRUCT, declaredColumns);
+    // `declaredColumns` genuine, validly-decoding empty ColumnChunk
+    // structs, each exactly Thrift's one-byte STOP-only struct encoding.
+    ubyte[] stops;
+    stops.length = declaredColumns;
+    stops[] = 0x00;
+    e.buffer.write(stops);
+    const bytes = e.finish();
+
+    ParquetFormatException caught;
+    const grew = heapGrowth({
+        try decodeFileMetaData(bytes);
+        catch (ParquetFormatException ex) caught = ex;
+    });
+    assert(caught !is null,
+        "a list of genuinely-valid degenerate elements was accepted without any bound");
+    assert(grew < (declaredColumns * ColumnChunk.sizeof) / 10,
+        "N genuinely-valid minimal elements still allocated close to N * ColumnChunk.sizeof");
 }

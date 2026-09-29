@@ -54,10 +54,14 @@
 /// full HTML independent of any prior stage's transform -- the same shape
 /// `stages.pii_four_class` had before its own #300 Slice 3 convergence --
 /// rather than the two-phase `html-metadata-annotate` + `html-main-content`
-/// shape. It can never usefully run after `html-main-content` reduces
-/// `content` to plain text in the same job: its own `parseHtml` would simply
-/// fail to find the head/body evidence sources it depends on (or fail to
-/// parse at all), and quarantine.
+/// shape. Running after `html-main-content` reduces `content` to plain text
+/// in the same job is rejected at compile time (issue #454, extending #447's
+/// `requiresRawHtmlInput`/`producesHtmlShape` shape check to this stage):
+/// this stage's own lenient `parseHtml` does not fail or quarantine on
+/// plain text -- it happily parses it as one big text node and silently
+/// finds zero tags -- so the shape mismatch is caught by
+/// `composition.compiler.compileJob` refusing the pipeline, naming both
+/// stages, rather than by any runtime parse failure.
 ///
 /// **#300 Slice 4 convergence.** Before this slice, this stage was
 /// `SideOutputCapability.terminal`: a job could produce either topical-tags
@@ -86,8 +90,9 @@ import effects.html_tree : HtmlFailureReason, HtmlNode, HtmlNodeKind, HtmlTree,
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
 import stages.registry : ConfiguredStageTransform, FilterPlacement,
-    OptionDeclaration, OptionType, SideOutputCapability, StageCardinality,
-    StageConfiguration, StageOptions, StageRegistration, registerStage;
+    HtmlOutputShape, OptionDeclaration, OptionType, SideOutputCapability,
+    StageCardinality, StageConfiguration, StageOptions, StageRegistration,
+    registerStage;
 import std.conv : to;
 import std.exception : enforce;
 import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
@@ -492,11 +497,20 @@ private ConfiguredStageTransform factory(const ref StageOptions options) {
 }
 
 static this() {
-    registerStage(StageRegistration(StageDeclaration(topicalTagsExtractStageKeyV1,
+    // Issue #454: parses `.content` as HTML but returns it completely
+    // unmodified (the extracted tags go into `.metadata` instead, same as
+    // `html-metadata`/`html-metadata-annotate`), so this stage's own output
+    // is still `rawHtml`-shaped -- a later HTML-consuming stage may safely
+    // follow it -- while this stage itself must not follow a declared
+    // non-HTML producer (e.g. `html-main-content`), per #447's shape check.
+    auto registration = StageRegistration(StageDeclaration(topicalTagsExtractStageKeyV1,
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
          OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, &factory,
-        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none));
+        FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none);
+    registration.requiresRawHtmlInput = true;
+    registration.producesHtmlShape = HtmlOutputShape.rawHtml;
+    registerStage(registration);
 }
 
 // ---------------------------------------------------------------------------
@@ -900,6 +914,41 @@ unittest {
     assert(events[0].sideOutputs.length == 0, "no side output at all");
     assert(events[0].payload.metadata.structuredSectionCount == 0,
         "the quarantined event is clean -- no structured section either");
+}
+
+// Issue #454 regression: `html-main-content` flattens HTML to plain text,
+// so a pipeline that hands that output straight to `topical-tags-extract`
+// (which then parses it as if it were still HTML) must be refused at
+// compile time, naming both stages, instead of silently succeeding with
+// zero declared tags -- the original report's repro
+// (`html-main-content -> topical-tags-extract` exits 0, "1 succeeded").
+unittest {
+    import effects.html_main_content_stage; // registers "html-main-content"
+    import std.algorithm.searching : canFind;
+    import std.exception : collectException;
+
+    auto badChain = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"extract","implementation":"html-main-content","options":{},"filters":[]},` ~
+        `{"id":"tags","implementation":"` ~ topicalTagsExtractStageKeyV1 ~
+        `","options":{},"filters":[]}]}`);
+    auto failure = collectException(compileJob(badChain));
+    assert(failure !is null,
+        "html-main-content -> topical-tags-extract must be rejected at compile time");
+    assert(failure.msg.canFind("tags") && failure.msg.canFind(topicalTagsExtractStageKeyV1),
+        "rejection must name the HTML-consuming stage");
+    assert(failure.msg.canFind("extract") && failure.msg.canFind("html-main-content"),
+        "rejection must name the non-HTML-producing stage");
+
+    // The positive case: a raw-HTML-preserving stage ahead of
+    // `topical-tags-extract` (matching the accepted `clean-web-document`-style
+    // `html-metadata-annotate` -> `html-main-content` ordering precedent)
+    // still compiles.
+    auto goodChain = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"meta","implementation":"html-metadata-annotate","options":{},"filters":[]},` ~
+        `{"id":"tags","implementation":"` ~ topicalTagsExtractStageKeyV1 ~
+        `","options":{},"filters":[]}]}`);
+    assert(collectException(compileJob(goodChain)) is null,
+        "an HTML-preserving stage ahead of topical-tags-extract must still compile");
 }
 
 // annotationBuildFailure: a real, genuine `DocumentMetadata` accumulator

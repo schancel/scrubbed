@@ -69,6 +69,41 @@ accept `--stage`, `--filter`, `--stage-option`, `--filter-option`, or any
 other composition/dispatch token -- the chain is fixed for this version; use
 `run` for custom stage/filter composition.
 
+**Quarantine reasons are printed by default (#401).** A document can land in
+`html-main-content` or `pii-four-class`'s quarantine outcome for a real,
+recoverable reason -- e.g. `abstainedBelowThreshold` when a document is too
+thin/low-confidence to safely publish. Because `clean-web-document` is a
+sealed preset, it can never gain an `--explain` flag of its own (that would
+be a composition/dispatch override, which is exactly what "sealed" rules
+out), so this reason is surfaced automatically instead: whenever a run ends
+with one or more quarantined documents, the summary line is followed by a
+`quarantined reasons: <reason> (<count>)[, <reason> (<count>)...]` line
+naming every distinct reason seen and how many documents hit it, for
+example:
+
+```
+done. 0 succeeded, 0 failed, 1 quarantined.
+quarantined reasons: abstainedBelowThreshold (1)
+```
+
+This is an aggregated roll-up by reason, not one line per file, so it stays
+small even for a large directory tree; for a full per-file breakdown
+(destination, document ID, sink), hand-compose the same five stages with
+`scrubbed run` plus `--explain`:
+
+```sh
+scrubbed run --input page.html --output page.txt --sidecar-output page.txt.sidecar \
+  --explain --stage clean=text-transform --filter fix-mojibake \
+  --stage meta=html-metadata-annotate --stage extract=html-main-content \
+  --stage pii=pii-four-class --stage pub=document-metadata-publish
+```
+
+This same roll-up line also appears after a plain (non-`--explain`)
+`run`/`repair`/`clean`/`fix` invocation, since all of these share the same
+underlying pipeline and reporting code; it is suppressed whenever
+`--explain` is passed, since `--explain`'s own per-file
+`EXPLAIN ... reason="..."` records already cover this in more detail.
+
 **Automatic document-metadata sidecar.** `document-metadata-publish` always
 produces a terminal record -- the annotated title/author/date/url (from
 `html-metadata-annotate`) together with the PII audit (from `pii-four-class`),

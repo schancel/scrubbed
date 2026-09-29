@@ -14,7 +14,7 @@ import effects.atomic_piece_sink : OutputPolicyViolation;
 import effects.cli_option_parsing : nextOption;
 import effects.document_metadata_publish_stage;
 import effects.html_metadata_annotate_stage : htmlMetadataAnnotateStageKeyV1;
-import effects.html_tree : maxRawBytes;
+import effects.html_tree : defaultExtractHtmlBytes;
 import effects.independent_sinks : IndependentLocalSinks, IndependentPayloads,
     IndependentSinkFailure, contentSinkKey, metadataSinkKey;
 import effects.local_manifest : LocalManifest, SinkKey, SinkState, configDigest,
@@ -304,9 +304,9 @@ int runMetadataRoute(const string[] args) {
             checkedTarget(o.contentRoot, file.name, false);
             checkedTarget(o.metadataRoot, file.name, false);
             auto size = checkedEntry(file.path, false).st_size;
-            if (size > maxRawBytes) { incomplete = true; continue; }
-            auto raw = cast(ubyte[]) read(file.path, maxRawBytes + 1);
-            if (raw.length > maxRawBytes) { incomplete = true; continue; }
+            if (size > defaultExtractHtmlBytes) { incomplete = true; continue; }
+            auto raw = cast(ubyte[]) read(file.path, defaultExtractHtmlBytes + 1);
+            if (raw.length > defaultExtractHtmlBytes) { incomplete = true; continue; }
             try validate(cast(string) raw);
             catch (Exception) { incomplete = true; continue; }
             auto document = Document(SourceLocator("local-html:v1", o.input, file.name),
@@ -394,4 +394,74 @@ unittest {
     Options rejectedEqualsForm;
     assert(!parseOptions(equalsForm, rejectedEqualsForm),
         "metadata_route_cli.d parseOptions accepted a NUL-byte-containing value (--flag=value form)");
+}
+
+/// Issue #451 regression: `runMetadataRoute` had its own, separate raw-HTML
+/// preflight gate -- run before the compiled `metadata-annotate` job is ever
+/// invoked -- that still hardcoded the old `effects.html_tree.maxRawBytes`
+/// (64 KiB) limit, even after issue #444/#452 raised the *stage-level*
+/// default (`defaultExtractHtmlBytes`, 1 MiB) that `html-metadata-annotate`
+/// itself now honors. A real corpus page comfortably inside the new 1 MiB
+/// default used to be marked `incomplete` here anyway, without ever reaching
+/// the compiled job. Pinned against a real bundled corpus file, not a
+/// synthetic fixture: run from the repository root (as `dub test`/
+/// `README.md`'s other documented commands already assume),
+/// `examples/pipeline-benchmark/corpus/appen-com.html` (81,918 bytes) is
+/// well over the old 64 KiB cap and well under the new 1 MiB default, so
+/// this proves both halves at once -- this exact assertion would have
+/// failed (`route-incomplete`, exit 1) against the pre-fix hardcoded-64 KiB
+/// behavior, and passes (exit 0, both sinks populated) now.
+unittest {
+    import core.stdc.stdlib : free;
+    import core.sys.posix.stdlib : realpath;
+    import effects.html_tree : defaultExtractHtmlBytes;
+    import std.file : copy, exists, getSize, mkdirRecurse, read, rmdirRecurse,
+        tempDir;
+    import std.path : buildPath;
+    import std.string : fromStringz, toStringz;
+    import std.uuid : randomUUID;
+
+    enum corpusFile = "examples/pipeline-benchmark/corpus/appen-com.html";
+    auto fixtureSize = getSize(corpusFile);
+    assert(fixtureSize > 64 * 1024,
+        "fixture must exceed the old hardcoded 64 KiB cap to prove the fix");
+    assert(fixtureSize <= defaultExtractHtmlBytes,
+        "fixture must fit the new default so the regression actually pins success");
+
+    // `preflight`'s `checkedAncestors` walks every ancestor directory up to
+    // `/`, rejecting any symlink along the way -- and on macOS `tempDir()`
+    // (from `$TMPDIR`) sits under `/var`, itself a symlink to `/private/var`.
+    // Resolve to the real, symlink-free path first so this test exercises
+    // the command's own byte-limit gate, not that unrelated ancestor check
+    // (`source/cli.d`'s `canonicalExisting` uses the same `realpath` idiom).
+    auto resolvedTempPtr = realpath(tempDir.toStringz, null);
+    assert(resolvedTempPtr !is null, "could not resolve tempDir()");
+    auto resolvedTemp = fromStringz(resolvedTempPtr).idup;
+    free(resolvedTempPtr);
+
+    auto root = buildPath(resolvedTemp, "scrubbed-metadata-route-451-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+
+    auto inputDir = buildPath(root, "input");
+    auto contentDir = buildPath(root, "content");
+    auto metadataDir = buildPath(root, "metadata");
+    auto manifestPath = buildPath(root, "manifest.sqlite3");
+    mkdirRecurse(inputDir);
+    mkdirRecurse(contentDir);
+    mkdirRecurse(metadataDir);
+
+    auto inputFile = buildPath(inputDir, "appen-com.html");
+    copy(corpusFile, inputFile);
+
+    auto exitCode = runMetadataRoute(["--input", inputDir,
+        "--content-output", contentDir, "--metadata-output", metadataDir,
+        "--manifest", manifestPath]);
+    assert(exitCode == 0,
+        "route-metadata must no longer report route-incomplete for a real " ~
+        "82 KB corpus page under the new 1 MiB default (issue #451)");
+    assert(exists(buildPath(contentDir, "appen-com.html")),
+        "route-metadata must publish the content sink for the admitted file");
+    assert(exists(buildPath(metadataDir, "appen-com.html")),
+        "route-metadata must publish the metadata sink for the admitted file");
 }

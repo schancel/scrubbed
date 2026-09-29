@@ -6,7 +6,9 @@ import composition.executor : runCompiledStage;
 import composition.job_executor : runCompiledJob;
 import content.pieces : Content, ContentPiece;
 import core.stdc.errno : errno, EINTR, ENOENT;
+import core.stdc.stdlib : free;
 import core.sys.posix.fcntl : open, O_RDONLY, O_NOFOLLOW;
+import core.sys.posix.stdlib : realpath;
 import core.sys.posix.sys.stat : fstat, lstat, stat, stat_t, S_ISDIR, S_ISREG, S_ISLNK;
 import core.sys.posix.unistd : close, posixRead = read;
 import domain.document : Document, OutputName, SourceLocator;
@@ -28,7 +30,7 @@ import std.file : SpanMode, dirEntries, mkdir, read, thisExePath;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, extension, relativePath;
 import std.stdio : stderr;
-import std.string : indexOf, split, startsWith, toLower, toStringz;
+import std.string : fromStringz, indexOf, split, startsWith, toLower, toStringz;
 import std.utf : validate;
 
 private struct Options {
@@ -139,13 +141,38 @@ private stat_t checkedEntry(string path, bool directory, bool mayBeAbsent = fals
     return entry;
 }
 
-private void checkedAncestors(string path) {
-    auto cursor = path;
-    while (true) {
-        checkedEntry(cursor, true);
-        if (cursor == "/") break;
-        cursor = dirName(cursor);
-    }
+/// Issue #458: this used to walk every ancestor directory up to `/`,
+/// rejecting any symlink along the way -- which false-refused on ordinary
+/// OS-level indirection the caller never controls and can't avoid, such as
+/// macOS's `/tmp` -> `/private/tmp` and `/var` -> `/private/var`. The actual
+/// protection this route needs is that the caller's own root -- the exact
+/// directory named by `--input`/`--content-output`/`--metadata-output`, or
+/// holding `--manifest` -- is itself a real, symlink-free directory; a
+/// symlink introduced *within* that root (nested content) is still caught
+/// separately, by `checkedParent`'s walk down to each target and by the
+/// input tree's own `entry.isSymlink` rejection below. So this now checks
+/// only the root itself, not any OS-level ancestor above it.
+private void checkedRoot(string path) {
+    checkedEntry(path, true);
+}
+
+/// Validates `path` itself exactly as `checkedRoot` does, then resolves it
+/// to its canonical, fully symlink-free form (the same `realpath` idiom
+/// `source/cli.d`'s `canonicalExisting` uses). `preflight` re-anchors every
+/// route root to this resolved form before comparing, walking, or handing
+/// any of them onward, so no OS-level ancestor symlink above a root --
+/// issue #458's macOS `/tmp` -> `/private/tmp` case -- can survive to
+/// confuse the overlap/alias checks below, `checkedParent`'s walk from a
+/// root down to a target, or `effects.independent_sinks`' own ancestor
+/// check once `contentRoot`/`metadataRoot` reach it. A symlink at `path`
+/// itself is still caught by `checkedRoot`, before any resolution happens.
+private string resolvedRoot(string path) {
+    checkedRoot(path);
+    auto resolved = realpath(path.toStringz, null);
+    if (resolved is null)
+        throw new OutputPolicyViolation("route path cannot be resolved");
+    scope(exit) free(resolved);
+    return resolved.fromStringz.idup;
 }
 
 private void checkedParent(string root, string relative, bool create) {
@@ -169,7 +196,7 @@ private void checkedParent(string root, string relative, bool create) {
 }
 
 private void checkedTarget(string root, string relative, bool createParent) {
-    checkedAncestors(root);
+    checkedRoot(root);
     auto parts = relative.split('/');
     foreach (part; parts)
         if (!part.length || part == "." || part == ".." || part.indexOf('\\') >= 0 ||
@@ -195,9 +222,17 @@ private Input[] preflight(ref Options o) {
     o.contentRoot = clean(o.contentRoot);
     o.metadataRoot = clean(o.metadataRoot);
     o.manifest = clean(o.manifest);
-    checkedAncestors(o.contentRoot);
-    checkedAncestors(o.metadataRoot);
-    checkedAncestors(dirName(o.manifest));
+    o.contentRoot = resolvedRoot(o.contentRoot);
+    o.metadataRoot = resolvedRoot(o.metadataRoot);
+    o.manifest = buildPath(resolvedRoot(dirName(o.manifest)), baseName(o.manifest));
+    stat_t root;
+    if (lstat(o.input.toStringz, &root) != 0 || S_ISLNK(root.st_mode))
+        throw new OutputPolicyViolation("invalid input root");
+    bool tree = S_ISDIR(root.st_mode);
+    if (!tree && (!S_ISREG(root.st_mode) || root.st_nlink != 1))
+        throw new OutputPolicyViolation("invalid input file");
+    o.input = tree ? resolvedRoot(o.input) :
+        buildPath(resolvedRoot(dirName(o.input)), baseName(o.input));
     if (within(o.contentRoot, o.metadataRoot) ||
         within(o.metadataRoot, o.contentRoot) ||
         within(o.contentRoot, o.input) || within(o.metadataRoot, o.input) ||
@@ -214,13 +249,6 @@ private Input[] preflight(ref Options o) {
             sameInode(companion, o.metadataRoot))
             throw new OutputPolicyViolation("manifest alias");
     }
-    stat_t root;
-    if (lstat(o.input.toStringz, &root) != 0 || S_ISLNK(root.st_mode))
-        throw new OutputPolicyViolation("invalid input root");
-    bool tree = S_ISDIR(root.st_mode);
-    if (!tree && (!S_ISREG(root.st_mode) || root.st_nlink != 1))
-        throw new OutputPolicyViolation("invalid input file");
-    checkedAncestors(tree ? o.input : dirName(o.input));
     Input[] files;
     size_t nameBytes;
     void admit(string path, string relative) {
@@ -428,12 +456,16 @@ unittest {
     assert(fixtureSize <= defaultExtractHtmlBytes,
         "fixture must fit the new default so the regression actually pins success");
 
-    // `preflight`'s `checkedAncestors` walks every ancestor directory up to
-    // `/`, rejecting any symlink along the way -- and on macOS `tempDir()`
-    // (from `$TMPDIR`) sits under `/var`, itself a symlink to `/private/var`.
-    // Resolve to the real, symlink-free path first so this test exercises
-    // the command's own byte-limit gate, not that unrelated ancestor check
-    // (`source/cli.d`'s `canonicalExisting` uses the same `realpath` idiom).
+    // Before issue #458, `preflight`'s ancestor walk rejected any symlink
+    // above the given root -- and on macOS `tempDir()` (from `$TMPDIR`) sits
+    // under `/var`, itself a symlink to `/private/var` -- so this test used
+    // to need `tempDir()` pre-resolved to a real, symlink-free path just to
+    // exercise the command's own byte-limit gate rather than that unrelated
+    // check. `checkedRoot` no longer walks ancestors (see its doc comment),
+    // so an unresolved `tempDir()` would pass here too; this keeps resolving
+    // it anyway, both because it costs nothing and to keep this fixture's
+    // root stable and comparable across runs (`source/cli.d`'s
+    // `canonicalExisting` uses the same `realpath` idiom).
     auto resolvedTempPtr = realpath(tempDir.toStringz, null);
     assert(resolvedTempPtr !is null, "could not resolve tempDir()");
     auto resolvedTemp = fromStringz(resolvedTempPtr).idup;
@@ -464,4 +496,99 @@ unittest {
         "route-metadata must publish the content sink for the admitted file");
     assert(exists(buildPath(metadataDir, "appen-com.html")),
         "route-metadata must publish the metadata sink for the admitted file");
+}
+
+/// Issue #458 regression: `preflight`'s old `checkedAncestors` walked every
+/// ancestor directory of `--input`/`--content-output`/`--metadata-output`/
+/// `--manifest` up to `/`, rejecting any symlink found along the way. That
+/// false-refused on an ordinary OS-level symlinked ancestor the caller
+/// never named and has no control over -- macOS's `/tmp` -> `/private/tmp`
+/// is the reported case -- making `route-metadata` unusable from the OS's
+/// own default scratch directory, even though every root the caller
+/// actually specified was a genuine, symlink-free directory.
+///
+/// Rather than depend on `/tmp` happening to be symlinked (true on macOS,
+/// not guaranteed on Linux CI), this builds its own synthetic symlinked
+/// ancestor so the regression is pinned portably: a real scratch directory
+/// holding the actual input/content/metadata roots and manifest, reached
+/// through a *second* path that symlinks to it one level above those
+/// roots -- exactly the `/tmp` -> `/private/tmp` shape, reproduced without
+/// relying on the host OS to provide it.
+///
+/// Against the pre-fix `checkedAncestors`, every one of this test's four
+/// route paths sits under the symlinked ancestor, so preflight would walk
+/// up from each root, hit that symlink, and refuse with `route-refused`
+/// (exit 2) before ever inspecting the input file. Against the fix (which
+/// only checks each given root's own identity, not what sits above it),
+/// the route succeeds and both sinks are published.
+unittest {
+    import core.stdc.stdlib : free;
+    import core.sys.posix.stdlib : realpath;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, symlink, tempDir,
+        write;
+    import std.path : buildPath;
+    import std.string : fromStringz, toStringz;
+    import std.uuid : randomUUID;
+
+    auto resolvedTempPtr = realpath(tempDir.toStringz, null);
+    assert(resolvedTempPtr !is null, "could not resolve tempDir()");
+    auto resolvedTemp = fromStringz(resolvedTempPtr).idup;
+    free(resolvedTempPtr);
+
+    auto tag = randomUUID.toString;
+    // The genuine, symlink-free directory that actually holds every root
+    // this route will be given -- standing in for `/private/tmp`.
+    auto real_ = buildPath(resolvedTemp, "scrubbed-metadata-route-458-real-" ~ tag);
+    // A second, sibling path that is nothing but a symlink to `real_` --
+    // standing in for `/tmp` itself. Every `--input`/`--content-output`/
+    // `--metadata-output`/`--manifest` path below is reached through this
+    // symlinked ancestor, never directly through `real_`.
+    auto link = buildPath(resolvedTemp, "scrubbed-metadata-route-458-link-" ~ tag);
+
+    mkdirRecurse(real_);
+    scope(exit) if (exists(real_)) rmdirRecurse(real_);
+    symlink(real_, link);
+    scope(exit) if (exists(link)) rmdirRecurse(link);
+
+    auto inputDir = buildPath(link, "input");
+    auto contentDir = buildPath(link, "content");
+    auto metadataDir = buildPath(link, "metadata");
+    // The manifest's own directory must, like the other three roots, be a
+    // genuine directory reached *through* the symlinked ancestor -- not the
+    // symlinked ancestor's own path -- so this pins the same "ancestor
+    // above the root" class this issue is about, not the already-covered
+    // "root itself is a symlink" case (see the "manifest alias" path-safety
+    // test, which deliberately passes a symlink as `--metadata-output`
+    // itself and must keep being refused).
+    auto manifestDir = buildPath(link, "manifest");
+    auto manifestPath = buildPath(manifestDir, "manifest.sqlite3");
+    mkdirRecurse(inputDir);
+    mkdirRecurse(contentDir);
+    mkdirRecurse(metadataDir);
+    mkdirRecurse(manifestDir);
+
+    enum sample = `<html><head><title>Fallback</title>` ~
+        `<meta property="og:title" content="Primary">` ~
+        `<meta name="author" content="Ada">` ~
+        `<meta name="date" content="2024-02-29">` ~
+        `<link rel="canonical" href="https://example.test/page">` ~
+        `</head><body>Alpha` ~ "\r\n" ~ `Beta</body></html>`;
+    write(buildPath(inputDir, "page.html"), sample);
+
+    auto exitCode = runMetadataRoute(["--input", inputDir,
+        "--content-output", contentDir, "--metadata-output", metadataDir,
+        "--manifest", manifestPath]);
+    assert(exitCode == 0,
+        "route-metadata must not report route-refused for roots reached " ~
+        "only through a symlinked ancestor the caller does not control " ~
+        "(issue #458); an ordinary OS-level indirection like macOS's " ~
+        "/tmp -> /private/tmp must not false-refuse this route");
+    assert(exists(buildPath(contentDir, "page.html")),
+        "route-metadata must publish the content sink through the symlinked ancestor");
+    assert(exists(buildPath(metadataDir, "page.html")),
+        "route-metadata must publish the metadata sink through the symlinked ancestor");
+    assert(exists(buildPath(real_, "content", "page.html")),
+        "the content sink must have actually landed in the real directory the symlink resolves to");
+    assert(exists(buildPath(real_, "metadata", "page.html")),
+        "the metadata sink must have actually landed in the real directory the symlink resolves to");
 }

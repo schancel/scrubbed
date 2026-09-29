@@ -2,6 +2,7 @@
 module effects.html_main_content;
 
 import effects.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree;
+import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
 import std.uni : isControl, isFormat, isWhite;
 import std.utf : UseReplacementDchar, decode, encode;
 
@@ -23,6 +24,68 @@ private enum double positiveTagWeight = 300.0;
 private enum double negativeTagWeight = 300.0;
 private enum double keywordWeightUnit = 150.0;
 
+// Issue #411 (www-homify-de.html): real content can live entirely inside a
+// `<script type="application/ld+json">` schema.org block (JSON, not DOM
+// text/element structure) rather than anywhere the candidate-scoring pass
+// above can see it -- a React SSR page can render a component's real body
+// only as JSON props/JSON-LD, with the *visible* DOM containing nothing but
+// chrome (nav, an app-install banner, locale pickers). Real trafilatura
+// 2.2.0 recovers exactly this page's content the same way (its own
+// `baseline.py` walks the identical `<script type="application/ld+json">`
+// schema.org `articleBody`/`step`/etc. properties as a fallback strategy
+// when its own DOM-based extraction doesn't win) -- confirmed by running it
+// directly against this repo's own copy of the page, not assumed. This is
+// therefore a different content *source*, not a scoring-weight/threshold
+// miscalibration in the candidate pass above, which is why it is a
+// dedicated fallback path invoked only once that pass has already
+// abstained, rather than a change to any candidate's score.
+private enum string structuredDataScriptType = "application/ld+json";
+// Aggregate ld+json bytes scanned per document, mirroring
+// `topical_tags_extract_stage.d`'s own already-accepted bound for the
+// identical "scan every ld+json script on the page" operation (this module
+// may not import that one directly -- see `scripts/check_modules.d`'s
+// effects-layer rule -- so the bound is restated here, not shared).
+private enum size_t maxStructuredDataAggregateBytes = 128 * 1024;
+private enum int maxStructuredDataParseDepth = 32;
+
+// schema.org properties that carry real page body text, restricted to the
+// same fixed set a real, independently-shipped tool (trafilatura 2.2.0's
+// `baseline.py`) already validates against real pages: `articleBody`/
+// `reviewBody` are direct content properties; `step`/`recipeInstructions`
+// share the exact same shape (a string, or a list of strings/objects each
+// carrying `text`, optionally one level down inside `itemListElement` --
+// the schema.org HowTo shape www-homify-de.html itself uses); FAQPage's
+// `acceptedAnswer.text` is handled separately below. Deliberately not
+// gated on the JSON-LD block's own `@type`: a property literally named
+// `articleBody`/`step`/`acceptedAnswer` inside a `application/ld+json`
+// block is schema.org markup by construction, so checking the property
+// name directly is simpler than -- and just as safe as -- an `@type`
+// pre-filter.
+private immutable string[] structuredDataTextKeys = ["articleBody", "reviewBody"];
+private immutable string[] structuredDataStepKeys = ["step", "recipeInstructions"];
+
+private struct NamedCharacterReference { string name; dchar value; }
+
+// Deliberately narrow, evidence-grounded HTML character-reference decoder,
+// local to this module: `effects.html_main_content` may not import
+// `filters.entities` (`scripts/check_modules.d`'s effects-layer rule), and
+// copying its full WHATWG-entities table here would be a large,
+// unjustified duplication for one fallback path. Handles the numeric form
+// (`&#NNN;`/`&#xHH;`) plus a small fixed set of named references: the one
+// verified present in this repo's own corpus (grep-confirmed: only
+// `&nbsp;` appears anywhere in www-homify-de.html's real ld+json text) and
+// the handful (`amp`/`lt`/`gt`/`quot`/`apos`) any HTML-escaped snippet is
+// overwhelmingly likely to carry. An unrecognized named reference is left
+// as literal text rather than guessed at.
+private immutable NamedCharacterReference[] structuredDataNamedReferences = [
+    NamedCharacterReference("amp;", '&'),
+    NamedCharacterReference("lt;", '<'),
+    NamedCharacterReference("gt;", '>'),
+    NamedCharacterReference("quot;", '"'),
+    NamedCharacterReference("apos;", '\''),
+    NamedCharacterReference("nbsp;", ' '),
+];
+
 /// Fixed content-vs-boilerplate tag-name table. `check.d` pins these exact
 /// lists so an accidental edit is caught as a golden drift.
 immutable string[] positiveContentTags = ["article", "main", "section", "p"];
@@ -39,6 +102,18 @@ immutable string[] negativeKeywords = ["nav", "sidebar", "footer", "header",
 
 enum MainContentStatus {
     selected,
+    // Issue #411: the DOM candidate-scoring pass below abstained (any of the
+    // three reasons below), but a `<script type="application/ld+json">`
+    // schema.org block on the same page carried enough real content-bearing
+    // text (`articleBody`/`reviewBody`/HowTo `step`/FAQ `acceptedAnswer`) to
+    // clear the same `minSelectableTextBytes` floor an ordinary DOM
+    // candidate must clear. `.node` stays `size_t.max` and `.score` stays
+    // `0.0`: this text has no corresponding tree node/score, it was
+    // synthesized from JSON, not selected from a subtree. See
+    // `structuredDataFallbackText`'s doc comment for the real page
+    // (www-homify-de.html) and real external-tool (trafilatura 2.2.0)
+    // evidence this generalizes from, not just a single-page special case.
+    selectedStructuredData,
     abstainedNoCandidate,
     abstainedBelowThreshold,
     abstainedTie,
@@ -165,6 +240,227 @@ private bool hasNegativeTagAncestor(const ref HtmlTree tree, size_t index) pure 
         parent = tree.nodes[parent].parentIndex;
     }
     return false;
+}
+
+private int hexDigitValue(char c) pure nothrow @nogc {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+private int decDigitValue(char c) pure nothrow @nogc {
+    return (c >= '0' && c <= '9') ? c - '0' : -1;
+}
+
+// See `structuredDataNamedReferences`'s doc comment for the deliberately
+// narrow scope. Byte-wise scan for `&`/digits/`;`: safe against multi-byte
+// UTF-8 the same way `topical_tags_extract_stage.d`'s own byte-wise
+// `splitKeywordList` already documents -- continuation bytes are always
+// >= 0x80, so none of these ASCII delimiters can ever match one.
+private string decodeStructuredDataEntities(string text) pure {
+    char[] result;
+    bool copied;
+    size_t i;
+    while (i < text.length) {
+        if (text[i] != '&') {
+            if (copied) result ~= text[i];
+            ++i;
+            continue;
+        }
+        size_t cursor = i + 1;
+        dchar codepoint;
+        bool matched;
+        if (cursor < text.length && text[cursor] == '#') {
+            size_t digitsStart = cursor + 1;
+            bool hex;
+            if (digitsStart < text.length && (text[digitsStart] == 'x' || text[digitsStart] == 'X')) {
+                hex = true;
+                ++digitsStart;
+            }
+            size_t d = digitsStart;
+            ulong value;
+            while (d < text.length) {
+                int dv = hex ? hexDigitValue(text[d]) : decDigitValue(text[d]);
+                if (dv < 0) break;
+                if (value <= 0x10FFFF) value = value * (hex ? 16 : 10) + dv;
+                ++d;
+            }
+            if (d > digitsStart) {
+                cursor = d;
+                if (cursor < text.length && text[cursor] == ';') ++cursor;
+                if (value > 0 && value <= 0x10FFFF && !(value >= 0xD800 && value <= 0xDFFF)) {
+                    codepoint = cast(dchar) value;
+                    matched = true;
+                }
+            }
+        } else {
+            foreach (reference; structuredDataNamedReferences) {
+                if (cursor + reference.name.length <= text.length &&
+                        text[cursor .. cursor + reference.name.length] == reference.name) {
+                    codepoint = reference.value;
+                    cursor += reference.name.length;
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
+            if (!copied) { result = text[0 .. i].dup; copied = true; }
+            result ~= text[i];
+            ++i;
+            continue;
+        }
+        if (!copied) { result = text[0 .. i].dup; copied = true; }
+        char[4] encoded;
+        result ~= encoded[0 .. encode(encoded, codepoint)];
+        i = cursor;
+    }
+    return copied ? cast(string) result : text;
+}
+
+// Strips literal HTML tags a schema.org JSON text/articleBody value may
+// carry -- the exact www-homify-de.html HowTo `step[].itemListElement.text`
+// shape ("<p>...</p>"). A removed tag becomes a single space (never a
+// direct word concatenation), then decodes any character references left
+// over (`_render_text`'s own two-step "unescape, then strip markup" shape,
+// just in the opposite order -- decoding after stripping means a decoded
+// `&lt;`/`&gt;` can never be mistaken for a real tag boundary).
+private string plainTextFromStructuredData(string raw) pure {
+    char[] stripped;
+    stripped.reserve(raw.length);
+    bool inTag;
+    foreach (c; raw) {
+        if (c == '<') {
+            inTag = true;
+            if (stripped.length && stripped[$ - 1] != ' ') stripped ~= ' ';
+            continue;
+        }
+        if (c == '>') { inTag = false; continue; }
+        if (inTag) continue;
+        stripped ~= c;
+    }
+    return decodeStructuredDataEntities(cast(string) stripped);
+}
+
+// Collects schema.org text content from one parsed JSON-LD value
+// (list-wrapped and `@graph`/`mainEntity`-nested nodes included), per
+// `structuredDataTextKeys`/`structuredDataStepKeys`'s doc comment. Bounded
+// recursion: `parseJSON`'s own `maxStructuredDataParseDepth` already caps
+// how deep a nested JSON-LD value can be before parsing ever reaches here,
+// and total work is bounded by `maxStructuredDataAggregateBytes` (the raw
+// JSON text this was parsed from).
+private void collectStructuredDataBodies(ref JSONValue node, ref string[] bodies) pure {
+    if (node.type == JSONType.array) {
+        foreach (ref item; node.array) collectStructuredDataBodies(item, bodies);
+        return;
+    }
+    if (node.type != JSONType.object) return;
+    foreach (key; structuredDataTextKeys) {
+        if (auto v = key in node.object)
+            if (v.type == JSONType.string && v.str.length) bodies ~= v.str;
+    }
+    foreach (key; structuredDataStepKeys) {
+        auto v = key in node.object;
+        if (v is null) continue;
+        if (v.type == JSONType.string) {
+            if (v.str.length) bodies ~= v.str;
+            continue;
+        }
+        if (v.type != JSONType.array) continue;
+        foreach (ref step; v.array) {
+            if (step.type == JSONType.string) {
+                if (step.str.length) bodies ~= step.str;
+                continue;
+            }
+            if (step.type != JSONType.object) continue;
+            if (auto t = "text" in step.object)
+                if (t.type == JSONType.string && t.str.length) bodies ~= t.str;
+            auto ile = "itemListElement" in step.object;
+            if (ile is null) continue;
+            JSONValue[] subs = ile.type == JSONType.array ? ile.array : [*ile];
+            foreach (ref sub; subs) {
+                if (sub.type != JSONType.object) continue;
+                if (auto t2 = "text" in sub.object)
+                    if (t2.type == JSONType.string && t2.str.length) bodies ~= t2.str;
+            }
+        }
+    }
+    if (auto answer = "acceptedAnswer" in node.object) {
+        if (answer.type == JSONType.object)
+            if (auto t = "text" in answer.object)
+                if (t.type == JSONType.string && t.str.length) bodies ~= t.str;
+    }
+    foreach (key; ["@graph", "mainEntity"]) {
+        if (auto v = key in node.object) collectStructuredDataBodies(*v, bodies);
+    }
+}
+
+// Direct (non-recursive) child text, for `<script>` bodies -- same idiom
+// `topical_tags_extract_stage.d`'s own `directChildText` already
+// establishes for the identical "read a script tag's own text" need
+// (restated here, not shared: see `structuredDataScriptType`'s doc comment
+// on this module's effects-layer import restriction).
+private string scriptOwnText(const ref HtmlTree tree, size_t scriptIndex) pure {
+    string result;
+    foreach (i, ref node; tree.nodes)
+        if (node.parentIndex == scriptIndex && node.kind == HtmlNodeKind.text)
+            result ~= node.text;
+    return result;
+}
+
+// Issue #411's real fallback: only reached once the ordinary candidate pass
+// has already abstained (see `abstainOrRescue`). Scans every
+// `<script type="application/ld+json">` on the page (bounded aggregate
+// bytes, bounded JSON parse depth -- a single malformed/oversize block is
+// skipped, never fatal to the whole document, same resilience idiom
+// `topical_tags_extract_stage.d`'s own ld+json handling already uses) for
+// schema.org content properties, and joins whatever real text they carry
+// with the same `CollapsingWriter`/paragraph-break/output-cap machinery the
+// ordinary selected-subtree path already uses below. Returns `null` when no
+// script carried a recognized content property at all.
+private string structuredDataFallbackText(const ref HtmlTree tree) pure {
+    size_t aggregateBytesScanned;
+    string[] bodies;
+    foreach (i, ref node; tree.nodes) {
+        if (node.kind != HtmlNodeKind.element || node.name != "script") continue;
+        if (attributeValue(node, "type") != structuredDataScriptType) continue;
+        auto scriptText = scriptOwnText(tree, i);
+        if (scriptText.length == 0) continue;
+        if (aggregateBytesScanned + scriptText.length > maxStructuredDataAggregateBytes) continue;
+        aggregateBytesScanned += scriptText.length;
+        JSONValue root;
+        try root = parseJSON(scriptText, maxStructuredDataParseDepth, JSONOptions.strictParsing);
+        catch (Exception) continue; // invalid JSON syntax: skip this block only
+        collectStructuredDataBodies(root, bodies);
+    }
+    if (bodies.length == 0) return null;
+    CollapsingWriter collapsing;
+    foreach (bodyText; bodies) {
+        collapsing.paragraphBreak();
+        collapsing.feed(plainTextFromStructuredData(bodyText));
+    }
+    return collapsing.writer.bytes.idup;
+}
+
+// Tries the structured-data fallback before committing to an abstention;
+// promotes to `selectedStructuredData` only if the recovered text clears
+// the exact same floor an ordinary DOM candidate must clear
+// (`minSelectableTextBytes`) -- a trivial/near-empty ld+json blob must not
+// override a genuine abstention, matching this module's existing
+// "explicit abstention over best-effort guess" rule. May propagate
+// `HtmlMainContentOutputLimit` (via `CollapsingWriter`'s shared `Writer`),
+// exactly as the ordinary selected path already can.
+private MainContentResult abstainOrRescue(const ref HtmlTree tree,
+        MainContentResult result, MainContentStatus reason) pure {
+    auto rescued = structuredDataFallbackText(tree);
+    if (rescued.length >= minSelectableTextBytes) {
+        result.status = MainContentStatus.selectedStructuredData;
+        result.text = rescued;
+        return result;
+    }
+    result.status = reason;
+    return result;
 }
 
 private void insertCandidate(ref MainContentCandidate[maxMainContentCandidates] top,
@@ -357,12 +653,21 @@ private void collectText(const ref HtmlTree tree, const size_t[] prevSibling,
 /// `minSelectableTextBytes`/`minSelectableScore`, having no element
 /// candidate at all, or an exact tie for the top score are each an explicit
 /// abstention (`abstainedBelowThreshold`/`abstainedNoCandidate`/
-/// `abstainedTie`) — never a best-effort guess. Only `HtmlTree`'s own
-/// bounded, already-capped node data is read; this performs no parsing and
-/// makes no native/native-adjacent calls.
+/// `abstainedTie`) — never a best-effort guess -- UNLESS
+/// `structuredDataFallbackText` (issue #411) recovers real schema.org JSON-LD
+/// content the DOM candidate pass could never see at all (content delivered
+/// only as JSON props/JSON-LD, not DOM text/elements -- see that function's
+/// doc comment), in which case `abstainOrRescue` promotes the result to
+/// `selectedStructuredData` instead. Only `HtmlTree`'s own bounded,
+/// already-capped node data is read; this performs no parsing and makes no
+/// native/native-adjacent calls (the structured-data fallback's own JSON
+/// parsing is over `HtmlTree` text already captured by the same restricted
+/// boundary, not a second native-adjacent call).
 ///
 /// Throws `HtmlMainContentOutputLimit` before returning any result if the
-/// selected node's whitespace-collapsed UTF-8 text would exceed 4 MiB.
+/// selected node's (or, for `selectedStructuredData`, the recovered
+/// structured-data text's) whitespace-collapsed UTF-8 text would exceed
+/// 4 MiB.
 MainContentResult extractMainContent(const ref HtmlTree tree) pure {
     MainContentResult result;
     const n = tree.nodes.length;
@@ -448,20 +753,14 @@ MainContentResult extractMainContent(const ref HtmlTree tree) pure {
     if (elementCandidates > maxMainContentCandidates) result.candidatesOverflow = true;
     result.candidates = top[0 .. topCount].dup;
 
-    if (topCount == 0) {
-        result.status = MainContentStatus.abstainedNoCandidate;
-        return result;
-    }
+    if (topCount == 0)
+        return abstainOrRescue(tree, result, MainContentStatus.abstainedNoCandidate);
 
     auto best = top[0];
-    if (best.textLength < minSelectableTextBytes || best.score < minSelectableScore) {
-        result.status = MainContentStatus.abstainedBelowThreshold;
-        return result;
-    }
-    if (topCount >= 2 && top[1].score == best.score) {
-        result.status = MainContentStatus.abstainedTie;
-        return result;
-    }
+    if (best.textLength < minSelectableTextBytes || best.score < minSelectableScore)
+        return abstainOrRescue(tree, result, MainContentStatus.abstainedBelowThreshold);
+    if (topCount >= 2 && top[1].score == best.score)
+        return abstainOrRescue(tree, result, MainContentStatus.abstainedTie);
 
     // Sibling links for `excludedFromText`'s sandwich rule (issue #27 Case
     // 2), computed only once selection is final. A single forward pass:
@@ -732,4 +1031,122 @@ unittest {
     assert(blankResult.text == paragraph ~ "\n\n" ~ paragraph,
         "a whitespace-only block between two real ones must not double the blank line, " ~
         "and there must be no leading/trailing blank line either");
+}
+
+// Issue #411: the structured-data (JSON-LD) fallback. www-homify-de.html's
+// own real shape -- a chrome-only DOM (here reduced to a bare abstaining
+// `<nav>`) plus a `<script type="application/ld+json">` schema.org `HowTo`
+// carrying the page's real content as `step[].itemListElement.text` -- must
+// be rescued into `selectedStructuredData` rather than left quarantined.
+unittest {
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+
+    HtmlTree structuredOnly;
+    structuredOnly.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "nav", null, null),
+        HtmlNode(HtmlNodeKind.text, 0, null, "Home About Contact"),
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 2, null,
+            `{"@type":"HowTo","step":[{"@type":"HowToStep","itemListElement":` ~
+            `{"@type":"HowToDirection","text":"<p>` ~ longParagraph ~ `</p>"}}]}`),
+    ];
+    auto structuredResult = extractMainContent(structuredOnly);
+    assert(structuredResult.status == MainContentStatus.selectedStructuredData,
+        "real JSON-LD content behind an abstaining DOM must be rescued");
+    assert(structuredResult.node == size_t.max,
+        "structured-data text has no corresponding tree node");
+    assert(structuredResult.score == 0.0,
+        "structured-data text has no corresponding candidate score");
+    assert(structuredResult.text.canFind("Article body sentence."),
+        "the HowTo step's own text must reach the final output");
+    assert(!structuredResult.text.canFind("<p>") && !structuredResult.text.canFind("</p>"),
+        "embedded HTML markup inside the JSON string must be stripped");
+
+    // Multiple steps become multiple paragraphs, same "\n\n" separator the
+    // ordinary DOM path already uses (Issue #335 Slice 1).
+    HtmlTree twoSteps;
+    twoSteps.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 0, null,
+            `{"@type":"HowTo","step":[` ~
+            `{"itemListElement":{"text":"<p>` ~ longParagraph ~ `</p>"}},` ~
+            `{"itemListElement":{"text":"<p>` ~ longParagraph ~ `</p>"}}]}`),
+    ];
+    auto twoStepResult = extractMainContent(twoSteps);
+    assert(twoStepResult.status == MainContentStatus.selectedStructuredData);
+    // trim() mirrors CollapsingWriter never emitting a trailing pending space.
+    string trimmedParagraph = longParagraph[0 .. $ - 1];
+    assert(twoStepResult.text == trimmedParagraph ~ "\n\n" ~ trimmedParagraph);
+
+    // A real `&nbsp;` character reference (the one actually observed in
+    // www-homify-de.html's own ld+json text) decodes to U+00A0 -- a
+    // whitespace character `CollapsingWriter` then collapses like any other
+    // (same as the ordinary DOM path already does for real whitespace), so
+    // the observable effect is an ordinary single space between the
+    // surrounding real words, never literal "&nbsp;" text.
+    HtmlTree entityCase;
+    entityCase.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 0, null,
+            `{"@type":"HowTo","step":[{"itemListElement":{"text":"<p>` ~
+            longParagraph ~ `passt?&nbsp;danach geht es weiter.</p>"}}]}`),
+    ];
+    auto entityResult = extractMainContent(entityCase);
+    assert(entityResult.status == MainContentStatus.selectedStructuredData);
+    assert(entityResult.text.canFind("passt? danach"),
+        "a real named character reference must decode, not survive as literal text");
+    assert(!entityResult.text.canFind("&nbsp;"));
+
+    // Too little recovered text must not override a genuine abstention --
+    // same floor (`minSelectableTextBytes`) an ordinary DOM candidate must
+    // clear, per this function's own doc comment.
+    HtmlTree tooShort;
+    tooShort.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "nav", null, null),
+        HtmlNode(HtmlNodeKind.text, 0, null, "Home About Contact"),
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 2, null,
+            `{"@type":"Article","articleBody":"Too short."}`),
+    ];
+    auto tooShortResult = extractMainContent(tooShort);
+    assert(tooShortResult.status == MainContentStatus.abstainedBelowThreshold,
+        "a trivial ld+json blob must not override a genuine abstention");
+    assert(tooShortResult.text.length == 0);
+
+    // Malformed JSON syntax is skipped (this one block only), never fatal:
+    // the document still abstains normally rather than throwing.
+    HtmlTree malformed;
+    malformed.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "nav", null, null),
+        HtmlNode(HtmlNodeKind.text, 0, null, "Home About Contact"),
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 2, null, `{not valid json at all`),
+    ];
+    auto malformedResult = extractMainContent(malformed);
+    assert(malformedResult.status == MainContentStatus.abstainedBelowThreshold,
+        "invalid ld+json syntax must be skipped, not fatal");
+
+    // A non-ld+json script (e.g. ordinary page JS) is never treated as a
+    // structured-data source, and its text never reaches scoring or output
+    // either (hiddenTag; pre-existing behavior, reconfirmed here).
+    HtmlTree ordinaryScript;
+    ordinaryScript.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "nav", null, null),
+        HtmlNode(HtmlNodeKind.text, 0, null, "Home About Contact"),
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null, null),
+        HtmlNode(HtmlNodeKind.text, 2, null,
+            `{"@type":"HowTo","step":[{"itemListElement":{"text":"<p>` ~
+            longParagraph ~ `</p>"}}]}`),
+    ];
+    auto ordinaryScriptResult = extractMainContent(ordinaryScript);
+    assert(ordinaryScriptResult.status == MainContentStatus.abstainedBelowThreshold,
+        "a script with no ld+json type attribute must not be scanned");
 }

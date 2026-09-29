@@ -74,7 +74,12 @@ private StageDecision applyHtmlMainContent(StageDocument input,
     MainContentResult result;
     try result = extractMainContent(outcome.tree);
     catch (HtmlMainContentOutputLimit) return StageDecision.quarantine("outputLimit");
-    if (result.status != MainContentStatus.selected)
+    // Issue #411: `selectedStructuredData` is a second, real success status
+    // (structured-data-fallback content, not one lost to the DOM candidate
+    // pass) -- see `effects.html_main_content`'s own doc comment on that
+    // status for why it is distinct from `selected` rather than reusing it.
+    if (result.status != MainContentStatus.selected &&
+            result.status != MainContentStatus.selectedStructuredData)
         return StageDecision.quarantine(result.status.to!string);
     input.content = new Content([ContentPiece.own(cast(const(ubyte)[]) result.text)]);
     // `input.metadata` (written by any prior stage) passes through

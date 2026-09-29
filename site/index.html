@@ -142,9 +142,9 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             <p>Exact parity with Presidio on every category: email, card, IP (5/5 each) and phone (6/6, including parenthesized numbers like "(415) 555-0199"). Zero false positives from scrubbed on any category.</p>
         </div>
         <div class="stat-card">
-            <span class="big">18/20 pages</span>
+            <span class="big">20/20 pages</span>
             <span class="label">vs. trafilatura, extraction</span>
-            <p>Precision 0.918 / recall 0.746 against trafilatura's own extraction as the reference (not authored ground truth &mdash; a cross-tool word-overlap comparison). The 2 non-selected pages are real, open gaps, not disclosed non-goals: trafilatura itself extracts real article text from both (confirmed directly), so an internal resource cap and a scoring/threshold gap are each incorrectly rejecting a page with genuine static content &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a> and the tracked issue for details.</p>
+            <p>Precision 0.895 / recall 0.756 against trafilatura's own extraction as the reference (not authored ground truth &mdash; a cross-tool word-overlap comparison). All 20 pages now select: a stale internal resource cap and a JSON-LD content source the DOM-only scoring pass couldn't see were each real, fixed bugs, not disclosed non-goals &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a> and the tracked issue for details.</p>
         </div>
         <div class="stat-card">
             <span class="big">~146x</span>

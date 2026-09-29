@@ -11,9 +11,43 @@ enum size_t maxDecodedBytes = 64 * 1024;
 enum size_t defaultExtractHtmlBytes = 1024 * 1024;
 enum size_t maxConfigurableHtmlBytes = 8 * 1024 * 1024;
 enum size_t maxDepth = 128;
-enum size_t maxNodes = 8192;
+// Issue #411 (scienceblogs-de.html): `maxNodes`/`maxObservationBytes` were
+// both introduced (`ebae4ed`) alongside the original 64 KiB `maxRawBytes`
+// admission bound and never revisited when a later, separate commit
+// (`68e1b1c`) raised extraction's own effective raw-byte admission to 1 MiB
+// by default and up to 8 MiB configurable via `--max-html-bytes` -- that
+// commit's own TODO.md entry explicitly notes "other tree/output limits...
+// remain unchanged", i.e. this was a known, not a hidden, gap, just never
+// closed. The result: a real page comfortably inside the *documented*
+// 1 MiB default admission bound could still be rejected by a *node* cap
+// still sized for the original, 16x-smaller 64 KiB budget -- exactly what
+// scienceblogs-de.html (397,702 raw bytes, its own 10,798-node true count,
+// confirmed by temporarily raising both caps and observing a successful
+// `selected` real-page parse) hit. Real trafilatura 2.2.0 extracts this
+// exact page's real content directly in 0.46s with no special handling
+// (confirmed by running it, not assumed) -- this is scrubbed's own admitted
+// internal representation cost catching up to a page a real tool finds
+// unremarkable, not a pathological/adversarial input this cap exists to
+// reject.
+//
+// Raised, not removed, and still a fixed bound (not scaled to whatever
+// raw-byte limit a caller configures via `--max-html-bytes`, which remains
+// the pre-existing, separately documented "other limits do not scale with
+// the configured raw cap" behavior -- out of this ticket's scope): the new
+// values are sized against this repo's own real 20-page corpus
+// (examples/pipeline-benchmark/corpus/), not just the one page that
+// motivated them. Real per-page node and observed-byte density (measured
+// by temporarily raising both caps and running every corpus page through
+// `parseHtml`) ranges from roughly 2.3 to 27.9 nodes and 0.89x to 3.17x
+// observed-vs-raw bytes per raw KiB across all 20 pages; `maxNodes` is set
+// to comfortably clear the corpus's own densest real page (27.9 nodes/KiB,
+// tofugu) at a full 1 MiB (the *default* extract admission bound) with
+// roughly 2x headroom beyond that, and `maxObservationBytes` similarly
+// clears the corpus's own highest observed-byte ratio (3.17x, tofugu) at a
+// full 1 MiB raw with headroom -- not an unbounded or unexamined increase.
+enum size_t maxNodes = 65536;
 enum size_t maxAttributesPerNode = 256;
-enum size_t maxObservationBytes = 1024 * 1024;
+enum size_t maxObservationBytes = 4 * 1024 * 1024;
 
 enum HtmlFailureReason {
     none, rawLimit, decode, decodedLimit, invalidUtf8, nativeCreate,

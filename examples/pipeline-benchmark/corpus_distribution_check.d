@@ -9,7 +9,7 @@
 //
 // This check does not invent a new pipeline or a new decoding mechanism:
 // it runs the exact repro command `docs/html-main-content.md`'s own
-// "`examples/pipeline-benchmark` corpus: current 18/20 status" section
+// "`examples/pipeline-benchmark` corpus: current 20/20 status" section
 // documents (`scrubbed run --stage extract=html-main-content --stage
 // pub=document-metadata-publish --explain`) against the real `scrubbed`
 // release binary, once per real corpus page, and decodes each page's
@@ -17,11 +17,12 @@
 // output (plain tab-separated `key=value`/`key="value"` fields on stdout).
 //
 // Expected table: the 20-page corpus's real, measured distribution as of
-// 2026-09-29 (18 selected, 2 quarantined -- confirmed by a fresh run for
-// this ticket, not copied from the possibly-stale doc claim). On any
-// mismatch -- a page flips selected<->quarantined, a quarantine reason
-// string changes, or the corpus's file set itself changes -- this check
-// prints every mismatch as an expected-vs-actual diff and exits non-zero.
+// 2026-09-29 (20 selected, 0 quarantined -- confirmed by a fresh run against
+// issue #411's real fix, not copied from the prior, disproven "18/20 /
+// working as intended" claim). On any mismatch -- a page flips
+// selected<->quarantined, a quarantine reason string changes, or the
+// corpus's file set itself changes -- this check prints every mismatch as
+// an expected-vs-actual diff and exits non-zero.
 //
 // Build and run (mirrors examples/cli/check.d's own build shape, per
 // docs/cli-commands.md; no internal source/ imports needed since this only
@@ -60,13 +61,20 @@ private struct ExpectedOutcome {
     string reason;
 }
 
-// Measured directly for this ticket (issue #422), 2026-09-29, against a
-// freshly built `dub build --compiler=ldc2 --build=release` binary and the
-// real, currently checked-in `examples/pipeline-benchmark/corpus/` files --
-// matches docs/html-main-content.md's existing "18/20" claim exactly (no
-// drift found at the time this check was written). See that document's
-// "`examples/pipeline-benchmark` corpus: current 18/20 status" section for
-// the root-cause investigation behind both quarantined pages.
+// Measured directly for this ticket (issue #411's real fix), 2026-09-29,
+// against a freshly built `dub build --compiler=ldc2 --build=release`
+// binary and the real, currently checked-in
+// `examples/pipeline-benchmark/corpus/` files. Both previously-quarantined
+// pages now select: `scienceblogs-de.html` via `html_tree.d`'s raised
+// `maxNodes`/`maxObservationBytes` (both were sized for a 64 KiB raw-byte
+// budget the pipeline's own admission bound outgrew), `www-homify-de.html`
+// via `html_main_content.d`'s new JSON-LD structured-data fallback (its
+// real content lives only in `<script type="application/ld+json">`, not
+// anywhere the DOM candidate pass can see). See
+// `docs/html-main-content.md`'s "`examples/pipeline-benchmark` corpus:
+// current 20/20 status" section for the full root-cause/fix writeup behind
+// both pages, including the real trafilatura 2.2.0 evidence that
+// disproved this table's prior "18/20, working as intended" expectations.
 private immutable ExpectedOutcome[] expected = [
     ExpectedOutcome("appen-com.html", false, ""),
     ExpectedOutcome("archiv-krimiblog-de.html", false, ""),
@@ -75,14 +83,14 @@ private immutable ExpectedOutcome[] expected = [
     ExpectedOutcome("jobsnhire-com.html", false, ""),
     ExpectedOutcome("kleinegruenemonster-wordpress-com.html", false, ""),
     ExpectedOutcome("neubau-wsl-ch.html", false, ""),
-    ExpectedOutcome("scienceblogs-de.html", true, "nodeLimit"),
+    ExpectedOutcome("scienceblogs-de.html", false, ""),
     ExpectedOutcome("utopia-de.html", false, ""),
     ExpectedOutcome("world-kbs-co-kr.html", false, ""),
     ExpectedOutcome("www-be-ch.html", false, ""),
     ExpectedOutcome("www-chemietechnik-de.html", false, ""),
     ExpectedOutcome("www-dvgw-de.html", false, ""),
     ExpectedOutcome("www-for-me-online-de.html", false, ""),
-    ExpectedOutcome("www-homify-de.html", true, "abstainedBelowThreshold"),
+    ExpectedOutcome("www-homify-de.html", false, ""),
     ExpectedOutcome("www-laweekly-com.html", false, ""),
     ExpectedOutcome("www-munich2022-com.html", false, ""),
     ExpectedOutcome("www-pronats-de.html", false, ""),

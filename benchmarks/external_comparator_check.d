@@ -3,11 +3,15 @@
 // fail-closed gate the runner relies on (version-prefix collision, url-pin
 // mismatch, executable mutation, fixture drift, independently authored
 // expectation drift, output drift, zero samples, missing case, duplicate
-// case, nonzero exit, timeout, and resource refusal) using its own copies of
-// the gating primitives, not by importing the runner module. `--check
-// <report.json>`
+// case, nonzero exit, timeout, resource refusal, and -- against a synthetic
+// report -- `checkReport` itself rejecting a corrupted expected hash,
+// corrupted sample, broken A/B/A/B interleave, or omitted case for either
+// mojibake case) using its own copies of the gating primitives, not by
+// importing the runner module. `--check <report.json>`
 // structurally validates a report actually produced by external_comparator
-// and proves the migrated ftfy case reproduces cli_baseline.d's prior
+// and proves both migrated ftfy mojibake cases (CP1252's
+// `mojibake/scrubbed-vs-ftfy` and its Windows-1251 sibling
+// `mojibake/scrubbed-vs-ftfy-windows1251`) reproduce cli_baseline.d's prior
 // correctness result for that case (same input/expected hashes, same
 // exact-output gate) even though the report format itself intentionally
 // broke compatibility with the old A00 shape.
@@ -455,11 +459,13 @@ private void selfTest() {
     checkTimeout();
     checkProcessGroupTimeout();
     checkResourceRefusal();
+    checkReportGates();
     writeln("external comparator negative-control self-test passed: ",
         "version-prefix-collision, url-pin-mismatch, executable-mutation, ",
         "fixture-drift, expectation-drift, output-drift, zero-samples, ",
         "missing-case, duplicate-case, nonzero-exit, timeout, ",
-        "process-group-timeout, resource-refusal");
+        "process-group-timeout, resource-refusal, report-check-gates ",
+        "(both mojibake cases' corrupted-hash/corrupted-sample/broken-interleave/missing-case)");
 }
 
 // ---- Report validation: proves a real external_comparator run reproduces
@@ -471,27 +477,32 @@ private enum mojibakeFixtureSha256 =
 private enum mojibakeExpectedSha256 =
     "14A9EDC0944EF516E12E1CE8ABBF3D78CCF41D48CDDD1F2A8AD13173363F7DCA";
 
-private void checkReport(string path) {
-    auto report = parseJSON(readText(path));
-    require(report["schema"].str == "scrubbed-external-comparator-v1",
-        "unexpected schema");
-    require(report["harness_sha256"].str == digest("benchmarks/external_comparator.d"),
-        "harness hash mismatch: report was not produced by the checked-out harness");
+// The Windows-1251 (Cyrillic) sibling of the pair above, matching
+// external_comparator.d's own `mojibakeWindows1251FixtureSha256`/
+// `mojibakeWindows1251ExpectedSha256` pins (issue #377's comparator case,
+// left unvalidated by this checker until issue #383).
+private enum mojibakeWindows1251FixtureSha256 =
+    "C1B6EDDA8EA799948C6F3E34D42E5224D316A157B9159DEB01593BDECD815248";
+private enum mojibakeWindows1251ExpectedSha256 =
+    "D9AC303E3E045729B922A123B5B9EC58DFEA3EC8B6DC46F89C47226C74DA3F85";
+
+// Shared validation for both ftfy/mojibake cases (issue #383): the CP1252
+// case `mojibake/scrubbed-vs-ftfy` and its Windows-1251 (Cyrillic) sibling
+// `mojibake/scrubbed-vs-ftfy-windows1251` are checked exactly the same way,
+// against each one's own pinned fixture/expected hashes.
+private void checkMojibakeCase(JSONValue report, string caseName, string fixtureSha256,
+                               string expectedSha256, string logLabel) {
     JSONValue found;
     bool hasCase;
-    bool[string] seenNames;
-    foreach (c; report["cases"].array) {
-        auto name = c["name"].str;
-        require(name !in seenNames, "duplicate case in report: " ~ name);
-        seenNames[name] = true;
-        if (name == "mojibake/scrubbed-vs-ftfy") { found = c; hasCase = true; }
-    }
-    require(hasCase, "missing mojibake/scrubbed-vs-ftfy case");
-    require(found["fixture_sha256"].str == mojibakeFixtureSha256,
-        "fixture hash differs from the pinned mojibake fixture");
-    require(found["expected_sha256"].str == mojibakeExpectedSha256,
-        "expected hash differs from the pinned independently authored expectation " ~
-        "(this is exactly the hash cli_baseline.d's mojibake case bound)");
+    foreach (c; report["cases"].array)
+        if (c["name"].str == caseName) { found = c; hasCase = true; }
+    require(hasCase, "missing " ~ caseName ~ " case");
+    require(found["fixture_sha256"].str == fixtureSha256,
+        "fixture hash differs from the pinned " ~ logLabel ~ " mojibake fixture");
+    require(found["expected_sha256"].str == expectedSha256,
+        "expected hash differs from the pinned independently authored " ~ logLabel ~
+        " expectation" ~ (caseName == "mojibake/scrubbed-vs-ftfy" ?
+            " (this is exactly the hash cli_baseline.d's mojibake case bound)" : ""));
     auto samples = found["samples"].array;
     require(samples.length == 4, "expected four A/B/A/B samples");
     require(samples[0]["tool"].str == "scrubbed" && samples[1]["tool"].str == "ftfy" &&
@@ -500,7 +511,7 @@ private void checkReport(string path) {
     foreach (sample; samples) {
         require(sample["status"].integer == 0, "a sample exited nonzero or was signaled");
         require(sample["exact_output"].boolean, "a sample failed the exact-output gate");
-        require(sample["output_sha256"].str == mojibakeExpectedSha256,
+        require(sample["output_sha256"].str == expectedSha256,
             "a sample's output hash differs from the independently authored expectation");
         foreach (metric; ["wall_seconds", "user_seconds", "system_seconds", "peak_rss_bytes"])
             require((metric in sample.object) !is null, "sample missing " ~ metric);
@@ -513,9 +524,28 @@ private void checkReport(string path) {
         "unexpected pinned ftfy version");
     require(found["timeout_seconds"].floating > 0, "missing declared timeout");
     require(found["max_rss_bytes"].integer > 0, "missing declared resource bound");
-    writeln("external comparator report check passed: migrated mojibake case reproduces ",
-        "cli_baseline.d's fixture/expected hashes and exact-output gate under the new ",
+    writeln("external comparator report check passed: ", caseName, " reproduces the pinned ",
+        logLabel, " fixture/expected hashes and exact-output gate under the ",
         "scrubbed-external-comparator-v1 report format");
+}
+
+private void checkReport(string path) {
+    auto report = parseJSON(readText(path));
+    require(report["schema"].str == "scrubbed-external-comparator-v1",
+        "unexpected schema");
+    require(report["harness_sha256"].str == digest("benchmarks/external_comparator.d"),
+        "harness hash mismatch: report was not produced by the checked-out harness");
+    bool[string] seenNames;
+    foreach (c; report["cases"].array) {
+        auto name = c["name"].str;
+        require(name !in seenNames, "duplicate case in report: " ~ name);
+        seenNames[name] = true;
+    }
+
+    checkMojibakeCase(report, "mojibake/scrubbed-vs-ftfy", mojibakeFixtureSha256,
+        mojibakeExpectedSha256, "CP1252");
+    checkMojibakeCase(report, "mojibake/scrubbed-vs-ftfy-windows1251",
+        mojibakeWindows1251FixtureSha256, mojibakeWindows1251ExpectedSha256, "Windows-1251");
 
     checkMainContentTrafilaturaCase(report);
     checkLanguageIdLangdetectCase(report);
@@ -819,6 +849,297 @@ private void checkPiiFourClassPresidioCase(JSONValue report) {
         "reproducibility, an empirically re-verified four-entity recognizer scope, and ",
         "per-category precision/recall scoring shape for exactly the four overlap categories ",
         "(email/phone/card/ip)");
+}
+
+// ---- Report-level self-test (issue #383): proves `checkReport` itself --
+// not just its independently reimplemented gate primitives above -- fails
+// closed. A synthetic report is assembled that satisfies every case's shape
+// (including main-content/language-id/pii-four-class, which `checkReport`
+// also validates whenever any case is checked), `checkReport` is proven to
+// accept that unmodified baseline, and then each mojibake case (CP1252 and
+// its Windows-1251 sibling) is independently proven to reject a corrupted
+// expected hash, a corrupted sample, a broken A/B/A/B interleave, and the
+// case being omitted entirely. Before this fix, the Windows-1251 variants of
+// these four rejections did not happen: `checkReport` never looked at that
+// case at all, so a corrupted or missing Windows-1251 case wrongly passed.
+
+private string syntheticHash(string seed) {
+    return toHexString(sha256Of(cast(ubyte[]) seed)).to!string;
+}
+
+private JSONValue syntheticSample(string tool, int status) {
+    JSONValue sample = JSONValue(["tool": JSONValue(tool)]);
+    sample["status"] = JSONValue(status);
+    sample["wall_seconds"] = JSONValue(0.01);
+    sample["user_seconds"] = JSONValue(0.01);
+    sample["system_seconds"] = JSONValue(0.0);
+    sample["peak_rss_bytes"] = JSONValue(1024);
+    return sample;
+}
+
+private JSONValue syntheticMojibakeSample(string tool, string expectedSha256) {
+    auto sample = syntheticSample(tool, 0);
+    sample["exact_output"] = JSONValue(true);
+    sample["output_sha256"] = JSONValue(expectedSha256);
+    return sample;
+}
+
+private JSONValue syntheticMojibakeCase(string name, string fixtureSha256, string expectedSha256) {
+    JSONValue[] samples;
+    foreach (i; 0 .. 4)
+        samples ~= syntheticMojibakeSample(i % 2 == 0 ? "scrubbed" : "ftfy", expectedSha256);
+    JSONValue c = JSONValue(["name": JSONValue(name)]);
+    c["fixture_sha256"] = JSONValue(fixtureSha256);
+    c["expected_sha256"] = JSONValue(expectedSha256);
+    c["python_packages_acquisition_order"] =
+        JSONValue([JSONValue("ftfy==6.3.1"), JSONValue("wcwidth==0.8.4")]);
+    c["ftfy_version"] = JSONValue("ftfy (fixes text for you), version 6.3.1 (synthetic self-test)");
+    c["timeout_seconds"] = JSONValue(30.0);
+    c["max_rss_bytes"] = JSONValue(1_048_576);
+    c["samples"] = JSONValue(samples);
+    return c;
+}
+
+private JSONValue syntheticMainContentCase() {
+    JSONValue[] samples;
+    foreach (i; 0 .. 4)
+        samples ~= syntheticSample(i % 2 == 0 ? "scrubbed" : "trafilatura", 0);
+
+    JSONValue[] fixtures;
+    foreach (i; 0 .. expectedHeldOutFixtureCount) {
+        JSONValue fixture = JSONValue(["id": JSONValue("fixture-" ~ i.to!string)]);
+        foreach (toolName; ["scrubbed", "trafilatura"]) {
+            JSONValue entry = JSONValue(["status": JSONValue("produced")]);
+            entry["precision"] = JSONValue(1.0);
+            entry["recall"] = JSONValue(1.0);
+            entry["withoutLeaks"] = JSONValue(0);
+            fixture[toolName] = entry;
+        }
+        fixtures ~= fixture;
+    }
+    JSONValue scoring = JSONValue(["gold_fixture_count": JSONValue(expectedHeldOutFixtureCount)]);
+    scoring["fixtures"] = JSONValue(fixtures);
+    foreach (toolName; ["scrubbed", "trafilatura"]) {
+        JSONValue summary = JSONValue(["extractedCount": JSONValue(expectedHeldOutFixtureCount)]);
+        summary["abstainedCount"] = JSONValue(0);
+        summary["meanPrecision"] = JSONValue(1.0);
+        summary["meanRecall"] = JSONValue(1.0);
+        summary["withoutLeakTotal"] = JSONValue(0);
+        scoring[toolName] = summary;
+    }
+
+    JSONValue c = JSONValue(["name": JSONValue("main-content/scrubbed-vs-trafilatura")]);
+    c["scrubbed_binary_sha256"] = JSONValue(syntheticHash("scrubbed-binary-main-content"));
+    c["trafilatura_binary_sha256"] = JSONValue(syntheticHash("trafilatura-binary"));
+    c["trafilatura_version"] = JSONValue("Trafilatura 1.x (synthetic self-test)");
+    c["held_out_corpus_commit"] = JSONValue(expectedHeldOutCommit);
+    c["held_out_fixture_count"] = JSONValue(expectedHeldOutFixtureCount);
+    c["python_packages_acquisition_order"] = JSONValue([JSONValue("trafilatura==1.0.0")]);
+    c["timeout_seconds"] = JSONValue(30.0);
+    c["max_rss_bytes"] = JSONValue(1_048_576);
+    c["samples"] = JSONValue(samples);
+    c["reproducibility"] =
+        JSONValue(["scrubbed": JSONValue(true), "trafilatura": JSONValue(true)]);
+    c["scoring"] = scoring;
+    return c;
+}
+
+private JSONValue syntheticLanguageIdCase() {
+    JSONValue[] samples;
+    foreach (i; 0 .. 4)
+        samples ~= syntheticSample(i % 2 == 0 ? "scrubbed" : "langdetect", 0);
+
+    JSONValue[] languages;
+    foreach (lang; expectedOriginalLanguageIdLanguages) {
+        JSONValue entry = JSONValue(["language": JSONValue(lang)]);
+        foreach (toolName; ["scrubbed", "langdetect"]) {
+            JSONValue outcome = JSONValue(["status": JSONValue("produced")]);
+            outcome["predicted"] = JSONValue(lang);
+            entry[toolName] = outcome;
+        }
+        entry["agreement"] = JSONValue(true);
+        languages ~= entry;
+    }
+    auto languageCount = cast(int) expectedOriginalLanguageIdLanguages.length;
+    JSONValue scoring = JSONValue(["language_count": JSONValue(languageCount)]);
+    scoring["agreement_rate"] = JSONValue(1.0);
+    scoring["agreement_count"] = JSONValue(languageCount);
+    foreach (toolName; ["scrubbed", "langdetect"]) {
+        JSONValue summary = JSONValue(["correctCount": JSONValue(languageCount)]);
+        summary["accuracy"] = JSONValue(1.0);
+        if (toolName == "scrubbed") summary["abstainedCount"] = JSONValue(0);
+        else summary["errorCount"] = JSONValue(0);
+        scoring[toolName] = summary;
+    }
+    scoring["languages"] = JSONValue(languages);
+
+    JSONValue[] originalLanguages;
+    foreach (lang; expectedOriginalLanguageIdLanguages) originalLanguages ~= JSONValue(lang);
+
+    JSONValue c = JSONValue(["name": JSONValue("language-id/scrubbed-vs-langdetect")]);
+    c["scrubbed_binary_sha256"] = JSONValue(syntheticHash("scrubbed-binary-language-id"));
+    c["langdetect_driver_sha256"] = JSONValue(syntheticHash("langdetect-driver"));
+    c["python_packages_acquisition_order"] = JSONValue([JSONValue("langdetect==1.0.9")]);
+    c["detector_factory_seed"] = JSONValue(0);
+    c["timeout_seconds"] = JSONValue(30.0);
+    c["max_rss_bytes"] = JSONValue(1_048_576);
+    c["original_languages"] = JSONValue(originalLanguages);
+    c["samples"] = JSONValue(samples);
+    c["reproducibility"] =
+        JSONValue(["scrubbed": JSONValue(true), "langdetect": JSONValue(true)]);
+    c["scoring"] = scoring;
+    return c;
+}
+
+private JSONValue syntheticPiiCase() {
+    JSONValue[] samples;
+    foreach (i; 0 .. 4)
+        samples ~= syntheticSample(i % 2 == 0 ? "scrubbed" : "presidio", 0);
+
+    JSONValue[] categoryNames;
+    foreach (cat; expectedPiiCategories) categoryNames ~= JSONValue(cat);
+    JSONValue scoring = JSONValue(["categories": JSONValue(categoryNames)]);
+    foreach (toolName; ["scrubbed", "presidio"]) {
+        JSONValue[string] perCategory;
+        foreach (cat; expectedPiiCategories) {
+            JSONValue entry = JSONValue(["truePositive": JSONValue(1)]);
+            entry["falsePositive"] = JSONValue(0);
+            entry["falseNegative"] = JSONValue(0);
+            entry["precision"] = JSONValue(1.0);
+            entry["recall"] = JSONValue(1.0);
+            perCategory[cat] = entry;
+        }
+        scoring[toolName] = JSONValue(perCategory);
+    }
+
+    JSONValue[] supportedEntities;
+    foreach (entity; expectedPresidioSupportedEntities) supportedEntities ~= JSONValue(entity);
+
+    JSONValue c = JSONValue(["name": JSONValue("pii-four-class/scrubbed-vs-presidio")]);
+    c["scrubbed_binary_sha256"] = JSONValue(syntheticHash("scrubbed-binary-pii"));
+    c["presidio_driver_sha256"] = JSONValue(syntheticHash("presidio-driver"));
+    c["presidio_spacy_model"] = JSONValue("en_core_web_sm");
+    c["presidio_python_version"] = JSONValue("Python 3.x (synthetic self-test)");
+    c["python_packages_acquisition_order"] = JSONValue([
+        JSONValue("presidio-analyzer==2.2.0"),
+        JSONValue("presidio-anonymizer==2.2.0"),
+        JSONValue("en-core-web-sm @ https://example.invalid/en_core_web_sm-3.8.0.whl")]);
+    c["timeout_seconds"] = JSONValue(30.0);
+    c["max_rss_bytes"] = JSONValue(1_048_576);
+    c["presidio_supported_entities"] = JSONValue(supportedEntities);
+    c["samples"] = JSONValue(samples);
+    c["reproducibility"] = JSONValue(["scrubbed": JSONValue(true), "presidio": JSONValue(true)]);
+    c["fixture_spec_sha256"] = JSONValue(syntheticHash("fixture-spec"));
+    c["fixture_count"] = JSONValue(4);
+    c["scoring"] = scoring;
+    return c;
+}
+
+// A complete, internally-consistent synthetic report: every case `checkReport`
+// currently validates is present and shaped to pass. Each self-test scenario
+// below starts from a fresh call to this (JSONValue is reference-typed for
+// objects/arrays, so reusing one built report across scenarios would let an
+// earlier scenario's mutation leak into a later one).
+private JSONValue buildValidSyntheticReport() {
+    JSONValue report = JSONValue(["schema": JSONValue("scrubbed-external-comparator-v1")]);
+    report["harness_sha256"] = JSONValue(digest("benchmarks/external_comparator.d"));
+    report["cases"] = JSONValue([
+        syntheticMojibakeCase("mojibake/scrubbed-vs-ftfy", mojibakeFixtureSha256,
+            mojibakeExpectedSha256),
+        syntheticMojibakeCase("mojibake/scrubbed-vs-ftfy-windows1251",
+            mojibakeWindows1251FixtureSha256, mojibakeWindows1251ExpectedSha256),
+        syntheticMainContentCase(),
+        syntheticLanguageIdCase(),
+        syntheticPiiCase(),
+    ]);
+    return report;
+}
+
+private JSONValue withoutCase(JSONValue report, string caseName) {
+    JSONValue[] kept;
+    foreach (c; report["cases"].array)
+        if (c["name"].str != caseName) kept ~= c;
+    report["cases"] = JSONValue(kept);
+    return report;
+}
+
+private JSONValue withCorruptedField(JSONValue report, string caseName, string field,
+                                     JSONValue badValue) {
+    JSONValue[] cases;
+    foreach (c; report["cases"].array) {
+        if (c["name"].str == caseName) c[field] = badValue;
+        cases ~= c;
+    }
+    report["cases"] = JSONValue(cases);
+    return report;
+}
+
+private JSONValue withCorruptedSample(JSONValue report, string caseName, size_t sampleIndex) {
+    JSONValue[] cases;
+    foreach (c; report["cases"].array) {
+        if (c["name"].str == caseName) {
+            auto samples = c["samples"].array;
+            samples[sampleIndex]["status"] = JSONValue(9);
+            samples[sampleIndex]["exact_output"] = JSONValue(false);
+            c["samples"] = JSONValue(samples);
+        }
+        cases ~= c;
+    }
+    report["cases"] = JSONValue(cases);
+    return report;
+}
+
+private JSONValue withBrokenInterleave(JSONValue report, string caseName) {
+    JSONValue[] cases;
+    foreach (c; report["cases"].array) {
+        if (c["name"].str == caseName) {
+            auto samples = c["samples"].array;
+            samples[0]["tool"] = JSONValue("ftfy"); // must be "scrubbed" first
+            c["samples"] = JSONValue(samples);
+        }
+        cases ~= c;
+    }
+    report["cases"] = JSONValue(cases);
+    return report;
+}
+
+private void checkReportGate(string scenario, JSONValue report, bool shouldPass) {
+    auto path = scratchFile("report-" ~ scenario);
+    scope(exit) if (exists(path)) remove(path);
+    write(path, report.toString());
+    bool rejected;
+    try checkReport(path);
+    catch (Exception) rejected = true;
+    if (shouldPass)
+        require(!rejected, "valid synthetic report was wrongly rejected: " ~ scenario);
+    else
+        require(rejected, "invalid synthetic report was wrongly accepted: " ~ scenario);
+}
+
+// Runs the same four negative-control scenarios (corrupted expected hash,
+// corrupted sample, broken A/B/A/B interleave, case omitted entirely)
+// against one named mojibake case, so the CP1252 case and its Windows-1251
+// sibling are proven to fail closed identically.
+private void checkMojibakeCaseNegativeControl(string caseName, string label) {
+    checkReportGate(label ~ "-corrupted-expected-hash",
+        withCorruptedField(buildValidSyntheticReport(), caseName, "expected_sha256",
+            JSONValue("BAD")), false);
+    checkReportGate(label ~ "-corrupted-sample",
+        withCorruptedSample(buildValidSyntheticReport(), caseName, 0), false);
+    checkReportGate(label ~ "-broken-interleave",
+        withBrokenInterleave(buildValidSyntheticReport(), caseName), false);
+    checkReportGate(label ~ "-missing-case",
+        withoutCase(buildValidSyntheticReport(), caseName), false);
+}
+
+private void checkReportGates() {
+    checkReportGate("valid-baseline", buildValidSyntheticReport(), true);
+    checkMojibakeCaseNegativeControl("mojibake/scrubbed-vs-ftfy", "cp1252");
+    checkMojibakeCaseNegativeControl("mojibake/scrubbed-vs-ftfy-windows1251", "windows1251");
+    writeln("external comparator report-check self-test passed: a valid synthetic report is ",
+        "accepted, and both mojibake cases (CP1252 and Windows-1251) are independently ",
+        "rejected on a corrupted expected hash, a corrupted sample, a broken A/B/A/B ",
+        "interleave, or the case being omitted entirely");
 }
 
 int main(string[] args) {

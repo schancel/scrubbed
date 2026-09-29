@@ -2,7 +2,10 @@
 
 A native D Parquet writer and reader for flat tables.
 `parquet.writer.ParquetWriter` buffers rows in memory and serializes one
-complete Parquet file with a single row group. `parquet.reader.ParquetReader`
+complete Parquet file, flushing a row group once its buffered data crosses
+`WriterOptions.rowGroupTargetBytes` (default 128 MiB) so peak memory stays
+bounded for large exports; a corpus smaller than the target still produces
+a single row group. `parquet.reader.ParquetReader`
 reads flat Parquet files produced by other writers -- in particular the
 pyarrow/parquet-cpp output that Hugging Face Hub corpora (FineWeb, C4, HF
 `datasets` exports) are published as. The package has zero dependency on

@@ -177,6 +177,7 @@ private struct Crafted {
     void listEnd() { p.writeListEnd(); p.writeFieldEnd(); }
     void structField(short id) { field(id, TType.STRUCT); begin(); }
     void structFieldEnd() { end(); p.writeFieldEnd(); }
+    void boolField(short id, bool v) { field(id, TType.BOOL); p.writeBool(v); p.writeFieldEnd(); }
 }
 
 /// `craftFile` typeLength value meaning "omit the type_length field".
@@ -184,9 +185,11 @@ private enum omitTypeLength = int.min;
 
 /// One-column, one-row-group file: "PAR1" + `pages` + footer. When
 /// `dictionaryBytes > 0`, the first that many bytes of `pages` are a
-/// dictionary page and the data page follows.
+/// dictionary page and the data page follows. `nullable` makes the column
+/// OPTIONAL instead of REQUIRED (needed to exercise definition levels, e.g.
+/// v2 data pages).
 private ubyte[] craftFile(int physicalType, int typeLength, int codec, long rows,
-        const(ubyte)[] pages, size_t dictionaryBytes) {
+        const(ubyte)[] pages, size_t dictionaryBytes, bool nullable = false) {
     import std.bitmanip : nativeToLittleEndian;
     import thrift.protocol.base : TType;
 
@@ -198,7 +201,7 @@ private ubyte[] craftFile(int physicalType, int typeLength, int codec, long rows
     c.begin();
     c.i32(1, physicalType);
     if (typeLength != omitTypeLength) c.i32(2, typeLength);
-    c.i32(3, 0);                                    // REQUIRED
+    c.i32(3, nullable ? 1 : 0);                      // REQUIRED (0) or OPTIONAL (1)
     c.str(4, "f");
     c.end();
     c.listEnd();
@@ -249,6 +252,30 @@ private ubyte[] craftPageHeader(int uncompressed, int compressed, int dictionary
         c.i32(1, dataValues); c.i32(2, encoding); c.i32(3, 3); c.i32(4, 3);
         c.structFieldEnd();
     }
+    c.end();
+    return c.bytes();
+}
+
+/// v2 data page header bytes (`PageHeader` with `data_page_header_v2`, field
+/// 8). `isCompressed` defaults true in the format, so it is only written
+/// out explicitly when false.
+private ubyte[] craftPageHeaderV2(int uncompressed, int compressed, int numValues,
+        int numNulls, int numRows, int encoding, int defLevelsByteLength,
+        int repLevelsByteLength, bool isCompressed = true) {
+    auto c = Crafted.make();
+    c.begin();
+    c.i32(1, 3);                                    // PageType.dataPageV2
+    c.i32(2, uncompressed);
+    c.i32(3, compressed);
+    c.structField(8);
+    c.i32(1, numValues);
+    c.i32(2, numNulls);
+    c.i32(3, numRows);
+    c.i32(4, encoding);
+    c.i32(5, defLevelsByteLength);
+    c.i32(6, repLevelsByteLength);
+    if (!isCompressed) c.boolField(7, false);
+    c.structFieldEnd();
     c.end();
     return c.bytes();
 }
@@ -353,4 +380,154 @@ unittest {
     auto page = craftPageHeader(8, 8, -1) ~ new ubyte[8];
     auto r = new ParquetReader(craftFile(int64, omitTypeLength, 0, 1, page, 0), opts);
     assert(collectExceptionMsg!ParquetFormatException(r.readColumn(0, 0)).canFind("maxPageBytes"));
+}
+
+// ---------------------------------------------------------------------------
+// Offline encoding/compression/page-format fixtures (#396). These are the
+// paths #392's review found were proven only by the network-dependent
+// tests/external_verify.py/.sh against real Hugging Face corpora: dictionary
+// encoding/decoding, SNAPPY, GZIP, v2 data pages, PLAIN_DICTIONARY data
+// pages, and INT96. Each fixture is crafted directly with the vendored
+// TCompactProtocol (as above) and asserts the actual decoded values, not
+// just that the reader doesn't crash, so a broken decoder for any of these
+// paths fails `dub test` -- not only the external check.
+// ---------------------------------------------------------------------------
+
+// Dictionary encoding/decoding, PLAIN_DICTIONARY data page: a 3-entry
+// BYTE_ARRAY dictionary ("red", "green", "blue"), referenced by a
+// PLAIN_DICTIONARY (encoding 2, not the RLE_DICTIONARY exercised above) data
+// page of 7 rows built from four RLE runs at bit width 2. A reader that
+// mishandles PLAIN_DICTIONARY specifically (e.g. only accepting 8), gets the
+// dictionary indices wrong, or misreads a PLAIN byte-array dictionary entry
+// would fail this on real values, not just on a crash.
+unittest {
+    import std.bitmanip : nativeToLittleEndian;
+
+    enum byteArray = 6, plainDictionary = 2;
+    static ubyte[] plainStr(string s) {
+        return nativeToLittleEndian(cast(uint) s.length)[].dup ~ cast(ubyte[]) s;
+    }
+
+    const ubyte[] entries = plainStr("red") ~ plainStr("green") ~ plainStr("blue");
+    auto dict = craftPageHeader(cast(int) entries.length, cast(int) entries.length, 3) ~ entries;
+
+    // Indices [0,0,1,1,2,2,0] at bit width 2 (3 entries): four RLE runs,
+    // header (runLength << 1), one value byte each.
+    const ubyte[] indices = [4, 0, 4, 1, 4, 2, 2, 0];
+    const ubyte[] data = [cast(ubyte) 2] ~ indices; // leading byte: bit width
+    auto page = craftPageHeader(cast(int) data.length, cast(int) data.length, -1, 7, plainDictionary)
+        ~ data;
+
+    auto r = new ParquetReader(craftFile(byteArray, omitTypeLength, 0, 7, dict ~ page, dict.length));
+    const col = r.readColumn(0, 0);
+    const expected = ["red", "red", "green", "green", "blue", "blue", "red"];
+    assert(col.binaries.length == 7);
+    foreach (i, e; expected) assert(col.text(i) == e, col.text(i) ~ " != " ~ e);
+}
+
+// SNAPPY-compressed data page: five PLAIN INT32 values, compressed as one
+// raw-Snappy literal element (preamble + literal tag + bytes -- this package
+// never writes Snappy, so the fixture is hand-built, not round-tripped
+// through its own encoder). A broken SNAPPY decode path (wrong preamble
+// handling, wrong tag arithmetic) produces wrong integers here, not a crash.
+unittest {
+    import std.bitmanip : nativeToLittleEndian;
+
+    enum int32 = 1, snappy = 1;
+    const int[] values = [10, -20, 30, -40, 50];
+    ubyte[] raw;
+    foreach (v; values) raw ~= nativeToLittleEndian(v)[];
+    assert(raw.length == 20 && raw.length < 60); // fits the 1-byte literal-length tag
+
+    ubyte[] compressed = [cast(ubyte) raw.length];         // preamble: uncompressed length
+    compressed ~= cast(ubyte)((raw.length - 1) << 2);       // literal tag, low 2 bits 00
+    compressed ~= raw;
+
+    auto page = craftPageHeader(cast(int) raw.length, cast(int) compressed.length, -1, 5)
+        ~ compressed;
+    auto r = new ParquetReader(craftFile(int32, omitTypeLength, snappy, 5, page, 0));
+    assert(r.readColumn(0, 0).int32s == values);
+}
+
+// GZIP-compressed data page: three PLAIN DOUBLE values, compressed with a
+// real gzip (RFC 1952) stream (produced once with Python's `gzip` module;
+// the bytes below are that stream's exact output, not re-derived at test
+// time). Proves the reader's zlib-backed `gunzip` actually inflates a real
+// gzip member, not just rejects malformed ones.
+unittest {
+    import std.bitmanip : nativeToLittleEndian;
+
+    enum double_ = 5, gzip = 2;
+    const double[] values = [1.5, -2.25, 3.75];
+    ubyte[] raw;
+    foreach (v; values) raw ~= nativeToLittleEndian(v)[];
+    assert(raw.length == 24);
+
+    // `python3 -c "import gzip,struct; print(list(gzip.compress(...,mtime=0)))"`
+    const ubyte[] compressed = [
+        31, 139, 8, 0, 0, 0, 0, 0, 2, 255, 99, 96, 0, 129, 31, 246, 96, 138,
+        129, 233, 0, 132, 230, 115, 0, 0, 220, 49, 142, 120, 24, 0, 0, 0,
+    ];
+
+    auto page = craftPageHeader(cast(int) raw.length, cast(int) compressed.length, -1, 3)
+        ~ compressed;
+    auto r = new ParquetReader(craftFile(double_, omitTypeLength, gzip, 3, page, 0));
+    assert(r.readColumn(0, 0).doubles == values);
+}
+
+// v2 data page: an OPTIONAL INT32 column, 5 rows with 2 nulls, encoded as a
+// DataPageHeaderV2 (page type 3). Unlike v1, the definition levels carry no
+// embedded 4-byte length prefix -- `definitionLevelsByteLength` in the
+// header is authoritative and the value bytes start immediately after it.
+// `isCompressed` is written explicitly false, so the body is read as raw
+// bytes regardless of the chunk's compression codec, per the v2 spec. A
+// reader that reused the v1 length-prefix parsing for v2, or ignored
+// `definitionLevelsByteLength`, would misalign the values here.
+unittest {
+    enum int32 = 1;
+    // Definition levels [1,0,1,0,1] (present/null/present/null/present) as
+    // five one-value RLE runs, bit width 1: header (1 << 1), one value byte.
+    const ubyte[] defLevels = [2, 1, 2, 0, 2, 1, 2, 0, 2, 1];
+    const ubyte[] values = [100, 0, 0, 0, 200, 0, 0, 0, 44, 1, 0, 0]; // PLAIN 100, 200, 300 (LE)
+    const ubyte[] body = defLevels ~ values;
+
+    auto page = craftPageHeaderV2(cast(int) body.length, cast(int) body.length,
+        5, 2, 5, 0 /* PLAIN */, cast(int) defLevels.length, 0, false /* isCompressed */);
+    auto r = new ParquetReader(craftFile(int32, omitTypeLength, 0, 5, page ~ body, 0, true /* nullable */));
+    const col = r.readColumn(0, 0);
+    assert(col.length == 5);
+    const expectedNull = [false, true, false, true, false];
+    const expectedValue = [100, 0, 200, 0, 300];
+    foreach (i; 0 .. 5) {
+        assert(col.isNull(i) == expectedNull[i]);
+        if (!expectedNull[i]) assert(col.int32s[i] == expectedValue[i]);
+    }
+}
+
+// INT96 timestamps: PLAIN-encoded, two 12-byte values (8-byte little-endian
+// nanoseconds-of-day + 4-byte little-endian Julian day, the physical layout
+// real writers use, though this reader treats INT96 as opaque 12-byte
+// binary -- see `ColumnDescriptor.typeLength`). Exercises the type_length-12
+// special case `parseFooter` applies only to INT96 (the schema never
+// carries `type_length` for it, unlike FIXED_LEN_BYTE_ARRAY): a reader that
+// dropped that special case, or got INT96's width or byte offsets wrong,
+// returns the wrong slice per row here.
+unittest {
+    import std.bitmanip : nativeToLittleEndian;
+
+    enum int96 = 3;
+    static ubyte[] int96Value(ulong nanosOfDay, uint julianDay) {
+        return nativeToLittleEndian(nanosOfDay)[].dup ~ nativeToLittleEndian(julianDay)[];
+    }
+
+    const row0 = int96Value(0, 2_451_545);           // midnight, an arbitrary Julian day
+    const row1 = int96Value(123_456_789_000UL, 2_460_000);
+    const ubyte[] raw = row0 ~ row1;
+    assert(raw.length == 24);
+
+    auto page = craftPageHeader(cast(int) raw.length, cast(int) raw.length, -1, 2) ~ raw;
+    auto r = new ParquetReader(craftFile(int96, omitTypeLength, 0, 2, page, 0));
+    const col = r.readColumn(0, 0);
+    assert(col.binaries.length == 2);
+    assert(col.binaries[0] == row0 && col.binaries[1] == row1);
 }

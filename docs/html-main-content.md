@@ -350,9 +350,17 @@ The site's extraction stat card cites `examples/pipeline-benchmark/`'s own
 20-page checked-in corpus (not the held-out tier above), currently 18/20
 selected. Owner request (2026-09-29, explicitly "later priority, not
 urgent"): investigate the 2 non-selected pages with real evidence rather
-than leave the gap as a vague aspiration. Both were investigated directly
-against the current binary. **Conclusion for both: working as intended, not
-a bug** — no code change made.
+than leave the gap as a vague aspiration.
+
+**Correction (2026-09-29): the "working as intended" conclusion below was
+wrong.** The owner directly challenged it and both claims failed real
+verification against the actual pinned `trafilatura` tool — it extracted
+real article content from both pages without issue (4,827 bytes from
+`www-homify-de.html`; a clean pass over `scienceblogs-de.html`'s full
+397,702-byte file in 0.46s). Issue #411 is reopened with the corrected
+scope. The investigation writeup below is kept for its real, still-true
+evidence (candidate scores, node counts) but its conclusion is superseded
+— treat "working as intended" as disproven, not settled.
 
 **This 18/20 count is no longer a hand-maintained citation** (issue #422,
 opened after #411/#412 each independently found a citation like this one had

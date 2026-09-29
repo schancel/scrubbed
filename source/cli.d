@@ -34,6 +34,7 @@ import effects.side_output_sink : SideOutputSink;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
     SourceLocator;
+import domain.failure : InvalidEncodingFailure;
 import effects.html_tree : checkedHtmlByteLimit, defaultExtractHtmlBytes;
 import effects.html_tree_json_stage;
 import effects.html_markdown_stage;
@@ -574,17 +575,25 @@ int runExtract(string requestedInput, string requestedOutput,
 }
 
 /// True when `error` (possibly wrapped by `EffectFailure`/`CompiledJobFailure`)
-/// ultimately stems from `std.utf.validate` rejecting non-UTF-8 input -- the
-/// text-transform stage's filter chain requires whole-text UTF-8 content
-/// (composition/executor.d's `materializeUtf8`). Walking the wrapper chain by
-/// type, rather than matching on rendered message text, keeps this immune to
-/// message wording changes in either wrapper.
+/// ultimately stems from a stage rejecting non-UTF-8 input -- either
+/// `std.utf.validate` surfacing directly as `UTFException` (text-transform's
+/// filter chain, composition/executor.d's `materializeUtf8`), or another
+/// stage/domain module that independently re-validates UTF-8 ahead of
+/// text-transform in a custom `run --stage` pipeline and rewraps the failure
+/// into its own exception type marked `domain.failure.InvalidEncodingFailure`
+/// (#402: pii_patterns/pii_policy/structured_chunks/similarity_signature/
+/// pii_overlay all do this). Walking the wrapper chain by type, rather than
+/// matching on rendered message text, keeps this immune to message wording
+/// changes in any wrapper, and matching by interface rather than by each
+/// domain module's own concrete exception type keeps this detector from
+/// needing to know about every stage that can hit invalid UTF-8.
 private bool isInvalidEncodingFailure(Throwable error) {
     if (auto compiled = cast(CompiledJobFailure) error)
         return isInvalidEncodingFailure(compiled.original);
     if (auto effect = cast(EffectFailure) error)
         return isInvalidEncodingFailure(effect.original);
-    return (cast(UTFException) error) !is null;
+    return (cast(UTFException) error) !is null ||
+        (cast(InvalidEncodingFailure) error) !is null;
 }
 
 /// A per-document, quarantine-eligible reason string that names the actual
@@ -2548,6 +2557,63 @@ unittest {
             !message.canFind("@105"),
             "the roll-up must not leak the volatile per-document byte " ~
             "offset that defeats aggregation: " ~ message);
+    }
+    {
+        // #402 regression: #400's quarantine path only recognized invalid UTF-8
+        // by casting to `std.utf.UTFException` while walking the
+        // `CompiledJobFailure`/`EffectFailure` wrapper chain. That is correct
+        // for `clean-web-document`'s sealed preset, which always runs
+        // text-transform (with fix-mojibake, the sole `UTFException` source)
+        // first -- but a hand-composed `run --stage` pipeline can put a stage
+        // that independently re-validates and rewraps UTF-8 (e.g.
+        // `pii-four-class`, via `domain.pii_patterns.scanPii`) ahead of
+        // text-transform. Before the fix, that rewrapped failure
+        // (`domain.failure.InvalidUtf8Exception`, previously `PiiScanException`)
+        // failed the `UTFException` cast and fell back to the pre-#400
+        // FATAL/batch-canceling behavior for the whole directory batch.
+        auto reorderedRoot = buildPath(root, "reordered-batch");
+        mkdir(reorderedRoot);
+        // Same invalid-UTF-8 fixture as the #400 case above.
+        write(buildPath(reorderedRoot, "bad.txt"),
+            cast(ubyte[])[0x00, 0x01, 0x02, 0xFF, 0xFE, 0x80, 0x81, 0x00]);
+        write(buildPath(reorderedRoot, "good.txt"),
+            "a perfectly normal plain-text document with enough content " ~
+            "to be an unremarkable, valid UTF-8 file for this batch.");
+        auto reorderedOut = buildPath(root, "reordered-out");
+        auto invocation = invokeJsonl(["scrubbed", "run", "--input",
+            reorderedRoot, "--output", reorderedOut, "--threads", "2",
+            "--explain",
+            "--stage", "pii-four-class=pii-four-class",
+            "--stage", "text-transform=text-transform",
+            "--filter", "fix-mojibake"], []);
+        auto message = cast(string) invocation.stdoutBytes;
+        assert(invocation.code == 1,
+            "a stage ahead of text-transform hitting invalid UTF-8 must " ~
+            "fail that file only (exit 1), not abort the whole batch as " ~
+            "fatal (exit 2): " ~ message ~ invocation.stderrText);
+        assert(!invocation.stderrText.canFind("FATAL"),
+            "an invalid-UTF-8 file must not be reported as FATAL " ~
+            "regardless of which stage detects it: " ~
+            invocation.stderrText);
+        assert(!invocation.stderrText.canFind("CANCELED"),
+            "an invalid-UTF-8 file rewrapped by a non-text-transform " ~
+            "stage must not cancel the rest of the batch: " ~
+            invocation.stderrText);
+        assert(message.canFind("quarantined"),
+            "message must explain the nonzero exit: " ~ message);
+        assert(message.canFind(
+            "reason=\"invalid encoding: input is not valid UTF-8"),
+            "the quarantine reason must specifically identify invalid " ~
+            "encoding even when pii-four-class (not text-transform) " ~
+            "detected it: " ~ message);
+        auto goodOut = buildPath(reorderedOut, "good.txt");
+        assert(exists(goodOut),
+            "the batch's other, valid file must still be published even " ~
+            "though an earlier-ordinal file was invalid UTF-8");
+        assert(readText(goodOut).canFind("perfectly normal"),
+            "the valid file's published content must be intact");
+        assert(!exists(buildPath(reorderedOut, "bad.txt")),
+            "the quarantined invalid-UTF-8 file must not publish output");
     }
     {
         auto priorMetrics =

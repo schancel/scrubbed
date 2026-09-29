@@ -1,6 +1,7 @@
 /// Pure decisions over validated four-class PII findings and original UTF-8 bytes.
 module domain.pii_policy;
 
+import domain.failure : InvalidUtf8Exception;
 import domain.pii_patterns : PiiCategory, PiiConfidence, PiiFinding,
     maxPiiFindings, maxPiiInputBytes;
 import std.utf : validate;
@@ -89,7 +90,7 @@ PiiPolicyResult applyPiiPolicy(const(ubyte)[] source,
     if (source.length > maxPiiInputBytes) throw new PiiPolicyException("input exceeds cap");
     if (findings.length > maxPiiFindings) throw new PiiPolicyException("findings exceed cap");
     try validate(cast(string) source);
-    catch (Exception) throw new PiiPolicyException("invalid UTF-8");
+    catch (Exception) throw new InvalidUtf8Exception("pii policy: invalid UTF-8");
 
     PiiPolicyResult result;
     result.policy = policy;

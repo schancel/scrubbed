@@ -2,6 +2,7 @@
 module domain.structured_chunks;
 
 import domain.document : DocumentId;
+import domain.failure : InvalidUtf8Exception;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import crypto.sha256 : sha256Of;
@@ -104,7 +105,7 @@ private ChunkMetadata inherit(ChunkMetadata parent, ChunkMetadata local) {
 
 private void validateText(string value) {
     try validate(value);
-    catch (UTFException) throw new Exception("structured chunks: invalid UTF-8");
+    catch (UTFException) throw new InvalidUtf8Exception("structured chunks: invalid UTF-8");
 }
 
 private void validateMetadata(ChunkMetadata value) {

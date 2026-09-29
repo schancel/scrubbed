@@ -2,6 +2,8 @@
 /// Pin ftfy==6.3.1 and wcwidth==0.8.4 as documented before running.
 module mojibake_scale;
 
+import core.sys.posix.sys.resource : getrusage, rusage, RUSAGE_CHILDREN;
+import std.algorithm : sort;
 import std.array : appender;
 import std.conv : to;
 import std.datetime.stopwatch : AutoStart, StopWatch;
@@ -15,6 +17,27 @@ import std.process : execute;
 import std.stdio : writeln;
 import std.string : split, splitLines, strip;
 import std.uuid : randomUUID;
+
+// CPU time (ru_utime + ru_stime) of reaped children, cumulative since
+// process start. execute() blocks until its one child exits and reaps it
+// synchronously, so a before/after delta around a single execute() call
+// isolates exactly that child's own CPU consumption -- unlike wall-clock,
+// this is not inflated by scheduling delays when other processes are
+// competing for CPU, so it stays meaningful on a loaded machine.
+private double childrenCpuSeconds() {
+    rusage u;
+    getrusage(RUSAGE_CHILDREN, &u);
+    return (u.ru_utime.tv_sec + u.ru_stime.tv_sec) +
+        (u.ru_utime.tv_usec + u.ru_stime.tv_usec) / 1_000_000.0;
+}
+
+private double median(double[] values) {
+    auto sorted = values.dup;
+    sorted.sort();
+    const mid = sorted.length / 2;
+    return sorted.length % 2 ? sorted[mid] :
+        (sorted[mid - 1] + sorted[mid]) / 2.0;
+}
 
 private string digest(string path) {
     return toHexString(sha256Of(read(path))).to!string;
@@ -76,25 +99,38 @@ void main(string[] args) {
     write(input, damaged);
 
     JSONValue[] samples;
-    // Interleave order to reduce monotonic host drift; retain every sample.
-    foreach (tool; ["scrubbed", "ftfy", "ftfy", "scrubbed", "scrubbed", "ftfy"]) {
+    double[] scrubbedWall, scrubbedCpu, ftfyWall, ftfyCpu;
+    // Interleave order to reduce monotonic host drift; 5 samples per tool
+    // for a median-of-5. Retain every sample, not just the median.
+    foreach (tool; ["scrubbed", "ftfy", "scrubbed", "ftfy", "scrubbed", "ftfy",
+            "scrubbed", "ftfy", "scrubbed", "ftfy"]) {
         if (exists(output)) remove(output);
         auto command = tool == "scrubbed" ?
             [args[1], "run", "--input", input, "--output", output,
                 "--filters", "fix-mojibake", "--threads", "1"] :
             [args[2], "--preserve-entities", "-n", "none", "-o", output, input];
         auto watch = StopWatch(AutoStart.yes);
+        const cpuBefore = childrenCpuSeconds();
         auto result = execute(command);
+        const cpuAfter = childrenCpuSeconds();
         watch.stop();
         if (result.status != 0 || !exists(output) || readText(output) != clean)
             throw new Exception(tool ~ " failed exact-output gate");
+        const wallSeconds = cast(double)watch.peek.total!"nsecs" / 1_000_000_000;
+        const cpuSeconds = cpuAfter - cpuBefore;
+        (tool == "scrubbed" ? scrubbedWall : ftfyWall) ~= wallSeconds;
+        (tool == "scrubbed" ? scrubbedCpu : ftfyCpu) ~= cpuSeconds;
         samples ~= JSONValue([
             "tool": JSONValue(tool),
-            "wall_seconds": JSONValue(cast(double)watch.peek.total!"nsecs" /
-                1_000_000_000),
+            "wall_seconds": JSONValue(wallSeconds),
+            "cpu_seconds": JSONValue(cpuSeconds),
             "exact_output": JSONValue(true),
             "output_sha256": JSONValue(digest(output))]);
     }
+    const scrubbedWallMedian = median(scrubbedWall);
+    const scrubbedCpuMedian = median(scrubbedCpu);
+    const ftfyWallMedian = median(ftfyWall);
+    const ftfyCpuMedian = median(ftfyCpu);
     if (digest(args[1]) != scrubbedHash || digest(args[2]) != ftfyHash)
         throw new Exception("benchmark executable changed during measurement");
     auto os = checked(["uname", "-s"]);
@@ -117,6 +153,17 @@ void main(string[] args) {
         "expected_bytes": JSONValue(cast(long)clean.length),
         "scrubbed_binary_sha256": JSONValue(scrubbedHash),
         "ftfy_binary_sha256": JSONValue(ftfyHash),
-        "samples": JSONValue(samples)]);
+        "samples": JSONValue(samples),
+        "medians": JSONValue([
+            "scrubbed_wall_seconds": JSONValue(scrubbedWallMedian),
+            "scrubbed_cpu_seconds": JSONValue(scrubbedCpuMedian),
+            "ftfy_wall_seconds": JSONValue(ftfyWallMedian),
+            "ftfy_cpu_seconds": JSONValue(ftfyCpuMedian),
+            "speedup_wall": JSONValue(ftfyWallMedian / scrubbedWallMedian),
+            "speedup_cpu": JSONValue(ftfyCpuMedian / scrubbedCpuMedian),
+            "scrubbed_wall_vs_cpu_pct_diff": JSONValue(
+                (scrubbedWallMedian - scrubbedCpuMedian) / scrubbedCpuMedian * 100),
+            "ftfy_wall_vs_cpu_pct_diff": JSONValue(
+                (ftfyWallMedian - ftfyCpuMedian) / ftfyCpuMedian * 100)])]);
     writeln(report.toString);
 }

@@ -556,6 +556,22 @@ than by version -- `PinnedPackage` grew an optional `url` field for this, and
 `uv pip freeze`'s own "name @ url" row shape is parsed and verified
 byte-for-byte alongside its existing "name==version" rows.
 
+**Update (issue #412 re-verification, 2026-09-29)**: the `(415) 555-0199`-style
+parenthesized-format gap noted above was fixed the same night in
+`pii-patterns: recognize parenthesized US phone format (#328)` (commit
+0467ae7). Re-running this comparator's real `pii-four-class/scrubbed-vs-
+presidio` case against current `main` (after also fixing this case's own
+`scrubbedCommand`/sidecar parsing for #300 Slice 3's unrelated
+`pii-four-class` &rarr; `document-metadata-publish` side-output move, which had
+separately broken this case closed) now scores scrubbed at 5/5 email, 5/5
+card, 5/5 ip, and **6/6 phone**, exact parity with Presidio's own 5/5, 5/5,
+5/5, 6/6, all with 0 false positives on both tools. The full five-case
+comparator invocation below still cannot complete end to end on current
+`main`: the separate `main-content/scrubbed-vs-trafilatura` and `language-id/
+scrubbed-vs-langdetect` cases have their own unrelated, still-open breakage
+(tracked in issue #418), so this case was re-verified in isolation rather
+than through a full report `--check`.
+
 Presidio's recognizer configuration is scoped to exactly the four overlap
 entities two ways, both real, not assumed: **by construction**,
 `presidio_driver.py` builds its `AnalyzerEngine` from a `RecognizerRegistry`

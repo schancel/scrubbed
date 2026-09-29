@@ -1,0 +1,38 @@
+name: benchmark scrubbed-verb guard
+
+# Cheap regression guard for #382: a benchmark harness that builds a
+# scrubbed command array without an explicit verb (run/clean/repair/fix/
+# extract/x, or clean-web-document) silently exits 2 since #336 removed the
+# bare no-verb pipeline form. dub test never runs these standalone
+# harnesses, so nothing else would catch a harness losing its verb again.
+# This is a lexical check (benchmarks/check_scrubbed_verb.py), not a build
+# or a real run, so it costs seconds and needs no D toolchain.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/benchmark-scrubbed-verb-guard.yml"
+      - "benchmarks/*.d"
+      - "benchmarks/check_scrubbed_verb.py"
+  pull_request:
+    paths:
+      - ".github/workflows/benchmark-scrubbed-verb-guard.yml"
+      - "benchmarks/*.d"
+      - "benchmarks/check_scrubbed_verb.py"
+
+permissions:
+  contents: read
+
+jobs:
+  verb-guard:
+    name: every benchmark scrubbed invocation carries a verb
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Check benchmarks/*.d for verb-less scrubbed invocations
+        run: python3 benchmarks/check_scrubbed_verb.py

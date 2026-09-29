@@ -51,6 +51,7 @@ preserved.
 
 ```sh
 ldc2 -O3 -release -Isource -of=.dub/pii-policy-check \
-  experiments/pii_policy/check.d source/domain/pii_policy.d source/domain/pii_patterns.d
+  experiments/pii_policy/check.d source/domain/pii_policy.d source/domain/pii_patterns.d \
+  source/domain/encoding_failure.d
 .dub/pii-policy-check
 ```

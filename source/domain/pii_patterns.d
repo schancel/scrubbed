@@ -2,6 +2,7 @@
 /// Offsets always refer to the original UTF-8 byte stream.
 module domain.pii_patterns;
 
+import domain.encoding_failure : InvalidEncodingFailure;
 import std.algorithm.sorting : sort;
 import std.utf : validate;
 
@@ -22,6 +23,17 @@ struct PiiFinding {
 
 class PiiScanException : Exception {
     this(string message) { super("pii scan: " ~ message); }
+}
+
+/// Invalid-UTF-8 input detected while scanning. A subtype of
+/// `PiiScanException` (not a sibling `domain.encoding_failure.InvalidUtf8Exception`)
+/// so existing callers that catch `PiiScanException` by name -- notably
+/// `experiments/pii_patterns/check.d`'s `rejects()` helper -- keep matching
+/// it, while also implementing `InvalidEncodingFailure` so `cli.d`'s generic
+/// encoding-failure detector recognizes it without needing to know about
+/// this module.
+class InvalidUtf8ScanException : PiiScanException, InvalidEncodingFailure {
+    this(string message) { super(message); }
 }
 
 private bool digit(ubyte c) { return c >= '0' && c <= '9'; }
@@ -189,7 +201,7 @@ PiiFinding[] scanPii(const(ubyte)[] bytes, string locale) {
     if (locale != "US" && locale != "GB") throw new PiiScanException("unsupported locale");
     if (bytes.length > maxPiiInputBytes) throw new PiiScanException("input exceeds cap");
     try validate(cast(string) bytes);
-    catch (Exception) throw new PiiScanException("invalid UTF-8");
+    catch (Exception) throw new InvalidUtf8ScanException("invalid UTF-8");
     PiiFinding[] findings;
     void add(size_t start, size_t end, PiiCategory category, string rule,
              PiiConfidence confidence = PiiConfidence.high) {

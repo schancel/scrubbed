@@ -1,6 +1,7 @@
 /// Opt-in, revision-bound C01 persistence for four-class PII findings.
 module effects.pii_overlay;
 
+import domain.encoding_failure : InvalidUtf8Exception;
 import domain.pii_patterns;
 import domain.shard_format : AnnotationField, AnnotationRecord, ShardDocument,
     maxAnnotationPayload;
@@ -195,7 +196,7 @@ void visitPiiFindings(string shardPath, string overlayPath, string locale,
         require(source.content.length <= maxPiiInputBytes,
             "source exceeds scanner cap");
         try validate(cast(string) source.content);
-        catch (Exception) throw new Exception("pii overlay: invalid UTF-8 source");
+        catch (Exception) throw new InvalidUtf8Exception("pii overlay: invalid UTF-8 source");
         require(overlay.next(annotation) &&
             annotation.documentId == source.id.text &&
             annotation.contentDigest == source.contentDigest,

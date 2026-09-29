@@ -2,6 +2,7 @@
 module domain.similarity_signature;
 
 import domain.document : DocumentId;
+import domain.encoding_failure : InvalidUtf8Exception;
 import std.exception : enforce;
 import std.utf : validate;
 
@@ -60,7 +61,7 @@ SimilaritySignatures similaritySignatures(DocumentId id, const(ubyte)[] content)
     enforce(content.length <= maxSimilarityInputBytes,
         "similarity signature: content exceeds 1 MiB");
     try validate(cast(const(char)[]) content);
-    catch (Exception) throw new Exception("similarity signature: invalid UTF-8");
+    catch (Exception) throw new InvalidUtf8Exception("similarity signature: invalid UTF-8");
 
     // ASCII folding never increases length; one document is the memory bound.
     auto normalized = normalize(content);

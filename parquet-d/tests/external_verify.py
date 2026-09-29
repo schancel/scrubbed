@@ -59,7 +59,11 @@ def main():
     out = sys.argv[1]
     print(f"pyarrow {pa.__version__}, duckdb {duckdb.__version__}")
     checked = 0
-    for table in ("mixed", "empty", "all_null"):
+    # "multi" (#399) is written with a small rowGroupTargetBytes specifically
+    # to force more than one row group; every other table keeps the writer's
+    # single-row-group behavior for a fixture-sized corpus, unchanged from
+    # before #399.
+    for table in ("mixed", "empty", "all_null", "multi"):
         with open(os.path.join(out, f"{table}.expected.jsonl"), encoding="utf-8") as f:
             expected = [json.loads(line) for line in f if line.strip()]
         for codec in ("zstd", "uncompressed"):
@@ -75,13 +79,23 @@ def main():
                 if field.type != want_type or field.nullable != want_nullable:
                     fail(f"{where}: pyarrow field {field} expected {want_type} nullable={want_nullable}")
             md = pf.metadata
-            if md.num_row_groups != 1 or md.num_rows != len(expected):
-                fail(f"{where}: row groups {md.num_row_groups}, rows {md.num_rows}")
-            rg = md.row_group(0)
-            for ci in range(rg.num_columns):
-                col = rg.column(ci)
-                if col.compression != CODEC_NAMES[codec]:
-                    fail(f"{where}: column {col.path_in_schema} codec {col.compression}")
+            if md.num_rows != len(expected):
+                fail(f"{where}: rows {md.num_rows}, expected {len(expected)}")
+            if table == "multi":
+                if md.num_row_groups <= 1:
+                    fail(f"{where}: expected multiple row groups, got {md.num_row_groups}")
+                total_rg_rows = sum(md.row_group(i).num_rows for i in range(md.num_row_groups))
+                if total_rg_rows != len(expected):
+                    fail(f"{where}: row groups' rows sum to {total_rg_rows}, expected {len(expected)}")
+                print(f"{where}: {md.num_row_groups} row groups (pyarrow)")
+            elif md.num_row_groups != 1:
+                fail(f"{where}: row groups {md.num_row_groups}, expected 1")
+            for gi in range(md.num_row_groups):
+                rg = md.row_group(gi)
+                for ci in range(rg.num_columns):
+                    col = rg.column(ci)
+                    if col.compression != CODEC_NAMES[codec]:
+                        fail(f"{where}: row group {gi} column {col.path_in_schema} codec {col.compression}")
             arrow_rows = pf.read().to_pylist()
             check_rows(f"{where} [pyarrow]", arrow_rows, expected, columns)
 

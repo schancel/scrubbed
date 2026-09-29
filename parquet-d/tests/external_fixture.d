@@ -16,6 +16,10 @@ private struct Table {
     string name;
     ColumnSpec[] schema;
     ParquetValue[][] rows;
+    /// Row-group flush target passed to `WriterOptions`; the writer's own
+    /// default (128 MiB) unless a table overrides it to force multiple row
+    /// groups from a fixture-sized corpus.
+    long rowGroupTargetBytes = 128L * 1024 * 1024;
 }
 
 private JSONValue toJson(ref const ParquetValue v) {
@@ -84,11 +88,39 @@ private Table allNullTable() {
     return t;
 }
 
+// 280 bytes of filler so each "multi" row is large enough that a handful of
+// rows cross a small `rowGroupTargetBytes`, forcing many row groups without
+// needing a huge fixture (#399).
+private immutable string fillerText = {
+    string s;
+    foreach (i; 0 .. 280) s ~= cast(char)('a' + i % 26);
+    return s;
+}();
+
+/// Large enough, and written with a small `rowGroupTargetBytes`, to force
+/// multiple row groups (#399): pyarrow must see `num_row_groups > 1` and
+/// still read every row correctly, split across row-group boundaries.
+private Table multiRowGroupTable() {
+    Table t;
+    t.name = "multi";
+    t.rowGroupTargetBytes = 64 * 1024; // small on purpose: see fillerText
+    t.schema = [
+        ColumnSpec("id", ColumnType.int64, false),
+        ColumnSpec("text", ColumnType.string_),
+    ];
+    foreach (i; 0 .. 6000) {
+        auto text = i % 37 == 0 ? ParquetValue.null_
+            : ParquetValue("row " ~ i.to!string ~ " " ~ fillerText);
+        t.rows ~= [ParquetValue(cast(long) i), text];
+    }
+    return t;
+}
+
 void main(string[] args) {
     if (args.length != 2) throw new Exception("usage: parquet-external-fixture <output-dir>");
     const dir = args[1];
     mkdirRecurse(dir);
-    foreach (table; [mixedTable(), emptyTable(), allNullTable()]) {
+    foreach (table; [mixedTable(), emptyTable(), allNullTable(), multiRowGroupTable()]) {
         string expected;
         foreach (row; table.rows) {
             JSONValue obj = JSONValue(string[string].init);
@@ -97,7 +129,9 @@ void main(string[] args) {
         }
         write(buildPath(dir, table.name ~ ".expected.jsonl"), expected);
         foreach (c; [Compression.zstd, Compression.uncompressed]) {
-            auto w = new ParquetWriter(table.schema, WriterOptions(c));
+            auto opts = WriterOptions(c);
+            opts.rowGroupTargetBytes = table.rowGroupTargetBytes;
+            auto w = new ParquetWriter(table.schema, opts);
             foreach (row; table.rows) w.addRow(row);
             const path = buildPath(dir, table.name ~ "." ~ c.to!string ~ ".parquet");
             w.writeFile(path);

@@ -11,7 +11,7 @@
 ///
 /// This is deliberately not a general Thrift layer: it mirrors only the
 /// subset of `parquet.thrift` (apache/parquet-format) that a flat,
-/// single-row-group, PLAIN-encoded, statistics-free writer needs --
+/// multi-row-group, PLAIN-encoded, statistics-free writer needs --
 /// `FileMetaData`, `SchemaElement`, `RowGroup`, `ColumnChunk`,
 /// `ColumnMetaData`, `PageHeader` and `DataPageHeader`. Field ids and enum
 /// values below are the ones `parquet.thrift` assigns; every optional field

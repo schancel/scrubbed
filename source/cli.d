@@ -2243,6 +2243,37 @@ int runApp(string[] args) {
     // misattributing the stop to a processing failure or a plain
     // traversal error.
     bool interruptedRun;
+    // #449: `pending`/`PendingExplanations` above only records a file once
+    // `submitPath` has actually been called on it -- but `walkCanonical`
+    // below materializes an entire directory's `entries` array up front
+    // (so it can sort deterministically) and then visits it with a plain
+    // `foreach`. When a file mid-array is run-fatal (e.g. exceeds
+    // --max-input-bytes), the `foreach` simply stops: `submitPath`, and
+    // therefore `pending.add`, is never called for sibling files ordered
+    // after it in that SAME already-materialized array, so `pending` has
+    // nothing to say about them, in either --explain or plain mode.
+    //
+    // These two counters close exactly that gap. `filesDiscovered` is
+    // incremented, once per directory, for every plain file entry in that
+    // directory's `entries` array as soon as it is materialized --
+    // independent of visitation order, so it already reflects the whole
+    // directory even before the `foreach` below starts walking it.
+    // `filesAttempted` is incremented immediately before `submitPath` is
+    // actually invoked for a file entry (whatever the outcome). Their
+    // difference at abort time is exactly "files already known to exist,
+    // sitting in an already-built `entries` array, that the walk had not
+    // yet gotten to" -- which includes the file that triggers the fatal
+    // error itself in `filesAttempted` (it *was* attempted; it's reported
+    // separately by the fatal message this exception becomes), so it is
+    // correctly excluded from the "canceled" count.
+    //
+    // Scope limit, stated plainly: this cannot see into a sibling
+    // directory that the outer `foreach` had not yet reached when the
+    // abort happened -- that subtree's own `entries` array is never
+    // materialized, so its files were never discovered at all, and these
+    // counters have nothing to report for them.
+    size_t filesDiscovered;
+    size_t filesAttempted;
     void submitPath(string file) {
         bool admissionCanceled;
         try {
@@ -2308,6 +2339,13 @@ int runApp(string[] args) {
         if (coordination !is null)
             coordination.record(CoordinationPhaseV2.discovery,
                 entries.length, discoveryStarted);
+        // #449: count this directory's whole file-entry set the moment it
+        // is materialized (see `filesDiscovered`'s declaration above), not
+        // as the `foreach` below happens to reach each entry -- otherwise
+        // a sibling ordered after an aborting file would never be counted
+        // at all.
+        foreach (entry; entries)
+            if (entry.isFile && !entry.isSymlink) ++filesDiscovered;
         foreach (entry; entries) {
             if (entry.isSymlink) {
                 auto reason = "refusing symlink in input tree: " ~ entry.name;
@@ -2322,6 +2360,7 @@ int runApp(string[] args) {
                 throw new Exception(reason);
             }
             if (entry.isFile) {
+                ++filesAttempted;
                 submitPath(entry.name);
                 continue;
             }
@@ -2337,7 +2376,14 @@ int runApp(string[] args) {
     } catch (Exception error) {
         if (!durableRoute) publication.abort();
         scheduler.cancel();
-        scheduler.finish();
+        // #449: this return value used to be discarded outright, which is
+        // why the traversal-abort path (a file failing bounded-input
+        // admission mid-batch, an interrupt, a symlink refusal, ...) could
+        // print nothing beyond the fatal message itself: no count of how
+        // many files had already succeeded, no acknowledgment that files
+        // ordered after the fatal one were never attempted at all. Capture
+        // it so the summary below can be accurate.
+        const abortCounts = scheduler.finish();
         if (explain && !errorJournalPath.length)
             foreach (file; pending.drain()) {
                 if (runtimePlan.isDispatch)
@@ -2351,6 +2397,38 @@ int runApp(string[] args) {
                             "canceled after fatal processing failure" :
                             "canceled after traversal error");
             }
+        // #449: mirror the normal-completion path's `done. N succeeded, M
+        // quarantined.` line for this abort path, which previously ended
+        // with nothing but the bare fatal message -- no indication of how
+        // much of the batch had already landed, or that files ordered
+        // after the fatal one were silently never attempted. Gated on
+        // `!errorJournalPath.length` for the same reason the existing
+        // summaries are: durable error-journal mode has its own
+        // resumable-ledger accounting and doesn't want a second, redundant
+        // one-shot summary here.
+        //
+        // "canceled" is `filesDiscovered - filesAttempted` (see that
+        // field's declaration above for exactly what it does and does not
+        // see -- in short: files already sitting in an already-walked
+        // directory's `entries` array that the walk had not yet reached,
+        // NOT a claim about undiscovered subtrees). It deliberately does
+        // not count the file that caused the fatal error itself: that
+        // file WAS attempted, and is already named by the fatal message
+        // this exception carries -- this line adds visibility into the
+        // rest of the batch, not a second description of the same file.
+        if (!errorJournalPath.length) {
+            const displaySucceeded =
+                succeededDisplayCount(abortCounts.succeeded, terminalDecisions);
+            const canceled = filesDiscovered > filesAttempted ?
+                filesDiscovered - filesAttempted : 0;
+            if (terminalDecisions)
+                writeln("done. ", displaySucceeded, " succeeded, ",
+                    terminalDecisions, " quarantined, ", canceled,
+                    " canceled before this fatal error.");
+            else
+                writeln("done. ", displaySucceeded, " succeeded, ", canceled,
+                    " canceled before this fatal error.");
+        }
         auto workerFatal = scheduler.fatal();
         if (workerFatalAdmission && workerFatal !is null)
             throw new Exception("fatal file processing failure: " ~ workerFatal.msg);
@@ -2963,6 +3041,70 @@ unittest {
     assert(!exists(outputDir) || dirEntries(outputDir, SpanMode.shallow).empty,
         "no file should be admitted once the interrupt flag is already set: " ~
         (exists(outputDir) ? dirEntries(outputDir, SpanMode.shallow).array.to!string : "(no output dir)"));
+}
+
+// #449 regression: a flat, non-nested directory with three files sorting as
+// (a) a small file that succeeds, (b) a file exceeding (a test-lowered)
+// --max-input-bytes, (c) a small file ordered after both. Single-threaded,
+// so the underlying `pending`/`PendingExplanations` --explain mechanism
+// (see its own comment) cannot see (c) at all -- it is never even discovered
+// by `walkCanonical`'s `foreach`, since `submitPath` is never called for it.
+// This is exactly the ticket's own acceptance-criteria scenario: plain
+// (non---explain) mode must still report (a) as succeeded and (c) as
+// canceled, via `filesDiscovered`/`filesAttempted` rather than `pending`.
+unittest {
+    import std.exception : collectException;
+    import std.file : rmdirRecurse, tempDir;
+    import std.stdio : stdout;
+
+    auto root = buildPath(tempDir, "scrubbed-449-mixed-batch-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto inputDir = buildPath(root, "in");
+    mkdir(root);
+    mkdir(inputDir);
+    write(buildPath(inputDir, "aaa-good1.txt"), "aa");
+    // Sorts between the two good files; comfortably over the lowered
+    // --max-input-bytes threshold below, comfortably under a real one.
+    write(buildPath(inputDir, "mmm-toobig.html"),
+        "this file is well over the lowered per-test byte limit on purpose");
+    write(buildPath(inputDir, "zzz-good2.txt"), "zz");
+    auto outputDir = buildPath(root, "out");
+
+    auto capturePath = buildPath(root, "stdout-capture.txt");
+    auto savedStdout = stdout;
+    scope(exit) stdout = savedStdout;
+    stdout = File(capturePath, "w");
+    auto error = collectException!Exception(runApp(["scrubbed", "run",
+        "--input", inputDir, "--output", outputDir, "--filters",
+        "normalize-line-endings", "--threads", "1", "--max-input-bytes",
+        "50"]));
+    stdout.flush();
+    stdout = savedStdout;
+    auto captured = readText(capturePath);
+
+    // Still run-fatal (exit 2 at the app.d layer, via the unchanged
+    // exception path), still naming the same file with the same message --
+    // this ticket only adds a diagnostic summary, it does not change the
+    // fatal classification itself.
+    assert(error !is null,
+        "a file exceeding --max-input-bytes must still be run-fatal");
+    assert(error.msg.canFind("input exceeds --max-input-bytes: ") &&
+        error.msg.canFind("mmm-toobig.html"),
+        "the existing fatal message must be unchanged: " ~ error.msg);
+
+    // The before-file succeeded and was actually written; the after-file
+    // was never attempted and never written -- the underlying behavior is
+    // unchanged, only its visibility is new.
+    assert(exists(buildPath(outputDir, "aaa-good1.txt")),
+        "the file ordered before the fatal one must have been processed");
+    assert(!exists(buildPath(outputDir, "zzz-good2.txt")),
+        "the file ordered after the fatal one must never have been attempted");
+
+    assert(captured.canFind(
+        "done. 1 succeeded, 1 canceled before this fatal error."),
+        "plain mode must summarize the abort, naming both the successful " ~
+        "before-file and the never-attempted after-file: " ~ captured);
 }
 
 // Regression for #294: the side-output publication loop above must not

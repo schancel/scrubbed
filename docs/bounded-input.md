@@ -44,6 +44,15 @@ releases all reservations.
 - A discovered path rejected after worker-fatal cancellation gets one
   `status=canceled` EXPLAIN record; traversal-error cancellation remains
   distinct.
+- In plain (non-`--explain`) mode, an abort mid-batch (including a
+  `--max-input-bytes` admission failure) prints `done. N succeeded, M
+  canceled before this fatal error.` before the fatal error propagates.
+  `M` counts files already discovered in an already-walked directory's
+  entry list that the walk had not yet reached when it aborted -- it does
+  not count the file that caused the abort (already named separately in
+  the fatal message) and cannot see into a sibling directory the walk had
+  not yet reached at all. This is a diagnostic addition only; it does not
+  change the run-fatal classification above.
 
 This queue is local and ephemeral: it is not a resume manifest or a
 distributed scheduler. The per-document pipeline still materializes

@@ -5,3 +5,4 @@ parquet-external-fixture
 *.o
 *.obj
 .DS_Store
+parquet-reader-dump

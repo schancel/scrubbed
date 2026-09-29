@@ -18,5 +18,12 @@ provenance and hashes are in `third_party/thrift/README.md`.
 Platforms, Inc. and affiliates, used under its BSD-style license (not GPLv2);
 see `third_party/zstd/LICENSE` and `third_party/zstd/README.md`.
 
+## Not vendored
+
+- Snappy: `parquet.snappy` is this package's own decoder for the raw Snappy
+  block format; no code from google/snappy (BSD-3-Clause) is included.
+- zlib: `GZIP` pages are inflated with the zlib that ships inside D's own
+  Phobos runtime (`etc.c.zlib`); nothing is vendored here.
+
 This package's own code (everything under `source/` and `tests/`) is
 MIT-licensed; see `LICENSE`.

@@ -1,7 +1,8 @@
 /// Minimal `extern(C)` surface over this package's vendored zstd v1.5.7
 /// (`third_party/zstd`, a byte-identical copy of scrubbed's pinned
-/// `third_party/zstd`): one-shot compression for Parquet data pages, plus the
-/// one-shot decompressor used only by this package's own tests.
+/// `third_party/zstd`): one-shot compression for Parquet data pages written
+/// by `parquet.writer`, and exact-size one-shot decompression for ZSTD pages
+/// read by `parquet.reader`.
 module parquet.zstd_ffi;
 
 extern(C) @nogc nothrow {
@@ -37,6 +38,34 @@ ubyte[] zstdCompress(const(ubyte)[] src, int level) {
     const n = ZSTD_compress(dst.ptr, dst.length, src.ptr, src.length, level);
     enforce(!ZSTD_isError(n), fromStringz(ZSTD_getErrorName(n)).idup);
     return dst[0 .. n];
+}
+
+/// Decompresses `src` (one or more zstd frames) into exactly
+/// `expectedLength` bytes, as Parquet page headers declare. Any zstd error
+/// or length disagreement throws `ParquetFormatException`.
+ubyte[] zstdDecompress(const(ubyte)[] src, size_t expectedLength) {
+    import parquet.exception : ParquetFormatException;
+    import std.string : fromStringz;
+
+    auto dst = new ubyte[expectedLength];
+    const n = ZSTD_decompress(dst.ptr, dst.length, src.ptr, src.length);
+    if (ZSTD_isError(n))
+        throw new ParquetFormatException("zstd: " ~ fromStringz(ZSTD_getErrorName(n)).idup);
+    if (n != expectedLength)
+        throw new ParquetFormatException("zstd: decompressed size disagrees with the page header");
+    return dst;
+}
+
+unittest {
+    import parquet.exception : ParquetFormatException;
+    import std.exception : assertThrown;
+
+    auto input = cast(const(ubyte)[]) "zstd zstd zstd zstd zstd zstd";
+    auto frame = zstdCompress(input, 3);
+    assert(zstdDecompress(frame, input.length) == input);
+    assertThrown!ParquetFormatException(zstdDecompress(frame, input.length - 1));
+    assertThrown!ParquetFormatException(zstdDecompress(frame, input.length + 1));
+    assertThrown!ParquetFormatException(zstdDecompress(frame[0 .. $ - 1], input.length));
 }
 
 unittest {

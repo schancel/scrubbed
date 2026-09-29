@@ -19,7 +19,10 @@ import core.sys.posix.unistd : _exit, dup2, execvp, fork, setpgid;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds;
 import domain.document : DocumentId, SourceLocator;
+import domain.document_metadata : decodeDocumentMetadataV1;
 import domain.language_id : LanguageDetectionStatus, decodeLanguageIdentity;
+import effects.language_id_detect_stage : languageIdDetectExtensionKeyV1,
+    languageIdDetectStageKeyV1;
 import experiments.html_main_content.token_overlap : containsNormalized,
     mergeTokenCounts, normalized, scoreTokenOverlap, tokenCounts;
 import std.algorithm.iteration : filter, map;
@@ -753,7 +756,12 @@ private JSONValue compareMainContentTrafilatura(string scrubbedBinary,
         JSONValue sample;
         if (useScrubbed) {
             auto outDir = buildPath(root, "scrubbed-out-" ~ index.to!string);
-            scrubbedCommand = [scrubbedSnapshot.path, "--input", htmlInputDir,
+            // "run" is the required argparse subcommand (issue #377/#418 --
+            // this case's own command construction predates the subcommand
+            // CLI restructuring the mojibake cases were already fixed for;
+            // #377's fix explicitly scoped itself to the mojibake cases'
+            // own command construction only, leaving this one broken).
+            scrubbedCommand = [scrubbedSnapshot.path, "run", "--input", htmlInputDir,
                 "--output", outDir, "--stage", "content=html-main-content",
                 "--threads", "1"];
             sample = runBoundedSample(scrubbedCommand, darwin, timeoutSeconds);
@@ -911,11 +919,36 @@ private JSONValue langIdOutcomeJson(const ref LangIdOutcome outcome) {
     ]);
 }
 
+// Since #300 Slice 2 (`effects.language_id_detect_stage`), `language-id-
+// detect` no longer emits a standalone `scrubbed:language-id:v1` sidecar
+// directly: it writes that same encoded record, unchanged, into the shared
+// `document-metadata:v1` envelope's own `extension` array (as the
+// `languageIdDetectExtensionKeyV1` ("language-id") entry's hex-encoded
+// opaque value), published by the paired `document-metadata-publish` stage.
+// Unlike the PII case's structured-section payload (a large, JSON-shaped
+// `pii-audit-v1` document requiring the `document-metadata:v2` envelope),
+// `language-id-detect` writes a small scalar via `.withExtensionField`, so
+// the two-stage chain here never produces a structured section and the
+// publish stage always emits the plain, unchanged `document-metadata:v1`
+// wire (see `effects.document_metadata_publish_stage`'s per-document v1/v2
+// choice) -- this unwraps that one level via the existing
+// `decodeDocumentMetadataV1` domain function, then decodes the
+// `LanguageIdentityRecord` from the unwrapped extension value exactly as
+// before.
 private LangIdOutcome scoreScrubbedLanguageId(string sidecarPath, string fixturePath,
                                               string goldLanguage) {
     auto expectedId = DocumentId.from(SourceLocator("local-files:v1",
         resolveRealPath(fixturePath), "."));
-    auto record = decodeLanguageIdentity(cast(ubyte[]) read(sidecarPath), expectedId,
+    auto envelope = decodeDocumentMetadataV1(expectedId, readText(sidecarPath));
+    auto languageIdFields = envelope.extensionFields
+        .filter!(f => f.key == languageIdDetectExtensionKeyV1).array;
+    require(languageIdFields.length == 1,
+        "expected exactly one language-id extension field, found " ~
+        languageIdFields.length.to!string);
+    require(languageIdFields[0].sourceStage == languageIdDetectStageKeyV1,
+        "language-id extension field has unexpected sourceStage: " ~
+        languageIdFields[0].sourceStage);
+    auto record = decodeLanguageIdentity(languageIdFields[0].value, expectedId,
         fileTextRevision(fixturePath));
     if (record.result.status != LanguageDetectionStatus.detected)
         return LangIdOutcome(false, "abstain:" ~ record.result.reason.to!string, false);
@@ -934,18 +967,29 @@ private LangIdOutcome scoreLangdetectLanguageId(string outputPath, string goldLa
 }
 
 // One shell-loop sample = one full pass over all 11 held-out fixtures,
-// wrapping single-file invocations that match issue #311's own proven
+// wrapping single-file invocations that originally matched issue #311's own
 // `scrubbed run --input FILE --output FILE --sidecar-output FILE --stage
-// id=language-id-detect --threads 1` shape exactly. `/usr/bin/time` (added
-// by the caller via runBoundedSample) wraps this whole shell process, so one
-// timed sample still times one full pass over every fixture, matching the
+// id=language-id-detect --threads 1` shape. #300 Slice 2 (commit reachable
+// via `effects.language_id_detect_stage`) moved `language-id-detect` onto
+// the annotate-only `SideOutputCapability.none` shape (it writes into the
+// shared `DocumentMetadata` accumulator's extension fields, mirroring
+// `effects.html_metadata_annotate_stage`/`effects.compressibility_annotate_
+// stage`), published by the separate `document-metadata-publish` terminal
+// stage -- `--stage id=language-id-detect` alone no longer produces a side
+// output and now fails "--sidecar-output requires a side-output-producing
+// plan" (issue #418, the same root cause already fixed for the PII case in
+// issue #412/PR #419: see that fix's `piiScrubbedBatchScript` for the
+// identical two-stage chain pattern). `/usr/bin/time` (added by the caller
+// via runBoundedSample) wraps this whole shell process, so one timed sample
+// still times one full pass over every fixture, matching the
 // mojibake/trafilatura cases' own methodology.
 private string languageIdScrubbedBatchScript() {
     return "scrubbed=\"$1\"; outdir=\"$2\"; sidecardir=\"$3\"; shift 3; status=0; " ~
         "for f in \"$@\"; do base=$(basename \"$f\"); stem=${base%.txt}; " ~
         "\"$scrubbed\" run --input \"$f\" --output \"$outdir/$stem.out\" " ~
         "--sidecar-output \"$sidecardir/$stem.sidecar\" " ~
-        "--stage id=language-id-detect --threads 1 || status=$?; done; exit \"$status\"";
+        "--stage lang=language-id-detect --stage pub=document-metadata-publish " ~
+        "--threads 1 || status=$?; done; exit \"$status\"";
 }
 
 // The langdetect-side equivalent: one full pass over the same 11 fixtures,

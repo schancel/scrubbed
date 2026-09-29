@@ -144,7 +144,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <div class="stat-card">
             <span class="big">18/20 pages</span>
             <span class="label">vs. trafilatura, extraction</span>
-            <p>Precision 0.918 / recall 0.746 against trafilatura's own extraction as the reference (not authored ground truth &mdash; a cross-tool word-overlap comparison). The 2 non-selected pages are each a disclosed, investigated non-goal, not an unfixed bug: one is a genuine node-count/size outlier for this corpus that a bounded-resource cap correctly rejects, the other is a JavaScript-rendered page whose article text is never present in the static HTML at all &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a> for the evidence.</p>
+            <p>Precision 0.918 / recall 0.746 against trafilatura's own extraction as the reference (not authored ground truth &mdash; a cross-tool word-overlap comparison). The 2 non-selected pages are real, open gaps, not disclosed non-goals: trafilatura itself extracts real article text from both (confirmed directly), so an internal resource cap and a scoring/threshold gap are each incorrectly rejecting a page with genuine static content &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a> and the tracked issue for details.</p>
         </div>
         <div class="stat-card">
             <span class="big">~146x</span>

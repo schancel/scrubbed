@@ -22,7 +22,7 @@ import domain.document : DocumentId, SourceLocator;
 import domain.language_id : LanguageDetectionStatus, decodeLanguageIdentity;
 import experiments.html_main_content.token_overlap : containsNormalized,
     mergeTokenCounts, normalized, scoreTokenOverlap, tokenCounts;
-import std.algorithm.iteration : map;
+import std.algorithm.iteration : filter, map;
 import std.algorithm.searching : canFind, endsWith, startsWith;
 import std.array : array;
 import std.conv : to;
@@ -1314,8 +1314,46 @@ private JSONValue piiToolScoringJson(const PiiCategoryCounts[string] totals) {
 // encodes for its own production consumers). Each contributor within each
 // union is one predicted PII span; a union's own merged bounds are not used,
 // since a contributor's own start/end is the actual per-category detection.
+// Since #300 Slice 3 (commit 384f404), `pii-four-class` no longer emits a
+// standalone `scrubbed-pii-audit-v1` sidecar directly: it writes that same
+// JSON, unchanged, into the `document-metadata:v2` envelope's own
+// `structuredSections` array (as the `sectionId: "pii-audit"` entry's
+// hex-encoded opaque `payload`), published by the paired
+// document-metadata-publish stage. This unwraps that one level -- the
+// `unions`/`contributors` shape parsed below is otherwise identical to the
+// old top-level sidecar.
+private ubyte[] decodeHex(string hex) {
+    require(hex.length % 2 == 0, "structured section payload has odd hex length");
+    ubyte[] bytes;
+    bytes.reserve(hex.length / 2);
+    foreach (i; 0 .. hex.length / 2) {
+        int hi = hexNibble(hex[2 * i]);
+        int lo = hexNibble(hex[2 * i + 1]);
+        bytes ~= cast(ubyte)((hi << 4) | lo);
+    }
+    return bytes;
+}
+
+private int hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    throw new Exception("structured section payload has non-hex byte");
+}
+
 private PiiSpan[] parseScrubbedPiiAudit(string sidecarPath) {
-    auto audit = parseJSON(readText(sidecarPath));
+    auto envelope = parseJSON(readText(sidecarPath));
+    JSONValue[] sections = "structuredSections" in envelope ?
+        envelope["structuredSections"].array : [];
+    auto piiSections = sections.filter!(s => s["sectionId"].str == "pii-audit").array;
+    require(piiSections.length == 1,
+        "expected exactly one pii-audit structured section, found " ~
+        piiSections.length.to!string);
+    require(piiSections[0]["sourceStage"].str == "pii-four-class",
+        "pii-audit structured section has unexpected sourceStage: " ~
+        piiSections[0]["sourceStage"].str);
+    auto payloadBytes = decodeHex(piiSections[0]["payload"].str);
+    auto audit = parseJSON(cast(string) payloadBytes);
     PiiSpan[] spans;
     foreach (unionSpan; audit["unions"].array)
         foreach (contributor; unionSpan["contributors"].array)
@@ -1347,16 +1385,24 @@ private PiiSpan[] parsePresidioOutput(string outputPath) {
 }
 
 // One shell-loop sample = one full pass over all five authored fixtures,
-// matching the language-id case's own single-file `scrubbed run --input FILE
-// --output FILE --sidecar-output FILE --stage id=pii-four-class --threads 1`
-// invocation shape exactly (default stage options already select all four
-// categories and both confidence levels).
+// via `scrubbed run --input FILE --output FILE --sidecar-output FILE --stage
+// pii=pii-four-class --stage pub=document-metadata-publish --threads 1`
+// (default stage options already select all four categories and both
+// confidence levels). #300 Slice 3 (commit 384f404) moved pii-four-class off
+// its own standalone TerminalSideOutput: it now writes its audit into the
+// shared DocumentMetadata accumulator as a structured section, published by
+// the separate document-metadata-publish terminal stage (see
+// docs/cli-commands.md's own two-stage example) -- `--stage id=pii-four-class`
+// alone no longer produces a side output and now fails
+// "--sidecar-output requires a side-output-producing plan" (issue #412
+// re-verification found this while re-running the real comparator).
 private string piiScrubbedBatchScript() {
     return "scrubbed=\"$1\"; outdir=\"$2\"; sidecardir=\"$3\"; shift 3; status=0; " ~
         "for f in \"$@\"; do base=$(basename \"$f\"); stem=${base%.txt}; " ~
         "\"$scrubbed\" run --input \"$f\" --output \"$outdir/$stem.out\" " ~
         "--sidecar-output \"$sidecardir/$stem.sidecar\" " ~
-        "--stage id=pii-four-class --threads 1 || status=$?; done; exit \"$status\"";
+        "--stage pii=pii-four-class --stage pub=document-metadata-publish " ~
+        "--threads 1 || status=$?; done; exit \"$status\"";
 }
 
 // The presidio-side equivalent: one full pass over the same five fixtures,

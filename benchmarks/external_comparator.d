@@ -19,7 +19,8 @@ import core.sys.posix.unistd : _exit, dup2, execvp, fork, setpgid;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds;
 import domain.document : DocumentId, SourceLocator;
-import domain.document_metadata : decodeDocumentMetadataV1;
+import domain.document_metadata : DocumentMetadata, decodeDocumentMetadataV1,
+    encodeDocumentMetadataV2;
 import domain.language_id : LanguageDetectionStatus, decodeLanguageIdentity;
 import effects.language_id_detect_stage : languageIdDetectExtensionKeyV1,
     languageIdDetectStageKeyV1;
@@ -1659,6 +1660,68 @@ private void selfTest() {
     try assembleReport([a], ["a", "b"]);
     catch (Exception) missingRejected = true;
     require(missingRejected, "missing required case accepted");
+
+    // parseScrubbedPiiAudit synthetic-envelope round-trip (issue #420): this
+    // is the parsing logic that silently broke during the #300 Slice 3
+    // refactor and was only caught by an expensive manual re-verification
+    // (#412/#419). Build a `document-metadata:v2` envelope through the real
+    // `withStructuredSection`/`encodeDocumentMetadataV2` helpers -- never
+    // hand-authoring the wire JSON for the positive case -- write it to a
+    // temp file, and confirm `parseScrubbedPiiAudit` decodes it back to
+    // exactly the audit data that went in. Pure in-process/offline: no live
+    // `scrubbed` binary and no Presidio venv involved.
+    {
+        JSONValue contributorA = JSONValue([
+            "category": JSONValue("EMAIL"), "start": JSONValue(10), "end": JSONValue(25)]);
+        JSONValue unionA = JSONValue(["contributors": JSONValue([contributorA])]);
+        JSONValue contributorB = JSONValue([
+            "category": JSONValue("PHONE"), "start": JSONValue(40), "end": JSONValue(52)]);
+        JSONValue unionB = JSONValue(["contributors": JSONValue([contributorB])]);
+        auto auditPayload = JSONValue(["unions": JSONValue([unionA, unionB])]);
+        auto payloadBytes = cast(immutable(ubyte)[]) auditPayload.toString();
+
+        auto piiTestId = DocumentId.from(SourceLocator("self-test", "pii-audit-roundtrip", "."));
+        auto piiTestMeta = DocumentMetadata.empty()
+            .withStructuredSection("pii-audit", payloadBytes, "pii-four-class");
+        auto piiTestWire = encodeDocumentMetadataV2(piiTestId, piiTestMeta);
+
+        auto piiTestPath = buildPath(tempDir,
+            "scrubbed-external-comparator-selftest-pii-audit-" ~ randomUUID.toString ~ ".json");
+        write(piiTestPath, piiTestWire);
+        scope(exit) if (exists(piiTestPath)) remove(piiTestPath);
+
+        auto roundTripSpans = parseScrubbedPiiAudit(piiTestPath);
+        require(roundTripSpans.length == 2,
+            "pii-audit round-trip: unexpected span count " ~ roundTripSpans.length.to!string);
+        require(roundTripSpans[0].category == "EMAIL" && roundTripSpans[0].start == 10 &&
+            roundTripSpans[0].end == 25, "pii-audit round-trip: first span mismatch");
+        require(roundTripSpans[1].category == "PHONE" && roundTripSpans[1].start == 40 &&
+            roundTripSpans[1].end == 52, "pii-audit round-trip: second span mismatch");
+
+        // Deliberately-corrupted envelopes must fail parsing cleanly (not
+        // silently return empty/wrong data): a wrong section id (the
+        // `withStructuredSection`/`encodeDocumentMetadataV2` real encoder
+        // just given the wrong sectionId string), and a malformed
+        // (non-hex) payload byte, hand-authored directly since the real
+        // encoder can never itself produce invalid hex.
+        auto piiWrongSectionMeta = DocumentMetadata.empty()
+            .withStructuredSection("pii-audit-v1", payloadBytes, "pii-four-class");
+        auto piiWrongSectionWire = encodeDocumentMetadataV2(piiTestId, piiWrongSectionMeta);
+        auto badHexWire = `{"version":"document-metadata:v2","documentId":"` ~ piiTestId.text ~
+            `","standard":{"title":null,"author":null,"date":null,"url":null},"extension":[],` ~
+            `"structuredSections":[{"sectionId":"pii-audit","payload":"zz","sourceStage":"pii-four-class"}]}`;
+        foreach (badWire; [piiWrongSectionWire, badHexWire]) {
+            auto badPath = buildPath(tempDir,
+                "scrubbed-external-comparator-selftest-pii-audit-bad-" ~ randomUUID.toString ~ ".json");
+            write(badPath, badWire);
+            scope(exit) if (exists(badPath)) remove(badPath);
+            bool rejected;
+            try parseScrubbedPiiAudit(badPath);
+            catch (Exception) rejected = true;
+            require(rejected, "corrupted pii-audit envelope accepted: " ~ badWire);
+        }
+    }
+
     writeln("external comparator self-test passed");
 }
 

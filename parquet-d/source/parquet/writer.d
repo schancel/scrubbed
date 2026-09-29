@@ -1,10 +1,11 @@
-/// Flat-schema, single-row-group Parquet writer.
+/// Flat-schema, multi-row-group Parquet writer.
 ///
 /// File layout produced (Parquet format spec, "File Format"):
 ///
 /// ```
 /// "PAR1"
-/// for each column: PageHeader (Thrift compact) + one data page (v1)
+/// for each row group, for each column: PageHeader (Thrift compact) + one
+///     data page (v1)
 /// FileMetaData (Thrift compact)
 /// footer length (4-byte little-endian)
 /// "PAR1"
@@ -19,11 +20,21 @@
 /// level 0 with no value, an empty string is definition level 1 with a
 /// zero-length `BYTE_ARRAY` value.
 ///
-/// Footer offsets depend on final (compressed) page sizes, so rows are
-/// buffered per column in memory until `finish`, which builds every column
-/// chunk first and only then computes offsets and serializes the footer.
-/// There is no streaming or multi-row-group mode: memory use is proportional
-/// to the whole table.
+/// A row group's column chunk offsets depend on that row group's final
+/// (compressed) page sizes, so rows are buffered per column in memory until
+/// the row group is complete: either `addRow` crosses
+/// `WriterOptions.rowGroupTargetBytes` of buffered (uncompressed) column
+/// data, or `finish` is called with a partial group still buffered. At that
+/// point the writer builds every column chunk for *that* row group, appends
+/// the finished bytes to the output, records the row group's metadata, and
+/// discards the row buffers before the next row group starts. Peak
+/// per-row-group buffering is therefore bounded by `rowGroupTargetBytes`
+/// regardless of total corpus size; a small corpus that never crosses the
+/// target still produces exactly one row group, unchanged from the writer's
+/// original single-row-group behavior. `finish` still returns (and
+/// `writeFile` still writes) the complete serialized file as one in-memory
+/// buffer: row-by-row buffering is bounded, but the accumulated *output*
+/// bytes are not freed until the caller has the whole file.
 module parquet.writer;
 
 import parquet.thrift_codec;
@@ -68,6 +79,18 @@ struct WriterOptions {
     int zstdLevel = 3;
     /// Written to `FileMetaData.created_by`.
     string createdBy = "parquet-d";
+    /// A row group is flushed once its buffered (uncompressed) column data
+    /// reaches this many bytes; overshoot is bounded by one row's worth of
+    /// data. Byte size (not row count) is the trigger because it tracks
+    /// actual memory pressure directly regardless of column width or count
+    /// (a table with a few wide string columns and one with many narrow
+    /// numeric columns both bound correctly under one knob). 128 MiB matches
+    /// the row-group-size ballpark other Parquet writers default to
+    /// (parquet-mr, pyarrow). Set higher to get fewer, larger row groups (or
+    /// `long.max` to force the original single-row-group behavior); set
+    /// lower to bound peak memory more tightly at the cost of more row
+    /// groups and slightly larger footers.
+    long rowGroupTargetBytes = 128L * 1024 * 1024;
 }
 
 /// A single cell value. Construct with `ParquetValue.null_`, or the
@@ -94,12 +117,20 @@ struct ParquetValue {
     bool isNull() const { return kind == Kind.null_; }
 }
 
-/// Buffers rows for one row group and serializes a complete Parquet file.
+private immutable ubyte[4] parquetMagic = ['P', 'A', 'R', '1'];
+
+/// Buffers rows for the row group in progress, flushing completed row
+/// groups into the output as it goes, and serializes a complete Parquet
+/// file. See the module documentation for the flush trigger and the memory
+/// bound it gives.
 final class ParquetWriter {
     private ColumnSpec[] columns_;
     private ColumnBuffer[] buffers_;
     private WriterOptions options_;
-    private long rows_;
+    private Appender!(ubyte[]) file_;
+    private RowGroup[] rowGroups_;
+    private long rows_;       // total rows across the whole file
+    private long groupRows_;  // rows buffered in the row group in progress
     private bool finished_;
 
     this(const ColumnSpec[] columns, WriterOptions options = WriterOptions.init) {
@@ -112,24 +143,35 @@ final class ParquetWriter {
         if (options.compression == Compression.zstd)
             enforce(options.zstdLevel >= minZstdLevel && options.zstdLevel <= maxZstdLevel,
                 "zstd level out of range");
+        enforce(options.rowGroupTargetBytes > 0, "rowGroupTargetBytes must be positive");
         columns_ = columns.dup;
         buffers_ = new ColumnBuffer[columns.length];
         options_ = options;
+        file_.put(parquetMagic[]);
     }
 
-    /// Rows appended so far.
+    /// Rows appended so far, across all row groups.
     long rowCount() const { return rows_; }
 
+    /// Row groups flushed so far, including a partial one still buffered
+    /// with rows in it. Zero before the first row is appended.
+    size_t rowGroupCount() const {
+        return rowGroups_.length + (groupRows_ > 0 ? 1 : 0);
+    }
+
     /// Appends one row. The row is validated as a whole before any column is
-    /// touched, so a rejected row leaves the writer unchanged.
+    /// touched, so a rejected row leaves the writer unchanged. May flush the
+    /// row group in progress (see `WriterOptions.rowGroupTargetBytes`).
     void addRow(const ParquetValue[] row) {
         enforce(!finished_, "parquet writer already finished");
         enforce(row.length == columns_.length, "parquet row has wrong column count");
         // A single data page's value count is a Thrift i32.
-        enforce(rows_ < int.max, "parquet row group row limit reached");
+        enforce(groupRows_ < int.max, "parquet row group row limit reached");
         foreach (i, ref v; row) validate(columns_[i], v);
         foreach (i, ref v; row) buffers_[i].append(columns_[i].type, v);
         ++rows_;
+        ++groupRows_;
+        if (bufferedBytes() >= options_.rowGroupTargetBytes) flushRowGroup();
     }
 
     /// Serializes the complete file. The writer cannot be used afterwards.
@@ -137,18 +179,61 @@ final class ParquetWriter {
         enforce(!finished_, "parquet writer already finished");
         finished_ = true;
 
-        static immutable ubyte[4] magic = ['P', 'A', 'R', '1'];
-        Appender!(ubyte[]) file;
-        file.put(magic[]);
+        // A corpus with zero rows still needs one (empty) row group to
+        // match the writer's original single-row-group behavior.
+        flushRowGroup(rowGroups_.length == 0);
+        buffers_ = null;
 
-        // Pass 1: build every column chunk (header + final page bytes) so
-        // that all sizes are known. Pass 2: lay them out and record offsets.
+        FileMetaData meta;
+        meta.version_ = 1;
+        meta.schema = schemaElements();
+        meta.numRows = rows_;
+        meta.rowGroups = rowGroups_;
+        meta.createdBy = options_.createdBy;
+
+        const footer = encodeFileMetaData(meta);
+        enforce(footer.length <= uint.max, "parquet footer too large");
+        file_.put(footer);
+        putLE!uint(file_, cast(uint) footer.length);
+        file_.put(parquetMagic[]);
+        return file_.data;
+    }
+
+    /// `finish()` and write the result to `path`.
+    void writeFile(string path) {
+        import std.file : write;
+        write(path, finish());
+    }
+
+    /// Sum of the buffered column data for the row group in progress: the
+    /// definition-level array, the PLAIN value bytes, and the (not yet
+    /// bit-packed) boolean array. This is real allocated memory, not an
+    /// estimate, and it is what `rowGroupTargetBytes` bounds.
+    private long bufferedBytes() const {
+        long total;
+        foreach (ref b; buffers_) {
+            total += cast(long) b.defLevels.length * uint.sizeof;
+            total += cast(long) b.values.data.length;
+            total += cast(long) b.bools.length * uint.sizeof;
+        }
+        return total;
+    }
+
+    /// Builds every column chunk for the row group currently buffered,
+    /// appends the finished bytes to `file_`, and records the row group's
+    /// metadata. Resets the column buffers for the next row group. A no-op
+    /// when nothing is buffered, unless `force` (used by `finish()` so a
+    /// zero-row corpus still gets one empty row group).
+    private void flushRowGroup(bool force = false) {
+        if (!force && groupRows_ == 0) return;
+        enforce(rowGroups_.length < short.max, "too many parquet row groups");
+
         auto chunks = new ColumnChunk[columns_.length];
         long totalUncompressed, totalCompressed;
         foreach (i, ref col; columns_) {
-            auto built = buildChunk(col, buffers_[i]);
-            const offset = cast(long) file.data.length;
-            file.put(built.bytes);
+            auto built = buildChunk(col, buffers_[i], groupRows_);
+            const offset = cast(long) file_.data.length;
+            file_.put(built.bytes);
 
             ColumnMetaData meta;
             meta.type = physicalType(col.type);
@@ -156,7 +241,7 @@ final class ParquetWriter {
             meta.pathInSchema = [col.name];
             meta.codec = options_.compression == Compression.zstd
                 ? CompressionCodec.zstd : CompressionCodec.uncompressed;
-            meta.numValues = rows_;
+            meta.numValues = groupRows_;
             meta.totalUncompressedSize = built.uncompressedSize;
             meta.totalCompressedSize = built.bytes.length;
             meta.dataPageOffset = offset;
@@ -164,34 +249,18 @@ final class ParquetWriter {
             totalUncompressed += built.uncompressedSize;
             totalCompressed += built.bytes.length;
         }
-        buffers_ = null;
 
-        FileMetaData meta;
-        meta.version_ = 1;
-        meta.schema = schemaElements();
-        meta.numRows = rows_;
         RowGroup group;
         group.columns = chunks;
         group.totalByteSize = totalUncompressed;
-        group.numRows = rows_;
+        group.numRows = groupRows_;
         group.fileOffset = chunks[0].metaData.dataPageOffset;
         group.totalCompressedSize = totalCompressed;
-        group.ordinal = 0;
-        meta.rowGroups = [group];
-        meta.createdBy = options_.createdBy;
+        group.ordinal = cast(short) rowGroups_.length;
+        rowGroups_ ~= group;
 
-        const footer = encodeFileMetaData(meta);
-        enforce(footer.length <= uint.max, "parquet footer too large");
-        file.put(footer);
-        putLE!uint(file, cast(uint) footer.length);
-        file.put(magic[]);
-        return file.data;
-    }
-
-    /// `finish()` and write the result to `path`.
-    void writeFile(string path) {
-        import std.file : write;
-        write(path, finish());
+        buffers_ = new ColumnBuffer[columns_.length];
+        groupRows_ = 0;
     }
 
     private SchemaElement[] schemaElements() const {
@@ -216,7 +285,7 @@ final class ParquetWriter {
         long uncompressedSize;  // page header + uncompressed page
     }
 
-    private BuiltChunk buildChunk(ref const ColumnSpec col, ref ColumnBuffer buf) {
+    private BuiltChunk buildChunk(ref const ColumnSpec col, ref ColumnBuffer buf, long numRows) {
         Appender!(ubyte[]) page;
         if (col.nullable) {
             const levels = encodeRleBitPackedHybrid(buf.defLevels, 1);
@@ -239,7 +308,7 @@ final class ParquetWriter {
         header.type = PageType.dataPage;
         header.uncompressedPageSize = cast(int) raw.length;
         header.compressedPageSize = cast(int) body.length;
-        header.dataPageHeader = DataPageHeader(cast(int) rows_, Encoding.plain,
+        header.dataPageHeader = DataPageHeader(cast(int) numRows, Encoding.plain,
             Encoding.rle, Encoding.rle);
         auto headerBytes = encodePageHeader(header);
         return BuiltChunk(headerBytes ~ body, headerBytes.length + raw.length);

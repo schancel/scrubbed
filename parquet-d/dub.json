@@ -1,6 +1,6 @@
 {
 	"name": "parquet-d",
-	"description": "Native D Parquet writer and reader for flat schemas. Writer: single row group, PLAIN values, RLE/bit-packed definition levels for real nulls, zstd or uncompressed pages. Reader: externally produced files (pyarrow/HF corpora) with PLAIN/dictionary/RLE encodings, v1/v2 data pages, and SNAPPY (native decoder), ZSTD, GZIP, or uncompressed pages. Footer metadata goes through a vendored copy of Apache Thrift's own D TCompactProtocol (six files, no libevent/openssl).",
+	"description": "Native D Parquet writer and reader for flat schemas. Writer: multiple row groups (flushed as buffered data crosses a configurable byte-size target), PLAIN values, RLE/bit-packed definition levels for real nulls, zstd or uncompressed pages. Reader: externally produced files (pyarrow/HF corpora) with PLAIN/dictionary/RLE encodings, v1/v2 data pages, and SNAPPY (native decoder), ZSTD, GZIP, or uncompressed pages. Footer metadata goes through a vendored copy of Apache Thrift's own D TCompactProtocol (six files, no libevent/openssl).",
 	"authors": ["Shammah Chancellor"],
 	"license": "MIT",
 	"copyright": "Copyright © 2026, Shammah Chancellor",

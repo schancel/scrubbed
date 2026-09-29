@@ -55,7 +55,11 @@ struct ReaderOptions {
     /// declared size against what its compressed input can produce before
     /// allocating (Snappy's preamble and 22x bound, zstd's frame bound,
     /// DEFLATE's 1032x maximum ratio, exact equality when uncompressed).
-    /// Lower this to cap per-page memory for a known workload.
+    /// Lower this to cap per-page memory for a known workload. It is also
+    /// the only lever against a genuine (not forged) decompression bomb in
+    /// a dictionary or data page: a valid page of zeros decodes to empty
+    /// strings at 4x its size (a 16-byte slice per 4-byte length) or to
+    /// BOOLEANs at 8x (one byte per bit), bounded only by the page size.
     long maxPageBytes = int.max;
 }
 

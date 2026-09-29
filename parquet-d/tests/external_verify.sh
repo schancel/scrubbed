@@ -117,6 +117,17 @@ trap 'rm -rf "$large"' EXIT
 "$py" "$pkg_dir/tests/reader_verify.py" generate-large "$large/large_page.parquet"
 "$dump_bin" digest "$large/large_page.parquet" "$large/digest.txt"
 "$py" "$pkg_dir/tests/reader_verify.py" compare-digest "$large/large_page.parquet" "$large/digest.txt"
+# Negative control for digest mode: an altered digest must fail.
+"$py" -c 'import sys
+header, digest = open(sys.argv[1]).read().splitlines()[:2]
+bad = ("0" if digest[0] != "0" else "1") + digest[1:]
+open(sys.argv[2], "w").write(header + "\n" + bad + "\n")' "$large/digest.txt" "$large/digest.bad"
+if "$py" "$pkg_dir/tests/reader_verify.py" compare-digest "$large/large_page.parquet" \
+    "$large/digest.bad" >/dev/null 2>&1; then
+  echo "external_verify.sh: digest negative control FAILED: altered digest went unnoticed" >&2
+  exit 1
+fi
+echo "digest negative control: compare-digest rejects an altered digest"
 set +e
 msg="$("$dump_bin" digest "$large/large_page.parquet" /dev/null 268435456 2>&1)"
 rc=$?

@@ -59,6 +59,20 @@ ubyte[] zstdDecompress(const(ubyte)[] src, size_t expectedLength) {
     import parquet.exception : ParquetFormatException;
     import std.string : fromStringz;
 
+    // Format bound first: ZSTD_decompressBound trusts a frame header's
+    // recorded content size, which a forged frame can set to anything. Per
+    // RFC 8878, every block has a 3-byte header and produces at most
+    // Block_Maximum_Size <= 128 KiB. A raw block of n bytes costs 3 + n
+    // input bytes for n output bytes; an RLE block, 4 bytes for up to
+    // 128 KiB; a compressed block needs at least a literals-section and a
+    // sequences-section header byte (>= 5 bytes); frame headers and
+    // skippable frames only add input. So each output-producing block
+    // costs >= 4 input bytes and total output is <= (len / 4) x 128 KiB.
+    // The + 1 is slack; the arithmetic is 64-bit.
+    enum ulong blockMax = 128 * 1024;
+    if (cast(ulong) expectedLength > (cast(ulong) src.length / 4 + 1) * blockMax)
+        throw new ParquetFormatException(
+            "zstd: page header declares more bytes than the input could produce");
     const bound = ZSTD_decompressBound(src.ptr, src.length);
     if (bound == zstdContentSizeError)
         throw new ParquetFormatException("zstd: corrupt or truncated frame");
@@ -87,7 +101,23 @@ unittest {
     // A forged 1 GiB size is refused before allocating.
     assertThrown!ParquetFormatException(zstdDecompress(frame, 1 << 30));
     assertThrown!ParquetFormatException(zstdDecompress([1, 2, 3, 4, 5, 6, 7, 8], 1 << 30));
+    // Forged frame recording a 1 GiB content size (FHD 0xA0: single segment,
+    // 4-byte content size) followed by one 1-byte raw last block. The
+    // recorded size alone satisfies ZSTD_decompressBound, so only the format
+    // bound stops the 1 GiB allocation.
+    assert(ZSTD_decompressBound(forgedContentSizeFrame.ptr, forgedContentSizeFrame.length)
+        == 1UL << 30);
+    assertThrown!ParquetFormatException(zstdDecompress(forgedContentSizeFrame, 1 << 30));
 }
+
+/// Test vector for the unittest above (tests/reader_checks.d repeats it).
+private immutable ubyte[] forgedContentSizeFrame = [
+    0x28, 0xb5, 0x2f, 0xfd,     // magic
+    0xa0,                       // FHD: FCS flag 2 (4 bytes), single segment
+    0x00, 0x00, 0x00, 0x40,     // content size 2^30
+    0x09, 0x00, 0x00,           // block header: last, raw, size 1
+    0x61,
+];
 
 unittest {
     import std.exception : enforce;

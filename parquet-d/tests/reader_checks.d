@@ -330,6 +330,21 @@ unittest {
         assert(msg !is null, "forged page size accepted");
         assert(grew < 64 << 20, "page buffer allocated for a forged size");
     }
+    // Round-3 review repro: a zstd frame whose header records a forged 1 GiB
+    // content size (FHD 0xA0, 4-byte size) and holds one 1-byte raw block.
+    // ZSTD_decompressBound trusts the recorded size, so this is caught only
+    // by the per-block format bound, before the buffer is allocated.
+    {
+        const ubyte[] frame = [0x28, 0xb5, 0x2f, 0xfd, 0xa0, 0x00, 0x00, 0x00, 0x40,
+            0x09, 0x00, 0x00, 0x61];
+        auto page = craftPageHeader(1 << 30, cast(int) frame.length, -1) ~ frame;
+        string msg;
+        const grew = heapGrowth({
+            msg = rejection(craftFile(int64, omitTypeLength, zstd, 1, page, 0));
+        });
+        assert(msg !is null, "forged zstd content size accepted");
+        assert(grew < 64 << 20, "page buffer allocated for a forged zstd content size");
+    }
     // The opt-in ceiling still applies when set.
     import std.algorithm.searching : canFind;
     import std.exception : collectExceptionMsg;

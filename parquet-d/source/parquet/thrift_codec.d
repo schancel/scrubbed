@@ -622,20 +622,27 @@ private struct Decoder {
     /// `T.sizeof` can be one to two orders of magnitude larger than the
     /// single wire byte the size check assumes per element (parquet-d#395:
     /// a `ColumnChunk` is well over 100 bytes in memory per declared list
-    /// entry). Cap the up-front reserve at what could plausibly still be in
-    /// the transport (each element needs at least one more byte on the
-    /// wire) and grow from there as elements are actually decoded, so a
-    /// bogus declared count costs no more memory than the elements really
-    /// read before truncation is caught.
+    /// entry).
+    ///
+    /// A cap keyed off "bytes remaining in the whole transport" is not
+    /// enough: that count includes bytes the attacker placed *after* this
+    /// list's header that this list's elements will never actually reach
+    /// (decoding throws on the first bad element long before they would be
+    /// consumed), so it can't tell a plausible declared count from a bogus
+    /// one padded out by trailing filler placed anywhere in the buffer.
+    /// Never reserve against the declared count or the buffer size at all:
+    /// build the result with `Appender`'s ordinary geometric growth, so
+    /// the only thing that ever grows the allocation is a `readOne()` call
+    /// that actually returned -- capping total spend to a small constant
+    /// factor over the elements truly decoded before truncation is caught,
+    /// independent of both `l.size` and where any filler bytes sit.
     T[] list(T)(TType elem, scope T delegate() readOne) {
         import std.array : Appender;
 
         check(++depth <= maxNestingDepth, "thrift: metadata nested too deeply");
         const l = listBegin();
         check(l.size == 0 || l.elemType == elem, "thrift: list has unexpected element type");
-        const remaining = trans.data.length - trans.pos;
         Appender!(T[]) result;
-        result.reserve(l.size < remaining ? l.size : remaining);
         foreach (_; 0 .. l.size) result.put(readOne());
         --depth;
         return result.data;
@@ -983,14 +990,20 @@ private size_t heapGrowth(scope void delegate() dg) {
 // no matter how deep or how much of that length earlier fields already
 // consumed. A `columns` list nested inside a `row_groups` entry can
 // therefore still declare a count up to the footer's total size even when
-// the footer ends right after that list's header -- and `ColumnChunk` is
+// the actual bytes it could read from are exhausted -- and `ColumnChunk` is
 // well over 100 bytes once decoded into memory, versus the one wire byte
 // the size check assumes an element needs. Before the fix, pre-allocating
 // `new ColumnChunk[declaredCount]` up front spent that amplification
 // (roughly declaredCount * ColumnChunk.sizeof) before a single element was
-// validated; after it, the reserve is capped by what is actually left in
-// the input, so a forged count that cannot be backed by real bytes costs
-// nothing beyond the elements truly decoded.
+// validated. `list!T` no longer reserves against the declared count *or*
+// against the transport's remaining byte count -- a remaining-bytes cap
+// only defeats filler placed *before* the forged list; filler placed
+// *after* the list header still counts toward "bytes remaining" even
+// though the list's elements can never actually reach it (decoding fails
+// on the first bad element well before that). Both layouts below must
+// show bounded growth.
+//
+// Layout 1: filler (a `created_by` string) before the forged list.
 unittest {
     import std.array : replicate;
 
@@ -1022,4 +1035,43 @@ unittest {
     // bounded decode allocates nothing close to that for zero real elements.
     assert(grew < (declaredColumns * ColumnChunk.sizeof) / 10,
         "forged list count allocated in proportion to its declared count, not the input");
+}
+
+// Layout 2 (adversarial): the same filler, but placed *after* the forged
+// list's header instead of before it. A "bytes remaining in the transport"
+// cap is fooled by this layout -- the filler is real, present data, so it
+// keeps "remaining" large, but the `columns` list's very first element
+// fails to decode (its bytes are not a valid `ColumnChunk`) long before
+// the filler would ever be reached as list content. A correct fix must not
+// depend on where in the buffer any padding sits, only on how many
+// elements were actually, successfully decoded -- here, zero.
+unittest {
+    import std.array : replicate;
+
+    enum padding = 50_000;
+    enum declaredColumns = 49_000;
+
+    auto e = Encoder.make();
+    e.begin("FileMetaData");
+    e.i32Field("version", 1, 1);
+    e.listBegin("row_groups", 4, TType.STRUCT, 1);
+    e.begin("RowGroup");
+    e.listBegin("columns", 1, TType.STRUCT, declaredColumns);
+    // Filler *after* the forged list header. It is well-formed, present
+    // input -- unlike layout 1, "bytes remaining" stays large here -- but
+    // it can never legitimately become one of the declared ColumnChunk
+    // elements: decoding the first one fails before this content is ever
+    // reached as list data.
+    e.stringField("created_by", 6, "x".replicate(padding));
+    const bytes = e.finish();
+
+    ParquetFormatException caught;
+    const grew = heapGrowth({
+        try decodeFileMetaData(bytes);
+        catch (ParquetFormatException ex) caught = ex;
+    });
+    assert(caught !is null, "forged columns count accepted instead of rejected as truncated");
+    assert(grew < (declaredColumns * ColumnChunk.sizeof) / 10,
+        "forged list count allocated in proportion to its declared count "
+        ~ "regardless of where padding sits in the buffer");
 }

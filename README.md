@@ -100,10 +100,13 @@ quality-gated local-tree harness, dispatch-shipping comparisons).
 - **Real parallelism** across files (OS threads, not green threads),
   zero-copy mmap reads, atomic output writes, and an opt-in SQLite-backed
   error journal/manifest for resuming interrupted local runs.
-- **Crawl building blocks**: a bounded WARC/1.1 reader (plain, gzip, and
-  zstd-compressed; read-only), a durable/resumable crawl frontier with
-  permanent duplicate-rejection, bounded HTTP fetch, and HTML link
-  discovery — not yet wired into a top-level `crawl` command.
+- **Crawling**: a `crawl` subcommand (fetch, discover links, and save raw
+  HTML with a concurrent, resumable frontier) built on a bounded WARC/1.1
+  reader (plain, gzip, and zstd-compressed; read-only), a durable crawl
+  frontier with permanent duplicate-rejection, bounded HTTP fetch, and
+  HTML link discovery. Fetch + discover + save raw only — no mojibake
+  repair or metadata/main-content/PII stages; use `clean-web-document` as
+  a separate later pass over the raw output.
 - **Metadata, tags, rights, and chunking**: deterministic title/author/
   date/URL extraction, declared topical-tag extraction, a source-rights
   policy engine for permission/takedown decisions, and structured

@@ -240,6 +240,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 ./scrubbed run --input - --output - --jsonl-fields text,title \
     --dataset-namespace corpus-v1 --source-key shard-0001 \
     --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 \
+    --filters fix-mojibake \
     < input.jsonl > clean.jsonl</pre>
     <p class="note">Full command and flag reference: <a href="https://github.com/schancel/scrubbed/blob/main/docs/cli-commands.md" target="_blank" rel="noopener">docs/cli-commands.md</a>.</p>
 

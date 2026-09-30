@@ -64,7 +64,7 @@ import std.digest : LetterCase, toHexString;
 import std.exception : enforce;
 import std.file : read;
 import std.json : JSONValue;
-import std.parallelism : task, TaskPool;
+import std.parallelism : task, TaskPool, totalCPUs;
 import std.stdio : File, stderr;
 import std.string : indexOf, toLower;
 
@@ -269,6 +269,25 @@ public:
     /// frontier-layer concept.
     this(JobQueue queue, string rawDir, ManifestWriter manifest, CrawlBounds bounds) {
         enforce(bounds.concurrency > 0, "crawl orchestrator: concurrency must be positive");
+        // Same thread-spawn-ceiling bug class as #472 (`--threads`, `cli.d`):
+        // `concurrency` feeds `run()`'s `new TaskPool(workers - 1)` below with
+        // no upper bound, so a garbage/typo value (e.g. `--concurrency
+        // 999999999`) was not rejected up front -- scrubbed actually tried to
+        // spawn that many OS worker threads, climbing toward the process's OS
+        // thread ceiling before crashing with an unhandled
+        // `core.thread.threadbase.ThreadError`, with no page fetched and no
+        // progress output (fixes #521). Mirrors #472's exact bound/rationale:
+        // 64x detected cores is a generous multiple that comfortably covers
+        // legitimate high-core-count server usage while catching
+        // garbage/typo values well before the OS thread ceiling is at risk.
+        // Validated here, in the constructor, so every caller -- the CLI
+        // (`effects.crawl_cli.executeCrawl`) and any direct/test caller alike
+        // -- is rejected before `run()` ever constructs a `TaskPool`.
+        enum concurrencyPerCoreLimit = 64;
+        enforce(bounds.concurrency <= totalCPUs * concurrencyPerCoreLimit,
+            "--concurrency must be at most " ~
+            (totalCPUs * concurrencyPerCoreLimit).to!string ~ " (" ~
+            totalCPUs.to!string ~ " cores detected)");
         queue_ = queue;
         rawDir_ = rawDir;
         manifest_ = manifest;
@@ -905,4 +924,53 @@ unittest {
         assert(queue.counts().activeLeases == 0 && queue.counts().completed == 1);
     }
     assert(server.hitsFor("/only") == 1);
+}
+
+// #521: an absurd `--concurrency` value (e.g. a typo like 999999999) must be
+// rejected by `CrawlOrchestrator`'s own constructor validation before `run()`
+// ever constructs a `TaskPool`, not left to climb toward the process's OS
+// thread ceiling and crash -- the identical bug class #472 already fixed for
+// `--threads` in `cli.d`. Exercised directly against the constructor (the
+// same in-process, no-full-CLI-stack shape #472's own `cli.d` regression test
+// uses), so the oversized value never reaches `run()`/`TaskPool` construction
+// and this test spawns no extra threads.
+unittest {
+    import std.exception : collectException;
+
+    auto limits = FrontierLimits(32, 32, 4, 32, 1, 16 * 1024 * 1024, 8192, 4096, 1024 * 1024);
+    auto opened = openInMemoryJobQueue(limits);
+    assert(opened.code == QueueOpenCode.opened);
+    JobQueue queue = opened.queue;
+
+    auto workDir = freshTempDir("oversized-concurrency");
+    scope(exit) removeTempDir(workDir);
+    auto rawDir = buildPath(workDir, "raw");
+    mkdirRecurse(rawDir);
+    auto manifest = new ManifestWriter(buildPath(workDir, "manifest.jsonl"));
+
+    auto bounds = smallGraphBounds(totalCPUs * 64 + 1, "http://example.test");
+    auto error = collectException!Exception(
+        new CrawlOrchestrator(queue, rawDir, manifest, bounds));
+    assert(error !is null,
+        "an oversized --concurrency must be rejected, not silently accepted");
+    assert(error.msg.canFind("--concurrency must be at most ") &&
+        error.msg.canFind((totalCPUs * 64).to!string ~ " (" ~ totalCPUs.to!string ~
+            " cores detected)"),
+        error.msg);
+
+    // The boundary itself (exactly 64x detected cores) and any smaller,
+    // in-range value (including the default of 4) are completely unaffected.
+    auto atBound = smallGraphBounds(totalCPUs * 64, "http://example.test");
+    auto boundError = collectException!Exception(
+        new CrawlOrchestrator(queue, rawDir, manifest, atBound));
+    assert(boundError is null,
+        "--concurrency at exactly the documented bound must be accepted, got: " ~
+        (boundError is null ? "" : boundError.msg));
+
+    auto defaultBounds = smallGraphBounds(4, "http://example.test");
+    auto defaultError = collectException!Exception(
+        new CrawlOrchestrator(queue, rawDir, manifest, defaultBounds));
+    assert(defaultError is null,
+        "the default --concurrency (4) must be accepted, got: " ~
+        (defaultError is null ? "" : defaultError.msg));
 }

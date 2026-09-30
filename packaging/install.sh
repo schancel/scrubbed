@@ -57,6 +57,27 @@ need_cmd() {
     fi
 }
 
+# `-w` on a path that does not exist yet is always false, so testing it
+# directly against an install prefix/bin dir that `mkdir -p` hasn't created
+# yet (the common case: a fresh account's $HOME/.local, or any custom
+# SCRUBBED_INSTALL_PREFIX nobody pre-created) wrongly reports "not
+# writable" even though the nearest existing parent directory is. Walk up
+# to that nearest existing ancestor and test writability there instead --
+# that is what actually determines whether `mkdir -p "$1"` would succeed.
+nearest_existing_ancestor() {
+    dir="$1"
+    while [ ! -d "$dir" ]; do
+        parent=$(dirname "$dir")
+        [ "$parent" = "$dir" ] && break
+        dir="$parent"
+    done
+    printf '%s' "$dir"
+}
+
+writable_prefix() {
+    [ -w "$(nearest_existing_ancestor "$1")" ]
+}
+
 need_cmd uname
 need_cmd curl
 need_cmd mktemp
@@ -177,7 +198,7 @@ choose_prefix() {
         printf '%s' "$SCRUBBED_INSTALL_PREFIX"
         return
     fi
-    if [ -w "/usr/local/bin" ] || [ "$(id -u)" = "0" ]; then
+    if writable_prefix "/usr/local/bin" || [ "$(id -u)" = "0" ]; then
         printf '%s' "/usr/local"
         return
     fi
@@ -193,12 +214,12 @@ bin_dir="$prefix/bin"
 share_dir="$prefix/share"
 
 use_sudo=""
-if [ ! -w "$bin_dir" ] && [ ! -w "$prefix" ] && [ "$(id -u)" != "0" ]; then
+if [ "$(id -u)" != "0" ] && ! writable_prefix "$bin_dir"; then
     if [ -z "${SCRUBBED_INSTALL_NO_SUDO:-}" ] && command -v sudo >/dev/null 2>&1; then
         use_sudo="sudo"
         info "using sudo to install into $prefix"
     else
-        die "cannot write to $prefix and no sudo available -- set SCRUBBED_INSTALL_PREFIX to a writable location (e.g. \$HOME/.local)"
+        die "cannot write to $prefix (nearest existing directory $(nearest_existing_ancestor "$bin_dir") is not writable) and no sudo available -- set SCRUBBED_INSTALL_PREFIX to a writable location (e.g. \$HOME/.local)"
     fi
 fi
 

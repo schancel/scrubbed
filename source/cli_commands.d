@@ -110,7 +110,7 @@ struct Extract {
     @(NamedArgument("input", "i").Description("Input path")) string input;
     @(NamedArgument("output", "o").Description("Output path")) string output;
     @(NamedArgument("format", "f").Description(
-        "Extraction format: tree-json (default), markdown (whole page), " ~
+        "Extraction format (required): tree-json, markdown (whole page), " ~
         "main-content-markdown (boilerplate/nav/ad/footer stripped " ~
         "first, same selection as html-main-content/clean-web-document, " ~
         "then rendered as Markdown instead of plain text), csv (one " ~
@@ -863,6 +863,26 @@ unittest {
 
     auto shortHelp = runCommandsCapturingStdout(["scrubbed", "-h"]);
     assert(shortHelp[0] == 0, "-h must still exit 0");
+}
+
+// Issue #474: `extract --help` must not claim `--format` has a default --
+// it is required (omitting it exits 2 with "extract requires ...
+// --format=..."). The help must say so and must list every accepted format.
+unittest {
+    import std.array : split, join;
+    auto help = runCommandsCapturingStdout(["scrubbed", "extract", "--help"]);
+    assert(help[0] == 0, "extract --help must exit 0");
+    // argparse wraps descriptions; collapse whitespace before matching.
+    auto flat = help[1].split.join(" ");
+    assert(flat.canFind("--format"), "extract --help must document --format");
+    assert(!flat.canFind("(default)"),
+        "extract --help must not claim --format has a default: " ~ flat);
+    assert(flat.canFind("Extraction format (required)"),
+        "extract --help must mark --format as required: " ~ flat);
+    foreach (fmt; ["tree-json", "markdown", "main-content-markdown", "csv",
+            "xml", "xml-tei"])
+        assert(flat.canFind(fmt),
+            "extract --help must list format " ~ fmt ~ ": " ~ flat);
 }
 
 // run/repair/clean/fix remain byte-identical to each other and completely

@@ -305,8 +305,11 @@ uncalibrated confidence described above; if `abstained`, one typed reason:
   widening is additive (Latin plus exactly these 6 Brahmic scripts), not a
   general loosening.
 - `mixedOrAmbiguous` — the best and second-best language's out-of-place
-  distances are within `mixedMarginBound` (2% of the worst-case distance) of
-  each other; the two top candidates are too close to call. This slice adds
+  distances are within the applicable margin bound of each other; the two
+  top candidates are too close to call. `mixedMarginBound` (2% of the
+  worst-case distance) is the default, tightened to 4% specifically when the
+  winning candidate is French — see "Excluded-neighbor abstention" below
+  (issue #34). This slice adds
   a mixed-*script* golden (`mixedScriptGolden` in
   `experiments/language_id/check.d`) alongside the existing mixed-*language*
   (English/Spanish) golden: an authored sentence blending an English clause
@@ -315,10 +318,12 @@ uncalibrated confidence described above; if `abstained`, one typed reason:
   the existing mixed-language mechanism generalizes to mixed-script text
   without a bespoke new mechanism.
 - `belowConfidenceThreshold` — the best candidate clears the margin check
-  above but its own relative confidence is still below
-  `internalConfidenceFloor` (0.15). This is an **internal** detection floor,
-  independent of `routeLanguage`'s caller-supplied external threshold
-  described next.
+  above but its own relative confidence is still below the applicable
+  confidence floor: `internalConfidenceFloor` (0.15) by default, or a
+  tighter per-target-language override from `confidenceFloorFor` — see
+  "Excluded-neighbor abstention" below (issue #34's threshold-tightening
+  fix). This is an **internal** detection floor, independent of
+  `routeLanguage`'s caller-supplied external threshold described next.
 
 `routeLanguage(result, threshold)` is a separate pure function: only a
 `detected` result at or above the caller-supplied `threshold` routes to a
@@ -346,69 +351,112 @@ number:
   one explicitly. No default is proposed here; a future CLI/config-exposing
   successor must pick and justify one.
 - **The excluded-neighbor abstention gap** (Romanian/Catalan/Swahili
-  probes not cleanly abstaining after reasonable tuning attempts within
-  existing constants) — see "Excluded-neighbor abstention" immediately
-  below for the full disclosure and specific observed numbers, flagged here
-  per the same contract instruction.
+  probes not cleanly abstaining at the original single global thresholds)
+  — issue #34's 2026-09-30 owner decision was to close this by tightening
+  further, via per-target-language threshold overrides. Romanian and
+  Swahili are now fully closed; Catalan has a disclosed, verified-
+  irreducible residual. See "Excluded-neighbor abstention" immediately
+  below for the full disclosure and specific numbers, flagged here per the
+  same contract instruction.
 
-`nonLatinScriptBound` (0.3), `mixedMarginBound` (0.02), and
-`internalConfidenceFloor` (0.15) are ordinary implementation constants,
-tuned against the same small authored fixture set described above and
-documented here for transparency, but were not separately called out for
-sign-off by the contract.
+`nonLatinScriptBound` (0.3), `mixedMarginBound` (0.02, the default margin
+bound), and `internalConfidenceFloor` (0.15, the default confidence floor)
+are ordinary implementation constants, tuned against the same small
+authored fixture set described above and documented here for transparency,
+but were not separately called out for sign-off by the contract. Issue #34
+additionally pins three per-target-language overrides of the latter two
+(`confidenceFloorFor`/`marginBoundFor` in `source/domain/language_id.d`) —
+see "Excluded-neighbor abstention" below for the exact values and the
+verification behind each one.
 
-### Excluded-neighbor abstention: a disclosed, not fully closed, gap
+### Excluded-neighbor abstention: tightened per target language (issue #34)
 
 This is the direct successor to the first slice's German-vs-Dutch
 disclosure (that specific pair is now resolved: Dutch is supported). The
-same structural problem recurs, now probed deliberately, per the
-accepted contract, against three close linguistic neighbors of the eleven
-supported languages that are themselves **not** supported: Romanian (close
-to the Romance cluster), Catalan (very close to Spanish; the contract's
-"Catalan-or-Galician" choice — Catalan was picked here; see
+same structural problem recurred, probed deliberately, per the accepted
+contract, against three close linguistic neighbors of the eleven supported
+Latin-script languages that are themselves **not** supported: Romanian
+(close to the Romance cluster), Catalan (very close to Spanish; the
+contract's "Catalan-or-Galician" choice — Catalan was picked here; see
 `experiments/language_id/fixtures/heldout/excluded/ca-or-gl.txt`), and
 Swahili (probed as a more distant, non-Indo-European control).
 
-The accepted contract's implementation path was: first try tightening via
-the existing `internalConfidenceFloor`/`mixedMarginBound` constants,
-validated against ten authored held-out probe sentences per excluded
-language, before considering any other option. That tuning attempt was made
-(`experiments/language_id/check.d`'s `excludedNeighborAbstentionGoldens`
-doc comment has the full sweep) and is disclosed here rather than silently
-skipped or forced to a false "clean pass":
+**A single global threshold cannot fix this.** The lowest genuine
+confidently-detected supported-language held-out confidence across the full
+170-line held-out set is **~0.263** (Telugu), only ~0.008 above the weakest
+excluded-neighbor force-classification (Swahili at 0.271 as Indonesian).
+Raising either `internalConfidenceFloor` or `mixedMarginBound` globally at
+all would cause regression before fixing anything — this matches the first
+tuning attempt's finding from the Brahmic slice, sharpened once the full
+17-language held-out set was available.
 
-- The lowest genuine confidently-detected supported-language held-out
-  confidence observed is **0.273** (Vietnamese). A Swahili probe line
-  force-classifies as Indonesian at confidence **0.271** — *below* that
-  genuine floor. No single `internalConfidenceFloor` value separates
-  excluded-neighbor false positives from genuine supported-language text
-  without also abstaining currently-correct held-out text.
-- The lowest genuine supported-language margin fraction observed is
-  **~0.0264** (Portuguese/Italian). Excluded-neighbor margin fractions range
-  from **~0.0213 to ~0.0603**, overlapping that genuine distribution
-  throughout; no single `mixedMarginBound` value separates them either.
+**Issue #34's owner decision (2026-09-30)** was to fix this by tightening
+the confidence threshold further, explicitly choosing that over adding a
+closely-related-language heuristic (detecting *which* unsupported language
+the text is) or accepting the disclosed risk as-is. The mechanism:
+`confidenceFloorFor`/`marginBoundFor` in `source/domain/language_id.d`
+key the existing threshold checks on the already-computed winning candidate
+(`scored[0].language`) instead of a single scalar, each override chosen to
+sit strictly between the highest excluded-neighbor force-classification
+value it must catch and the lowest genuine-correct held-out value for that
+same target language — so raising it cannot regress any currently-correct
+held-out classification. Verified two ways: directly, against the full
+sorted per-target-language confidence/margin distributions over the 170-line
+held-out set; and empirically, by confirming the held-out confusion-matrix
+golden (166/170 correct, 0 misclassified, 4 abstained) is unchanged before
+and after the change.
 
-Neither existing constant admits a value that cleanly separates these three
-probes from genuine supported-language text, so no bespoke new mechanism
-was invented and no false "always abstains" claim is made. The observed
-outcome, exactly as pinned and disclosed by `excludedNeighborAbstentionGoldens`:
+The three overrides:
 
-- **Romanian**: 8/10 probe lines abstain (`mixedOrAmbiguous`); 2/10
-  force-classify (Italian at confidence 0.286, French at 0.366).
-- **Catalan**: 4/10 abstain; 6/10 force-classify (all as Spanish or Italian,
-  confidence 0.400-0.427 — the worst case of the three, as expected given
-  how close Catalan is to Spanish).
-- **Swahili**: 7/10 abstain; 3/10 force-classify (Indonesian, confidence
-  0.271-0.308).
+- **`it` (confidence floor 0.33, default 0.15)**: catches Romanian's
+  it-target force-classification (confidence 0.286). Genuine Italian
+  held-out minimum confidence is 0.374 — real headroom (~0.044) on both
+  sides.
+- **`id` (confidence floor 0.35, default 0.15)**: catches all three of
+  Swahili's id-target force-classifications (confidences 0.271, 0.279,
+  0.308). Genuine Indonesian held-out minimum confidence is 0.397 — real
+  headroom (~0.045-0.09) on both sides.
+- **`fr` (margin bound 0.04, default 0.02)**: Romanian's fr-target
+  force-classification (confidence 0.366) sits only ~0.003 below the
+  genuine French held-out confidence minimum (0.369) — too thin a gap in
+  confidence space to tighten robustly. Its raw margin (0.026), however,
+  sits comfortably below the genuine French held-out margin minimum
+  (0.051) — real headroom (~0.011-0.025) — so the margin side of the
+  threshold logic, not the confidence side, is what closes this case.
 
-`unsupportedScript` does not help here (all three probe languages are
-plain Latin script within the recognized ranges). `mixedOrAmbiguous` and
-`belowConfidenceThreshold` catch a majority but not all probe lines. This
-is consistent with the contract's explicit allowance ("no guarantee the
-excluded-neighbor mechanism achieves zero false-classification — only that
-it's tested and any residual gap is disclosed"), and is flagged here for
-owner sign-off, the same way the original German-vs-Dutch 0.315/0.316
-finding was.
+Post-fix outcome, pinned by `excludedNeighborAbstentionGoldens`:
+
+- **Romanian**: **10/10 probe lines abstain; 0/10 force-classify — full
+  fix.** (Was 8/10 abstain, 2/10 force-classify: Italian at 0.286, French
+  at 0.366.)
+- **Swahili**: **10/10 probe lines abstain; 0/10 force-classify — full
+  fix.** (Was 7/10 abstain, 3/10 force-classify: Indonesian at
+  0.271-0.308.)
+- **Catalan**: **unchanged — 4/10 abstain; 6/10 force-classify** (1 as
+  Italian at confidence 0.400, 5 as Spanish at confidence 0.407-0.427).
+  This is a disclosed, verified-irreducible residual gap, not a silently
+  accepted or silently invented fix:
+  - The it-target case (0.400) sits *above* the genuine Italian held-out
+    minimum (0.374); no it-target confidence or margin floor can catch it
+    without also newly abstaining 4 genuine Italian held-out lines
+    (confidences 0.374, 0.381, 0.390, 0.394).
+  - All five es-target cases (0.407-0.427) sit *above* the genuine Spanish
+    held-out minimum confidence (0.351; second-lowest 0.371); no es-target
+    confidence floor can catch any of them without regression. The same
+    check in margin space also fails to cleanly separate: two of the five
+    es-target margins (0.028, 0.035) sit below the genuine Spanish margin
+    minimum (0.051) and could technically be caught, but only with a floor
+    within ~0.0003-0.001 of that genuine minimum — razor-thin, and the
+    other three es-target margins (0.050, 0.058, 0.060) remain uncatchable
+    regardless. Forcing that fragile a partial fix would fit the specific
+    residual fixture lines rather than reflect a real, robust separation,
+    so it was not done.
+
+`unsupportedScript` does not help here (all three probe languages are plain
+Latin script within the recognized ranges). This Catalan residual is
+flagged here for owner sign-off, the same way the original German-vs-Dutch
+0.315/0.316 finding, and the pre-fix Catalan 60% finding itself, both
+were.
 
 **Not extended to the 6 new Brahmic languages by this slice.** Per the
 accepted contract, the excluded-neighbor mechanism exists to catch close

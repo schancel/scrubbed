@@ -6,7 +6,7 @@ The seven\-person survey team spent three weeks mapping the tidal delta with [a 
 
 Two sonar rigs and a hand\-held current meter formed the core kit for the season, backed by a paper logbook that every team member signed at the end of each shift so nothing was lost between rotations\.
 
- ![The survey team wading through the delta at low tide](<https://example.com/images/survey-team.jpg>)
+![The survey team wading through the delta at low tide](<https://example.com/images/survey-team.jpg>)
 
 ## Observations
 

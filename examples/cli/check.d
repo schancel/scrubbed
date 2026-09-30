@@ -111,20 +111,49 @@ int main(string[] args) {
         "Usage: scrubbed [-h] <command> [<args>]\n\n" ~
         "Sanitize text through a bounded filter pipeline.\n\n" ~
         "Available commands:\n" ~
-        "  run,clean         Run the bounded filter pipeline (also the no-verb default).\n" ~
-        "  repair,fix        Repair text with the existing filter pipeline.\n" ~
-        "  extract,x         Export a bounded selected HTML parse tree or Markdown.\n" ~
-        "  completion        Generate shell setup or command/option-name candidates; use\n" ~
-        "                    completion init --bash, --zsh or --fish.\n" ~
-        "  errors-init       Create a new opt-in v3 error journal.\n" ~
-        "  errors-copy       Copy an existing v1 journal to a new v2 journal.\n" ~
-        "  errors-export     Export a bounded v2 or v3 journal snapshot.\n" ~
-        "  errors-verify     Verify exported JSONL and digest sidecars.\n" ~
-        "  route-metadata    Route local HTML content and stage metadata to independent\n" ~
-        "                    sinks.\n\n" ~
+        "  run,clean             Run the bounded filter pipeline.\n" ~
+        "  repair,fix            Repair text with the existing filter pipeline.\n" ~
+        "  extract,x             Export a bounded selected HTML parse tree, whole-page\n" ~
+        "                        Markdown, boilerplate-stripped main-content Markdown,\n" ~
+        "                        CSV, generic XML, or TEI-conformant XML.\n" ~
+        "  completion            Generate shell setup or command/option-name candidates;\n" ~
+        "                        use completion init --bash, --zsh or --fish.\n" ~
+        "  errors-init           Create a new opt-in v3 error journal.\n" ~
+        "  errors-copy           Copy an existing v1 journal to a new v2 journal.\n" ~
+        "  errors-export         Export a bounded v2 or v3 journal snapshot.\n" ~
+        "  errors-verify         Verify exported JSONL and digest sidecars.\n" ~
+        "  route-metadata        Route local HTML content and stage metadata to\n" ~
+        "                        independent sinks.\n" ~
+        "  clean-web-document    Run the sealed clean-web-document/v1 preset. Equivalent\n" ~
+        "                        to: run --stage text-transform=text-transform --filter\n" ~
+        "                        fix-mojibake --stage\n" ~
+        "                        html-metadata-annotate=html-metadata-annotate --stage\n" ~
+        "                        html-main-content=html-main-content --stage\n" ~
+        "                        pii-four-class=pii-four-class --stage\n" ~
+        "                        document-metadata-publish=document-metadata-publish\n" ~
+        "                        (plus your own --input/--output, and optionally\n" ~
+        "                        --threads/--max-queued-docs/--max-input-bytes/--max-open-inputs)\n" ~
+        "                        -- generated from the same compiled stage-token list\n" ~
+        "                        --emit-config prints, not hand-maintained prose. No\n" ~
+        "                        --stage/--filter/--stage-option/--filter-option\n" ~
+        "                        overrides accepted directly; use 'run' for custom\n" ~
+        "                        composition. Automatically writes a document-metadata\n" ~
+        "                        sidecar (annotated title/author/date/url plus the PII\n" ~
+        "                        audit, in one blob) beside --output (see --output help);\n" ~
+        "                        fails before touching anything if that derived path\n" ~
+        "                        already exists.\n" ~
+        "  crawl                 Fetch, discover links, and save raw HTML with a\n" ~
+        "                        concurrent, resumable frontier. Fetch + discover + save\n" ~
+        "                        raw only: no mojibake repair, no\n" ~
+        "                        metadata/main-content/PII stages. Use\n" ~
+        "                        'clean-web-document' as a separate later pass over the\n" ~
+        "                        raw output.\n" ~
+        "  version               Print version and exit (same as --version)\n\n" ~
         "Optional arguments:\n" ~
-        "  -h, --help        Show this help message and exit\n\n", "root help golden");
-    foreach (verb; ["run", "clean", "repair", "fix", "extract", "x", "completion"]) {
+        "  -h, --help            Show this help message and exit\n\n", "root help golden");
+    foreach (verb; ["run", "clean", "repair", "fix", "extract", "x", "completion",
+            "errors-init", "errors-copy", "errors-export", "errors-verify", "route-metadata",
+            "clean-web-document", "crawl"]) {
         auto help = execute([exe, verb, "--help"]);
         auto canonical = verb == "clean" ? "run" : verb == "fix" ? "repair" :
             verb == "x" ? "extract" : verb;
@@ -143,14 +172,13 @@ int main(string[] args) {
         "Optional arguments:\n" ~
         "  -h, --help    Show this help message and exit\n\n",
         "completion help golden");
-    auto list = execute([exe, "--list-filters"]);
+    auto list = execute([exe, "run", "--list-filters"]);
     check(list.status == 0 && list.output ==
         "registered filters: fix-mojibake, strip-control, decode-html-entities, uncurl-quotes, normalize-line-endings\n",
         "legacy list golden");
     auto missing = execute([exe]);
-    check(missing.status == 2 &&
-        missing.output == "--input and --output are required (--list-filters to see what's available)\n",
-        "legacy missing paths golden");
+    check(missing.status == 2 && missing.output == rootHelp.output,
+        "missing verb prints root help");
     foreach (bad; [["--unknown"], ["--FILTERS", "x"], ["run", "--threads", "bad"],
                    ["repair", "--max-open-inputs", "bad"], ["completion", "bogus"]]) {
         auto result = execute([exe] ~ bad);
@@ -161,7 +189,7 @@ int main(string[] args) {
     auto input = buildPath(root, "input.txt");
     auto output = buildPath(root, "output.txt");
     write(input, "line\r\n");
-    foreach (verb; ["", "run", "clean", "repair", "fix"]) {
+    foreach (verb; ["run", "clean", "repair", "fix"]) {
         string[] command = [exe];
         if (verb.length) command ~= verb;
         command ~= ["--input", input, "--output", output,
@@ -191,8 +219,9 @@ int main(string[] args) {
     write(invalid, [cast(ubyte) 0xFF]);
     auto failedFile = execute([exe, "run", "--input", invalid,
         "--output", invalidOutput, "--threads", "1"]);
-    check(failedFile.status == 2 && failedFile.output.canFind("FATAL") &&
-        !exists(invalidOutput), "no-manifest worker failure exits fatal 2");
+    check(failedFile.status == 1 && failedFile.output.canFind("1 quarantined") &&
+        failedFile.output.canFind("invalid encoding") && !exists(invalidOutput),
+        "invalid UTF-8 is quarantined without output");
     auto dryOutput = buildPath(root, "dry", "output.txt");
     auto dry = execute([exe, "repair", "--input", input, "--output", dryOutput,
         "--dry-run", "--explain", "--threads", "1"]);
@@ -415,7 +444,8 @@ int main(string[] args) {
     auto extractOutput = buildPath(root, "extract.txt");
     auto extract = separately([exe, "extract", "--input", input, "--output", extractOutput]);
     check(extract.status == 2 && extract.output == "" &&
-        extract.error == "scrubbed: extract requires --input, --output and --format=tree-json|markdown\n" &&
+        extract.error == "scrubbed: extract requires --input, --output and " ~
+            "--format=tree-json|markdown|main-content-markdown|csv|xml|xml-tei\n" &&
         !exists(extractOutput), "extract argument golden");
 
     auto executable = buildNormalizedPath(absolutePath(exe));

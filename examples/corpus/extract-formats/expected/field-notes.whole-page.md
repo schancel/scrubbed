@@ -1,4 +1,4 @@
- Home About Contact
+Home About Contact
 
 # Delta Survey Field Notes
 
@@ -8,7 +8,7 @@ The seven\-person survey team spent three weeks mapping the tidal delta with [a 
 
 Two sonar rigs and a hand\-held current meter formed the core kit for the season, backed by a paper logbook that every team member signed at the end of each shift so nothing was lost between rotations\.
 
- ![The survey team wading through the delta at low tide](<https://example.com/images/survey-team.jpg>)
+![The survey team wading through the delta at low tide](<https://example.com/images/survey-team.jpg>)
 
 ## Observations
 
@@ -44,4 +44,4 @@ Great writeup \-\- did the sonar rig need recalibration after the storm on day n
 
 Station four's layering matches what our own team saw further upstream last spring\.
 
- Copyright 2026 Delta Survey Project\. [Legal](<https://example.com/legal>)
+Copyright 2026 Delta Survey Project\. [Legal](<https://example.com/legal>)

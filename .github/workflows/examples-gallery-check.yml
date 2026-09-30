@@ -1,0 +1,83 @@
+name: Examples gallery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/examples-gallery-check.yml"
+      - "examples/**"
+      - "source/**"
+      - "README.md"
+      - "site/**"
+      - "dub.json"
+      - "dub.selections.json"
+  pull_request:
+    paths:
+      - ".github/workflows/examples-gallery-check.yml"
+      - "examples/**"
+      - "source/**"
+      - "README.md"
+      - "site/**"
+      - "dub.json"
+      - "dub.selections.json"
+
+permissions:
+  contents: read
+
+jobs:
+  gallery:
+    name: every advertised example
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned LDC
+        uses: dlang-community/setup-dlang@2979e3ea011f6a234cd3a47dcbeb60f451c9635f
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake libcurl4-openssl-dev python3
+
+      - name: Build release binary
+        run: dub build --compiler=ldc2 --build=release
+
+      - name: Prove gallery closure
+        run: |
+          ldc2 -O -release -of=.dub/gallery-closure-check \
+            examples/gallery_closure_check.d
+          .dub/gallery-closure-check . --self-test
+
+      - name: Build and run every pipeline checker
+        shell: bash
+        run: |
+          set -euo pipefail
+          dxml_import=$(dub describe --data=import-paths | tr ' ' '\n' | grep '/dxml/' | head -n 1)
+          while IFS= read -r checker; do
+            name=$(basename "$(dirname "$checker")")
+            binary=".dub/${name}-check"
+            extra=()
+            if [[ "$name" == "extract-formats" ]]; then
+              extra+=("$dxml_import")
+            fi
+            if [[ "$name" == "crawl" ]]; then
+              extra+=(third_party/sqlite/sqlite3.o)
+            fi
+            ldc2 -O3 -release -preview=dip1000 -i -Isource \
+              "${extra[@]}" -of="$binary" "$checker"
+            "$binary" ./scrubbed
+          done < <(find examples/pipelines -mindepth 2 -maxdepth 2 \
+            -name check.d -type f | sort)
+
+      - name: Build and run CLI checkers
+        run: |
+          ldc2 -O -release -of=.dub/cli-check examples/cli/check.d
+          .dub/cli-check ./scrubbed
+          ldc2 -O -release -of=.dub/cli-version-check examples/cli/version_check.d
+          .dub/cli-version-check ./scrubbed

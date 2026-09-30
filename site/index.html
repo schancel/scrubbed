@@ -70,6 +70,7 @@
                 <li><a href="#pipeline">The pipeline</a></li>
                 <li><a href="#verified">Verified against</a></li>
                 <li><a href="#also-shipped">Also shipped</a></li>
+                <li><a href="#examples">Examples</a></li>
                 <li><a href="#status">Status</a></li>
                 <li><a href="#feedback">Feedback</a></li>
                 <li><a href="#usage">Usage</a></li>
@@ -184,6 +185,10 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <li>Parallel file processing, atomic output, and resumable runs.</li>
         <li>A local, multithreaded, resumable crawler.</li>
     </ul>
+
+    <h2 id="examples">Examples</h2>
+    <p>CI runs the <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipelines" target="_blank" rel="noopener">complete example gallery</a>: quickstart, cleaning, extraction formats, custom stages, near-duplicate decisions, PII policies, metadata routing, and local crawling.</p>
+    <p class="note">No S3, Parquet, native-Windows, or distributed-execution examples are advertised because those are not shipped CLI capabilities.</p>
 
     <h2 id="status">Status</h2>
     <p>Ready for local, single-machine corpus runs. Multi-machine execution and proven multi-terabyte operation are not yet supported.</p>

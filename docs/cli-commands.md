@@ -169,13 +169,19 @@ quarantined reasons: abstainedBelowThreshold (1)
 This is an aggregated roll-up by reason, not one line per file, so it stays
 small even for a large directory tree; for a full per-file breakdown
 (destination, document ID, sink), hand-compose the same five stages with
-`scrubbed run` plus `--explain`:
+`scrubbed run` plus `--explain`. `clean-web-document --help` prints this
+exact composition (rendered, not hand-typed, from the same compiled token
+list `--emit-config` compiles -- see below), so it is the source of truth
+if this example and that generated text ever disagree; add `--explain` and
+your own `--sidecar-output`:
 
 ```sh
 scrubbed run --input page.html --output page.txt --sidecar-output page.txt.sidecar \
-  --explain --stage clean=text-transform --filter fix-mojibake \
-  --stage meta=html-metadata-annotate --stage extract=html-main-content \
-  --stage pii=pii-four-class --stage pub=document-metadata-publish
+  --explain --stage text-transform=text-transform --filter fix-mojibake \
+  --stage html-metadata-annotate=html-metadata-annotate \
+  --stage html-main-content=html-main-content \
+  --stage pii-four-class=pii-four-class \
+  --stage document-metadata-publish=document-metadata-publish
 ```
 
 This same roll-up line also appears after a plain (non-`--explain`)
@@ -293,6 +299,15 @@ No mojibake repair, no metadata/main-content extraction, no PII detection,
 no `StageDocument` involvement anywhere in this command -- cleaning the raw
 output it produces is a separate, later pass, e.g. `clean-web-document`
 pointed at the `raw/` directory `crawl` wrote.
+
+(Issue #563 asked whether `crawl`, like `clean-web-document`, is really a
+thin alias to a `run --stage ...` composition whose `--help` should render
+that equivalent -- verified not: `crawl` never builds a `job.spec.JobSpec`
+or calls `job.cli_tokens.parseJobTokens`/`composition.compiler.compileJob`
+at all. Its real logic is the frontier/orchestrator machinery above --
+seed admission, concurrent fetch, link discovery, scope/depth/host-limit
+enforcement, a resumable SQLite or in-memory queue -- none of which is
+expressible as `--stage`/`--filter` tokens. There is nothing to render.)
 
 ```sh
 scrubbed crawl --seed https://example.com/ --corpus-dir ./corpus

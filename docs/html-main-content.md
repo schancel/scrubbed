@@ -56,15 +56,33 @@ Per node, purely from already-observed `HtmlNode` data, the pass tracks:
   `section`/`p` each add a flat bonus; `nav`/`aside`/`footer`/`header`/
   `form`/`button`/`figure` each subtract the same amount.
 - A fixed **class/id keyword table**, matched as an ASCII case-insensitive
-  substring of the node's `class` or `id` attribute value:
+  **word-boundary-aware** check against the node's `class` or `id` attribute
+  value (`containsKeywordWord`, issue #538): a candidate occurrence only
+  counts when it is not immediately preceded or followed by another ASCII
+  alphanumeric character (or sits at the string's own edge there) — so `ad`
+  matches `class="ad-banner"` but not `thread` or `class="wp-block-heading"`
+  (`ad` inside `heading` is flanked by alphanumeric `e`/`i` on both sides),
+  and a multi-token keyword like `registration-banner` (itself containing a
+  `-` delimiter) still matches as one unit without needing
+  sequence-of-tokens matching:
   - Adds a bonus: `content`/`article`/`main`/`post`/`body`/`entry`.
   - Subtracts it: `nav`/`sidebar`/`footer`/`header`/`comment`/`menu`/`ad`/
     `advert`/`promo`/`share`/`social`/`related`/`widget`/`breadcrumb`/
     `registration-banner`.
-  - A short keyword such as `ad` is a blunt substring match (for example
-    `thread` contains `ad`); this is the fixed table the contract specifies,
-    not a smarter word-boundary matcher. `experiments/html_main_content/check.d`
-    pins its exact membership so an edit is caught as a drift.
+  - **Positive keywords get a second, narrower credit path** (issue #549,
+    `containsKeywordPrefixOfLongerWord`): the word-boundary rule above
+    otherwise withholds credit from a legitimate compound class/id that
+    concatenates a keyword with no delimiter at all, e.g. `class="maintext"`
+    (`main` is followed directly by alphanumeric `t`). This path credits
+    such a value when it is, as a whole, a single unbroken alphanumeric word
+    starting with the keyword, and the remainder of that word does not
+    itself start with a negative keyword — so `maintext`/`mainheading` are
+    credited, while `mainMenu`/`mainNavBox`/`articleFooter` are withheld
+    because their suffix is itself chrome. This path is never applied to
+    `negativeKeywords`: reopening the unanchored-substring false positive
+    the word-boundary rule fixed (`ad` inside `heading`) is exactly what it
+    must not do. `experiments/html_main_content/check.d` pins both tables'
+    exact membership so an edit is caught as a drift.
 - **Negative-tag-ancestor suppression** (issue #27) — a node nested at *any*
   depth inside a negative-tag container (`nav`/`aside`/`footer`/`header`/
   `form`/`button`/`figure`) never gets credit for its *own* positive tag or
@@ -158,11 +176,13 @@ everything `.text` already dropped. On the corpus that is mostly real
 boilerplate: share/like widgets (`kleinegruenemonster`), the
 `registration-banner` promo (`for-me-online`), an advertising disclosure
 (`laweekly`), teaser headlines (`chemietechnik`) and a rating widget
-(`tofugu`). But `utopia-de.html` also loses two real `<h2
-class="wp-block-heading">` section headings, because the negative keyword
-`ad` is a substring of `heading`. `.text` has dropped those headings since
-the keyword table was added. This is the blunt substring match disclosed
-above, not something this change introduced.
+(`tofugu`). At the time this section was written, `utopia-de.html` also lost
+two real `<h2 class="wp-block-heading">` section headings, because the
+negative keyword `ad` matched as an unanchored substring of `heading`. Issue
+#538's word-boundary-aware `containsKeywordWord` (see "Algorithm" above) has
+since fixed exactly this false positive — `ad` inside `heading` is flanked
+by alphanumeric characters on both sides and no longer matches — so those
+headings are no longer dropped.
 
 Both tables and every weight/threshold constant are private to
 `source/effects/html_main_content.d`; `positiveContentTags`,

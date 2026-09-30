@@ -5,6 +5,7 @@
 	"license": "MIT",
 	"targetType": "executable",
 	"sourcePaths": ["source"],
+	"stringImportPaths": ["."],
 	"dependencies": {"argparse": "==2.0.2", "dxml": "==0.4.5", "warc-reader": {"path": "warc-reader"}},
 	"preBuildCommands": [
 		"os=`uname -s`; arch=`uname -m`; case \"$$os-$$arch\" in Darwin-arm64|Linux-x86_64|Linux-aarch64) exit 0;; *) echo \"scrubbed: unsupported build platform $$os-$$arch (supported: macOS arm64, Linux x86_64/aarch64; see issue #353)\" >&2; exit 1;; esac",

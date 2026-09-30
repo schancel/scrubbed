@@ -15,7 +15,17 @@ import std.conv : to;
 import std.file : FileException, exists, isDir, isSymlink, thisExePath;
 import std.path : buildNormalizedPath;
 import std.stdio : stderr, stdout, writeln;
-import std.string : indexOf, startsWith;
+import std.string : indexOf, startsWith, strip;
+
+// #498: single-owned version source. `VERSION` at the repo root is the one
+// place that owns the printed version string -- `dub.json` intentionally
+// has no `"version"` field (see #499 for real tag/release wiring, out of
+// scope here). `stringImportPaths: ["."]` in dub.json makes this
+// compile-time `import()` expression pull the file's contents in as a
+// string literal; `.strip` drops the trailing newline the checked-in file
+// ends with. Before a real git tag exists this is a fixed placeholder/dev
+// string, not a claim about what the shipped release version will be.
+private immutable string scrubbedVersion = import("VERSION").strip;
 
 mixin template ProcessingOptions() {
     @(NamedArgument("input", "i").Description("Input file or directory tree"))
@@ -233,10 +243,37 @@ struct RouteMetadata {
     @(NamedArgument("retry").Description("Explicitly retry unresolved sink outputs")) bool retry;
 }
 
+// #498: documentation-only stand-in so argparse's own generated --help
+// lists "version" under "Available commands", matching how every other
+// management verb here (errors-init, route-metadata, clean-web-document,
+// crawl, ...) is self-documenting through the same union. This must NOT be
+// a `NamedArgument` field directly on `Commands`: argparse treats a field
+// there as a "common"/global flag accepted anywhere in argv, including
+// *after* a real subcommand's own token (e.g. `scrubbed run --version` would
+// then be silently accepted and ignored instead of correctly erroring as an
+// unrecognized argument -- confirmed empirically, this was caught and
+// reverted in review). A `Command`-tagged struct in the `SubCommand!` union
+// below, by contrast, is only ever matched as the single command-position
+// token, so it carries no such risk -- but for that same reason (argparse
+// statically rejects any subcommand name starting with its short-name
+// prefix, "typetraits.d: Subcommand name should not begin with '-'") it
+// cannot be spelled `--version` as a second alias here the way `run,clean`
+// or `repair,fix` are; the flag spelling is documented in the description
+// text below instead. The actual `scrubbed --version`/`scrubbed version`
+// invocation is handled earlier in `runCommands`, in the same bare-flag
+// dispatch spot that already special-cases `-h`/`--help`, before this
+// struct is ever parsed -- this variant is never actually reached at
+// runtime (see the `assert(0, "management verbs dispatched before
+// argparse")` case below, shared with every other early-dispatched verb).
+@(Command("version").Description("Print version and exit (same as --version)"))
+struct Version {
+}
+
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
     SubCommand!(Run, Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
-        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl)
+        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl,
+        Version)
         command;
 }
 
@@ -715,6 +752,21 @@ int runCommands(string[] argv) {
     // real help (the same generated text `--help` prints) and fail loudly,
     // rather than silently no-op (bare `scrubbed`) or surface argparse's own
     // terse "Unrecognized arguments" message (bare `scrubbed --input ...`).
+    // #498: real `--version`/`version` top-level handling, in the same
+    // bare-flag dispatch spot that already special-cases a genuine top-level
+    // `-h`/`--help` (see `isKnownVerbToken` above) -- covers both the bare-
+    // flag case (`scrubbed --version` with no other arguments) and staying
+    // out of the way of the `run,clean`-alias-style generic argparse
+    // dispatch just below for every other verb. Handled directly here
+    // rather than left to argparse's generic `SubCommand!` parse: unlike
+    // `-h`/`--help`, which argparse recognizes natively on any parser,
+    // `--version` is scrubbed's own flag with no built-in argparse support,
+    // so it must never fall through to the "unknown verb" branch just below
+    // (which would print full help text and exit 2).
+    if (argv.length > 1 && (argv[1] == "--version" || argv[1] == "version")) {
+        writeln("scrubbed ", scrubbedVersion);
+        return 0;
+    }
     if (argv.length < 2 || !isKnownVerbToken(argv[1])) {
         Commands help;
         cast(void) CLI!(parserConfig, Commands).parseArgs(help, ["--help"]);
@@ -759,7 +811,8 @@ int runCommands(string[] argv) {
         } else static if (is(typeof(cmd) == ErrorsInit) ||
             is(typeof(cmd) == ErrorsCopy) || is(typeof(cmd) == ErrorsExport) ||
             is(typeof(cmd) == ErrorsVerify) || is(typeof(cmd) == RouteMetadata) ||
-            is(typeof(cmd) == CleanWebDocument) || is(typeof(cmd) == Crawl)) {
+            is(typeof(cmd) == CleanWebDocument) || is(typeof(cmd) == Crawl) ||
+            is(typeof(cmd) == Version)) {
             assert(0, "management verbs dispatched before argparse");
             return 2;
         } else {
@@ -863,6 +916,59 @@ unittest {
 
     auto shortHelp = runCommandsCapturingStdout(["scrubbed", "-h"]);
     assert(shortHelp[0] == 0, "-h must still exit 0");
+}
+
+// Issue #498: `scrubbed --version` (and `scrubbed version`) must print a
+// non-empty version string and exit 0, exactly like `--help`/`-h`, and must
+// never fall through to the general command-list usage text that a bare or
+// unknown verb prints.
+unittest {
+    auto flagVersion = runCommandsCapturingStdout(["scrubbed", "--version"]);
+    assert(flagVersion[0] == 0, "--version must exit 0");
+    assert(flagVersion[1].length > 0, "--version must print a non-empty string");
+    assert(flagVersion[1].startsWith("scrubbed "),
+        "--version output must name scrubbed: " ~ flagVersion[1]);
+    assert(!flagVersion[1].canFind("Available commands"),
+        "--version must not fall through to the general command-list usage text");
+
+    auto subcommandVersion = runCommandsCapturingStdout(["scrubbed", "version"]);
+    assert(subcommandVersion[0] == 0, "version subcommand must exit 0");
+    assert(subcommandVersion[1] == flagVersion[1],
+        "version subcommand output must match --version exactly");
+
+    // --version must also be discoverable from the generated --help text,
+    // the same way -h/--help documents itself.
+    auto help = runCommandsCapturingStdout(["scrubbed", "--help"]);
+    assert(help[1].canFind("--version"),
+        "--help output must document --version");
+}
+
+// Regression (caught in review of #498): the first implementation attempt
+// documented `--version` as a plain `NamedArgument` field directly on the
+// top-level `Commands` struct. argparse treats such a field as a
+// "common"/global flag accepted anywhere in argv -- including *after* a
+// real subcommand's own token -- so `scrubbed run --version ...` was
+// silently accepted and the pipeline just ran, instead of erroring on the
+// unrecognized argument the way it did before #498 and the way any other
+// unknown flag still does. `--version` must remain scoped to genuinely
+// being the top-level verb: appending it to a real subcommand's own argv
+// must still be a hard, loud error, never a silent no-op flag.
+unittest {
+    foreach (argv; [["scrubbed", "run", "--version", "--input", "in.txt",
+                "--output", "out.txt"],
+            ["scrubbed", "extract", "--version", "--input", "in.txt",
+                "--output", "out.txt", "--format", "markdown"],
+            ["scrubbed", "repair", "--version", "--input", "in.txt",
+                "--output", "out.txt"]]) {
+        auto result = runCommandsCapturingStderr(argv);
+        assert(result[0] == 2,
+            "--version appended to a real subcommand must still exit 2: " ~
+            argv[1]);
+        assert(result[1].canFind("Unrecognized"),
+            "--version appended to a real subcommand must still surface " ~
+            "an unrecognized-argument error, not be silently swallowed: " ~
+            argv[1] ~ " -> " ~ result[1]);
+    }
 }
 
 // Issue #474: `extract --help` must not claim `--format` has a default --

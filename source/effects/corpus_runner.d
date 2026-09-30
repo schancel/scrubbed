@@ -820,6 +820,26 @@ private int openRelativeParent(CorpusScratchDatabase db, int rootFd,
         components.length == 1 ? "" : components[0 .. $ - 1].join("/"));
 }
 
+private void verifyMetadataLeafAt(int parentFd, string metadataLeaf,
+        string expectedDevice, string expectedInode) {
+    stat_t metadataInfo;
+    enforce(fstatat(parentFd, metadataLeaf.toStringz, &metadataInfo,
+            AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(metadataInfo.st_mode),
+        "corpus runner: metadata sidecar changed before decision publication");
+    enforce(metadataInfo.st_dev.to!string == expectedDevice &&
+            metadataInfo.st_ino.to!string == expectedInode,
+        "corpus runner: metadata sidecar identity changed before decision publication");
+}
+
+private void verifyMetadataSidecarIdentity(CorpusScratchDatabase db, int rootFd,
+        string relativeSidecarPath, string expectedDevice, string expectedInode) {
+    string metadataLeaf;
+    auto parentFd = openRelativeParent(db, rootFd, relativeSidecarPath,
+        metadataLeaf);
+    scope(exit) close(parentFd);
+    verifyMetadataLeafAt(parentFd, metadataLeaf, expectedDevice, expectedInode);
+}
+
 private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
         string relativeSidecarPath,
         string expectedDevice, string expectedInode,
@@ -834,16 +854,7 @@ private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
     scope(exit) close(parentFd);
 
     auto metadataLeaf = baseName(relativeSidecarPath);
-    void verifyMetadataLeaf() {
-        stat_t metadataInfo;
-        enforce(fstatat(parentFd, metadataLeaf.toStringz, &metadataInfo,
-                AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(metadataInfo.st_mode),
-            "corpus runner: metadata sidecar changed before decision publication");
-        enforce(metadataInfo.st_dev.to!string == expectedDevice &&
-                metadataInfo.st_ino.to!string == expectedInode,
-            "corpus runner: metadata sidecar identity changed before decision publication");
-    }
-    verifyMetadataLeaf();
+    verifyMetadataLeafAt(parentFd, metadataLeaf, expectedDevice, expectedInode);
 
     stat_t priorInfo;
     auto priorFd = openat(parentFd, leaf.toStringz, O_RDONLY | O_NOFOLLOW);
@@ -883,7 +894,7 @@ private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
     auto closing = fd;
     fd = -1;
     enforce(close(closing) == 0, "corpus runner: decision close failed");
-    verifyMetadataLeaf();
+    verifyMetadataLeafAt(parentFd, metadataLeaf, expectedDevice, expectedInode);
     enforce(renameat(parentFd, temporary.toStringz,
         parentFd, leaf.toStringz) == 0,
         "corpus runner: atomic decision replacement failed");
@@ -1066,12 +1077,29 @@ WHERE EXISTS(
         }
     }
 
+    // Validate the complete discovered corpus before the first publication so
+    // a changed representative cannot leave a partially published decision
+    // set. Per-decision checks below narrow the subsequent race window too.
+    auto verifyDocuments = db.prepare(`SELECT sidecar_path,device,inode
+FROM documents ORDER BY document_id`);
+    scope(exit) sqlite3_finalize(verifyDocuments);
+    int verifyStep;
+    while ((verifyStep = sqlite3_step(verifyDocuments)) == SQLITE_ROW)
+        verifyMetadataSidecarIdentity(db, sidecarRootFd,
+            columnText(verifyDocuments, 0), columnText(verifyDocuments, 1),
+            columnText(verifyDocuments, 2));
+    dbNeed(verifyStep == SQLITE_DONE, "document identity scan failed");
+
     auto addDecision = db.prepare("INSERT INTO decisions VALUES(?1)");
     scope(exit) sqlite3_finalize(addDecision);
     auto decisions = db.prepare(`SELECT links.document_id,
- links.representative_id,links.bucket_identity,documents.sidecar_path,
- documents.device,documents.inode
-FROM links JOIN documents USING(document_id)
+ links.representative_id,links.bucket_identity,removed.sidecar_path,
+ removed.device,removed.inode,representative.sidecar_path,
+ representative.device,representative.inode
+FROM links
+JOIN documents AS removed ON removed.document_id=links.document_id
+JOIN documents AS representative
+ ON representative.document_id=links.representative_id
 ORDER BY links.document_id`);
     scope(exit) sqlite3_finalize(decisions);
     int decisionStep;
@@ -1082,9 +1110,14 @@ ORDER BY links.document_id`);
         auto relativeSidecarPath = columnText(decisions, 3);
         auto expectedDevice = columnText(decisions, 4);
         auto expectedInode = columnText(decisions, 5);
+        auto representativeSidecarPath = columnText(decisions, 6);
+        auto representativeDevice = columnText(decisions, 7);
+        auto representativeInode = columnText(decisions, 8);
         auto decision = CorpusStageDecision(DocumentId.fromCanonicalText(documentId),
             CorpusDecisionKind.prune, DocumentId.fromCanonicalText(representativeId),
             bucketIdentity);
+        verifyMetadataSidecarIdentity(db, sidecarRootFd,
+            representativeSidecarPath, representativeDevice, representativeInode);
         auto decisionPath = writeDecisionSidecar(db, sidecarRootFd,
             relativeSidecarPath, expectedDevice, expectedInode, decision);
         bindText(addDecision, 1, decisionPath);
@@ -1457,12 +1490,7 @@ unittest {
     write(buildPath(root, "legacy-malformed" ~ documentMetadataPublishSuffixV1),
         `{"version":"document-metadata:v1","documentId":"` ~
         fixtureId("legacy-malformed").text ~ `"}`);
-    CorpusStageDecision[] observed;
-    assertThrown(runPruneNearDuplicates(root,
-        (CorpusStageDecision decision) { observed ~= decision; },
-        PruneOptions.init));
-    assert(observed.length == 0,
-        "a changed directory must fail before emitting any decision");
+    assertThrown(runFixture(root));
     assert(scratchArtifactsCurrent == 0,
         "malformed-wire failure must clean every scratch artifact");
 }
@@ -1630,16 +1658,21 @@ version (Posix) unittest {
         rename(nested, original);
         rename(replacement, nested);
     };
-    assertThrown(runFixture(root));
+    CorpusStageDecision[] observed;
+    assertThrown(runPruneNearDuplicates(root,
+        (CorpusStageDecision decision) { observed ~= decision; },
+        PruneOptions.init));
+    assert(observed.length == 0,
+        "a changed directory must fail before emitting any decision");
 
     foreach (directory; [original, nested])
         foreach (entry; dirEntries(directory, SpanMode.shallow, false))
             assert(!entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1));
 }
 
-// Metadata leaves are identity-bound too. Replacing them atomically after
-// discovery cannot publish or emit decisions derived from the old files next
-// to unrelated replacement metadata in the unchanged directory.
+// Metadata leaves are identity-bound too. Replacing only the selected
+// representative after discovery cannot publish or emit a decision that names
+// metadata no longer present in the unchanged directory.
 version (Posix) unittest {
     import std.exception : assertThrown;
     import std.file : mkdir, rename;
@@ -1656,23 +1689,22 @@ version (Posix) unittest {
     writeFixtureSidecar(nested, "two", originalText);
     auto replacementText =
         "Unrelated replacement metadata text with enough shingles for a signature.";
-    writeFixtureSidecar(replacements, "replacement-one", replacementText);
-    writeFixtureSidecar(replacements, "replacement-two", replacementText);
+    writeFixtureSidecar(replacements, "replacement", replacementText);
+    auto representativeStem = fixtureId("one").text < fixtureId("two").text ?
+        "one" : "two";
 
     postDiscoveryHook = (string) {
         rename(buildPath(replacements,
-                "replacement-one" ~ documentMetadataPublishSuffixV1),
-            buildPath(nested, "one" ~ documentMetadataPublishSuffixV1));
-        rename(buildPath(replacements,
-                "replacement-two" ~ documentMetadataPublishSuffixV1),
-            buildPath(nested, "two" ~ documentMetadataPublishSuffixV1));
+                "replacement" ~ documentMetadataPublishSuffixV1),
+            buildPath(nested,
+                representativeStem ~ documentMetadataPublishSuffixV1));
     };
     CorpusStageDecision[] observed;
     assertThrown(runPruneNearDuplicates(root,
         (CorpusStageDecision decision) { observed ~= decision; },
         PruneOptions.init));
     assert(observed.length == 0,
-        "changed metadata must fail before emitting any decision");
+        "a changed representative must fail before emitting any decision");
     foreach (entry; dirEntries(nested, SpanMode.shallow, false))
         assert(!entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1));
 }

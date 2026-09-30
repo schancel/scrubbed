@@ -30,7 +30,7 @@
 module effects.extract_formats;
 
 import effects.html_main_content : extractMainContent, HtmlMainContentOutputLimit,
-    MainContentResult, MainContentStatus;
+    MainContentResult, MainContentStatus, selectedContentTree;
 import effects.html_tree : HtmlAttribute, HtmlNodeKind, HtmlTree;
 import effects.html_tree_walk : attribute, endOf, headingLevel, hiddenTag,
     safeTarget, singleLine, white;
@@ -144,9 +144,15 @@ string renderXml(const ref HtmlTree tree) pure {
     Writer w;
     w.put("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document>\n");
     w.put("  <main>\n");
-    if (selection.status == MainContentStatus.selected)
-        renderXmlContainer(tree, selection.node, w, 2, false);
-    else if (selection.status == MainContentStatus.selectedStructuredData)
+    if (selection.status == MainContentStatus.selected) {
+        // Issue #539: render the same boilerplate-excluded copy `.text`/
+        // `.markdown` already render/collect from (`selectedContentTree`,
+        // issue #517), not the raw selected node -- otherwise a `<nav>`
+        // (by tag or by class/id keyword) that #517 already strips from
+        // `.text`/`.markdown` still leaked into `.xml`.
+        auto content = selectedContentTree(tree, selection.node);
+        renderXmlContainer(content, 0, w, 2, false);
+    } else if (selection.status == MainContentStatus.selectedStructuredData)
         renderFlatParagraphsXml(selection.text, w, 2, "paragraph");
     w.put("  </main>\n");
     if (selection.commentsExtracted) {
@@ -507,9 +513,12 @@ string renderXmlTei(const ref HtmlTree tree) pure {
     w.put("  </teiHeader>\n");
     w.put("  <text>\n    <body>\n");
     w.put("      <div type=\"entry\">\n");
-    if (selection.status == MainContentStatus.selected)
-        renderTeiContainer(tree, selection.node, w, 4, false);
-    else if (selection.status == MainContentStatus.selectedStructuredData)
+    if (selection.status == MainContentStatus.selected) {
+        // Issue #539: same `selectedContentTree` routing as `renderXml`
+        // above -- see its comment.
+        auto content = selectedContentTree(tree, selection.node);
+        renderTeiContainer(content, 0, w, 4, false);
+    } else if (selection.status == MainContentStatus.selectedStructuredData)
         renderFlatParagraphsXml(selection.text, w, 4, "p");
     w.put("      </div>\n");
     if (selection.commentsExtracted) {
@@ -1105,6 +1114,74 @@ unittest {
     assert(!tei.canFind("SCRIPT"), "script element text must not leak into TEI output");
     assert(!tei.canFind(".x{}"), "script element text must not leak into TEI output");
     assert(!tei.canFind(".y{color:red}"), "style element text must not leak into TEI output");
+}
+
+unittest {
+    // Regression guard for issue #539: `.text`/`.markdown` (issue #517)
+    // already exclude a `<nav>` descendant of the *selected* node -- by
+    // bare tag, and by a class/id keyword match like `class="nav"` -- via
+    // `selectedContentTree`. `renderXml`/`renderXmlTei` rendered the raw
+    // selected node directly with no exclusion at all: `renderXmlContainer`/
+    // `renderTeiContainer` treat an unrecognized element as a "transparent
+    // container: keep descending", so a `<nav>`'s own children (its loose
+    // text) were walked and emitted just like any other wrapper's. This is
+    // deliberately distinct from the top-level-sibling `<nav>` already
+    // covered by this module's very first unittest above (never a
+    // descendant of the selected node, so it was never affected by this
+    // bug); here the `<nav>` is nested *inside* the winning subtree.
+    //
+    // Same fixture shape as html_main_content.d's own #517 nav-policy
+    // unittest (a long direct-text "lede" so the wrapping `<div>` itself
+    // outscores any child and is the node actually selected) run through
+    // the real DOM-selection path end to end, not a hand-built tree.
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string lede = "LedeStart the survey team spent three weeks mapping the river " ~
+        "delta and recording water depth every two hundred meters along six " ~
+        "transects while the main channel migrated nearly forty meters east " ~
+        "since the previous survey was completed and the second leg of the " ~
+        "survey repeated every one of those transects a month later to check " ~
+        "how quickly the sandbars were moving after the spring floods had " ~
+        "passed through the lower reaches of the delta LedeEnd";
+
+    const(HtmlTree) buildTree(string navMarkup) {
+        auto outcome = parseHtml(cast(const(ubyte)[]) ("<html><body><div>" ~ lede ~
+            navMarkup ~ "<p>TrailingMarker paragraph text.</p></div></body></html>"));
+        assert(outcome.isParsed);
+        auto selection = extractMainContent(outcome.tree);
+        assert(selection.status == MainContentStatus.selected);
+        assert(outcome.tree.nodes[selection.node].name == "div",
+            "the fixture's own <div> must be the selected node");
+        return outcome.tree;
+    }
+
+    // By tag: a bare <nav>, no class/id involved.
+    auto byTag = buildTree("<nav>NavTagMarker Home About Contact</nav>");
+    auto xmlByTag = renderXml(byTag);
+    assert(!xmlByTag.canFind("NavTagMarker"),
+        "a <nav> descendant of the selected node must not leak into .xml (#539)");
+    assert(xmlByTag.canFind("TrailingMarker"), "real content around the <nav> must survive");
+    auto teiByTag = renderXmlTei(byTag);
+    assert(!teiByTag.canFind("NavTagMarker"),
+        "a <nav> descendant of the selected node must not leak into .xml-tei (#539)");
+    assert(teiByTag.canFind("TrailingMarker"), "real content around the <nav> must survive");
+
+    // By class/id keyword: a <div class="nav">, no <nav> tag involved.
+    auto byClass = buildTree(`<div class="nav">NavClassMarker Home About Contact</div>`);
+    auto xmlByClass = renderXml(byClass);
+    assert(!xmlByClass.canFind("NavClassMarker"),
+        `a class="nav" descendant of the selected node must not leak into .xml (#539)`);
+    assert(xmlByClass.canFind("TrailingMarker"), "real content around the nav div must survive");
+    auto teiByClass = renderXmlTei(byClass);
+    assert(!teiByClass.canFind("NavClassMarker"),
+        `a class="nav" descendant of the selected node must not leak into .xml-tei (#539)`);
+    assert(teiByClass.canFind("TrailingMarker"), "real content around the nav div must survive");
+
+    assertWellFormedXml(xmlByTag);
+    assertWellFormedXml(teiByTag);
+    assertWellFormedXml(xmlByClass);
+    assertWellFormedXml(teiByClass);
 }
 
 unittest {

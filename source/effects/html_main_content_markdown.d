@@ -393,6 +393,46 @@ unittest {
     assert(!defaulted.markdown.canFind("Home") && !allOff.markdown.canFind("Home"));
 }
 
+// Issue #493 regression: the nested-table pipe-syntax corruption
+// (`html_markdown.d`'s own fixture, same ticket) is reachable through this
+// combinator too -- `extractMainContentMarkdown`'s `selected` path renders
+// via the very same `renderMarkdownFrom`/`renderNode`/`renderTable` call
+// chain, just scoped to the selected subtree, so the fix (an `inCell` guard
+// entirely internal to `html_markdown.d`) is exercised here unmodified.
+// This module's own source needed no change -- confirming that, not
+// duplicating the fix, is the point of this test.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string html = "<nav>Home About Contact</nav><article><h1>Report</h1>" ~
+        "<p>This report includes a small reference table summarizing the " ~
+        "figures discussed below, reproduced here exactly as it appeared " ~
+        "in the original source document for the reader's convenience.</p>" ~
+        "<table><tr><th>Outer</th></tr>" ~
+        "<tr><td>before<table><tr><th>Inner</th></tr>" ~
+        "<tr><td>innerdata</td></tr></table>after</td></tr></table>" ~
+        "<p>The remainder of this report continues with further analysis " ~
+        "of the figures shown above and their implications for the " ~
+        "overall conclusions reached by the study's authors.</p></article>";
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto result = extractMainContentMarkdown(tree);
+    assert(result.status == MainContentStatus.selected);
+    assert(!result.markdown.canFind("Home"),
+        "the sibling <nav> boilerplate must not leak into the selected content");
+    assert(result.markdown.canFind("| Outer | "),
+        "the outer table's own real header row must still render");
+    assert(result.markdown.canFind("before Inner innerdata after"),
+        "the nested table's real content must survive, flattened into the " ~
+        "outer cell");
+    assert(!result.markdown.canFind("|---| |") && !result.markdown.canFind("| |---|"),
+        "no stray delimiter-row fragment from the nested table may bleed " ~
+        "into the outer table's data row at this combinator level either");
+}
+
 // Issue #478: `extractMainContentMarkdown`'s `options` parameter reaches the
 // `selected` path's `renderMarkdownFrom` call for the four new fields
 // (`tables`/`lists`/`quotes`/`code`), not just #477's original three, at

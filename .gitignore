@@ -26,3 +26,4 @@ scrubd.lib
 .worktrees/
 __pycache__/
 *.pyc
+HANDOFF_*.md

@@ -1978,6 +1978,18 @@ int runApp(string[] args) {
     }
     if (nThreads == 0)
         throw new Exception("--threads must be positive");
+    // Generous multiple of detected cores: comfortably covers legitimate
+    // high-core-count server usage while rejecting typo/garbage values
+    // (e.g. --threads 999999999) before any OS thread is spawned. Without
+    // this, such a value crawls toward the process's OS thread ceiling
+    // (~4096 threads observed on a 10-core macOS box) over minutes before
+    // crashing with an unhandled `core.thread.threadbase.ThreadError`
+    // (fixes #472).
+    enum threadsPerCoreLimit = 64;
+    if (nThreads > totalCPUs * threadsPerCoreLimit)
+        throw new Exception("--threads must be at most " ~
+            (totalCPUs * threadsPerCoreLimit).to!string ~ " (" ~
+            totalCPUs.to!string ~ " cores detected)");
     if (maxOpenInputs == 0 && !descriptorsExplicit) maxOpenInputs = nThreads;
     if (maxQueuedDocuments == 0 || maxInputBytes == 0 || maxOpenInputs == 0)
         throw new Exception("input limits must be positive");
@@ -2557,7 +2569,7 @@ unittest {
 }
 
 unittest {
-    import std.exception : assertThrown;
+    import std.exception : assertThrown, collectException;
     import std.file : read, rmdirRecurse, tempDir;
 
     auto root = buildPath(tempDir, "scrubbed-cli-" ~ randomUUID.toString);
@@ -2910,6 +2922,23 @@ unittest {
         "--config", "x.json", "--FILTERS", "fix-mojibake"]));
     assertThrown(runApp(["scrubbed", "run", "--input", same, "--output", emptyOut,
         "--threads", "0"]));
+
+    // #472: an absurd --threads value (e.g. a typo like 999999999) must be
+    // rejected by validation before any OS thread is spawned, not left to
+    // crawl toward the process's OS thread ceiling and crash. Exercises the
+    // rejection branch directly through the same in-process runApp() call
+    // the "--threads 0" case above uses; the oversized value never reaches
+    // TaskPool construction, so this assertion returns immediately and
+    // spawns no extra threads.
+    auto oversizedThreadsError = collectException!Exception(runApp(
+        ["scrubbed", "run", "--input", same, "--output", emptyOut,
+        "--threads", "999999999"]));
+    assert(oversizedThreadsError !is null);
+    assert(oversizedThreadsError.msg.canFind("--threads must be at most ") &&
+        oversizedThreadsError.msg.canFind(
+            (totalCPUs * 64).to!string ~ " (" ~ totalCPUs.to!string ~
+            " cores detected)"),
+        oversizedThreadsError.msg);
 
     auto badConfig = buildPath(root, "bad.json");
     write(badConfig, `{ "filters": [{ "name": "fix-mojibake", ` ~

@@ -18,8 +18,8 @@
         nav.jump { margin-top: 1rem; }
         nav.jump ul { list-style: none; padding-left: 0; display: flex; flex-wrap: wrap; gap: 0 1rem; }
         nav.jump li { margin-bottom: 0; }
-        nav.jump a { color: #666; text-decoration: none; font-family: monospace; font-size: 0.78rem; }
-        nav.jump a:hover { color: #1a1a1a; text-decoration: underline; }
+        nav.jump a { color: #444; text-decoration: underline; text-underline-offset: 0.18em; font-family: monospace; font-size: 0.78rem; }
+        nav.jump a:hover { color: #000; text-decoration-thickness: 2px; }
         h2 { font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; color: #666; margin: 2.75rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; font-family: monospace; }
         ul { padding-left: 1.25rem; }
         li { margin-bottom: 0.6rem; }
@@ -58,11 +58,10 @@
         <div class="links">
             <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source on GitHub</a>
             <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
-            <a href="https://schancel.github.io" target="_blank" rel="noopener">#!blag</a>
         </div>
         <nav class="jump" aria-label="Jump to section">
             <ul>
-                <li><a href="#why">Why</a></li>
+                <li><a href="#why">The Why</a></li>
                 <li><a href="#problem">The problem</a></li>
                 <li><a href="#fit">Where this fits</a></li>
                 <li><a href="#see-it-work">See it work</a></li>
@@ -78,7 +77,7 @@
         </nav>
     </header>
 
-    <h2 id="why">Why</h2>
+    <h2 id="why">The Why</h2>
     <p>Bad corpus cleaning quietly costs more than it looks like it does: mojibake nobody caught, nav/ad/footer boilerplate mixed into "content," PII nobody scrubbed, near-duplicate pages nobody deduped — none of it throws an error, it just degrades whatever gets trained on it. Doing this step correctly, and fast enough to run over a real corpus rather than a sample, is table stakes for everything downstream.</p>
 
     <h2 id="problem">The problem</h2>
@@ -274,7 +273,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p class="note">Every bit helps and is genuinely appreciated &mdash; thank you to anyone who does. None of it is required: the project stays MIT-licensed and fully open either way, no paywalled features, no nagging.</p>
 
     <footer>
-        <p><a href="https://github.com/schancel/scrubbed/blob/main/LICENSE" target="_blank" rel="noopener">MIT licensed</a> &middot; <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a> &middot; <a href="https://github.com/schancel/scrubbed/tree/main/benchmarks" target="_blank" rel="noopener">Verify the numbers yourself</a> &middot; <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">Open issues</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">schancel.github.io</a></p>
+        <p><a href="https://github.com/schancel/scrubbed/blob/main/LICENSE" target="_blank" rel="noopener">MIT licensed</a> &middot; <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a> &middot; <a href="https://github.com/schancel/scrubbed/tree/main/benchmarks" target="_blank" rel="noopener">Verify the numbers yourself</a> &middot; <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">Open issues</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">#!blag</a></p>
     </footer>
 </main>
 </body>

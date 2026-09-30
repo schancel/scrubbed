@@ -301,38 +301,59 @@ private size_t longestRun(string value, char marker) pure {
     return longest;
 }
 
-/// Independently-toggleable inline structural fidelity for a Markdown
-/// render: whether inline emphasis (bold/italic), link targets, and image
-/// sources are preserved as real Markdown syntax, or flattened to their
-/// plain inline text. Issue #477 (trafilatura-parity `--formatting`/
-/// `--links`/`--images`).
+/// Independently-toggleable structural fidelity for a Markdown render:
+/// whether inline emphasis (bold/italic), link targets, image sources,
+/// tables, lists, blockquotes, and code blocks are preserved as real
+/// Markdown syntax, or flattened to plain text/prose. Issue #477
+/// (trafilatura-parity `--formatting`/`--links`/`--images`) added the first
+/// three fields; issue #478 (trafilatura-parity `--no-tables`-shaped
+/// block-level fidelity) added `tables`/`lists`/`quotes`/`code`.
 ///
-/// All three default `true`. Unlike trafilatura -- where these flags opt a
-/// stripped-by-default renderer INTO richness -- this renderer's bold/
-/// italic emphasis, real `[text](<href>)` links, and `![alt](<src>)` image
-/// syntax were already unconditional before this struct existed (#431/
-/// #438's already-shipped behavior). Flipping the *default* to strip them
-/// would regress #411's 20/20 corpus result and #438's JSON-LD-fallback
-/// Markdown path, which issue #477 explicitly disallows regressing. So each
-/// field here opts an already-rich-by-default renderer OUT of one dimension
-/// of that richness for a caller who explicitly wants plainer output --
-/// same three independent dimensions trafilatura exposes, just the opposite
-/// polarity. See this module's doc comment / the issue #477 PR description
-/// for the fuller tradeoff.
+/// All seven default `true`. Unlike trafilatura -- where `--formatting`/
+/// `--links`/`--images` opt a stripped-by-default renderer INTO richness,
+/// and `--no-tables` is the only block-level opt-OUT it exposes at all (it
+/// has no equivalent `--no-lists`/`--no-quotes`/`--no-code`) -- every field
+/// here opts an already-rich-by-default renderer OUT of one dimension of
+/// fidelity, matching this struct's own pre-existing (#477) polarity for
+/// consistency: a caller who explicitly wants plainer output flips a field
+/// off, rather than a second, differently-polarized options mechanism
+/// existing alongside this one. See this module's doc comment / the issue
+/// #477 PR description for the fuller inline-fidelity tradeoff.
 ///
-/// Disabling a dimension degrades to exactly the same fallback rendering
-/// this module already used for an *unsafe* link/image target: an anchor's
-/// visible text with no `[...](...)` wrapping, an image's alt text with no
-/// `![...](...)` wrapping. Disabling `formatting` renders `strong`/`b`/
-/// `em`/`i` as a plain (unwrapped) generic element, the same as any other
-/// unrecognized inline element already unwraps.
+/// Disabling a dimension degrades to a plain-text/prose fallback that keeps
+/// the real content and loses only the Markdown syntax marking its
+/// structure -- never drops text outright. This mirrors trafilatura's own
+/// opt-out *shape* (`--no-tables`), not its exact opt-out *semantics*:
+/// trafilatura's `--no-tables` discards table content at extraction time
+/// (confirmed against pinned trafilatura==2.2.0 -- see this module's table
+/// fixture), whereas every field here is a rendering-only degrade, matching
+/// this struct's own pre-existing `formatting`/`links`/`images` precedent
+/// (an unsafe link/image target already degrades to plain visible text with
+/// no `[...](...)`/`![...](...)` wrapping; `formatting=false` unwraps
+/// `strong`/`b`/`em`/`i` the same way any other unrecognized inline element
+/// already unwraps). Concretely: `tables=false` renders each row as a
+/// plain `- cell | cell` line (this renderer's pre-#478 table behavior,
+/// kept as the graceful degrade rather than trafilatura's outright drop);
+/// `lists=false` renders each (possibly nested) list item as its own plain
+/// paragraph with no bullet/number marker; `quotes=false` renders a
+/// blockquote's content as a plain paragraph with no `> ` marker;
+/// `code=false` renders `pre`/`code` content as ordinary prose text (normal
+/// whitespace collapsing and literal-character escaping), with no fence or
+/// backtick delimiters.
 struct MarkdownRenderOptions {
     bool formatting = true;
     bool links = true;
     bool images = true;
+    bool tables = true;
+    bool lists = true;
+    bool quotes = true;
+    bool code = true;
 }
 
 private void renderChildren(const ref HtmlTree tree, size_t parent,
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure;
+
+private void renderTable(const ref HtmlTree tree, size_t tableIndex,
     ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure;
 
 private void renderNode(const ref HtmlTree tree, size_t index,
@@ -363,7 +384,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         writer.putText(alt);
         return;
     }
-    if (name == "pre") {
+    if (name == "pre" && options.code) {
         auto content = clean(nodeText(tree, index), true);
         auto fenceLength = longestRun(content, '`') + 1;
         if (fenceLength < 3) fenceLength = 3;
@@ -378,7 +399,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         writer.block();
         return;
     }
-    if (name == "code") {
+    if (name == "code" && options.code) {
         auto content = singleLine(clean(nodeText(tree, index), true));
         if (!content.length) return;
         auto ticks = new char[longestRun(content, '`') + 1];
@@ -391,7 +412,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         writer.put(ticks);
         return;
     }
-    if (name == "ul" || name == "ol") {
+    if ((name == "ul" || name == "ol") && options.lists) {
         writer.block();
         long ordinal = 1;
         if (name == "ol") {
@@ -432,7 +453,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         writer.block();
         return;
     }
-    if (name == "blockquote") {
+    if (name == "blockquote" && options.quotes) {
         Writer quote;
         renderChildren(tree, index, quote, depth + 1, options);
         quote.trim();
@@ -447,6 +468,10 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         }
         writer.put(quote.bytes[lineStart .. $]);
         writer.block();
+        return;
+    }
+    if (name == "table" && options.tables) {
+        renderTable(tree, index, writer, depth, options);
         return;
     }
     if (name == "tr") {
@@ -467,8 +492,14 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     }
     bool heading = name.length == 2 && name[0] == 'h' &&
         name[1] >= '1' && name[1] <= '6';
+    // "pre" and "blockquote" only ever reach here when their own dedicated,
+    // real-syntax branch above was skipped because `options.code`/
+    // `options.quotes` is false (that branch always `return`s before this
+    // point when the option is on) -- this is exactly the graceful
+    // plain-paragraph degrade `MarkdownRenderOptions`'s doc comment
+    // describes: same blank-line block separation, no fence/`> ` marker.
     bool block = heading || name == "p" || name == "div" || name == "li" ||
-        name == "table";
+        name == "table" || name == "pre" || name == "blockquote";
     if (block) writer.block();
     if (heading) {
         foreach (_; 0 .. name[1] - '0') writer.put("#");
@@ -513,6 +544,121 @@ private void renderChildren(const ref HtmlTree tree, size_t parent,
          child = endOf(tree, child))
         if (tree.nodes[child].parentIndex == parent)
             renderNode(tree, child, writer, depth, options);
+}
+
+// Issue #478 real GFM-shaped pipe table, modeled on pinned trafilatura==
+// 2.2.0's own `--output-format markdown` table syntax (confirmed by running
+// it, not guessed): `| cell | cell | \n`, a `|---|---|\n` delimiter row
+// (present only when a header row was found, dash count matching the
+// widest row's column count, no per-column width/alignment), and every row
+// -- header and data alike -- right-padded with empty cells to that same
+// widest-row column count. `colspan`/`rowspan` are deliberately not
+// interpreted (matching this renderer's own pre-existing, already-
+// documented policy in docs/html-markdown.md's "Tables" section, and
+// matching trafilatura's own observed behavior: a `colspan="2")` header
+// cell still occupies exactly one column slot, confirmed against pinned
+// trafilatura==2.2.0). Only rows and cells belonging to THIS table (not a
+// nested `<table>` inside one of its cells) are gathered into the grid --
+// a nested table's own rows/cells are rendered separately, recursively, by
+// the ordinary per-cell `renderChildren` call below (which is a normal
+// `renderNode` recursion and so re-enters this same function for a nested
+// `<table>` reached that way).
+//
+// Header-row detection: the table's structurally-first `<tr>` (whether
+// inside a `<thead>` or not) is treated as a header, and gets the
+// delimiter row beneath it, iff it contains at least one `<th>` cell --
+// confirmed against pinned trafilatura==2.2.0, which emits no delimiter
+// row at all for an all-`<td>` first row (even when a later row happens to
+// contain a `<th>`), and which does emit one for a first row that is a mix
+// of `<th>`/`<td>` cells (a real, common shape: a leading `<th scope="row">`
+// row-label cell alongside ordinary `<td>` data cells in the same row).
+//
+// Caption: a direct `<caption>` child's content is rendered as its own
+// plain text line immediately before the grid, not folded into the grid as
+// a pseudo-row. This is a deliberate divergence from pinned trafilatura==
+// 2.2.0's own caption handling (confirmed by running it): it renders a
+// caption as an entirely separate one-cell "table" (its own delimiter row
+// padded out to the real table's column count, immediately followed by the
+// real header's own second delimiter row) -- a second invented rectangular
+// grid for non-tabular content that this renderer chooses not to
+// replicate, in keeping with this module's existing "never synthesize
+// structure that was not there" posture (see `docs/html-markdown.md`).
+// Preserving the caption's real text (rather than trafilatura's own
+// apparent drop-on-`--no-tables` semantics, and rather than silently
+// discarding it the way a naive tr-only tree walk would) keeps this
+// addition data-preserving, matching every other dimension in
+// `MarkdownRenderOptions`.
+private void renderTable(const ref HtmlTree tree, size_t tableIndex,
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure {
+    if (depth > 128) throw new HtmlMarkdownOutputLimit;
+    string captionText;
+    bool hasCaption;
+    string[][] rows;
+    bool[] rowHasHeaderCell;
+    size_t maxCols;
+    size_t tableEnd = endOf(tree, tableIndex);
+    for (size_t i = tableIndex + 1; i < tableEnd; ++i) {
+        ref const candidate = tree.nodes[i];
+        if (candidate.kind != HtmlNodeKind.element) continue;
+        if (candidate.name == "caption" && candidate.parentIndex == tableIndex &&
+            !hasCaption) {
+            Writer caption;
+            renderChildren(tree, i, caption, depth + 1, options);
+            captionText = singleLine(caption.finish());
+            hasCaption = true;
+            continue;
+        }
+        if (candidate.name != "tr") continue;
+        // Walk up to the nearest ancestor `<table>`; only a row whose
+        // nearest table ancestor is this exact table belongs in this
+        // table's own grid -- a row that belongs to a table nested inside
+        // one of this table's cells does not (it is rendered separately,
+        // recursively, when that cell's own content is rendered below).
+        size_t parent = candidate.parentIndex;
+        bool ownRow;
+        while (parent != size_t.max) {
+            if (tree.nodes[parent].name == "table") {
+                ownRow = parent == tableIndex;
+                break;
+            }
+            parent = tree.nodes[parent].parentIndex;
+        }
+        if (!ownRow) continue;
+        string[] cells;
+        bool hasHeaderCell;
+        for (size_t child = i + 1; child < endOf(tree, i); child = endOf(tree, child)) {
+            if (tree.nodes[child].parentIndex != i) continue;
+            if (tree.nodes[child].name != "td" && tree.nodes[child].name != "th") continue;
+            if (tree.nodes[child].name == "th") hasHeaderCell = true;
+            Writer cell;
+            renderChildren(tree, child, cell, depth + 1, options);
+            cells ~= singleLine(cell.finish());
+        }
+        if (cells.length > maxCols) maxCols = cells.length;
+        rows ~= cells;
+        rowHasHeaderCell ~= hasHeaderCell;
+    }
+    if (!hasCaption && !rows.length) return;
+    writer.block();
+    if (hasCaption) {
+        writer.put(captionText);
+        if (rows.length) writer.block();
+    }
+    bool hasHeader = rows.length && rowHasHeaderCell[0];
+    foreach (rowIndex, row; rows) {
+        writer.put("| ");
+        foreach (col; 0 .. maxCols) {
+            if (col) writer.put(" | ");
+            if (col < row.length) writer.put(row[col]);
+        }
+        writer.put(" | \n");
+        if (rowIndex == 0 && hasHeader) {
+            writer.put("|");
+            foreach (_; 0 .. maxCols) writer.put("---|");
+            writer.put("\n");
+        }
+    }
+    writer.block();
 }
 
 /// Convert a bounded selected tree without reading HTML or publishing output.
@@ -782,4 +928,405 @@ unittest {
     auto linksOff = renderMarkdown(tree, MarkdownRenderOptions(true, false, true));
     assert(linksOff == "Christopher Dallman\n",
         "links=false must fall back to the real anchor's visible text only");
+}
+
+// Issue #478 regression: before `tables`/`lists`/`quotes`/`code` existed on
+// `MarkdownRenderOptions`, a 4-, 5-, 6-, or 7-argument construction of it
+// (as every test below uses, via named fields) was a compile error on base
+// commit fa5e18e (the struct had only 3 fields) -- a compile-time failure,
+// not merely a wrong-output one, exactly mirroring #477's own "new API
+// surface" fail-on-base/pass-on-tip proof one struct generation up. Named-
+// field construction (`MarkdownRenderOptions(tables: false, ...)`) is used
+// throughout this ticket's new tests rather than positional, per this
+// ticket's own explicit instruction: a 7-field all-`bool` struct makes
+// positional transposition a real, silent risk that named fields rule out
+// by construction.
+//
+// Default-param proof: omitting `options` (or passing `.init`) must still
+// resolve to every field `true`, byte-identical to before these four fields
+// existed -- the #411/#438 non-regression guarantee this struct's own
+// doc comment describes, now covering all seven fields, not just the
+// original three.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        `<p>Plain paragraph with <strong>bold</strong> text.</p>` ~
+        `<ul><li>one</li><li>two</li></ul>` ~
+        `<blockquote><p>a real quotation</p></blockquote>` ~
+        `<pre><code>fn();</code></pre>` ~
+        `<table><tr><th>H</th></tr><tr><td>D</td></tr></table>`));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto omitted = renderMarkdown(tree);
+    auto explicitDefault = renderMarkdown(tree, MarkdownRenderOptions.init);
+    auto explicitAllTrue = renderMarkdown(tree, MarkdownRenderOptions(
+        formatting: true, links: true, images: true,
+        tables: true, lists: true, quotes: true, code: true));
+    assert(omitted == explicitDefault);
+    assert(omitted == explicitAllTrue);
+    import std.algorithm.searching : canFind;
+    assert(omitted.canFind("- one"), "lists default true");
+    assert(omitted.canFind("> a real quotation"), "quotes default true");
+    assert(omitted.canFind("```"), "code default true");
+    assert(omitted.canFind("|---|"), "tables default true");
+}
+
+// Issue #478 real fixture 1/4 -- tables (trafilatura-parity `--no-tables`
+// polarity). Verbatim excerpt (the real "ISOCALENDAR" template table, header
+// row plus its first two real data rows, trimmed for fixture size) from
+// Wikipedia's "ISO 8601" article (en.wikipedia.org/wiki/ISO_8601, CC BY-SA
+// 4.0 -- real third-party content, test-only and never shipped, per this
+// repository's existing test-fixture policy), resolved by fetching that
+// real page directly (the 20-page adbar/trafilatura held-out corpus this
+// ticket's other three fixtures draw from has exactly one real `<table>`
+// across all 20 pages -- a single-cell search-form layout table, confirmed
+// by inspection -- not a genuine multi-column data table, so this fixture
+// draws on a different, separately fetched real page instead, per this
+// issue's own explicit allowance for that when the held-out corpus lacks a
+// good example of a structure type). A genuine multi-column (8-column)
+// real table: `<th>` column headers (Week/Mon/.../Sun) plus real `<caption>`
+// and real per-day `<td>` data, exercising the header/separator-row
+// detection, the real `<caption>`, and real multi-column width together --
+// not a synthetic 2x2 grid invented for this test.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    string html = `<article><h2>September 2026</h2>` ~
+        `<p>The ISO week calendar arranges each week from Monday through ` ~
+        `Sunday and numbers each week of the year, as shown in the ` ~
+        `following excerpt of a September 2026 calendar table.</p>` ~
+        `<table class="wikitable floatright" style="text-align:center;">` ~
+        `<caption>September 2026</caption><tbody><tr>` ~
+        `<th width="%" scope="column" style="font-family: monospace;">Week</th>` ~
+        `<th width="%" scope="column" style="font-family: monospace;" title="Monday">Mon</th>` ~
+        `<th width="%" scope="column" style="font-family: monospace;" title="Tuesday">Tue</th>` ~
+        `<th width="%" scope="column" style="font-family: monospace;" title="Wednesday">Wed</th>` ~
+        `<th width="%" scope="column" style="font-family: monospace;" title="Thursday">Thu</th>` ~
+        `<th width="%" scope="column" style="font-family: monospace;" title="Friday">Fri</th>` ~
+        `<th width="%" scope="column" style="font-family: monospace;" title="Saturday">Sat</th>` ~
+        `<th width="%" scope="column" style="font-family: monospace;" title="Sunday">Sun</th></tr>` ~
+        `<tr><th scope="row" title="days in calendar week number 36">` ~
+        `<span style="opacity:0.7;">W36</span></th>` ~
+        `<td style="opacity:0.3; " title="2026-08-31">31</td><td title="2026-09-01">01</td>` ~
+        `<td title="2026-09-02">02</td><td title="2026-09-03">03</td><td title="2026-09-04">04</td>` ~
+        `<td title="2026-09-05">05</td><td title="2026-09-06">06</td></tr>` ~
+        `<tr><th scope="row" title="days in calendar week number 37">` ~
+        `<span style="opacity:0.7;">W37</span></th>` ~
+        `<td title="2026-09-07">07</td><td title="2026-09-08">08</td><td title="2026-09-09">09</td>` ~
+        `<td title="2026-09-10">10</td><td title="2026-09-11">11</td><td title="2026-09-12">12</td>` ~
+        `<td title="2026-09-13">13</td></tr></tbody></table>` ~
+        `<p>Numbering each week from 01 through 52 or 53 lets applications ` ~
+        `sort dates lexicographically without ambiguity across year ` ~
+        `boundaries in most practical cases.</p></article>`;
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto tablesOn = renderMarkdown(tree, MarkdownRenderOptions(tables: true));
+    assert(tablesOn ==
+        "## September 2026\n\n" ~
+        "The ISO week calendar arranges each week from Monday through Sunday " ~
+        "and numbers each week of the year, as shown in the following " ~
+        "excerpt of a September 2026 calendar table\\.\n\n" ~
+        "September 2026\n\n" ~
+        "| Week | Mon | Tue | Wed | Thu | Fri | Sat | Sun | \n" ~
+        "|---|---|---|---|---|---|---|---|\n" ~
+        "| W36 | 31 | 01 | 02 | 03 | 04 | 05 | 06 | \n" ~
+        "| W37 | 07 | 08 | 09 | 10 | 11 | 12 | 13 |\n\n" ~
+        "Numbering each week from 01 through 52 or 53 lets applications " ~
+        "sort dates lexicographically without ambiguity across year " ~
+        "boundaries in most practical cases\\.\n",
+        "tables=true must render a real GFM-shaped pipe table, matching " ~
+        "pinned trafilatura==2.2.0's own row/delimiter syntax (confirmed by " ~
+        "running it), plus the real caption as its own preceding line");
+
+    auto tablesOff = renderMarkdown(tree, MarkdownRenderOptions(tables: false));
+    assert(tablesOff ==
+        "## September 2026\n\n" ~
+        "The ISO week calendar arranges each week from Monday through Sunday " ~
+        "and numbers each week of the year, as shown in the following " ~
+        "excerpt of a September 2026 calendar table\\.\n\n" ~
+        "September 2026\n\n" ~
+        "- Week | Mon | Tue | Wed | Thu | Fri | Sat | Sun\n\n" ~
+        "- W36 | 31 | 01 | 02 | 03 | 04 | 05 | 06\n\n" ~
+        "- W37 | 07 | 08 | 09 | 10 | 11 | 12 | 13\n\n" ~
+        "Numbering each week from 01 through 52 or 53 lets applications " ~
+        "sort dates lexicographically without ambiguity across year " ~
+        "boundaries in most practical cases\\.\n",
+        "tables=false must fall back to this renderer's own pre-#478 plain " ~
+        "bullet-row form -- a graceful rendering degrade that still keeps " ~
+        "every real cell's text, unlike pinned trafilatura==2.2.0's own " ~
+        "--no-tables (confirmed by running it: it drops table content " ~
+        "outright rather than degrading it -- a deliberate divergence, see " ~
+        "MarkdownRenderOptions's own doc comment)");
+}
+
+// Issue #478 real fixture 2/4 -- lists (nested, ordered/unordered). Verbatim
+// excerpt (the real "Durations" section's designator list, real <i> emphasis
+// kept as-is) from the same Wikipedia "ISO 8601" article as the table
+// fixture above (en.wikipedia.org/wiki/ISO_8601, CC BY-SA 4.0), for the same
+// reason: none of the held-out corpus's 20 real pages have a genuine nested
+// list inside actual article content (every `<ul>`/`<ol>` found by direct
+// inspection across all 20 pages is navigation/menu/footer chrome -- e.g.
+// `class="sub-menu"`, `class="menu_2depth_list"`, `id="menu-main-menu"` --
+// not article prose), so this fixture draws on a different, separately
+// fetched real page, per this issue's own explicit allowance for that case.
+// A genuinely two-level-nested real `<ul>`: an outer list item's own prose
+// text followed immediately by a nested `<ul>`, twice, each nested list
+// itself holding several real `<li>` items -- not a synthetic one-level
+// list invented for this test.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    string html = `<article><h2>Durations</h2>` ~
+        `<p>Durations define the amount of intervening time in a time ` ~
+        `interval and are represented by the format P[n]Y[n]M[n]DT[n]H[n]M[n]S ` ~
+        `or P[n]W as shown on the aside. The capital letters are designators ` ~
+        `for each of the date and time elements and are not replaced.</p>` ~
+        `<ul><li><i>P</i> is the duration designator (for <i>period</i>) ` ~
+        `placed at the start of the duration representation.` ~
+        `<ul><li><i>Y</i> is the year designator that follows the value ` ~
+        `for the number of calendar years.</li>` ~
+        `<li><i>M</i> is the month designator that follows the value for ` ~
+        `the number of calendar months.</li>` ~
+        `<li><i>W</i> is the week designator that follows the value for ` ~
+        `the number of weeks.</li>` ~
+        `<li><i>D</i> is the day designator that follows the value for ` ~
+        `the number of calendar days.</li></ul></li>` ~
+        `<li><i>T</i> is the time designator that precedes the time ` ~
+        `components of the duration representation.` ~
+        `<ul><li><i>H</i> is the hour designator that follows the value ` ~
+        `for the number of hours.</li>` ~
+        `<li><i>M</i> is the minute designator that follows the value for ` ~
+        `the number of minutes.</li>` ~
+        `<li><i>S</i> is the second designator that follows the value for ` ~
+        `the number of seconds.</li></ul></li></ul>` ~
+        `<p>For example, "P3Y6M4DT12H30M5S" represents a duration of three ` ~
+        `years, six months, four days, twelve hours, thirty minutes, and ` ~
+        `five seconds.</p></article>`;
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto listsOn = renderMarkdown(tree, MarkdownRenderOptions(lists: true));
+    assert(listsOn ==
+        "## Durations\n\n" ~
+        "Durations define the amount of intervening time in a time interval " ~
+        "and are represented by the format P\\[n\\]Y\\[n\\]M\\[n\\]DT\\[n\\]H\\[n\\]M\\[n\\]S " ~
+        "or P\\[n\\]W as shown on the aside\\. The capital letters are " ~
+        "designators for each of the date and time elements and are not " ~
+        "replaced\\.\n\n" ~
+        "- *P* is the duration designator \\(for *period*\\) placed at the " ~
+        "start of the duration representation\\.\n" ~
+        "  \n" ~
+        "  - *Y* is the year designator that follows the value for the " ~
+        "number of calendar years\\.\n" ~
+        "  - *M* is the month designator that follows the value for the " ~
+        "number of calendar months\\.\n" ~
+        "  - *W* is the week designator that follows the value for the " ~
+        "number of weeks\\.\n" ~
+        "  - *D* is the day designator that follows the value for the " ~
+        "number of calendar days\\.\n" ~
+        "- *T* is the time designator that precedes the time components " ~
+        "of the duration representation\\.\n" ~
+        "  \n" ~
+        "  - *H* is the hour designator that follows the value for the " ~
+        "number of hours\\.\n" ~
+        "  - *M* is the minute designator that follows the value for the " ~
+        "number of minutes\\.\n" ~
+        "  - *S* is the second designator that follows the value for the " ~
+        "number of seconds\\.\n\n" ~
+        "For example, \"P3Y6M4DT12H30M5S\" represents a duration of three " ~
+        "years, six months, four days, twelve hours, thirty minutes, and " ~
+        "five seconds\\.\n",
+        "lists=true must render the real two-level nesting as indented " ~
+        "Markdown sub-bullets under their real parent item, preserving the " ~
+        "real inline <i> emphasis in every item's text");
+
+    auto listsOff = renderMarkdown(tree, MarkdownRenderOptions(lists: false));
+    assert(listsOff ==
+        "## Durations\n\n" ~
+        "Durations define the amount of intervening time in a time interval " ~
+        "and are represented by the format P\\[n\\]Y\\[n\\]M\\[n\\]DT\\[n\\]H\\[n\\]M\\[n\\]S " ~
+        "or P\\[n\\]W as shown on the aside\\. The capital letters are " ~
+        "designators for each of the date and time elements and are not " ~
+        "replaced\\.\n\n" ~
+        "*P* is the duration designator \\(for *period*\\) placed at the " ~
+        "start of the duration representation\\.\n\n" ~
+        "*Y* is the year designator that follows the value for the number " ~
+        "of calendar years\\.\n\n" ~
+        "*M* is the month designator that follows the value for the number " ~
+        "of calendar months\\.\n\n" ~
+        "*W* is the week designator that follows the value for the number " ~
+        "of weeks\\.\n\n" ~
+        "*D* is the day designator that follows the value for the number " ~
+        "of calendar days\\.\n\n" ~
+        "*T* is the time designator that precedes the time components of " ~
+        "the duration representation\\.\n\n" ~
+        "*H* is the hour designator that follows the value for the number " ~
+        "of hours\\.\n\n" ~
+        "*M* is the minute designator that follows the value for the " ~
+        "number of minutes\\.\n\n" ~
+        "*S* is the second designator that follows the value for the " ~
+        "number of seconds\\.\n\n" ~
+        "For example, \"P3Y6M4DT12H30M5S\" represents a duration of three " ~
+        "years, six months, four days, twelve hours, thirty minutes, and " ~
+        "five seconds\\.\n",
+        "lists=false must flatten every (possibly nested) real item to its " ~
+        "own plain paragraph with no bullet/number marker, keeping the " ~
+        "real text and real inline emphasis");
+}
+
+// Issue #478 real fixture 3/4 -- quotations. Verbatim excerpt from
+// archiv-related German blog fixture 08 of the pinned adbar/trafilatura
+// held-out corpus (fetched via `experiments/html_main_content/
+// fetch_held_out.sh --emit-corpus-dir`, same real-page provenance already
+// used by #477's own fixtures) -- one of the corpus's 20 real pages
+// (fixture 08) has exactly one real `<blockquote>`, a genuine quoted
+// newspaper excerpt about coin-toss physics ("Im Fall des Münzwurfs...")
+// embedded in the article's own real prose, not a synthetic quotation
+// invented for this test.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    string html = `<article><h1>Warum die Münze nicht fair ist</h1>` ~
+        `<p>Ein letzte Woche in der Süddeutschen erschienener Artikel ` ~
+        `erklärt es so:</p>` ~
+        `<blockquote><p>Im Fall des Münzwurfs kommt es zur Präzession, ` ~
+        `wenn die Münze nicht genau mittig geschnippt wird. Dann eiert sie ` ~
+        `in der Flugphase, und das führt dazu, dass sie etwas mehr Zeit in ` ~
+        `der ursprünglichen Ausrichtung verbringt und demzufolge häufiger ` ~
+        `so landet, wie sie geschnipst wurde. Das Eiern der Münze ist mit ` ~
+        `bloßem Auge kaum zu sehen &#8211; was von Zauberern und ` ~
+        `Trickbetrügern ausgenutzt wird, die eine Münze so schnipsen ` ~
+        `können, dass sie sich überhaupt nicht um sich selbst dreht, ` ~
+        `sondern nur wackelt.</p></blockquote>` ~
+        `<p>Das bestätigt experimentell eine Vorhersage aus der 2007 in ` ~
+        `SIAM Reviews erschienenen Arbeit &#8220;Dynamical bias in the ` ~
+        `coin toss&#8221; von Persi Diaconis, Susan Holmes und Richard ` ~
+        `Montgomery.</p></article>`;
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto quotesOn = renderMarkdown(tree, MarkdownRenderOptions(quotes: true));
+    assert(quotesOn ==
+        "# Warum die Münze nicht fair ist\n\n" ~
+        "Ein letzte Woche in der Süddeutschen erschienener Artikel erklärt " ~
+        "es so:\n\n" ~
+        "> Im Fall des Münzwurfs kommt es zur Präzession, wenn die Münze " ~
+        "nicht genau mittig geschnippt wird\\. Dann eiert sie in der " ~
+        "Flugphase, und das führt dazu, dass sie etwas mehr Zeit in der " ~
+        "ursprünglichen Ausrichtung verbringt und demzufolge häufiger so " ~
+        "landet, wie sie geschnipst wurde\\. Das Eiern der Münze ist mit " ~
+        "bloßem Auge kaum zu sehen – was von Zauberern und Trickbetrügern " ~
+        "ausgenutzt wird, die eine Münze so schnipsen können, dass sie " ~
+        "sich überhaupt nicht um sich selbst dreht, sondern nur wackelt\\." ~
+        "\n\n" ~
+        "Das bestätigt experimentell eine Vorhersage aus der 2007 in SIAM " ~
+        "Reviews erschienenen Arbeit “Dynamical bias in the coin toss” von " ~
+        "Persi Diaconis, Susan Holmes und Richard Montgomery\\.\n",
+        "quotes=true must render the real blockquote with a real `> ` " ~
+        "marker on every wrapped line");
+
+    auto quotesOff = renderMarkdown(tree, MarkdownRenderOptions(quotes: false));
+    assert(quotesOff ==
+        "# Warum die Münze nicht fair ist\n\n" ~
+        "Ein letzte Woche in der Süddeutschen erschienener Artikel erklärt " ~
+        "es so:\n\n" ~
+        "Im Fall des Münzwurfs kommt es zur Präzession, wenn die Münze " ~
+        "nicht genau mittig geschnippt wird\\. Dann eiert sie in der " ~
+        "Flugphase, und das führt dazu, dass sie etwas mehr Zeit in der " ~
+        "ursprünglichen Ausrichtung verbringt und demzufolge häufiger so " ~
+        "landet, wie sie geschnipst wurde\\. Das Eiern der Münze ist mit " ~
+        "bloßem Auge kaum zu sehen – was von Zauberern und Trickbetrügern " ~
+        "ausgenutzt wird, die eine Münze so schnipsen können, dass sie " ~
+        "sich überhaupt nicht um sich selbst dreht, sondern nur wackelt\\." ~
+        "\n\n" ~
+        "Das bestätigt experimentell eine Vorhersage aus der 2007 in SIAM " ~
+        "Reviews erschienenen Arbeit “Dynamical bias in the coin toss” von " ~
+        "Persi Diaconis, Susan Holmes und Richard Montgomery\\.\n",
+        "quotes=false must render the real quoted text as a plain " ~
+        "paragraph with no `> ` marker, keeping the real text");
+}
+
+// Issue #478 real fixture 4/4 -- code (fenced `pre` and inline `code`).
+// Verbatim excerpt from the official Python documentation's "Virtual
+// Environments and Packages" tutorial (docs.python.org/3/tutorial/
+// venv.html, Python Software Foundation license -- real third-party
+// content, test-only and never shipped, per this repository's existing
+// test-fixture policy), fetched directly (the held-out corpus has *no*
+// `<pre>`/`<code>` at all across any of its 20 real pages, confirmed by
+// grepping every fetched page, so this fixture necessarily draws on a
+// different real page). Confirmed against pinned trafilatura==2.2.0
+// (`--output-format markdown`, run directly): it renders this exact real
+// `<pre>` as a bare ``` fence with **no** language hint, even though the
+// genuine page markup around it (`<div class="highlight-python3">`) does
+// carry language information one level up from the `<pre>` -- and,
+// separately, a second synthetic probe with the more common
+// `<code class="language-python">` convention also produced no hint from
+// trafilatura. Two different real/realistic language-hint conventions, one
+// answer both times: pinned trafilatura's Markdown code output never
+// includes a language hint, so this renderer's own pre-#478 bare-fence
+// (no hint) behavior is kept unchanged rather than adding hint support
+// this issue's own reference tool does not itself have.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    string html = `<article><h2>Creating Virtual Environments</h2>` ~
+        `<p>The module used to create and manage virtual environments is ` ~
+        `called <code class="xref py py-mod docutils literal notranslate">venv</code>. ` ~
+        `<code class="xref py py-mod docutils literal notranslate">venv</code> ` ~
+        `will install the Python version from which the command was run.</p>` ~
+        `<p>To create a virtual environment, decide upon a directory where ` ~
+        `you want to place it, and run the venv module as a script with ` ~
+        `the directory path:</p>` ~
+        `<div class="highlight-python3 notranslate"><div class="highlight">` ~
+        `<pre>python -m venv tutorial-env</pre></div></div>` ~
+        `<p>This will create the ` ~
+        `<code class="docutils literal notranslate">tutorial-env</code> ` ~
+        `directory if it doesn&#8217;t exist, and also create directories ` ~
+        `inside it containing a copy of the Python interpreter and various ` ~
+        `supporting files.</p></article>`;
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto codeOn = renderMarkdown(tree, MarkdownRenderOptions(code: true));
+    assert(codeOn ==
+        "## Creating Virtual Environments\n\n" ~
+        "The module used to create and manage virtual environments is " ~
+        "called `venv`\\. `venv` will install the Python version from " ~
+        "which the command was run\\.\n\n" ~
+        "To create a virtual environment, decide upon a directory where " ~
+        "you want to place it, and run the venv module as a script with " ~
+        "the directory path:\n\n" ~
+        "```\n" ~
+        "python -m venv tutorial-env\n" ~
+        "```\n\n" ~
+        "This will create the `tutorial-env` directory if it doesn’t " ~
+        "exist, and also create directories inside it containing a copy " ~
+        "of the Python interpreter and various supporting files\\.\n",
+        "code=true must render the real inline <code> mentions with real " ~
+        "backticks and the real <pre> as a real bare fenced block, matching " ~
+        "pinned trafilatura==2.2.0's own no-language-hint fence syntax");
+
+    auto codeOff = renderMarkdown(tree, MarkdownRenderOptions(code: false));
+    assert(codeOff ==
+        "## Creating Virtual Environments\n\n" ~
+        "The module used to create and manage virtual environments is " ~
+        "called venv\\. venv will install the Python version from which " ~
+        "the command was run\\.\n\n" ~
+        "To create a virtual environment, decide upon a directory where " ~
+        "you want to place it, and run the venv module as a script with " ~
+        "the directory path:\n\n" ~
+        "python \\-m venv tutorial\\-env\n\n" ~
+        "This will create the tutorial\\-env directory if it doesn’t " ~
+        "exist, and also create directories inside it containing a copy " ~
+        "of the Python interpreter and various supporting files\\.\n",
+        "code=false must render both the real inline mentions and the real " ~
+        "pre block as ordinary prose text -- no backticks, no fence -- " ~
+        "keeping the real text");
 }

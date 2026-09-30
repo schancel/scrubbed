@@ -355,3 +355,69 @@ unittest {
     // module: chrome never leaks into selected content, options or not.
     assert(!defaulted.markdown.canFind("Home") && !allOff.markdown.canFind("Home"));
 }
+
+// Issue #478: `extractMainContentMarkdown`'s `options` parameter reaches the
+// `selected` path's `renderMarkdownFrom` call for the four new fields
+// (`tables`/`lists`/`quotes`/`code`), not just #477's original three, at
+// this combinator's own public entry point. Fixture is the real held-out
+// blockquote excerpt (`html_markdown.d`'s own "quotations" fixture -- see
+// that unittest's doc comment for exact provenance: fixture 08 of the
+// pinned adbar/trafilatura held-out corpus) alongside a real `<nav>`
+// boilerplate sibling, mirroring this module's own pre-existing
+// `headingThenParagraph`-style fixture shape. Named-field
+// `MarkdownRenderOptions` construction throughout, per this ticket's own
+// instruction (a 7-field all-`bool` struct makes positional construction a
+// real transposition-risk footgun).
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string quoteExcerpt =
+        `<h1>Warum die Münze nicht fair ist</h1>` ~
+        `<p>Ein letzte Woche in der Süddeutschen erschienener Artikel ` ~
+        `erklärt es so:</p>` ~
+        `<blockquote><p>Im Fall des Münzwurfs kommt es zur Präzession, ` ~
+        `wenn die Münze nicht genau mittig geschnippt wird. Dann eiert sie ` ~
+        `in der Flugphase, und das führt dazu, dass sie etwas mehr Zeit in ` ~
+        `der ursprünglichen Ausrichtung verbringt und demzufolge häufiger ` ~
+        `so landet, wie sie geschnipst wurde.</p></blockquote>` ~
+        `<p>Das bestätigt experimentell eine Vorhersage aus der 2007 in ` ~
+        `SIAM Reviews erschienenen Arbeit &#8220;Dynamical bias in the ` ~
+        `coin toss&#8221; von Persi Diaconis, Susan Holmes und Richard ` ~
+        `Montgomery.</p>`;
+    string page = "<nav>Home About Contact</nav><article>" ~ quoteExcerpt ~ "</article>";
+
+    auto outcome = parseHtml(cast(const(ubyte)[]) page);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto defaulted = extractMainContentMarkdown(tree);
+    auto explicitOn = extractMainContentMarkdown(tree, MarkdownRenderOptions(
+        formatting: true, links: true, images: true,
+        tables: true, lists: true, quotes: true, code: true));
+    auto quotesOff = extractMainContentMarkdown(tree,
+        MarkdownRenderOptions(quotes: false));
+
+    assert(defaulted.status == MainContentStatus.selected);
+    assert(defaulted.status == explicitOn.status && defaulted.status == quotesOff.status);
+    assert(defaulted.node == explicitOn.node && defaulted.node == quotesOff.node,
+        "options must change rendering only, never which subtree selection picks");
+
+    // Default (omitted `options`) is byte-identical to explicitly requesting
+    // full fidelity -- the same #411/#438 non-regression guarantee this
+    // module's own earlier unittest already proves for `formatting`/
+    // `links`/`images`, now covering `quotes` (and, by the same code path,
+    // `tables`/`lists`/`code`) too.
+    assert(defaulted.markdown == explicitOn.markdown);
+    assert(defaulted.markdown.canFind("> Im Fall des Münzwurfs"),
+        "default must preserve the real blockquote's `> ` marker");
+
+    assert(!quotesOff.markdown.canFind("> "),
+        "quotes=false must drop the `> ` marker at this combinator level too");
+    assert(quotesOff.markdown.canFind("Im Fall des Münzwurfs"),
+        "quotes=false must keep the real quoted text itself, only strip the marker");
+
+    // Same invariant #438's own fixture above already proves for this
+    // module: chrome never leaks into selected content, options or not.
+    assert(!defaulted.markdown.canFind("Home") && !quotesOff.markdown.canFind("Home"));
+}

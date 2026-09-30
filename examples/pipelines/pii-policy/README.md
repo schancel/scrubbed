@@ -134,19 +134,36 @@ release binary, and for each:
 
 ## Fixture provenance
 
-This corpus is wholly new content authored for issue #507, not copied from
-issue #180's existing `experiments/pii_pipeline/check.d` fixture. That
-fixture is an inline literal byte string inside a D test file under
-`experiments/` -- an internal/test-only location in this repo, not the
-public `examples/**` gallery -- with no standalone file, license header, or
-manifest/provenance record of its own, so it was not redistributable as-is
-into the public gallery's corpus, which requires exactly that kind of
-per-artifact provenance and license metadata (see
-`examples/corpus/quickstart/manifest.json`'s existing pattern). This
-example's fixture pattern-matches #180's category coverage (email, phone,
-plus IPv4 in place of #180's fourth, payment-card, category -- three of the
-four is already more than one category) but every byte is newly authored:
-a different local part, a different reserved test domain, a different
-NANP fictional exchange, and a different RFC 5737 documentation-range IP
-address. See `examples/corpus/pii-policy/manifest.json`'s
-`fixtureProvenance` record for the same statement in machine-checked form.
+This corpus is wholly new content authored for issue #507. Two #180-adjacent
+candidates were located and considered before authoring new content:
+
+1. **`experiments/pii_pipeline/check.d`'s inline test-fixture bytes.** An
+   inline literal byte string inside a D test file under `experiments/` --
+   an internal/test-only location in this repo, not the public `examples/**`
+   gallery -- with no standalone file, license header, or manifest/
+   provenance record of its own, so it was not redistributable as-is into
+   the public gallery's corpus, which requires exactly that kind of
+   per-artifact provenance and license metadata (see
+   `examples/corpus/quickstart/manifest.json`'s existing pattern).
+2. **`benchmarks/pii-pipeline.json`'s checked-in `"handoff"` object**
+   (landed in commit `15eeab5`/PR #272; issue #180's own closing comment
+   describes it as the ready synthetic handoff packet published for #62 to
+   land separately). This one genuinely *is* redistributable as-is: it
+   carries its own explicit `"license": "CC0-1.0"` and a `"provenance"`
+   record (`author`, `kind: authored-synthetic`, `network_data: false`,
+   `private_data: false`). It was not reused here because its coverage
+   doesn't meet this ticket's acceptance criteria on its own: only two
+   categories (`email`, `ip` -- no `phone`, no `card`) and a single
+   `mask`-policy golden only (no `report` or `redact` expected output/audit).
+   Reusing it would still have required authoring a phone finding and
+   report/redact goldens from scratch, so a coherent from-scratch
+   three-category/three-policy corpus was authored instead.
+
+This example's fixture pattern-matches #180's category coverage (email,
+phone, plus IPv4 in place of #180's fourth, payment-card, category -- three
+of the four is already more than one category) but every byte is newly
+authored: a different local part, a different reserved test domain, a
+different NANP fictional exchange, and a different RFC 5737
+documentation-range IP address, distinct from both #180-adjacent fixtures
+above. See `examples/corpus/pii-policy/manifest.json`'s `fixtureProvenance`
+record for the same statement in machine-checked form.

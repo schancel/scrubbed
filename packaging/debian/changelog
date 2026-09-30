@@ -1,0 +1,13 @@
+scrubbed (0.0.0~dev-1) UNRELEASED; urgency=medium
+
+  * Initial .deb packaging (issue #500, slice of #61): binary, bash/zsh/fish
+    completions installed to Debian-convention paths, and the release
+    tarball's license-notice closure (LICENSE, THIRD_PARTY_NOTICES.md, and
+    the third_party/** files it references) bundled as
+    /usr/share/doc/scrubbed/{copyright,THIRD_PARTY_NOTICES.md}. Runtime
+    dependencies (libcurl4t64/libcurl4, libc6, libgcc-s1) were determined by
+    running dpkg-shlibdeps against a real release binary inside real Debian
+    12 (bookworm) and Ubuntu 24.04 (noble) containers, not guessed; see
+    packaging/debian/README.md for the recorded evidence.
+
+ -- Shammah Chancellor <213740+schancel@users.noreply.github.com>  Wed, 30 Sep 2026 00:00:00 +0000

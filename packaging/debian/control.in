@@ -1,0 +1,15 @@
+Package: scrubbed
+Version: @VERSION@
+Section: text
+Priority: optional
+Architecture: @ARCH@
+Installed-Size: @INSTALLED_SIZE@
+Depends: libcurl4t64 (>= 7.16.2) | libcurl4 (>= 7.16.2), libc6 (>= 2.36), libgcc-s1 (>= 4.2)
+Recommends: zlib1g
+Maintainer: Shammah Chancellor <213740+schancel@users.noreply.github.com>
+Homepage: https://github.com/schancel/scrubbed
+Description: text sanitization CLI: mojibake repair, HTML-to-Markdown extraction
+ scrubbed repairs mojibake and normalizes text encodings, extracts clean
+ Markdown from HTML, and runs a range-based, parallel filter pipeline over
+ multiple documents from the command line. Bash, zsh, and fish completions
+ are installed automatically.

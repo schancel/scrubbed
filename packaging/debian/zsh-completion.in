@@ -1,0 +1,28 @@
+#compdef scrubbed
+# Debian/Ubuntu vendor-completions zsh wrapper for scrubbed (issue #500).
+#
+# `scrubbed completion init --zsh` (source/cli_commands.d) prints code meant
+# to be `source`d directly into an interactive shell *after* the user has
+# manually loaded `bashcompinit` (its own header comment says so): it
+# registers via bash's `complete -F`, which zsh's native compsys autoload
+# never triggers on its own. Verified empirically (real zpty-driven Tab
+# press in a container, standard `autoload -Uz compinit && compinit` only,
+# no `bashcompinit`) that dropping that raw output at
+# /usr/share/zsh/vendor-completions/_scrubbed silently no-ops: Tab falls
+# back to plain filename completion instead of scrubbed's own subcommands.
+#
+# This wrapper avoids that gap without touching source/cli_commands.d (out
+# of this ticket's scope) by calling the same stable, already-tested
+# candidate-producing subcommand (`scrubbed completion complete --zsh --
+# <tokens> ---`) directly through zsh's native `compadd`, which needs
+# nothing but the standard `compinit` almost every Debian/Ubuntu zsh setup
+# already runs. Re-verified working (real candidates: clean, extract,
+# repair, run, ... via a fresh zsh's first Tab press) after this change.
+_scrubbed() {
+    local -a candidates
+    local candidate
+    while IFS= read -r candidate; do
+        candidates+=("$candidate")
+    done < <(@SCRUBBED_BIN@ completion complete --zsh -- "${words[@]}" ---)
+    compadd -a candidates
+}

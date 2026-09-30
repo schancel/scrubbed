@@ -167,3 +167,35 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
+
+  cleanup-failed-release:
+    name: clean up stale draft release on failure
+    # `create-release` only succeeds when `gh release create` found no
+    # existing release for $TAG -- so a successful `create-release` means
+    # *this* run is the one that created the draft, never an unrelated
+    # pre-existing release for the same tag. `failure()` (scoped to this
+    # job's direct `needs`) is true only when `build`, `checksums`, or
+    # `publish` actually failed -- if `create-release` itself failed, the
+    # rest are skipped (not failed), `failure()` is false, and this job
+    # correctly never runs (issue #553).
+    needs: [create-release, build, checksums, publish]
+    if: failure() && needs.create-release.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Delete the draft release this run created
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Belt-and-suspenders: only delete while it is still a draft, so
+          # a race that somehow already published it for real is left
+          # untouched rather than deleted.
+          is_draft=$(gh release view "$TAG" --repo "${{ github.repository }}" \
+            --json isDraft --jq .isDraft 2>/dev/null || echo "")
+          if [[ "$is_draft" != "true" ]]; then
+            echo "no stale draft release for $TAG to clean up (is_draft='$is_draft')"
+            exit 0
+          fi
+          gh release delete "$TAG" --repo "${{ github.repository }}" --yes
+          echo "deleted stale draft release for $TAG"

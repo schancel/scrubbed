@@ -79,7 +79,15 @@ private string[] discoverLicenseLikeFiles(string repository) {
 /// paths alike) -- used as the "what should we ship" side of the closure
 /// check.
 private string[] discoverReferencedThirdPartyPaths(string noticesText) {
-    auto re = regex(`third_party/[A-Za-z0-9_./-]+`);
+    // A trailing "." is only kept when it is itself followed by more
+    // path-shaped characters (a real extension, e.g. `LICENSE.txt`) --
+    // never when it is the last character of the reference, so a
+    // sentence-ending period right after a bare (non-backtick-quoted) path
+    // is never swallowed into the matched path. The trailing lookahead then
+    // additionally requires that whatever follows the whole match is a real
+    // path-terminating boundary: a backtick, a closing paren, whitespace,
+    // a literal terminating period, or end-of-string (issue #553).
+    auto re = regex(`third_party/[A-Za-z0-9_/-]+(?:\.[A-Za-z0-9_/-]+)*(?=[` ~ "`" ~ `),.]|\s|$)`);
     bool[string] seen;
     string[] result;
     foreach (m; matchAll(noticesText, re)) {
@@ -90,6 +98,39 @@ private string[] discoverReferencedThirdPartyPaths(string noticesText) {
     }
     sort(result);
     return result;
+}
+
+// issue #553: a bare (non-backtick-quoted) `third_party/...` reference
+// immediately followed by a sentence-ending period must not swallow that
+// period into the extracted path -- whether the period sits at the very
+// end of the document, right before a newline, or glued straight onto the
+// next sentence with no separating whitespace at all. Backtick-quoted and
+// parenthesized references, and real dotted extensions, must keep working.
+unittest {
+    auto atEndOfDocument = "See third_party/foo/LICENSE.";
+    assert(discoverReferencedThirdPartyPaths(atEndOfDocument) == ["third_party/foo/LICENSE"]);
+
+    auto beforeNewline = "See third_party/foo/LICENSE.\nMore text below.";
+    assert(discoverReferencedThirdPartyPaths(beforeNewline) == ["third_party/foo/LICENSE"]);
+
+    auto beforeSpace = "See third_party/foo/LICENSE. Next sentence follows.";
+    assert(discoverReferencedThirdPartyPaths(beforeSpace) == ["third_party/foo/LICENSE"]);
+
+    // No separating whitespace between the trailing period and the prose
+    // that follows -- the pathological shape called out in issue #553.
+    auto gluedProse = "See third_party/foo/LICENSE.No blank line separates this sentence.";
+    auto glued = discoverReferencedThirdPartyPaths(gluedProse);
+    assert(glued.length == 1);
+    assert(!glued[0].endsWith("."), "trailing period must never be captured: " ~ glued[0]);
+
+    auto backtickQuoted = "see `third_party/foo/LICENSE.txt` for details";
+    assert(discoverReferencedThirdPartyPaths(backtickQuoted) == ["third_party/foo/LICENSE.txt"]);
+
+    auto backtickNoExtension = "see `third_party/foo/LICENSE` for details";
+    assert(discoverReferencedThirdPartyPaths(backtickNoExtension) == ["third_party/foo/LICENSE"]);
+
+    auto parenthesized = "(third_party/zstd/COPYING)";
+    assert(discoverReferencedThirdPartyPaths(parenthesized) == ["third_party/zstd/COPYING"]);
 }
 
 /// Cross-checks the live `third_party/**` tree against

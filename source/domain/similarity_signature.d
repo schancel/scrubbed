@@ -67,34 +67,56 @@ SimilaritySignatures similaritySignatures(DocumentId id, const(ubyte)[] content)
     auto normalized = normalize(content);
 
     SimilaritySignatures result;
-    result.document = signature(id, 0, false, normalized);
+    result.document = initializeSignature(id, 0, false, normalized.length);
+    size_t[] segmentEnds;
     for (size_t start = 0, ordinal = 0; start < normalized.length; ++ordinal) {
         size_t end = start + similaritySegmentBytes;
         if (end >= normalized.length) end = normalized.length;
         else while (end > start && (normalized[end] & 0xc0) == 0x80) --end;
         assert(end > start);
-        result.segments ~= signature(id, ordinal, true, normalized[start .. end]);
+        result.segments ~= initializeSignature(id, ordinal, true, end - start);
+        segmentEnds ~= end;
         start = end;
     }
+
+    size_t segmentIndex;
+    foreach (offset; 0 .. (normalized.length >= 5 ? normalized.length - 4 : 0)) {
+        while (segmentIndex < segmentEnds.length && offset >= segmentEnds[segmentIndex])
+            ++segmentIndex;
+        SimilaritySignature* segment;
+        if (segmentIndex < segmentEnds.length && offset + 5 <= segmentEnds[segmentIndex])
+            segment = &result.segments[segmentIndex];
+        updateSignatures(result.document, segment, normalized[offset .. offset + 5]);
+    }
+    finishSignature(result.document);
+    foreach (ref segment; result.segments) finishSignature(segment);
     return result;
 }
 
-private SimilaritySignature signature(DocumentId id, size_t ordinal, bool segment,
-    const(ubyte)[] bytes) {
+private SimilaritySignature initializeSignature(DocumentId id, size_t ordinal,
+        bool segment, size_t byteLength) {
     SimilaritySignature result;
     result.documentId = id;
     result.segmentOrdinal = ordinal;
     result.segment = segment;
-    if (bytes.length < 5) return result;
+    if (byteLength < 5) return result;
     result.hasKeys = true;
     result.lanes[] = ulong.max;
-    foreach (offset; 0 .. bytes.length - 4) {
-        auto shingle = bytes[offset .. offset + 5];
-        foreach (lane; 0 .. similarityLanes) {
-            auto hash = shingleHash(shingle, laneInitialHashes[lane]);
-            if (hash < result.lanes[lane]) result.lanes[lane] = hash;
-        }
+    return result;
+}
+
+private void updateSignatures(ref SimilaritySignature document,
+        SimilaritySignature* segment, const(ubyte)[] shingle) {
+    foreach (lane; 0 .. similarityLanes) {
+        auto hash = shingleHash(shingle, laneInitialHashes[lane]);
+        if (hash < document.lanes[lane]) document.lanes[lane] = hash;
+        if (segment !is null && hash < segment.lanes[lane])
+            segment.lanes[lane] = hash;
     }
+}
+
+private void finishSignature(ref SimilaritySignature result) {
+    if (!result.hasKeys) return;
     foreach (band; 0 .. similarityBands) {
         ulong hash = (0xcbf29ce484222325UL ^ cast(ubyte) band) * 0x100000001b3UL;
         foreach (lane; band * 4 .. band * 4 + 4) {
@@ -106,7 +128,18 @@ private SimilaritySignature signature(DocumentId id, size_t ordinal, bool segmen
         }
         result.bands[band] = hash;
     }
-    return result;
+}
+
+version (unittest) {
+    private SimilaritySignature referenceSignature(DocumentId id, size_t ordinal,
+            bool segment, const(ubyte)[] bytes) {
+        auto result = initializeSignature(id, ordinal, segment, bytes.length);
+        if (!result.hasKeys) return result;
+        foreach (offset; 0 .. bytes.length - 4)
+            updateSignatures(result, null, bytes[offset .. offset + 5]);
+        finishSignature(result);
+        return result;
+    }
 }
 
 // The domain and SplitMix64 seed schedule are frozen v1 constants; arithmetic
@@ -156,4 +189,28 @@ unittest {
     assert(normalize(cast(const(ubyte)[]) " \t\r\n\f") == cast(const(ubyte)[]) " ");
     assert(normalize(cast(const(ubyte)[]) "  Alpha\tBETA\né  ") ==
         cast(const(ubyte)[]) " alpha beta é ");
+
+    // The one-pass document/segment update must remain byte-for-byte equal
+    // to computing each signature independently, including UTF-8-adjusted
+    // segment boundaries and shingles that straddle those boundaries.
+    auto boundaryText = new ubyte[similaritySegmentBytes + 17];
+    boundaryText[] = cast(ubyte) 'a';
+    boundaryText[similaritySegmentBytes - 1 .. similaritySegmentBytes + 1] =
+        cast(const(ubyte)[]) "é";
+    auto combined = similaritySignatures(id, boundaryText);
+    auto normalizedBoundary = normalize(boundaryText);
+    assert(combined.document.lanes ==
+        referenceSignature(id, 0, false, normalizedBoundary).lanes);
+    size_t start;
+    foreach (ordinal, segment; combined.segments) {
+        size_t end = start + similaritySegmentBytes;
+        if (end >= normalizedBoundary.length) end = normalizedBoundary.length;
+        else while (end > start && (normalizedBoundary[end] & 0xc0) == 0x80) --end;
+        auto reference = referenceSignature(id, ordinal, true,
+            normalizedBoundary[start .. end]);
+        assert(segment.hasKeys == reference.hasKeys);
+        assert(segment.lanes == reference.lanes);
+        assert(segment.bands == reference.bands);
+        start = end;
+    }
 }

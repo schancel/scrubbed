@@ -1562,6 +1562,55 @@ unittest {
     assert(styleInStructuredDataResult.text.canFind("Article body sentence."));
 }
 
+// Issue #485: a literal, unescaped `</script>` inside a JSON-LD string value.
+// Parsed through the real lexbor boundary (not a hand-built tree), because
+// the whole point is how the HTML5 tokenizer splits this: the raw-text
+// `<script>` ends at the first `</script>`, so the script's own text is the
+// truncated, unparseable `{"@type":"Article","articleBody":"... PrefixMarker `
+// and everything after it (including the `"}` JSON tail) becomes ordinary
+// `<body>` text -- exactly what a browser renders visibly. The invariant
+// pinned here: the truncated block contributes *nothing* through the
+// structured-data fallback (never parsed leniently, never stitched to
+// sibling text outside the script element), so any text in the result
+// comes from the ordinary DOM path, and the invisible prefix never appears.
+// The properly escaped `<\/script>` twin must still be recovered whole.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string tailProse = " and some prose after the close tag with a very long real " ~
+        "sentence of readable prose padded out so that there is still comfortably " ~
+        "more than two hundred bytes of genuine paragraph text left over for the " ~
+        "extraction floor to accept without any trouble at all here now for sure " ~
+        "end of body.";
+    string pageWith(string closeTag) {
+        return "<html><head>\n<script type=\"application/ld+json\">\n" ~
+            `{"@type":"Article","articleBody":"Some prose before the marker PrefixMarker ` ~
+            closeTag ~ tailProse ~ "\"}\n</script>\n</head><body><nav>NavBoilerplateMarker " ~
+            "Home About Contact</nav></body></html>";
+    }
+
+    auto unescaped = parseHtml(cast(const(ubyte)[]) pageWith("</script>"));
+    assert(unescaped.isParsed);
+    assert(structuredDataFallbackText(unescaped.tree) is null,
+        "a JSON-LD block truncated by an unescaped </script> must contribute nothing");
+    auto unescapedResult = extractMainContent(unescaped.tree);
+    assert(unescapedResult.status != MainContentStatus.selectedStructuredData,
+        "truncated JSON-LD must never be promoted to selectedStructuredData");
+    assert(!unescapedResult.text.canFind("PrefixMarker"),
+        "text inside the (truncated) script element must never leak into output");
+
+    auto escaped = parseHtml(cast(const(ubyte)[]) pageWith(`<\/script>`));
+    assert(escaped.isParsed);
+    auto escapedResult = extractMainContent(escaped.tree);
+    assert(escapedResult.status == MainContentStatus.selectedStructuredData);
+    assert(escapedResult.text.canFind("PrefixMarker") &&
+        escapedResult.text.canFind("end of body."),
+        "a properly escaped JSON-LD value must be recovered whole");
+    assert(!escapedResult.text.canFind("NavBoilerplateMarker"),
+        "recovered JSON-LD text must never carry DOM boilerplate");
+}
+
 // Issue #475: comment-section identification/extraction, distinct from
 // `.text`. Fixture shapes below are modeled directly on this repo's own real
 // held-out corpus (`examples/pipeline-benchmark/corpus/`), not invented --

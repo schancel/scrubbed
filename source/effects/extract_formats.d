@@ -1106,6 +1106,55 @@ unittest {
 }
 
 unittest {
+    // Regression guard for issue #496: mutation testing found that breaking
+    // `xmlText`'s `&`/`<`/`>` escaping of real body text is caught by
+    // neither this module's other unittests above nor the pinned-trafilatura
+    // held-out corpus evidence script, because none of those 20 real pages'
+    // selected body text happens to contain a literal `<`/`>` character.
+    // This fixture's heading and paragraph carry all three characters (via
+    // real HTML entities in the source, which `parseHtml` decodes to the
+    // literal characters `xmlText` must then re-escape) so both `renderXml`
+    // and `renderXmlTei` are forced through that path. `assertWellFormedXml`
+    // alone already makes this mutation-testable: a raw, un-escaped `<` or
+    // `>` emitted into XML text content is not well-formed XML, so
+    // `dxml.parser.parseXML` throws and the unittest fails -- but the
+    // `canFind` assertions below additionally pin the exact expected
+    // escaped substrings, so a *double*-escaping mutation (e.g. reordering
+    // the `&` case to run after `<`/`>`, escaping the `&` inside an
+    // already-emitted `&lt;`/`&gt;` a second time) is also caught even
+    // though its output would still be well-formed XML.
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<article><h1>Rules &amp; Regulations &lt;Draft&gt;</h1><p>" ~ longParagraph ~
+        "The final comparison showed 5 &lt; 10 and 10 &gt; 3, and the committee " ~
+        "reviewed rules &amp; regulations before closing the discussion.</p></article>"));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto xml = renderXml(tree);
+    assert(xml.canFind("<heading level=\"1\">Rules &amp; Regulations &lt;Draft&gt;</heading>"),
+        "heading text must be XML-escaped, not left with raw &/</>");
+    assert(xml.canFind("5 &lt; 10 and 10 &gt; 3"),
+        "paragraph text's numeric comparisons must be XML-escaped");
+    assert(xml.canFind("reviewed rules &amp; regulations"),
+        "paragraph text's literal & must be XML-escaped");
+    assertWellFormedXml(xml);
+
+    auto tei = renderXmlTei(tree);
+    assert(tei.canFind("<ab rend=\"h1\" type=\"header\">Rules &amp; Regulations &lt;Draft&gt;</ab>"),
+        "TEI heading text must be XML-escaped, not left with raw &/</>");
+    assert(tei.canFind("5 &lt; 10 and 10 &gt; 3"),
+        "TEI paragraph text's numeric comparisons must be XML-escaped");
+    assert(tei.canFind("reviewed rules &amp; regulations"),
+        "TEI paragraph text's literal & must be XML-escaped");
+    assertWellFormedXml(tei);
+}
+
+unittest {
     // Abstention: no selectable content, so `<main>`/`<div type="entry">`
     // stay empty rather than fabricating structure -- mirrors
     // `MainContentResult.text`'s own empty-on-abstention behavior.

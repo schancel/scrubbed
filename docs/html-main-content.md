@@ -194,6 +194,154 @@ dependency), covering the same abstention paths plus a direct proof that
 are exercised by `dub test --build=release-unittest`, which needs no extra
 flags for this module.
 
+## Comment-section extraction (issue #475)
+
+Before this ticket, comment-section markup (`<div class="comments">`, a
+WordPress-style `<div id="comments">` thread, a Disqus embed) was either
+absorbed into the winning candidate's text or scored down by the existing
+`"comment"` entry in `negativeKeywords` and simply discarded -- treated
+identically to an ad or a share widget, with no way to tell "this page has
+comments and here they are" from "this page has boilerplate we dropped".
+This ticket adds a genuinely new output category: `MainContentResult` gains
+`commentsExtracted` (`bool`) and `comments` (`string`), populated by a
+second, independent scan of the whole document, distinct from the ordinary
+DOM candidate-scoring pass above (no interaction with `.text`/`.node`/
+`.score`/`.status` either way).
+
+**Real survey, not a guess.** `commentSectionKeywords`
+(`source/effects/html_main_content.d`) is grounded in a direct grep-and-read
+survey of this repo's own 20-page held-out corpus
+(`examples/pipeline-benchmark/corpus/`, the same corpus #411's own 20/20
+check uses), documented in that table's own doc comment:
+
+- `archiv-krimiblog-de.html`: `<div id="comments">` wrapping
+  `<div class="commentEntry"><div class="commentContent" id="comment-2310">`.
+- `kleinegruenemonster-wordpress-com.html`: `<div id="comments">` wrapping
+  `<div id="comment-75">`.
+- `scienceblogs-de.html`: `<div id="comments">` wrapping 140 real
+  `<div id="comment-NNNNNN" class="comment ... reply">` entries -- this
+  corpus's largest real comment thread.
+- `france-attac-org.html`: `<div class="comments">` containing only two bare
+  `<a id="comments">`/`<a id="forum">` fragment-link anchors, no comment text
+  at all -- a real "structurally comment-shaped but empty" page.
+- `www-tofugu-com.html`: a `<i class="fa fa-comments">` comment-*count*
+  glyph icon inside nav chrome, not a comment section at all.
+
+A single keyword, `"comment"`, covers every real pattern above (it is a
+substring of "comments", "commentEntry", "commentContent", "comment-75",
+"comment-NNNNNN", etc.). `"disqus"` is not present anywhere in this corpus;
+it is added because the issue's own acceptance criteria explicitly name
+Disqus embeds (`<div id="disqus_thread">`) as a pattern to detect, disclosed
+in the table's own doc comment as issue-instructed rather than
+corpus-observed. Detection is restricted to real block-container tags
+(`div`/`section`/`aside`/`ol`/`ul`, matching real trafilatura's own
+`htmlprocessing.py` comment-XPath restriction to `div`/`section`/`list`
+shapes) rather than any element -- this is exactly what keeps the
+`fa-comments` glyph icon (`<i>`, not a block container) and the bare
+`<a id="comments">` anchor (`<a>`, not a block container) from being
+misidentified as comment *sections*.
+
+**Algorithm.** One forward pre-order pass (the flat tree is already
+pre-order): each element whose tag is a real block container and whose
+class/id matches `commentSectionKeywords` becomes a comment-section root, and
+its whole subtree is claimed (`endOf`) -- a nested match inside an
+already-claimed root (e.g. `scienceblogs-de.html`'s individual
+`<div id="comment-NNNNNN">` entries inside the page's own outer
+`<div id="comments">`) is not treated as a second root. `commentsExtracted`
+is `true` whenever at least one root was found, even when the recovered text
+is empty (`france-attac-org.html`'s real shape above) -- a different, more
+honest fact than a page with no comment markup at all. Text collection
+(`collectPlainSubtreeText`) shares `collectText`'s hidden-tag/block-boundary
+logic but not its sandwich-exclusion rule (issue #27's Case 2 exists to
+strip a small embedded promotional run out of an *article* container; a
+comment section has no such "real content vs. embedded boilerplate"
+distinction to make once identified as a comment section in full).
+
+**Deliberately weaker output-cap invariant than main content.**
+`extractMainContent`'s own 4 MiB cap throws before returning any result so
+the *selected* main content is never observed truncated. Comments text
+instead catches its own overflow and returns whatever was collected before
+the cap, truncated rather than fatal: comments are a supplementary,
+independently-identified output, and a single real page's discussion thread
+growing past 4 MiB (plausible -- this corpus's own largest real thread,
+`scienceblogs-de.html`'s 140 entries, produces 156,620 bytes, comfortably
+under it, but a highly-discussed post elsewhere would not be) must not turn
+into a hard failure that quarantines the whole document over a part of the
+page nothing else depends on.
+
+**Default-on, with an opt-out** (issue #475's own acceptance criterion,
+matching trafilatura's `--no-comments` shape): `extractMainContent`'s new
+`includeComments` parameter defaults `true`; passing `false` suppresses
+comment scanning entirely (never merely filtering the output) --
+`commentsExtracted` stays `false` and `.comments` stays empty regardless of
+what markup the page actually carries. `html_main_content_stage.d` exposes
+the identical default/opt-out shape as a real, hyphenated boolean stage
+option, `include-comments` (matching `pii-four-class`'s own `allow-redact`
+as this repo's existing precedent for a hyphenated boolean stage option,
+parsed through the same `key in options` / default-value idiom, restated
+locally rather than shared since that helper is private to
+`pii_four_class.d`).
+
+**Real fixture proof.**
+[`experiments/html_main_content/comments_check.d`](../experiments/html_main_content/comments_check.d)
+is a real-fixture regression check (network-free, reads only this
+repository's own already-checked-in corpus HTML) satisfying acceptance
+criterion 2 directly: it asserts `commentsExtracted`/`.comments` against
+eight real corpus pages with ground truth drawn from the same survey above
+(four with real comment content, `france-attac-org.html`'s structurally-
+present-but-empty case, and three genuinely comment-free pages, including
+the `fa-comments`-glyph page), and that `includeComments=false` suppresses
+detection without perturbing main-content selection on the identical page.
+Run it exactly like `check.d`:
+
+```sh
+ldc2 -O3 -release -Isource -of=/tmp/html-main-content-comments-check \
+  experiments/html_main_content/comments_check.d source/effects/html_main_content.d \
+  source/effects/html_tree.d source/effects/lexbor_ffi.d \
+  source/text/decoding.d .dub/lexbor/liblexbor_static.a
+/tmp/html-main-content-comments-check
+```
+
+**Real pinned trafilatura==2.2.0 comparison** (acceptance criterion 1),
+[`experiments/html_main_content/compare_comments_trafilatura.sh`](../experiments/html_main_content/compare_comments_trafilatura.sh):
+a separate, non-gating, network-and-pip-using acquisition tier (outside
+`dub build`/`dub test` entirely, mirroring `fetch_held_out.sh`'s own
+established convention) that installs pinned `trafilatura==2.2.0` into a
+throwaway `uv venv`, verifies the exact pin via `uv pip freeze`, and compares
+scrubbed's own comment/non-comment split (`commentsExtracted && comments.length
+> 0`) against real trafilatura's own `"comments"` JSON output field
+(`trafilatura.extract(..., include_comments=True)`) over the identical eight
+real corpus pages `comments_check.d` uses. A real run (2026-09-29,
+`trafilatura==2.2.0` verified via `uv pip freeze`): **8/8 agreement** -- both
+tools agree on which of the four comment-bearing pages have comments and
+which of the four comment-free/textless-comment pages don't, with no
+disagreement on any page. One honest, disclosed nuance: on
+`scienceblogs-de.html` both tools agree comments are present, but real
+trafilatura's own extraction recovers only its section heading
+("Kommentare (140)", 16 bytes) while scrubbed recovers the full 140-entry
+thread (156,620 bytes) -- a difference in extraction *depth* on a page both
+tools correctly classify as "has comments", not a disagreement on the
+comment/non-comment split itself, which is what this criterion asks for.
+
+**Disclosed, deliberate scope boundary.** `html_main_content_stage.d` adds
+comment text to `input.metadata` as an extension field only when it fits the
+existing, already-wired `document-metadata:v1` extension-field cap (512
+bytes) -- real comment threads (this corpus's own 156,620-byte example)
+routinely exceed it. `document-metadata:v2`'s structured-section capability
+(2 MiB) would fit, but per that module's own header comment it is
+"domain-only... not wired to anything yet", and wiring a new
+`SideOutputCapability`/second output bucket through
+`composition/compiler.d`/`composition/executor.d` is a larger, cross-cutting
+change outside this ticket's allowed file scope
+(`html_main_content.d`/`html_main_content_stage.d` only). Rather than
+silently truncating a real thread to fit the wrong-sized cap, the stage
+skips the metadata write entirely once the text doesn't fit; the full,
+untruncated separation is real and already available at the
+`extractMainContent` API level (`MainContentResult.comments`/
+`.commentsExtracted`, this ticket's actual deliverable). Giving the compiled
+v3 stage a real, unbounded second output channel is a concrete follow-up,
+not silently dropped.
+
 ## Held-out real-page tier (separate, non-gating)
 
 `experiments/html_main_content/fetch_held_out.sh` is a **separate**
@@ -768,6 +916,16 @@ since it is already correctly registered in production.
   walk) or an explicitly-declined answer for `selectedStructuredData`,
   rather than leaving it as this ticket's own incidental, undocumented
   side effect.
+- A real, unbounded second stage-level output channel for extracted comment
+  text (issue #475): `html_main_content_stage.d` only ever writes comments
+  into `.metadata` when they fit the existing `document-metadata:v1`
+  extension-field cap (512 bytes) -- see "Comment-section extraction (issue
+  #475)"'s own "Disclosed, deliberate scope boundary" above for the real
+  corpus evidence (a 156,620-byte real thread) motivating this as a concrete
+  follow-up (wiring `document-metadata:v2`'s already-defined but
+  "not wired to anything yet" structured-section capability, or a new
+  `SideOutputCapability`) rather than an oversight. The full, untruncated
+  separation is already real at the `extractMainContent` API level.
 - No v4 extractor registration; no `cli.d`/`app.d` change beyond automatic
   self-registration reachability; no `benchmarks/external_comparator.d`
   change beyond what issue #229 already added.

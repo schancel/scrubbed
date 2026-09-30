@@ -444,7 +444,9 @@ PRAGMA cache_size=-2048;
 PRAGMA locking_mode=EXCLUSIVE;
 CREATE TABLE documents(
  document_id TEXT PRIMARY KEY,
- sidecar_path TEXT NOT NULL UNIQUE
+ sidecar_path TEXT NOT NULL UNIQUE,
+ device TEXT NOT NULL,
+ inode TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE links(
  document_id TEXT PRIMARY KEY,
@@ -600,9 +602,11 @@ private void walkSidecarTree(CorpusScratchDatabase db, string root,
 }
 
 private void insertDocument(sqlite3_stmt* statement, string documentId,
-        string sidecarPath) {
+        string sidecarPath, const ref stat_t info) {
     bindText(statement, 1, documentId);
     bindText(statement, 2, sidecarPath);
+    bindText(statement, 3, info.st_dev.to!string);
+    bindText(statement, 4, info.st_ino.to!string);
     dbNeed(sqlite3_step(statement) == SQLITE_DONE,
         "duplicate document ID or sidecar path");
     resetStatement(statement);
@@ -618,17 +622,17 @@ private void upsertLink(sqlite3_stmt* statement, string documentId,
 }
 
 private ubyte[] readBoundedSidecar(CorpusScratchDatabase db, int rootFd,
-        string relativePath) {
+        string relativePath, out stat_t identity) {
     string leaf;
     auto parentFd = openRelativeParent(db, rootFd, relativePath, leaf);
     scope(exit) close(parentFd);
     auto fd = openat(parentFd, leaf.toStringz, O_RDONLY | O_NOFOLLOW);
     enforce(fd >= 0, "corpus runner: cannot open metadata sidecar safely");
     scope(exit) close(fd);
-    stat_t info;
-    enforce(fstat(fd, &info) == 0 && S_ISREG(info.st_mode),
+    enforce(fstat(fd, &identity) == 0 && S_ISREG(identity.st_mode),
         "corpus runner: metadata sidecar is not a regular file");
-    enforce(info.st_size >= 0 && cast(ulong) info.st_size <= maxTotalEncodedBytesV2,
+    enforce(identity.st_size >= 0 &&
+            cast(ulong) identity.st_size <= maxTotalEncodedBytesV2,
         "corpus runner: metadata sidecar exceeds wire-size limit");
 
     auto bytes = new ubyte[maxTotalEncodedBytesV2 + 1];
@@ -718,8 +722,8 @@ private ulong[similarityBands] bandValuesFromLanesV1(
 /// payload's already-validated `byte-shingle-minhash:v1` algorithm version.
 private bool tryDecodeCandidate(CorpusScratchDatabase db, int rootFd,
         string relativePath,
-        out DecodedCandidate result) {
-    auto bytes = readBoundedSidecar(db, rootFd, relativePath);
+        out DecodedCandidate result, out stat_t identity) {
+    auto bytes = readBoundedSidecar(db, rootFd, relativePath, identity);
     auto wire = cast(string) bytes;
     auto versionName = metadataVersion(wire);
     auto id = recoverDocumentId(wire);
@@ -782,6 +786,7 @@ private int openRelativeDirectory(CorpusScratchDatabase db, int rootFd,
     auto current = openat(rootFd, ".".toStringz,
         O_RDONLY | O_NOFOLLOW | directoryOnly);
     enforce(current >= 0, "corpus runner: cannot reopen sidecar root handle");
+    scope(failure) if (current >= 0) close(current);
     stat_t info;
     enforce(fstat(current, &info) == 0,
         "corpus runner: cannot inspect anchored sidecar root");
@@ -790,9 +795,9 @@ private int openRelativeDirectory(CorpusScratchDatabase db, int rootFd,
     foreach (component; components) {
         auto next = openat(current, component.toStringz,
             O_RDONLY | O_NOFOLLOW | directoryOnly);
-        close(current);
         enforce(next >= 0,
             "corpus runner: sidecar parent changed during phase 2");
+        close(current);
         current = next;
         traversed = traversed.length ? buildPath(traversed, component) : component;
         enforce(fstat(current, &info) == 0,
@@ -817,6 +822,7 @@ private int openRelativeParent(CorpusScratchDatabase db, int rootFd,
 
 private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
         string relativeSidecarPath,
+        string expectedDevice, string expectedInode,
         CorpusStageDecision decision) {
     auto relativeDecisionPath = decisionPathFor(relativeSidecarPath);
     auto json = `{"schema":"` ~ pruneNearDuplicatesDecisionSchemaV1 ~
@@ -826,6 +832,18 @@ private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
     string leaf;
     auto parentFd = openRelativeParent(db, rootFd, relativeDecisionPath, leaf);
     scope(exit) close(parentFd);
+
+    auto metadataLeaf = baseName(relativeSidecarPath);
+    void verifyMetadataLeaf() {
+        stat_t metadataInfo;
+        enforce(fstatat(parentFd, metadataLeaf.toStringz, &metadataInfo,
+                AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(metadataInfo.st_mode),
+            "corpus runner: metadata sidecar changed before decision publication");
+        enforce(metadataInfo.st_dev.to!string == expectedDevice &&
+                metadataInfo.st_ino.to!string == expectedInode,
+            "corpus runner: metadata sidecar identity changed before decision publication");
+    }
+    verifyMetadataLeaf();
 
     stat_t priorInfo;
     auto priorFd = openat(parentFd, leaf.toStringz, O_RDONLY | O_NOFOLLOW);
@@ -865,6 +883,7 @@ private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
     auto closing = fd;
     fd = -1;
     enforce(close(closing) == 0, "corpus runner: decision close failed");
+    verifyMetadataLeaf();
     enforce(renameat(parentFd, temporary.toStringz,
         parentFd, leaf.toStringz) == 0,
         "corpus runner: atomic decision replacement failed");
@@ -933,7 +952,7 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
     RunAccumulator accumulator;
     accumulator.fresh = &fresh;
     BandCandidate[] batch;
-    auto addDocument = db.prepare("INSERT INTO documents VALUES(?1,?2)");
+    auto addDocument = db.prepare("INSERT INTO documents VALUES(?1,?2,?3,?4)");
     scope(exit) sqlite3_finalize(addDocument);
     db.exec("BEGIN");
     walkSidecarTree(db, sidecarRoot, sidecarRootFd, true,
@@ -946,9 +965,11 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
             "prune-near-duplicates: non-regular entry inside sidecar root: " ~ path);
         if (!path.endsWith(documentMetadataPublishSuffixV1)) return;
         DecodedCandidate decoded;
-        if (!tryDecodeCandidate(db, sidecarRootFd, relative, decoded)) return;
+        stat_t sidecarIdentity;
+        if (!tryDecodeCandidate(db, sidecarRootFd, relative, decoded,
+                sidecarIdentity)) return;
         auto idText = decoded.documentId.text;
-        insertDocument(addDocument, idText, relative);
+        insertDocument(addDocument, idText, relative, sidecarIdentity);
         // A document whose signature never received real content
         // (hasKeys == false) is excluded here -- never a spurious bucket
         // candidate, matching similarity_buckets.d's own explode().
@@ -1048,7 +1069,8 @@ WHERE EXISTS(
     auto addDecision = db.prepare("INSERT INTO decisions VALUES(?1)");
     scope(exit) sqlite3_finalize(addDecision);
     auto decisions = db.prepare(`SELECT links.document_id,
- links.representative_id,links.bucket_identity,documents.sidecar_path
+ links.representative_id,links.bucket_identity,documents.sidecar_path,
+ documents.device,documents.inode
 FROM links JOIN documents USING(document_id)
 ORDER BY links.document_id`);
     scope(exit) sqlite3_finalize(decisions);
@@ -1058,11 +1080,13 @@ ORDER BY links.document_id`);
         auto representativeId = columnText(decisions, 1);
         auto bucketIdentity = columnText(decisions, 2);
         auto relativeSidecarPath = columnText(decisions, 3);
+        auto expectedDevice = columnText(decisions, 4);
+        auto expectedInode = columnText(decisions, 5);
         auto decision = CorpusStageDecision(DocumentId.fromCanonicalText(documentId),
             CorpusDecisionKind.prune, DocumentId.fromCanonicalText(representativeId),
             bucketIdentity);
         auto decisionPath = writeDecisionSidecar(db, sidecarRootFd,
-            relativeSidecarPath, decision);
+            relativeSidecarPath, expectedDevice, expectedInode, decision);
         bindText(addDecision, 1, decisionPath);
         dbNeed(sqlite3_step(addDecision) == SQLITE_DONE,
             "decision path write failed");
@@ -1433,7 +1457,12 @@ unittest {
     write(buildPath(root, "legacy-malformed" ~ documentMetadataPublishSuffixV1),
         `{"version":"document-metadata:v1","documentId":"` ~
         fixtureId("legacy-malformed").text ~ `"}`);
-    assertThrown(runFixture(root));
+    CorpusStageDecision[] observed;
+    assertThrown(runPruneNearDuplicates(root,
+        (CorpusStageDecision decision) { observed ~= decision; },
+        PruneOptions.init));
+    assert(observed.length == 0,
+        "a changed directory must fail before emitting any decision");
     assert(scratchArtifactsCurrent == 0,
         "malformed-wire failure must clean every scratch artifact");
 }
@@ -1522,7 +1551,7 @@ version (Posix) unittest {
     auto decision = CorpusStageDecision(removed, CorpusDecisionKind.prune,
         representative, "band=0,key=0000000000000000");
     assertThrown(writeDecisionSidecar(null, rootFd,
-        "nested/doc" ~ documentMetadataPublishSuffixV1, decision));
+        "nested/doc" ~ documentMetadataPublishSuffixV1, "", "", decision));
     assert(cast(string) read(outsideDecision) == "must survive");
     assertThrown(removeDecisionSidecar(null, rootFd,
         "nested/doc" ~ pruneNearDuplicatesDecisionSuffixV1));
@@ -1606,6 +1635,46 @@ version (Posix) unittest {
     foreach (directory; [original, nested])
         foreach (entry; dirEntries(directory, SpanMode.shallow, false))
             assert(!entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1));
+}
+
+// Metadata leaves are identity-bound too. Replacing them atomically after
+// discovery cannot publish or emit decisions derived from the old files next
+// to unrelated replacement metadata in the unchanged directory.
+version (Posix) unittest {
+    import std.exception : assertThrown;
+    import std.file : mkdir, rename;
+
+    auto root = freshRoot("metadata-leaf-swap");
+    scope(exit) rmdirRecurse(root);
+    auto nested = buildPath(root, "nested");
+    mkdir(nested);
+    auto replacements = freshRoot("metadata-leaf-replacements");
+    scope(exit) if (exists(replacements)) rmdirRecurse(replacements);
+    auto originalText =
+        "Original metadata duplicate text with enough shingles for a signature.";
+    writeFixtureSidecar(nested, "one", originalText);
+    writeFixtureSidecar(nested, "two", originalText);
+    auto replacementText =
+        "Unrelated replacement metadata text with enough shingles for a signature.";
+    writeFixtureSidecar(replacements, "replacement-one", replacementText);
+    writeFixtureSidecar(replacements, "replacement-two", replacementText);
+
+    postDiscoveryHook = (string) {
+        rename(buildPath(replacements,
+                "replacement-one" ~ documentMetadataPublishSuffixV1),
+            buildPath(nested, "one" ~ documentMetadataPublishSuffixV1));
+        rename(buildPath(replacements,
+                "replacement-two" ~ documentMetadataPublishSuffixV1),
+            buildPath(nested, "two" ~ documentMetadataPublishSuffixV1));
+    };
+    CorpusStageDecision[] observed;
+    assertThrown(runPruneNearDuplicates(root,
+        (CorpusStageDecision decision) { observed ~= decision; },
+        PruneOptions.init));
+    assert(observed.length == 0,
+        "changed metadata must fail before emitting any decision");
+    foreach (entry; dirEntries(nested, SpanMode.shallow, false))
+        assert(!entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1));
 }
 
 // Reachability: the stage is genuinely self-registering, and a run through

@@ -204,11 +204,12 @@ destination remains deliberately out of scope.
 Decision publication and stale removal are anchored to one descriptor for
 the verified sidecar root. Discovery and metadata reads use that same
 descriptor, every parent component is reopened relative to it with symlink
-following disabled, and discovered directory device/inode identities are
-verified whenever a path is reopened. Replacement/removal is performed
+following disabled, and discovered directory and metadata-file device/inode
+identities are verified before publication. Replacement/removal is performed
 relative to the resulting parent descriptor. A renamed root therefore remains
-one consistent corpus, while a replaced descendant or a parent swapped to a
-symlink fails closed instead of redirecting a read or write outside it.
+one consistent corpus, while a replaced descendant, replaced metadata file,
+or parent swapped to a symlink fails closed instead of mixing two corpora or
+redirecting a read or write outside it.
 
 ### CLI reachability
 

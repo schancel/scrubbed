@@ -22,6 +22,48 @@
 /// recomputed band hash is then checked against the persisted `bandKeyValue`
 /// before it may contribute a candidate row: a tampered or stale bucket
 /// overlay is rejected here, not silently trusted.
+///
+/// **Issue #480 (configurable near-duplicate pruning) adds two independent,
+/// both-off-by-default capabilities on top of the above, unchanged detection
+/// pipeline:**
+///
+/// 1. **`policy` (`domain.near_dedup_decision.PruningPolicy`)** controls
+///    which cluster member `nearDuplicateLinksInBucket` names as
+///    representative. Defaults to `PruningPolicy.keepFirst`, the exact
+///    pre-#480 lexicographically-smallest-ID rule, so every caller that
+///    does not pass a policy gets byte-identical annotation-overlay output
+///    to before this issue.
+/// 2. **`NearDedupShard.prunedDestination`** (empty string by default) is
+///    this issue's actual *removal* capability -- distinct from the
+///    annotation overlay above, which only ever links/reports and was
+///    verified never to drop anything from any downstream artifact prior
+///    to this issue (see this issue's own PR description for that
+///    verification). When non-empty for a shard, this module additionally
+///    reads that shard's immutable C01 source in full and republishes every
+///    document that is *not* a non-representative member of `finalLinks`
+///    (computed from the exact same policy-driven decision above) as a new,
+///    physically smaller C01 document shard at that path via the existing
+///    `DocumentShardWriter` -- matching trafilatura's real `--deduplicate`
+///    semantics (removal), not just annotation. A shard that never names a
+///    `prunedDestination` gets no pruned output at all: pruning is strictly
+///    additive and opt-in per shard, on top of the unchanged annotation
+///    overlay this module always writes.
+///
+/// **Post-#480 review fix: only a document's own whole-document signature
+/// ever becomes a clustering candidate.** `similarity_buckets.d` persists a
+/// band membership for both a document's whole-document signature and each
+/// of its per-4096-byte *segment* signatures; every persisted member is
+/// still tamper/staleness-verified against its recomputed band hash below,
+/// but a segment-level member is never turned into a `CandidateRow` --
+/// only `member.segment == false` rows are. A segment captures only a
+/// fragment of a document's content (e.g. shared boilerplate), and
+/// treating a segment-vs-whole-document match as equivalent to a genuine
+/// whole-document match let one shared boilerplate segment cluster -- and,
+/// with pruning enabled, physically delete -- an otherwise entirely unique
+/// large document, even though the two documents' own whole-document
+/// jaccard estimate was well below threshold. See this module's own
+/// regression test (search "segment-conflation") for the exact reproduced
+/// shape.
 module effects.near_dedup_overlay;
 
 import core.stdc.errno : errno, ENOENT;
@@ -29,12 +71,12 @@ import core.sys.posix.sys.stat : lstat, stat_t, S_ISREG;
 import crypto.sha256 : sha256Of;
 import domain.document : DocumentId;
 import domain.near_dedup_decision : NearDedupCandidate, NearDuplicateLink,
-    nearDuplicateLinksInBucket, nearDuplicateThreshold;
+    nearDuplicateLinksInBucket, nearDuplicateThreshold, PruningPolicy;
 import domain.shard_format : AnnotationField, AnnotationRecord, ShardDocument;
 import domain.similarity_signature : SimilaritySignature, SimilaritySignatures,
     signatureVersion, similarityBands, similarityLanes, similaritySignatures;
-import effects.document_shards : JoinedOverlay, OverlayWriter, PublishFault,
-    PublishStep, joinShards;
+import effects.document_shards : DocumentShardReader, DocumentShardWriter,
+    JoinedOverlay, OverlayWriter, PublishFault, PublishStep, joinShards;
 import effects.similarity_buckets : SimilarityBucketMember, decodeSimilarityBucketMembers,
     similarityBucketsAnalyzerKey;
 import std.algorithm.sorting : sort;
@@ -57,11 +99,17 @@ private enum fanIn = 8;
 private enum maxScratchFrame = 8192;
 
 /// One source C01 shard, its upstream `similarity-buckets` overlay, and this
-/// analyzer's own destination overlay.
+/// analyzer's own destination overlay. `prunedDestination` (issue #480,
+/// empty by default) additionally names where this module should publish a
+/// physically pruned copy of `source` -- every non-representative
+/// near-duplicate document actually removed, not just annotated -- for this
+/// one shard. Leaving it empty (every pre-#480 caller) means this shard
+/// gets no pruned output at all.
 struct NearDedupShard {
     string source;
     string bucketsOverlay;
     string destination;
+    string prunedDestination = "";
 }
 
 /// Decode exactly the four canonical near-dedup fields after C01's revision
@@ -98,10 +146,16 @@ private string identity(stat_t info) {
 
 /// Explodes each shard's already-decoded, already-capped `similarity-buckets`
 /// membership into per-bucket candidate rows, resolves each `(bandIndex,
-/// bandKeyValue)` bucket independently through the unmodified pure decision
-/// function, and publishes one strictly-ID-sorted C01 overlay per shard
-/// naming every non-representative document's representative.
-void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault = null) {
+/// bandKeyValue)` bucket independently through the pure decision function
+/// (unmodified except for issue #480's additive `policy` parameter, which
+/// defaults to the function's own pre-#480 default), and publishes one
+/// strictly-ID-sorted C01 overlay per shard naming every non-representative
+/// document's representative. When a shard names a `prunedDestination`
+/// (issue #480, empty by default), this also republishes that shard's
+/// source as a physically pruned C01 document shard -- see this module's
+/// doc comment above for the two features' exact, independent scope.
+void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault = null,
+        PruningPolicy policy = PruningPolicy.keepFirst) {
     if (!inputs.length) return;
 
     // Canonicalize shard order by source path so output never depends on the
@@ -136,6 +190,7 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
     CandidateRow[] batch;
     uint[string] sourceIndexOf;
     ubyte[32][string] contentDigestOf;
+    size_t[string] contentLengthOf; // issue #480: only consulted by PruningPolicy.keepLongest.
     string expectedBucketsVersion;
     foreach (canonicalIndex, shard; shards) {
         auto index = cast(uint)canonicalIndex;
@@ -159,6 +214,7 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
                 else
                     sourceIndexOf[idText] = index;
                 contentDigestOf[idText] = document.contentDigest;
+                contentLengthOf[idText] = document.content.length;
 
                 auto signatures = similaritySignatures(document.id, document.content);
                 foreach (member; members) {
@@ -175,8 +231,26 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
                     enforce(signature.bands[member.bandIndex] == member.bandKeyValue,
                         "near dedup overlay: recomputed band key mismatch " ~
                         "(tampered or stale bucket overlay)");
+                    // Issue #480 review round 1 (confirmed, fixed): every
+                    // persisted member is still verified above (tamper/
+                    // staleness detection stays symmetric across document-
+                    // and segment-level members alike), but only a
+                    // document's own whole-document signature may ever
+                    // become a clustering candidate below. A segment
+                    // captures only a fragment of a document's content
+                    // (e.g. shared boilerplate); treating a segment-vs-
+                    // whole-document match as equivalent to a genuine
+                    // whole-document match let one shared boilerplate
+                    // segment cluster -- and, once pruning is enabled,
+                    // physically delete -- an otherwise entirely unique
+                    // large document, even though the two documents' own
+                    // whole-document jaccard estimate was well below
+                    // threshold. See this module's own regression test
+                    // (search "segment-conflation") for the exact
+                    // reproduced shape.
+                    if (member.segment) continue;
                     batch ~= CandidateRow(member.bandIndex, member.bandKeyValue,
-                        member.overflowed, index, signature);
+                        member.overflowed, index, signature, document.content.length);
                     if (batch.length == runRecords) flushRun(batch, runs, &fresh);
                 }
             });
@@ -201,10 +275,10 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
             while (hasItem && item.bandIndex == bandIndex && item.bandKeyValue == bandKeyValue) {
                 members ~= NearDedupCandidate(item.signature.segment,
                     item.signature.segmentOrdinal, item.bandIndex, item.bandKeyValue,
-                    item.overflowed, item.signature);
+                    item.overflowed, item.signature, item.contentLength);
                 hasItem = readRecord(sorted, item);
             }
-            foreach (link; nearDuplicateLinksInBucket(members)) {
+            foreach (link; nearDuplicateLinksInBucket(members, policy)) {
                 auto docText = link.documentId.text;
                 outputs ~= OutputLink(docText, sourceIndexOf[docText], link.representativeId.text);
             }
@@ -231,6 +305,17 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
         if (existing is null || output.representativeId < *existing)
             representativeOf[output.documentId] = output.representativeId;
     }
+    // Issue #480 review round 1 (secondary concern, resolved): a document's
+    // chosen representative here may itself be a key in this same map --
+    // i.e. itself a non-representative entry from some other bucket --
+    // since a document's own signature can explode into up to
+    // `similarityBands` independent band rows and land in more than one
+    // bucket-cluster at once (the same structural fact the comment above
+    // already names). Left unresolved, a published `representative_id`
+    // could name a document that pruning has itself physically removed.
+    // `resolveRepresentativeChains` rewrites every entry to its true,
+    // never-itself-a-key root before anything is published.
+    representativeOf = resolveRepresentativeChains(representativeOf);
     OutputLink[] finalLinks;
     finalLinks.reserve(representativeOf.length);
     foreach (documentId, representativeId; representativeOf)
@@ -264,12 +349,140 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
         writer.publish(checkedFault);
     }
     enforce(at == finalLinks.length, "near dedup overlay: orphan sorted link");
+
+    // Phase D (issue #480): physical pruning, strictly additive and opt-in
+    // per shard. `finalLinks` (just published above as annotations) is
+    // reused unchanged as the drop set: a document is omitted from a
+    // pruned shard iff it appears as `documentId` (the non-representative
+    // side) in `finalLinks`. Every other document -- including one this
+    // analyzer never touched at all (no bucket membership, or
+    // hasKeys == false) -- is republished byte-for-byte. A shard that never
+    // named a `prunedDestination` does zero extra work here.
+    bool[string] droppedIds;
+    foreach (link; finalLinks) droppedIds[link.documentId] = true;
+    foreach (canonicalIndex, shard; shards) {
+        if (!shard.prunedDestination.length) continue;
+        plan.validateSource(canonicalIndex);
+        plan.validatePrunedDestination(canonicalIndex);
+        auto reader = new DocumentShardReader(shard.source);
+        scope(exit) reader.closeReader();
+        auto writer = new DocumentShardWriter(shard.prunedDestination);
+        scope(failure) writer.abort();
+        ShardDocument document;
+        while (reader.next(document))
+            if ((document.id.text in droppedIds) is null) writer.append(document);
+        PublishFault checkedPruneFault = (PublishStep step) {
+            if (fault !is null) fault(step);
+            plan.validateSource(canonicalIndex);
+            plan.validatePrunedDestination(canonicalIndex);
+        };
+        writer.publish(checkedPruneFault);
+    }
 }
 
 private SimilaritySignature segmentSignature(SimilaritySignatures signatures, size_t ordinal) {
     enforce(ordinal < signatures.segments.length,
         "near dedup overlay: segment ordinal out of range");
     return signatures.segments[ordinal];
+}
+
+/// Issue #480 review round 1: rewrites every `documentId -> representativeId`
+/// entry to its true root -- a value that is never itself a key in this same
+/// map -- by following each chain to its end. Pure and total over any input
+/// shaped like Phase C's own `representativeOf` map.
+///
+/// **Termination, not just correctness.** This never checks for a cycle
+/// directly; instead it relies on (and bounds-checks) a structural
+/// invariant every shipped `PruningPolicy` already satisfies: representative
+/// selection within one bucket always ranks documents by some fixed,
+/// document-intrinsic key (`keepFirst`: the document's own canonical ID;
+/// `keepLongest`: content length, ID tie-break) that never depends on which
+/// other documents happen to share that bucket. Because that ranking is the
+/// same total order everywhere, "X beats Y" is consistent across every
+/// bucket X and Y ever co-occur in, so the induced loser-to-winner graph is
+/// necessarily acyclic -- a cycle would require some document to both
+/// outrank and be outranked by another under one fixed order, which a total
+/// order forbids. The bounded loop below still enforces this rather than
+/// trusting it blindly: a future `PruningPolicy` whose ranking is
+/// bucket-dependent (and could therefore cycle) fails closed here with a
+/// clear message instead of looping forever.
+private string[string] resolveRepresentativeChains(const(string[string]) representativeOf) {
+    auto resolved = representativeOf.dup;
+    foreach (documentId; resolved.keys) {
+        auto root = resolved[documentId];
+        size_t hops;
+        while (auto next = root in resolved) {
+            root = *next;
+            ++hops;
+            enforce(hops <= resolved.length,
+                "near dedup overlay: representative chain did not terminate -- a " ~
+                "PruningPolicy's per-document ranking must be a fixed, document-intrinsic " ~
+                "total order, never bucket-dependent");
+        }
+        resolved[documentId] = root;
+    }
+    return resolved;
+}
+
+unittest {
+    // Issue #480 review round 1 (secondary concern): a two-hop chain
+    // resolves to its true root, and the intermediate document (itself
+    // both a loser and a winner) is rewritten too, not left dangling.
+    string[string] input = ["b": "a", "c": "b"]; // c -> b -> a (a is the true root)
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved.length == 2);
+    assert(resolved["b"] == "a");
+    assert(resolved["c"] == "a", "an intermediate link must resolve straight to the true root");
+}
+
+unittest {
+    // A longer, three-hop chain resolves fully, and a document that never
+    // appears as anyone's representative (i.e. is only ever a key, never
+    // a value someone else's key points at across the whole map here)
+    // still resolves correctly.
+    string[string] input = ["d": "c", "c": "b", "b": "a"]; // d -> c -> b -> a
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved.length == 3);
+    assert(resolved["b"] == "a");
+    assert(resolved["c"] == "a");
+    assert(resolved["d"] == "a");
+}
+
+unittest {
+    // Already-resolved input (every value already a true root, i.e. no
+    // value also appears as a key) is returned unchanged -- idempotent,
+    // and the common case (most batches never have a cross-bucket
+    // conflict at all) costs nothing extra.
+    string[string] input = ["b": "a", "d": "c", "f": "e"];
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved == input);
+}
+
+unittest {
+    // Two independent chains sharing no documents resolve independently;
+    // one chain's resolution must never leak into the other's.
+    string[string] input = ["b": "a", "e": "d", "d": "c"];
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved["b"] == "a");
+    assert(resolved["d"] == "c");
+    assert(resolved["e"] == "c");
+}
+
+unittest {
+    // A diamond: two different documents (b, c) both lose to the same
+    // intermediate (d), which itself loses to the true root (a). Both
+    // must resolve to a, not to d.
+    string[string] input = ["b": "d", "c": "d", "d": "a"];
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved["b"] == "a");
+    assert(resolved["c"] == "a");
+    assert(resolved["d"] == "a");
+}
+
+unittest {
+    // Empty input resolves to empty output.
+    string[string] empty;
+    assert(resolveRepresentativeChains(empty).length == 0);
 }
 
 private AnnotationRecord annotation(OutputLink link, ubyte[32] contentDigest) {
@@ -287,11 +500,15 @@ private AnnotationRecord annotation(OutputLink link, ubyte[32] contentDigest) {
 
 /// Batch-wide source/destination safety, mirroring both upstream overlay
 /// writers' own PreflightPlan exactly, extended to also guard the upstream
-/// buckets overlay (a second read-only input this module must not clobber).
+/// buckets overlay (a second read-only input this module must not clobber)
+/// and, per shard, an optional `prunedDestination` (issue #480) -- guarded
+/// with the exact same duplicate/alias/hardlink discipline as `destination`
+/// itself, just skipped entirely for a shard that names none.
 private struct PreflightPlan {
     string directory;
     string[] sources;
     string[] destinations;
+    string[] prunedDestinations; // "" (never a real path) means "no pruning for this shard"
     string[] sourceIdentities;
     bool[string] sourcePaths;
     bool[string] sourceInodes;
@@ -312,6 +529,18 @@ private struct PreflightPlan {
                 "near dedup overlay: duplicate near-dedup destination");
             destinationPaths[destination] = true;
 
+            string prunedDestination;
+            if (shard.prunedDestination.length) {
+                prunedDestination = buildNormalizedPath(absolutePath(shard.prunedDestination));
+                enforce(dirName(prunedDestination) == parent,
+                    "near dedup overlay: pruned destination must share the batch's output directory");
+                enforce(prunedDestination != destination,
+                    "near dedup overlay: pruned destination aliases the annotation-overlay destination");
+                enforce((prunedDestination in destinationPaths) is null,
+                    "near dedup overlay: duplicate near-dedup pruned destination");
+                destinationPaths[prunedDestination] = true;
+            }
+
             stat_t sourceInfo;
             enforce(lstat(source.toStringz, &sourceInfo) == 0 && S_ISREG(sourceInfo.st_mode),
                 "near dedup overlay: source is not a regular shard");
@@ -322,6 +551,7 @@ private struct PreflightPlan {
 
             sources ~= source;
             destinations ~= destination;
+            prunedDestinations ~= prunedDestination;
             sourceIdentities ~= identity(sourceInfo);
             sourcePaths[source] = true;
             sourcePaths[bucketsOverlay] = true;
@@ -331,7 +561,11 @@ private struct PreflightPlan {
         foreach (i, destination; destinations) {
             enforce((destination in sourcePaths) is null,
                 "near dedup overlay: destination aliases a source or buckets-overlay path");
+            if (prunedDestinations[i].length)
+                enforce((prunedDestinations[i] in sourcePaths) is null,
+                    "near dedup overlay: pruned destination aliases a source or buckets-overlay path");
             validateDestination(i);
+            validatePrunedDestination(i);
         }
     }
 
@@ -343,7 +577,10 @@ private struct PreflightPlan {
     }
 
     void validateAllDestinations() {
-        foreach (i; 0 .. destinations.length) validateDestination(i);
+        foreach (i; 0 .. destinations.length) {
+            validateDestination(i);
+            validatePrunedDestination(i);
+        }
     }
 
     void validateDestination(size_t i) {
@@ -359,6 +596,21 @@ private struct PreflightPlan {
         enforce((identity(target) in sourceInodes) is null,
             "near dedup overlay: destination aliases a source or buckets-overlay inode");
     }
+
+    void validatePrunedDestination(size_t i) {
+        if (!prunedDestinations[i].length) return;
+        enforce(isDir(directory) && !isSymlink(directory),
+            "near dedup overlay: output directory changed");
+        stat_t target;
+        if (lstat(prunedDestinations[i].toStringz, &target) != 0) {
+            enforce(errno == ENOENT, "near dedup overlay: cannot inspect pruned destination");
+            return;
+        }
+        enforce(S_ISREG(target.st_mode) && target.st_nlink == 1,
+            "near dedup overlay: pruned destination is nonregular or hardlinked");
+        enforce((identity(target) in sourceInodes) is null,
+            "near dedup overlay: pruned destination aliases a source or buckets-overlay inode");
+    }
 }
 
 private struct CandidateRow {
@@ -367,6 +619,7 @@ private struct CandidateRow {
     bool overflowed;
     uint sourceIndex;
     SimilaritySignature signature; // hasKeys is always true for a persisted row.
+    size_t contentLength; // issue #480: only consulted by PruningPolicy.keepLongest.
 }
 private struct OutputLink {
     string documentId;
@@ -412,6 +665,7 @@ private ubyte[] encode(CandidateRow item) {
     bytes ~= cast(ubyte)(item.signature.segment ? 1 : 0);
     number(bytes, item.signature.segmentOrdinal);
     foreach (lane; item.signature.lanes) number(bytes, lane);
+    number(bytes, item.contentLength); // issue #480
     return bytes;
 }
 private CandidateRow decodeCandidateRow(const(ubyte)[] bytes) {
@@ -429,6 +683,7 @@ private CandidateRow decodeCandidateRow(const(ubyte)[] bytes) {
     item.signature.segmentOrdinal = cast(size_t)number64(bytes, at);
     item.signature.hasKeys = true;
     foreach (ref lane; item.signature.lanes) lane = number64(bytes, at);
+    item.contentLength = cast(size_t)number64(bytes, at); // issue #480
     enforce(at == bytes.length, "near dedup overlay: bad candidate row length");
     return item;
 }
@@ -605,6 +860,24 @@ version (unittest) {
             randomUUID.toString);
         mkdirRecurse(root);
         return root;
+    }
+
+    /// Issue #480 review round 1: general invariant check reused by pruning
+    /// tests below -- no `representative_id` an annotation overlay names
+    /// may ever be absent from the corresponding `prunedDestination`'s
+    /// surviving document set (see `resolveRepresentativeChains`'s own doc
+    /// comment for the structural reasoning this exists to double-check
+    /// end to end, against the actually-published artifacts, not this
+    /// module's internal state).
+    private void assertNoRepresentativeDangles(string annotationOverlayPath, string prunedShardPath) {
+        bool[string] surviving;
+        foreach (document; readAllDocuments(prunedShardPath)) surviving[document.id.text] = true;
+        foreach (record; readAllAnnotations(annotationOverlayPath)) {
+            auto representativeIdText = cast(string) record.fields[2].value;
+            assert((representativeIdText in surviving) !is null,
+                "representative_id " ~ representativeIdText ~ " named by document " ~
+                record.documentId ~ " must survive pruning, never be dangling");
+        }
     }
 }
 
@@ -822,4 +1095,296 @@ unittest {
         while (reader.next(record)) {}
     } catch (Exception) truncatedRejected = true;
     assert(truncatedRejected, "a truncated overlay file must be rejected");
+}
+
+unittest {
+    // Issue #480, no-regression proof at this module's own public API: the
+    // annotation overlay this module publishes is byte-for-byte identical
+    // whether a caller omits `policy` entirely (every pre-#480 call site) or
+    // passes the new parameter's own default explicitly, and identical
+    // again whether or not any shard names a `prunedDestination` -- pruning
+    // is strictly additive, never a mutation of the pre-existing output.
+    auto root = scratchRoot("no-regression");
+    scope(exit) rmdirRecurse(root);
+    auto content = "no-regression fixture content shared by two documents";
+    auto documents = [testDocument("s", "one", content), testDocument("s", "two", content)];
+
+    auto destinationImplicit = buildPath(root, "implicit.overlay");
+    auto shardImplicit = buildFixtureShard(root, "implicit", documents, destinationImplicit);
+    writeNearDedupOverlays([shardImplicit]);
+
+    auto destinationExplicit = buildPath(root, "explicit.overlay");
+    auto shardExplicit = buildFixtureShard(root, "explicit", documents, destinationExplicit);
+    writeNearDedupOverlays([shardExplicit], null, PruningPolicy.keepFirst);
+
+    assert(cast(ubyte[])read(destinationImplicit) == cast(ubyte[])read(destinationExplicit),
+        "omitting policy must match passing its own default explicitly, byte-for-byte");
+
+    // Naming a prunedDestination must not change the annotation overlay's
+    // own bytes at all -- it is a wholly separate, additive output.
+    auto destinationPruned = buildPath(root, "pruned-sibling.overlay");
+    auto prunedOutput = buildPath(root, "pruned-sibling.shard");
+    auto shardWithPruning = buildFixtureShard(root, "pruned-sibling", documents, destinationPruned);
+    shardWithPruning.prunedDestination = prunedOutput;
+    writeNearDedupOverlays([shardWithPruning]);
+    assert(cast(ubyte[])read(destinationPruned) == cast(ubyte[])read(destinationImplicit),
+        "naming a prunedDestination must not alter the annotation overlay's own bytes");
+}
+
+unittest {
+    // Issue #480 review round 1 (confirmed, reproduced blocker): a document
+    // that is NOT a whole-document near-duplicate of anything must never be
+    // pruned just because one of its *segments* closely matches a small,
+    // unrelated standalone document. `similaritySignatures` splits content
+    // over 4096 bytes into independent per-segment signatures, and every
+    // surviving band -- document-level or segment-level alike -- used to
+    // feed the same clustering/representative-selection decision with zero
+    // regard for how much of the matched document the shared content
+    // actually represents. This fixture is exactly that shape: a
+    // 7096-byte document made of 4096 bytes of genuinely unique prose
+    // followed by a 3000-byte trailing segment that is byte-identical to a
+    // small standalone document. The two documents' own *whole-document*
+    // jaccard estimate is well below threshold (this is deliberately NOT a
+    // document-level near-duplicate pair) -- only the large document's
+    // second *segment* matches the small document at all.
+    auto root = scratchRoot("segment-conflation");
+    scope(exit) rmdirRecurse(root);
+
+    string uniqueContent;
+    while (uniqueContent.length < 4096)
+        uniqueContent ~= "genuinely unique large document prose about distant mountain ranges. ";
+    uniqueContent = uniqueContent[0 .. 4096];
+
+    string boilerplate;
+    while (boilerplate.length < 3000)
+        boilerplate ~= "standard site footer boilerplate shared verbatim across many pages. ";
+    boilerplate = boilerplate[0 .. 3000];
+
+    auto largeContent = uniqueContent ~ boilerplate;
+    assert(largeContent.length == 7096);
+
+    // `DocumentId.from` hashes the source locator, so which of the two IDs
+    // sorts first is not directly controllable by content; search a small,
+    // fixed, deterministic sequence of record-key salts for one where the
+    // small document's ID sorts *before* the large document's -- exactly
+    // the ordering the reviewer's own live repro hit, and the one
+    // PruningPolicy.keepFirst is least safe under (it would otherwise pick
+    // the large, mostly-unique document as representative and this
+    // fixture would prove nothing about the bug).
+    string largeKey, smallKey;
+    foreach (salt; 0 .. 64) {
+        auto candidateLarge = "large-mostly-unique-" ~ salt.to!string;
+        auto candidateSmall = "small-boilerplate-only-" ~ salt.to!string;
+        auto largeId = testDocument("s", candidateLarge, "x").id;
+        auto smallId = testDocument("s", candidateSmall, "x").id;
+        if (smallId.text < largeId.text) {
+            largeKey = candidateLarge;
+            smallKey = candidateSmall;
+            break;
+        }
+    }
+    assert(largeKey.length != 0,
+        "fixture bug: could not find a salt where the small document's ID sorts before " ~
+        "the large document's within 64 tries");
+
+    auto largeDoc = testDocument("s", largeKey, largeContent);
+    auto smallDoc = testDocument("s", smallKey, boilerplate);
+
+    // Fixture self-check, using the real pipeline's own signature/estimate
+    // functions (not a hand-computed guess): confirms this really is the
+    // "segment matches, whole document does not" shape before trusting any
+    // conclusion drawn from it.
+    auto largeSig = similaritySignatures(largeDoc.id, largeDoc.content);
+    auto smallSig = similaritySignatures(smallDoc.id, smallDoc.content);
+    import domain.near_dedup_decision : jaccardEstimate;
+    assert(jaccardEstimate(largeSig.document, smallSig.document) < nearDuplicateThreshold,
+        "fixture bug: the two whole documents must NOT be near-duplicates of each other");
+    assert(largeSig.segments.length >= 2,
+        "fixture bug: the large document must split into at least two segments");
+    assert(jaccardEstimate(largeSig.segments[1], smallSig.document) >= nearDuplicateThreshold,
+        "fixture bug: the large document's second segment must closely match the small document");
+
+    auto documents = [largeDoc, smallDoc];
+    auto destination = buildPath(root, "near-dedup.overlay");
+    auto prunedShardPath = buildPath(root, "near-dedup-pruned.shard");
+    auto shard = buildFixtureShard(root, "segment-conflation", documents, destination);
+    shard.prunedDestination = prunedShardPath;
+
+    writeNearDedupOverlays([shard]); // default PruningPolicy.keepFirst
+    assertNoRepresentativeDangles(destination, prunedShardPath);
+
+    auto prunedDocuments = readAllDocuments(prunedShardPath);
+    bool[string] survivingIds;
+    foreach (document; prunedDocuments) survivingIds[document.id.text] = true;
+    assert((largeDoc.id.text in survivingIds) !is null,
+        "a document that is not a whole-document near-duplicate of anything must never be " ~
+        "pruned just because one of its segments matches an unrelated small document " ~
+        "(segment-level candidates must never drive a pruning decision)");
+}
+
+unittest {
+    // Issue #480: PruningPolicy.keepLongest, exercised end to end through
+    // this module's real external-memory pipeline (not the pure decision
+    // function directly). Two documents share enough 5-byte shingles to
+    // cluster as a near-duplicate pair (jaccardEstimate >= 0.8) despite the
+    // second being longer than the first, thanks to a distinct trailing
+    // sentence appended to it -- so keepFirst and keepLongest reach
+    // genuinely different, independently verified representative choices.
+    auto root = scratchRoot("keep-longest");
+    scope(exit) rmdirRecurse(root);
+    string shortText;
+    foreach (_; 0 .. 8) shortText ~= "the quick brown fox jumps over the lazy dog. ";
+    // A short, distinct trailing word (independently verified via a throwaway
+    // probe against the real `similaritySignatures`/`jaccardEstimate`
+    // pipeline to land comfortably above the 0.8 threshold: 0.90625) is
+    // enough to make the two copies genuinely different byte sequences
+    // without breaking their near-duplicate clustering.
+    auto longText = shortText ~ "extra.";
+    assert(longText.length > shortText.length);
+
+    auto shortDoc = testDocument("s", "short-copy", shortText);
+    auto longDoc = testDocument("s", "long-copy", longText);
+    auto shortSig = similaritySignatures(shortDoc.id, shortDoc.content);
+    auto longSig = similaritySignatures(longDoc.id, longDoc.content);
+    import domain.near_dedup_decision : jaccardEstimate;
+    assert(jaccardEstimate(shortSig.document, longSig.document) >= nearDuplicateThreshold,
+        "fixture bug: short/long copies must cluster as near-duplicates for this test to prove anything");
+
+    auto documents = [shortDoc, longDoc];
+
+    auto keepFirstDestination = buildPath(root, "keep-first.overlay");
+    auto keepFirstShard = buildFixtureShard(root, "keep-first", documents, keepFirstDestination);
+    writeNearDedupOverlays([keepFirstShard], null, PruningPolicy.keepFirst);
+    auto keepFirstRecords = readAllAnnotations(keepFirstDestination);
+    assert(keepFirstRecords.length == 1);
+    auto expectedKeepFirstRepresentative =
+        shortDoc.id.text < longDoc.id.text ? shortDoc.id.text : longDoc.id.text;
+
+    auto keepLongestDestination = buildPath(root, "keep-longest.overlay");
+    auto keepLongestShard = buildFixtureShard(root, "keep-longest", documents, keepLongestDestination);
+    writeNearDedupOverlays([keepLongestShard], null, PruningPolicy.keepLongest);
+    auto keepLongestRecords = readAllAnnotations(keepLongestDestination);
+    assert(keepLongestRecords.length == 1);
+
+    auto sourceDocuments = readAllDocuments(keepLongestShard.source);
+    ShardDocument bySourceId(string id) {
+        foreach (document; sourceDocuments) if (document.id.text == id) return document;
+        assert(false, "missing source document");
+    }
+    auto keepLongestDecoded = decodeCanonicalNearDedupLink(
+        keepLongestRecords[0].fields, bySourceId(keepLongestRecords[0].documentId));
+    assert(keepLongestDecoded.representativeId == longDoc.id,
+        "keepLongest must select the longer document as representative");
+    assert(keepLongestDecoded.documentId == shortDoc.id);
+    assert(keepLongestDecoded.representativeId.text != expectedKeepFirstRepresentative ||
+        longDoc.id.text == expectedKeepFirstRepresentative,
+        "keepLongest's choice should differ from keepFirst's whenever the longer " ~
+        "document isn't already the lexicographically-first one");
+}
+
+unittest {
+    // Issue #480: the actual removal capability. A prunedDestination shard
+    // physically omits every non-representative near-duplicate while
+    // keeping every other document byte-for-byte -- proven by reading the
+    // pruned shard back as an ordinary C01 document shard, not by
+    // inspecting an annotation. Mirrors the "basic" fixture above (two
+    // byte-identical documents, one solo document, one too-short-to-signature
+    // document) so its already-verified detection semantics carry over.
+    auto root = scratchRoot("prune-basic");
+    scope(exit) rmdirRecurse(root);
+    auto documents = [
+        testDocument("s", "a", "the quick brown fox jumps over the lazy dog"),
+        testDocument("s", "b", "the quick brown fox jumps over the lazy dog"),
+        testDocument("s", "solo", "a wildly different unrelated sentence about oceans"),
+        testDocument("s", "short", "hi"),
+    ];
+    auto destination = buildPath(root, "near-dedup.overlay");
+    auto prunedShardPath = buildPath(root, "near-dedup-pruned.shard");
+    auto shard = buildFixtureShard(root, "prune-basic", documents, destination);
+    shard.prunedDestination = prunedShardPath;
+
+    writeNearDedupOverlays([shard]);
+    assertNoRepresentativeDangles(destination, prunedShardPath);
+
+    auto aId = testDocument("s", "a", "x").id;
+    auto bId = testDocument("s", "b", "x").id;
+    auto soloId = testDocument("s", "solo", "x").id;
+    auto shortId = testDocument("s", "short", "x").id;
+    auto expectedRepresentative = aId.text < bId.text ? aId : bId;
+    auto expectedDropped = expectedRepresentative == aId ? bId : aId;
+
+    auto prunedDocuments = readAllDocuments(prunedShardPath);
+    assert(prunedDocuments.length == 3,
+        "pruned shard must drop exactly the one non-representative duplicate");
+    bool[string] prunedIds;
+    foreach (document; prunedDocuments) prunedIds[document.id.text] = true;
+    assert((expectedRepresentative.text in prunedIds) !is null,
+        "the representative document must survive pruning");
+    assert((expectedDropped.text in prunedIds) is null,
+        "the non-representative duplicate must be physically absent from the pruned shard");
+    assert((soloId.text in prunedIds) !is null, "a non-duplicate document must survive pruning");
+    assert((shortId.text in prunedIds) !is null,
+        "a document never signature-eligible at all must survive pruning untouched");
+
+    // The surviving representative's content is untouched -- pruning drops
+    // whole documents, it never edits a kept one.
+    foreach (document; prunedDocuments)
+        if (document.id == expectedRepresentative)
+            assert(document.content == cast(ubyte[])"the quick brown fox jumps over the lazy dog".dup);
+}
+
+unittest {
+    // Issue #480: a shard that never names a prunedDestination gets no
+    // pruned output at all -- the empty default really does mean "skip
+    // pruning for this shard", not "prune to an empty/degenerate path".
+    auto root = scratchRoot("prune-off-default");
+    scope(exit) rmdirRecurse(root);
+    auto content = "prune-off-by-default fixture content shared by two documents";
+    auto documents = [testDocument("s", "one", content), testDocument("s", "two", content)];
+    auto destination = buildPath(root, "near-dedup.overlay");
+    auto shard = buildFixtureShard(root, "prune-off-default", documents, destination);
+    assert(shard.prunedDestination.length == 0, "fixture bug: prunedDestination must default empty");
+
+    writeNearDedupOverlays([shard]);
+
+    // No file was ever created at any plausible "would-have-been" pruned
+    // path, and the annotation overlay itself still names exactly one link
+    // -- pruning being off changes nothing about the existing behavior.
+    assert(!exists(buildPath(root, "prune-off-default-source.shard.pruned")));
+    assert(readAllAnnotations(destination).length == 1);
+}
+
+unittest {
+    // Issue #480: preflight rejects an unsafe prunedDestination exactly as
+    // strictly as it already rejects an unsafe `destination` -- aliasing
+    // the shard's own annotation destination, and duplicating another
+    // shard's destination or prunedDestination across the batch.
+    auto root = scratchRoot("prune-preflight");
+    scope(exit) rmdirRecurse(root);
+    auto content = "preflight fixture content";
+    auto documents = [testDocument("s", "one", content)];
+
+    auto destination = buildPath(root, "near-dedup.overlay");
+    auto selfAliasShard = buildFixtureShard(root, "self-alias", documents, destination);
+    selfAliasShard.prunedDestination = destination;
+    bool selfAliasRejected;
+    try writeNearDedupOverlays([selfAliasShard]);
+    catch (Exception) selfAliasRejected = true;
+    assert(selfAliasRejected,
+        "a prunedDestination aliasing the shard's own annotation destination must be rejected");
+
+    auto destinationA = buildPath(root, "a.overlay");
+    auto destinationB = buildPath(root, "b.overlay");
+    auto sharedPrunedPath = buildPath(root, "shared.pruned.shard");
+    auto shardA = buildFixtureShard(root, "dup-a", documents, destinationA);
+    shardA.prunedDestination = sharedPrunedPath;
+    auto shardB = buildFixtureShard(root, "dup-b",
+        [testDocument("s2", "two", content)], destinationB);
+    shardB.prunedDestination = sharedPrunedPath;
+    bool duplicateRejected;
+    try writeNearDedupOverlays([shardA, shardB]);
+    catch (Exception) duplicateRejected = true;
+    assert(duplicateRejected,
+        "two shards naming the same prunedDestination path must be rejected");
+    assert(!exists(sharedPrunedPath), "a rejected batch must not leave a partial pruned shard behind");
 }

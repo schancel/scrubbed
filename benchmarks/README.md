@@ -1235,3 +1235,42 @@ RSS stayed within the configured bound, and sampled file-descriptor peaks
 were unchanged or lower. These are same-host, interleaved hosted-run results,
 not claims about every machine; cache and frequency state remained
 uncontrolled.
+
+## Near-duplicate pruning vs. trafilatura's `--deduplicate` (issue #480)
+
+`near_dedup_trafilatura_comparator.d` is a standalone D program (it imports
+this project's `domain`/`effects` near-dedup modules directly, not through
+`scrubbed`'s CLI, since near-dedup pruning is not wired into a pipeline
+stage) that runs a real, pinned `trafilatura==2.2.0` `--deduplicate`
+comparison on four genuinely near-duplicate HTML fixtures -- the same
+authored article body, differing only in nav/ad-banner/sidebar/footer/
+tracking-pixel boilerplate. It verifies the pinned version via `uv pip
+freeze`, confirms `scrubbed`'s own real `html-main-content` stage extracts
+byte-identical text from all four pages, runs `scrubbed`'s real near-dedup
+pipeline (`writeSimilarityBucketOverlays` + `writeNearDedupOverlays` with a
+`prunedDestination`) to see which document(s) physically survive, and runs
+the pinned `near_dedup_trafilatura_driver.py` (trafilatura's own
+`deduplicate=True` Python API, the exact parameter its CLI flag passes
+through -- substituting for this pinned version's broken multi-file
+`--input-dir` batch mode) over the same fixtures in one process. The two
+tools are shown to disagree on survivor count by design: `scrubbed`'s
+MinHash/Jaccard clustering keeps exactly one representative per cluster,
+while trafilatura's LRU-cached exact-string `max_repetitions` policy (default
+2) keeps the first three occurrences and drops only the fourth onward. This
+is a real semantics comparison, not a parity assertion; see issue #480's PR
+description for the full write-up.
+
+```sh
+uv venv /tmp/scrubbed-trafilatura-venv
+uv pip install --python /tmp/scrubbed-trafilatura-venv/bin/python trafilatura==2.2.0
+dub build --compiler=ldc2
+ldc2 -Isource benchmarks/near_dedup_trafilatura_comparator.d \
+  source/domain/document.d source/domain/encoding_failure.d source/domain/shard_format.d \
+  source/domain/similarity_signature.d source/domain/near_dedup_decision.d \
+  source/effects/document_shards.d source/effects/similarity_buckets.d \
+  source/effects/near_dedup_overlay.d \
+  source/crypto/sha256.d source/crypto/sha256_arm64.d source/crypto/sha256_x86_64.d \
+  -of=.dub/near-dedup-trafilatura-comparator
+.dub/near-dedup-trafilatura-comparator ./scrubbed \
+  /tmp/scrubbed-trafilatura-venv/bin/python
+```

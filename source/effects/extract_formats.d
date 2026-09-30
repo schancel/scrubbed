@@ -1090,6 +1090,54 @@ unittest {
     assert(tei.canFind("<hi rend=\"bold\">bold</hi> tail text"));
 }
 
+// Issue #560: dedicated regression coverage for the `flush()`-aggregated
+// loose-text call site in `renderXmlContainer`/`renderTeiContainer` (the
+// `trimAsciiWhitespace(content)` calls guarding `<paragraph>`/`<p>` inside
+// each `flush()`). Every other #527-item-4 unittest above exercises either
+// the `<p>`-wrapped call sites directly, or -- for loose text -- only the
+// `inlineIsBare == true` cell/list-item path (which skips the trim
+// entirely) or whitespace-only loose text (which `hasNonWhitespace` drops
+// before the trim would ever matter). This fixture has real, non-
+// whitespace-only text sitting directly inside the selected container, not
+// wrapped in `<p>`, both before and after a real `<p>` sibling -- the one
+// shape that actually reaches `flush()`'s own trim with `inlineIsBare ==
+// false`.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<article><h1>Loose text page</h1>" ~
+        "  LooseBefore real loose text before the paragraph  " ~
+        "<p>" ~ longParagraph ~ "</p>" ~
+        "  LooseAfter real loose text after the paragraph  " ~
+        "</article>"));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto xml = renderXml(tree);
+    assertWellFormedXml(xml);
+    assert(xml.canFind("<paragraph>LooseBefore real loose text before the paragraph</paragraph>"),
+        "loose text sitting directly inside a container, ahead of a <p> " ~
+        "sibling, must be trimmed of its leading/trailing collapsed-" ~
+        "boundary space when flush()-aggregated into its own <paragraph>: " ~ xml);
+    assert(xml.canFind("<paragraph>LooseAfter real loose text after the paragraph</paragraph>"),
+        "loose text sitting directly inside a container, after a <p> " ~
+        "sibling, must be trimmed of its leading/trailing collapsed-" ~
+        "boundary space when flush()-aggregated into its own <paragraph>: " ~ xml);
+
+    auto tei = renderXmlTei(tree);
+    assertWellFormedXml(tei);
+    assert(tei.canFind("<p>LooseBefore real loose text before the paragraph</p>"),
+        "same flush()-aggregated trim must apply to the TEI renderer's own " ~
+        "call site: " ~ tei);
+    assert(tei.canFind("<p>LooseAfter real loose text after the paragraph</p>"),
+        "same flush()-aggregated trim must apply to the TEI renderer's own " ~
+        "call site: " ~ tei);
+}
+
 unittest {
     // XML-TEI: the fixed, DTD-required shape (teiHeader/text/body/div) plus
     // the same structural richness, using trafilatura's own confirmed-real

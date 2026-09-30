@@ -242,7 +242,8 @@ private void renderXmlContainer(const ref HtmlTree tree, size_t containerIndex,
             i = endOf(tree, i);
             continue;
         }
-        if (node.kind != HtmlNodeKind.element || hiddenTag(node.name)) { ++i; continue; }
+        if (node.kind != HtmlNodeKind.element) { ++i; continue; }
+        if (hiddenTag(node.name)) { i = endOf(tree, i); continue; }
         int level;
         if (headingLevel(node.name, level)) {
             flush();
@@ -545,7 +546,8 @@ private void renderTeiContainer(const ref HtmlTree tree, size_t containerIndex,
             i = endOf(tree, i);
             continue;
         }
-        if (node.kind != HtmlNodeKind.element || hiddenTag(node.name)) { ++i; continue; }
+        if (node.kind != HtmlNodeKind.element) { ++i; continue; }
+        if (hiddenTag(node.name)) { i = endOf(tree, i); continue; }
         int level;
         if (headingLevel(node.name, level)) {
             flush();
@@ -1060,6 +1062,49 @@ unittest {
     assert(tei.canFind("reviewed rules &amp; regulations"),
         "TEI paragraph text's literal & must be XML-escaped");
     assertWellFormedXml(tei);
+}
+
+unittest {
+    // Regression guard for issue #533: a hidden `<script>`/`<style>` element
+    // encountered mid-container by `renderXmlContainer` (XML) /
+    // `renderTeiContainer` (XML-TEI) must be skipped by its *entire subtree*
+    // via `endOf(tree, i)`, not merely its own node via `++i`. The bug
+    // (`++i`) only advances past the `<script>`/`<style>` element node
+    // itself; the loop's very next iteration then lands on that element's
+    // own text-node child and, since a bare text node is ordinary loose
+    // inline content as far as the scan is concerned, folds it straight into
+    // the surrounding `<paragraph>`/`<p>` -- leaking script/style text into
+    // the extracted body. This fixture places a `<script>` and a `<style>`
+    // between two real paragraphs (mirroring the ticket's adversarial
+    // `links.html` reproduction) so both the "hidden element followed by
+    // more real content" shape and both element names are covered, for both
+    // the XML and the XML-TEI code paths (two distinct `renderXmlContainer`
+    // and `renderTeiContainer` call sites, hence two separate assertion
+    // groups below rather than one).
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<article><h1>Field notes</h1><p>" ~ longParagraph ~ "</p>" ~
+        "<script>var s=\"SCRIPT\";.x{}</script>" ~
+        "<p>" ~ longParagraph ~ "</p>" ~
+        "<style>.y{color:red}</style></article>"));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto xml = renderXml(tree);
+    assertWellFormedXml(xml);
+    assert(!xml.canFind("SCRIPT"), "script element text must not leak into XML output");
+    assert(!xml.canFind(".x{}"), "script element text must not leak into XML output");
+    assert(!xml.canFind(".y{color:red}"), "style element text must not leak into XML output");
+
+    auto tei = renderXmlTei(tree);
+    assertWellFormedXml(tei);
+    assert(!tei.canFind("SCRIPT"), "script element text must not leak into TEI output");
+    assert(!tei.canFind(".x{}"), "script element text must not leak into TEI output");
+    assert(!tei.canFind(".y{color:red}"), "style element text must not leak into TEI output");
 }
 
 unittest {

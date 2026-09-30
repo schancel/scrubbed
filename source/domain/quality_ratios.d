@@ -89,7 +89,6 @@
 module domain.quality_ratios;
 
 import std.algorithm.searching : canFind;
-import std.array : join;
 import std.ascii : isPunctuation;
 import std.string : strip;
 import std.typecons : Nullable, nullable;
@@ -341,44 +340,140 @@ private void findDuplicates(const(string[]) items, out size_t duplicateElements,
 /// the most frequent gram's `(codepoint length) * (occurrence count)` is the
 /// numerator. Ties are broken by first occurrence, deterministically.
 /// Caller guarantees `words.length >= n`.
-private size_t topNGramCharCount(const(string[]) words, size_t n) pure @safe {
-    size_t[string] counts;
-    string[] order;
-    for (size_t i = 0; i + n <= words.length; ++i) {
-        auto gram = join(words[i .. i + n], " ");
-        if (gram !in counts) {
-            counts[gram] = 0;
-            order ~= gram;
+private struct WordNgramIndex {
+    const(string)[] words;
+    ulong[] hashes;
+    ulong[] powers;
+
+    static WordNgramIndex build(const(string[]) words) pure @safe {
+        enum prime = 0x100000001b3UL;
+        WordNgramIndex result;
+        result.words = words;
+        result.hashes.reserve(words.length);
+        result.powers.reserve(words.length);
+        foreach (word; words) {
+            ulong hash;
+            ulong power = 1;
+            foreach (value; word) {
+                hash = hash * prime + cast(ubyte) value;
+                power *= prime;
+            }
+            result.hashes ~= hash;
+            result.powers ~= power;
         }
-        counts[gram] = counts[gram] + 1;
+        return result;
     }
-    string best;
+}
+
+private ulong ngramHash(const ref WordNgramIndex index, size_t start,
+        size_t n, bool spaces) pure @safe {
+    enum prime = 0x100000001b3UL;
+    ulong hash;
+    foreach (wordOffset; 0 .. n) {
+        if (spaces && wordOffset != 0)
+            hash = hash * prime + cast(ubyte) ' ';
+        const wordIndex = start + wordOffset;
+        hash = hash * index.powers[wordIndex] + index.hashes[wordIndex];
+    }
+    return hash;
+}
+
+private bool sameSpacedNgram(const(string)[] words, size_t left,
+        size_t right, size_t n) pure @safe {
+    foreach (offset; 0 .. n)
+        if (words[left + offset] != words[right + offset]) return false;
+    return true;
+}
+
+private bool sameConcatenatedNgram(const(string)[] words, size_t left,
+        size_t right, size_t n) pure @safe {
+    size_t leftWord, leftByte, rightWord, rightByte;
+    while (leftWord < n && rightWord < n) {
+        if (words[left + leftWord][leftByte] != words[right + rightWord][rightByte])
+            return false;
+        if (++leftByte == words[left + leftWord].length) {
+            ++leftWord;
+            leftByte = 0;
+        }
+        if (++rightByte == words[right + rightWord].length) {
+            ++rightWord;
+            rightByte = 0;
+        }
+    }
+    return leftWord == n && rightWord == n;
+}
+
+private size_t ngramCodepointLength(const(string)[] words, size_t start,
+        size_t n, bool spaces) pure @safe {
+    size_t length = spaces ? n - 1 : 0;
+    foreach (offset; 0 .. n) length += codepointLength(words[start + offset]);
+    return length;
+}
+
+private struct CountedNgram {
+    size_t start;
+    size_t count;
+}
+
+private size_t topNGramCharCount(const ref WordNgramIndex index,
+        size_t n) pure @safe {
+    CountedNgram[] entries;
+    size_t[][ulong] buckets;
+    for (size_t i = 0; i + n <= index.words.length; ++i) {
+        auto hash = ngramHash(index, i, n, true);
+        auto bucket = hash in buckets;
+        bool found;
+        if (bucket !is null) {
+            foreach (entryIndex; *bucket) {
+                if (sameSpacedNgram(index.words, entries[entryIndex].start, i, n)) {
+                    ++entries[entryIndex].count;
+                    found = true;
+                    break;
+                }
+            }
+        }
+        if (!found) {
+            const entryIndex = entries.length;
+            entries ~= CountedNgram(i, 1);
+            buckets[hash] ~= entryIndex;
+        }
+    }
+    size_t bestStart;
     size_t bestCount = 0;
-    foreach (gram; order) {
-        if (counts[gram] > bestCount) {
-            bestCount = counts[gram];
-            best = gram;
+    foreach (entry; entries) {
+        if (entry.count > bestCount) {
+            bestCount = entry.count;
+            bestStart = entry.start;
         }
     }
-    return codepointLength(best) * bestCount;
+    return ngramCodepointLength(index.words, bestStart, n, true) * bestCount;
 }
 
 /// Reproduces `datatrove`'s `find_all_duplicate`: a sliding window over
 /// concatenated (no separator) `n`-word grams; on a repeat, count its
 /// codepoint length and skip the window ahead by `n` (non-overlapping past a
 /// match); otherwise advance by 1. Caller guarantees `words.length >= n`.
-private size_t duplicateNGramCharCount(const(string[]) words, size_t n) pure @safe {
-    bool[string] seen;
+private size_t duplicateNGramCharCount(const ref WordNgramIndex index,
+        size_t n) pure @safe {
+    size_t[][ulong] seen;
     size_t repeatedChars = 0;
     size_t idx = 0;
-    immutable size_t total = words.length;
+    immutable size_t total = index.words.length;
     while (idx + n <= total) {
-        auto gram = join(words[idx .. idx + n], "");
-        if (gram in seen) {
-            repeatedChars += codepointLength(gram);
+        auto hash = ngramHash(index, idx, n, false);
+        auto bucket = hash in seen;
+        bool repeated;
+        if (bucket !is null)
+            foreach (prior; *bucket)
+                if (sameConcatenatedNgram(index.words, prior, idx, n)) {
+                    repeated = true;
+                    break;
+                }
+        if (repeated) {
+            repeatedChars += ngramCodepointLength(index.words, idx, n, false);
             idx += n;
         } else {
-            seen[gram] = true;
+            seen[hash] ~= idx;
             ++idx;
         }
     }
@@ -404,6 +499,7 @@ QualityRatiosResult computeQualityRatios(const(ubyte)[] bytes) pure @trusted {
     result.rawChars = codepointLength(text);
 
     auto wordStats = collectWordStats(text);
+    auto ngramIndex = WordNgramIndex.build(wordStats.words);
     result.wordCount = wordStats.wordCount;
     result.stopWordPresentCount = countStopWordsPresent(wordStats.words);
 
@@ -443,7 +539,7 @@ QualityRatiosResult computeQualityRatios(const(ubyte)[] bytes) pure @trusted {
     static immutable size_t[3] topNs = [2, 3, 4];
     foreach (i, n; topNs) {
         if (wordStats.wordCount >= n) {
-            auto topChars = topNGramCharCount(wordStats.words, n);
+            auto topChars = topNGramCharCount(ngramIndex, n);
             result.topNGramCharFraction[i] = nullable(
                 cast(double) topChars / cast(double) result.rawChars);
         }
@@ -452,7 +548,7 @@ QualityRatiosResult computeQualityRatios(const(ubyte)[] bytes) pure @trusted {
     static immutable size_t[6] dupNs = [5, 6, 7, 8, 9, 10];
     foreach (i, n; dupNs) {
         if (wordStats.wordCount >= n) {
-            auto dupChars = duplicateNGramCharCount(wordStats.words, n);
+            auto dupChars = duplicateNGramCharCount(ngramIndex, n);
             result.duplicateNGramCharFraction[i] = nullable(
                 cast(double) dupChars / cast(double) result.rawChars);
         }
@@ -508,6 +604,11 @@ unittest {
     assert(!whitespaceOnly.duplicateLineCharFraction.isNull);
     assert(whitespaceOnly.duplicateLineCharFraction.get == 0.0);
     assert(!whitespaceOnly.duplicateParagraphCharFraction.isNull);
+
+    // rawChars is Unicode scalar count, not UTF-8 byte count.
+    auto nonAscii = computeQualityRatios(cast(const(ubyte)[]) "é 界 😀");
+    assert(nonAscii.rawBytes == 11);
+    assert(nonAscii.rawChars == 5);
 
     // Hand-computed word stats: "The cat sat on the mat." -- 6 words,
     // whitespace-delimited (the trailing period stays attached to "mat.").
@@ -615,4 +716,11 @@ unittest {
     assert(!tenX.duplicateNGramCharFraction[0].isNull); // n=5
     assert(abs(tenX.duplicateNGramCharFraction[0].get - (5.0 / 19.0)) < 1e-9,
         "duplicate-5-gram char fraction: " ~ tenX.duplicateNGramCharFraction[0].get.to!string);
+
+    // Concatenated n-gram identity intentionally ignores word boundaries:
+    // ["ab", "c", ...] and ["a", "bc", ...] both materialize as the
+    // exact same byte string under the frozen reference algorithm.
+    auto boundaryAmbiguous = WordNgramIndex.build(
+        ["ab", "c", "d", "e", "f", "a", "bc", "d", "e", "f"]);
+    assert(duplicateNGramCharCount(boundaryAmbiguous, 5) == 6);
 }

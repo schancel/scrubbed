@@ -107,11 +107,22 @@ private SimilaritySignature initializeSignature(DocumentId id, size_t ordinal,
 
 private void updateSignatures(ref SimilaritySignature document,
         SimilaritySignature* segment, const(ubyte)[] shingle) {
-    foreach (lane; 0 .. similarityLanes) {
-        auto hash = shingleHash(shingle, laneInitialHashes[lane]);
-        if (hash < document.lanes[lane]) document.lanes[lane] = hash;
-        if (segment !is null && hash < segment.lanes[lane])
-            segment.lanes[lane] = hash;
+    const b0 = shingle[0];
+    const b1 = shingle[1];
+    const b2 = shingle[2];
+    const b3 = shingle[3];
+    const b4 = shingle[4];
+    if (segment is null) {
+        foreach (lane; 0 .. similarityLanes) {
+            auto hash = shingleHash(b0, b1, b2, b3, b4, laneInitialHashes[lane]);
+            if (hash < document.lanes[lane]) document.lanes[lane] = hash;
+        }
+    } else {
+        foreach (lane; 0 .. similarityLanes) {
+            auto hash = shingleHash(b0, b1, b2, b3, b4, laneInitialHashes[lane]);
+            if (hash < document.lanes[lane]) document.lanes[lane] = hash;
+            if (hash < segment.lanes[lane]) segment.lanes[lane] = hash;
+        }
     }
 }
 
@@ -163,9 +174,15 @@ private ulong[similarityLanes] buildLaneInitialHashes() {
 private immutable ulong[similarityLanes] laneInitialHashes =
     buildLaneInitialHashes();
 
-private ulong shingleHash(const(ubyte)[] shingle, ulong initialHash) {
+private ulong shingleHash(ubyte b0, ubyte b1, ubyte b2, ubyte b3, ubyte b4,
+        ulong initialHash) {
+    enum prime = 0x100000001b3UL;
     ulong hash = initialHash;
-    foreach (value; shingle) hash = (hash ^ value) * 0x100000001b3UL;
+    hash = (hash ^ b0) * prime;
+    hash = (hash ^ b1) * prime;
+    hash = (hash ^ b2) * prime;
+    hash = (hash ^ b3) * prime;
+    hash = (hash ^ b4) * prime;
     return hash;
 }
 
@@ -182,6 +199,14 @@ unittest {
     auto folded = similaritySignatures(id, cast(const(ubyte)[]) "A\t BCD");
     auto canonical = similaritySignatures(id, cast(const(ubyte)[]) "a bcd");
     assert(folded.document.lanes == canonical.document.lanes);
+    auto exactlyOneShingle = similaritySignatures(id,
+        cast(const(ubyte)[]) "abcde");
+    assert(exactlyOneShingle.document.hasKeys);
+    assert(exactlyOneShingle.document.lanes ==
+        referenceSignature(id, 0, false, cast(const(ubyte)[]) "abcde").lanes);
+    assert(exactlyOneShingle.segments.length == 1);
+    assert(exactlyOneShingle.segments[0].hasKeys);
+    assert(exactlyOneShingle.segments[0].lanes == exactlyOneShingle.document.lanes);
     assertThrown!Exception(similaritySignatures(id, [cast(ubyte) 0xff]));
     assertThrown!Exception(similaritySignatures(id, new ubyte[maxSimilarityInputBytes + 1]));
 

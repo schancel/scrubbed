@@ -2,7 +2,7 @@
 module composition.dispatch_compiler;
 
 import composition.compiler : CompiledJob, compileJob;
-import extraction.container : ZipInspectionLimitsV1;
+import extraction.container : ZipInflateV1, ZipInspectionLimitsV1;
 import extraction.contracts : DetectionOutcomeV1, RouteActionKindV1,
     RouteActionV1, RouteDeclarationV1, RouteRuleV1;
 import extraction.detector : DetectionLimitsV1;
@@ -78,15 +78,18 @@ private:
     string identityValue;
     DetectionLimitsV1 detectionLimitsValue;
     ZipInspectionLimitsV1 zipLimitsValue;
+    ZipInflateV1 inflateValue;
     RouteDeclarationV1 declarationValue;
     CompiledDispatchRouteV1[] routesValue;
     CompiledJob commonValue;
     @disable this();
     this(string identity, DetectionLimitsV1 detectionLimits,
-            ZipInspectionLimitsV1 zipLimits, RouteDeclarationV1 declaration,
+            ZipInspectionLimitsV1 zipLimits, ZipInflateV1 inflate,
+            RouteDeclarationV1 declaration,
             CompiledDispatchRouteV1[] routes, CompiledJob common) {
         initialized = true; identityValue = identity.idup;
         detectionLimitsValue = detectionLimits; zipLimitsValue = zipLimits;
+        inflateValue = inflate;
         declarationValue = declaration; routesValue = routes.dup; commonValue = common;
     }
     void requireCompiled() const { enforce(initialized, "dispatch job is not compiled"); }
@@ -94,6 +97,11 @@ public:
     string identity() { requireCompiled; return identityValue; }
     DetectionLimitsV1 detectionLimits() { requireCompiled; return detectionLimitsValue; }
     ZipInspectionLimitsV1 zipLimits() { requireCompiled; return zipLimitsValue; }
+    /// The real, injected raw-DEFLATE decompressor (see `extraction.container`'s
+    /// `ZipInflateV1`), if the compile call was given one; `null` when the
+    /// caller had none to inject, in which case DEFLATE entries are refused
+    /// exactly as before this capability existed (see `refineMediaV1`).
+    ZipInflateV1 inflate() { requireCompiled; return inflateValue; }
     RouteDeclarationV1 declaration() { requireCompiled; return declarationValue; }
     const(CompiledDispatchRouteV1)[] routes() { requireCompiled; return routesValue; }
     CompiledJob common() { requireCompiled; return commonValue; }
@@ -107,7 +115,8 @@ public:
 CompiledDispatchJobV1 compileDispatchJobV1(ref DispatchJobSpecV1 spec,
         ExtractorRegistryV1* extractors,
         const(StageRegistry)* stages = null,
-        const(FilterRegistry)* filters = null) {
+        const(FilterRegistry)* filters = null,
+        ZipInflateV1 inflate = null) {
     validateDispatchJobSpecV1(spec);
     enforce(extractors !is null, "dispatch compilation needs an extractor registry");
     auto detectionLimits = DetectionLimitsV1(spec.dispatch.detector.prefixBytes,
@@ -177,7 +186,7 @@ CompiledDispatchJobV1 compileDispatchJobV1(ref DispatchJobSpecV1 spec,
     // Exactly one compilation of the nested existing v3 common plan.
     auto common = buildCommon(spec, stages, filters, identity);
     return CompiledDispatchJobV1(identity, detectionLimits,
-        zipLimits, declaration, routes, common);
+        zipLimits, inflate, declaration, routes, common);
 }
 
 private ConfiguredExtractorV1 buildExtractor(

@@ -90,7 +90,8 @@ DispatchExecutionEventV1 runDispatchJobV1(StageDocument input,
     try {
         detected = detectMediaV1(input.content, declaredMediaType, fileName,
             plan.detectionLimits);
-        refined = refineMediaV1(input.content, detected, plan.zipLimits);
+        refined = refineMediaV1(input.content, detected, plan.zipLimits,
+            plan.inflate);
     } catch (Exception error) {
         throw new DispatchExecutionFailureV1(identity,
             detected.detectorVersion.length ? detected.outcome : DetectionOutcomeV1.unknown,

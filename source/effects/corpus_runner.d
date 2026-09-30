@@ -120,6 +120,7 @@ version (unittest) {
     private __gshared size_t scratchArtifactsPeak;
     private __gshared string[] decodedDocumentOrder;
     private __gshared void delegate(string) rootAnchoredHook;
+    private __gshared void delegate(string) postDiscoveryHook;
     size_t corpusRunnerPeakOpenScratchFiles() { return openScratchFilesPeak; }
     size_t corpusRunnerPeakBatchRecords() { return batchPeakRecords; }
     size_t corpusRunnerPeakBucketMembers() { return bucketPeakMembers; }
@@ -134,6 +135,7 @@ version (unittest) {
         scratchArtifactsPeak = 0;
         decodedDocumentOrder = null;
         rootAnchoredHook = null;
+        postDiscoveryHook = null;
     }
     private void trackOpen() {
         ++openScratchFilesCurrent;
@@ -452,6 +454,11 @@ CREATE TABLE links(
 CREATE TABLE decisions(
  decision_path TEXT PRIMARY KEY
 ) WITHOUT ROWID;
+CREATE TABLE directories(
+ path TEXT PRIMARY KEY,
+ device TEXT NOT NULL,
+ inode TEXT NOT NULL
+) WITHOUT ROWID;
 CREATE TABLE walk_dirs(
  path TEXT PRIMARY KEY
 ) WITHOUT ROWID;`);
@@ -479,6 +486,32 @@ CREATE TABLE walk_dirs(
     }
 }
 
+private void recordDirectoryIdentity(CorpusScratchDatabase db, string relative,
+        const ref stat_t info) {
+    auto statement = db.prepare("INSERT INTO directories VALUES(?1,?2,?3)");
+    scope(exit) sqlite3_finalize(statement);
+    bindText(statement, 1, relative);
+    bindText(statement, 2, info.st_dev.to!string);
+    bindText(statement, 3, info.st_ino.to!string);
+    dbNeed(sqlite3_step(statement) == SQLITE_DONE,
+        "directory identity write failed");
+}
+
+private void verifyDirectoryIdentity(CorpusScratchDatabase db, string relative,
+        const ref stat_t info) {
+    if (db is null) return;
+    auto statement = db.prepare(
+        "SELECT device,inode FROM directories WHERE path=?1");
+    scope(exit) sqlite3_finalize(statement);
+    bindText(statement, 1, relative);
+    dbNeed(sqlite3_step(statement) == SQLITE_ROW,
+        "directory identity missing");
+    auto device = columnText(statement, 0);
+    auto inode = columnText(statement, 1);
+    enforce(device == info.st_dev.to!string && inode == info.st_ino.to!string,
+        "corpus runner: sidecar directory changed during phase 2: " ~ relative);
+}
+
 private void bindText(sqlite3_stmt* statement, int index, string value) {
     dbNeed(sqlite3_bind_text(statement, index, value.toStringz,
         cast(int) value.length, cast(void*) -1) == SQLITE_OK, "bind failed");
@@ -500,7 +533,7 @@ private void resetStatement(sqlite3_stmt* statement) {
 /// before another directory is opened, so descriptor use is independent of
 /// tree depth and breadth.
 private void walkSidecarTree(CorpusScratchDatabase db, string root,
-        int rootFd,
+        int rootFd, bool recordDirectories,
         scope void delegate(string path, string relative, bool directory,
             bool regular, bool symlink) visit) {
     db.exec("DELETE FROM walk_dirs");
@@ -525,7 +558,7 @@ private void walkSidecarTree(CorpusScratchDatabase db, string root,
         dbNeed(sqlite3_step(drop) == SQLITE_DONE, "walk queue delete failed");
         resetStatement(drop);
 
-        auto directoryFd = openRelativeDirectory(rootFd, directoryRelative);
+        auto directoryFd = openRelativeDirectory(db, rootFd, directoryRelative);
         auto stream = fdopendir(directoryFd);
         if (stream is null) {
             close(directoryFd);
@@ -553,6 +586,10 @@ private void walkSidecarTree(CorpusScratchDatabase db, string root,
                 buildPath(directoryRelative, name) : name;
             visit(buildPath(root, relative), relative, directory, regular, link);
             if (directory) {
+                if (recordDirectories)
+                    recordDirectoryIdentity(db, relative, info);
+                else
+                    verifyDirectoryIdentity(db, relative, info);
                 bindText(add, 1, relative);
                 dbNeed(sqlite3_step(add) == SQLITE_DONE,
                     "walk queue write failed");
@@ -580,9 +617,10 @@ private void upsertLink(sqlite3_stmt* statement, string documentId,
     resetStatement(statement);
 }
 
-private ubyte[] readBoundedSidecar(int rootFd, string relativePath) {
+private ubyte[] readBoundedSidecar(CorpusScratchDatabase db, int rootFd,
+        string relativePath) {
     string leaf;
-    auto parentFd = openRelativeParent(rootFd, relativePath, leaf);
+    auto parentFd = openRelativeParent(db, rootFd, relativePath, leaf);
     scope(exit) close(parentFd);
     auto fd = openat(parentFd, leaf.toStringz, O_RDONLY | O_NOFOLLOW);
     enforce(fd >= 0, "corpus runner: cannot open metadata sidecar safely");
@@ -678,9 +716,10 @@ private ulong[similarityBands] bandValuesFromLanesV1(
 /// produced) -- such a document is simply not a pruning candidate, not an
 /// error. Bands are derived from the persisted canonical lanes using the
 /// payload's already-validated `byte-shingle-minhash:v1` algorithm version.
-private bool tryDecodeCandidate(int rootFd, string relativePath,
+private bool tryDecodeCandidate(CorpusScratchDatabase db, int rootFd,
+        string relativePath,
         out DecodedCandidate result) {
-    auto bytes = readBoundedSidecar(rootFd, relativePath);
+    auto bytes = readBoundedSidecar(db, rootFd, relativePath);
     auto wire = cast(string) bytes;
     auto versionName = metadataVersion(wire);
     auto id = recoverDocumentId(wire);
@@ -728,7 +767,8 @@ private string decisionPathFor(string sidecarPath) {
     return parent == "." ? decisionName : buildPath(parent, decisionName);
 }
 
-private int openRelativeDirectory(int rootFd, string relative) {
+private int openRelativeDirectory(CorpusScratchDatabase db, int rootFd,
+        string relative) {
     enforce(relative.indexOf('\0') < 0 &&
             (!relative.length || relative[0] != '/'),
         "corpus runner: invalid relative directory path");
@@ -742,6 +782,11 @@ private int openRelativeDirectory(int rootFd, string relative) {
     auto current = openat(rootFd, ".".toStringz,
         O_RDONLY | O_NOFOLLOW | directoryOnly);
     enforce(current >= 0, "corpus runner: cannot reopen sidecar root handle");
+    stat_t info;
+    enforce(fstat(current, &info) == 0,
+        "corpus runner: cannot inspect anchored sidecar root");
+    verifyDirectoryIdentity(db, "", info);
+    string traversed;
     foreach (component; components) {
         auto next = openat(current, component.toStringz,
             O_RDONLY | O_NOFOLLOW | directoryOnly);
@@ -749,11 +794,16 @@ private int openRelativeDirectory(int rootFd, string relative) {
         enforce(next >= 0,
             "corpus runner: sidecar parent changed during phase 2");
         current = next;
+        traversed = traversed.length ? buildPath(traversed, component) : component;
+        enforce(fstat(current, &info) == 0,
+            "corpus runner: cannot inspect anchored sidecar directory");
+        verifyDirectoryIdentity(db, traversed, info);
     }
     return current;
 }
 
-private int openRelativeParent(int rootFd, string relative, out string leaf) {
+private int openRelativeParent(CorpusScratchDatabase db, int rootFd,
+        string relative, out string leaf) {
     enforce(relative.length && relative[0] != '/' && relative.indexOf('\0') < 0,
         "corpus runner: invalid relative sidecar path");
     auto components = relative.split('/');
@@ -761,11 +811,12 @@ private int openRelativeParent(int rootFd, string relative, out string leaf) {
         enforce(component.length && component != "." && component != "..",
             "corpus runner: noncanonical relative sidecar path");
     leaf = components[$ - 1];
-    return openRelativeDirectory(rootFd,
+    return openRelativeDirectory(db, rootFd,
         components.length == 1 ? "" : components[0 .. $ - 1].join("/"));
 }
 
-private string writeDecisionSidecar(int rootFd, string relativeSidecarPath,
+private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
+        string relativeSidecarPath,
         CorpusStageDecision decision) {
     auto relativeDecisionPath = decisionPathFor(relativeSidecarPath);
     auto json = `{"schema":"` ~ pruneNearDuplicatesDecisionSchemaV1 ~
@@ -773,7 +824,7 @@ private string writeDecisionSidecar(int rootFd, string relativeSidecarPath,
         `","representative_id":"` ~ decision.representativeId.text ~
         `","bucket_identity":"` ~ decision.bucketIdentity ~ `"}` ~ "\n";
     string leaf;
-    auto parentFd = openRelativeParent(rootFd, relativeDecisionPath, leaf);
+    auto parentFd = openRelativeParent(db, rootFd, relativeDecisionPath, leaf);
     scope(exit) close(parentFd);
 
     stat_t priorInfo;
@@ -821,9 +872,10 @@ private string writeDecisionSidecar(int rootFd, string relativeSidecarPath,
     return relativeDecisionPath;
 }
 
-private void removeDecisionSidecar(int rootFd, string relativeDecisionPath) {
+private void removeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
+        string relativeDecisionPath) {
     string leaf;
-    auto parentFd = openRelativeParent(rootFd, relativeDecisionPath, leaf);
+    auto parentFd = openRelativeParent(db, rootFd, relativeDecisionPath, leaf);
     scope(exit) close(parentFd);
     enforce(unlinkat(parentFd, leaf.toStringz, 0) == 0,
         "corpus runner: stale decision removal failed");
@@ -873,6 +925,10 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
     enforce(close(databaseFd) == 0, "corpus runner: cannot close scratch database");
     trackScratchCreate();
     db = new CorpusScratchDatabase(databasePath);
+    stat_t rootInfo;
+    enforce(fstat(sidecarRootFd, &rootInfo) == 0,
+        "corpus runner: cannot inspect anchored sidecar root");
+    recordDirectoryIdentity(db, "", rootInfo);
 
     RunAccumulator accumulator;
     accumulator.fresh = &fresh;
@@ -880,7 +936,7 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
     auto addDocument = db.prepare("INSERT INTO documents VALUES(?1,?2)");
     scope(exit) sqlite3_finalize(addDocument);
     db.exec("BEGIN");
-    walkSidecarTree(db, sidecarRoot, sidecarRootFd,
+    walkSidecarTree(db, sidecarRoot, sidecarRootFd, true,
             (string path, string relative, bool directory, bool regular,
                 bool symlink) {
         enforce(!symlink,
@@ -890,7 +946,7 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
             "prune-near-duplicates: non-regular entry inside sidecar root: " ~ path);
         if (!path.endsWith(documentMetadataPublishSuffixV1)) return;
         DecodedCandidate decoded;
-        if (!tryDecodeCandidate(sidecarRootFd, relative, decoded)) return;
+        if (!tryDecodeCandidate(db, sidecarRootFd, relative, decoded)) return;
         auto idText = decoded.documentId.text;
         insertDocument(addDocument, idText, relative);
         // A document whose signature never received real content
@@ -906,6 +962,13 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
         }
     });
     db.exec("COMMIT");
+    version (unittest) {
+        if (postDiscoveryHook !is null) {
+            auto hook = postDiscoveryHook;
+            postDiscoveryHook = null;
+            hook(sidecarRoot);
+        }
+    }
     if (batch.length) flushRun(batch, accumulator);
     auto runs = accumulator.finish();
     if (runs.count) runs = mergeRuns(runs, &fresh);
@@ -998,7 +1061,7 @@ ORDER BY links.document_id`);
         auto decision = CorpusStageDecision(DocumentId.fromCanonicalText(documentId),
             CorpusDecisionKind.prune, DocumentId.fromCanonicalText(representativeId),
             bucketIdentity);
-        auto decisionPath = writeDecisionSidecar(sidecarRootFd,
+        auto decisionPath = writeDecisionSidecar(db, sidecarRootFd,
             relativeSidecarPath, decision);
         bindText(addDecision, 1, decisionPath);
         dbNeed(sqlite3_step(addDecision) == SQLITE_DONE,
@@ -1014,7 +1077,7 @@ ORDER BY links.document_id`);
     auto currentDecision = db.prepare(
         "SELECT 1 FROM decisions WHERE decision_path=?1");
     scope(exit) sqlite3_finalize(currentDecision);
-    walkSidecarTree(db, sidecarRoot, sidecarRootFd,
+    walkSidecarTree(db, sidecarRoot, sidecarRootFd, false,
             (string path, string relative, bool directory, bool regular,
                 bool symlink) {
         enforce(!symlink,
@@ -1030,7 +1093,7 @@ ORDER BY links.document_id`);
         auto isCurrent = currentStep == SQLITE_ROW;
         resetStatement(currentDecision);
         if (!isCurrent) {
-            removeDecisionSidecar(sidecarRootFd, relative);
+            removeDecisionSidecar(db, sidecarRootFd, relative);
         }
     });
 }
@@ -1458,10 +1521,10 @@ version (Posix) unittest {
     auto representative = fixtureId("swap-representative");
     auto decision = CorpusStageDecision(removed, CorpusDecisionKind.prune,
         representative, "band=0,key=0000000000000000");
-    assertThrown(writeDecisionSidecar(rootFd,
+    assertThrown(writeDecisionSidecar(null, rootFd,
         "nested/doc" ~ documentMetadataPublishSuffixV1, decision));
     assert(cast(string) read(outsideDecision) == "must survive");
-    assertThrown(removeDecisionSidecar(rootFd,
+    assertThrown(removeDecisionSidecar(null, rootFd,
         "nested/doc" ~ pruneNearDuplicatesDecisionSuffixV1));
     assert(cast(string) read(outsideDecision) == "must survive");
 }
@@ -1509,6 +1572,40 @@ version (Posix) unittest {
             ++replacementDecisions;
     assert(anchoredDecisions == 1);
     assert(replacementDecisions == 0);
+}
+
+// A descendant ordinary directory is identity-bound during discovery. If it
+// is replaced before publication, the run fails before writing a decision or
+// emitting one for metadata that no longer occupies that directory.
+version (Posix) unittest {
+    import std.exception : assertThrown;
+    import std.file : mkdir, rename;
+
+    auto root = freshRoot("nested-directory-swap");
+    scope(exit) rmdirRecurse(root);
+    auto nested = buildPath(root, "nested");
+    auto replacement = buildPath(root, "replacement");
+    auto original = buildPath(root, "original");
+    mkdir(nested);
+    mkdir(replacement);
+    auto originalText =
+        "Original nested duplicate text with enough shingles for a signature.";
+    writeFixtureSidecar(nested, "one", originalText);
+    writeFixtureSidecar(nested, "two", originalText);
+    auto replacementText =
+        "Replacement nested duplicate text with enough shingles for a signature.";
+    writeFixtureSidecar(replacement, "other-one", replacementText);
+    writeFixtureSidecar(replacement, "other-two", replacementText);
+
+    postDiscoveryHook = (string) {
+        rename(nested, original);
+        rename(replacement, nested);
+    };
+    assertThrown(runFixture(root));
+
+    foreach (directory; [original, nested])
+        foreach (entry; dirEntries(directory, SpanMode.shallow, false))
+            assert(!entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1));
 }
 
 // Reachability: the stage is genuinely self-registering, and a run through

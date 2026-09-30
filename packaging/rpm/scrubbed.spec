@@ -122,9 +122,12 @@ cp -a %{scrubbed_pkgtree}/third_party/. %{buildroot}%{_datadir}/licenses/%{name}
 %{buildroot}%{_bindir}/scrubbed --help | grep -q '^Usage: scrubbed'
 
 %files
-%license %{_datadir}/licenses/%{name}/LICENSE
-%license %{_datadir}/licenses/%{name}/THIRD_PARTY_NOTICES.md
-%license %{_datadir}/licenses/%{name}/third_party
+# A single directory-level %%license entry (rather than one per file) so
+# rpm also owns and removes the /usr/share/licenses/%%{name} directory
+# itself on erase -- listing only the files inside it left an empty,
+# unowned directory behind after `dnf remove` in this rpm's own real
+# clean-container uninstall proof (issue #502).
+%license %{_datadir}/licenses/%{name}
 %{_bindir}/scrubbed
 %{_datadir}/bash-completion/completions/scrubbed
 %{_datadir}/zsh/site-functions/_scrubbed

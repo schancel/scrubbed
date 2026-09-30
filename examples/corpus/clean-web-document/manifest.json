@@ -1,0 +1,147 @@
+{
+  "schema": "scrubbed.clean-web-document-corpus.v1",
+  "licenseFile": "examples/corpus/clean-web-document/LICENSE.txt",
+  "claims": {
+    "mainContentExtraction": true,
+    "piiDetection": true,
+    "trainingReady": false,
+    "generalPurposeAnonymization": false
+  },
+  "sidecarDocumentIdPlaceholder": "doc:v1:0000000000000000000000000000000000000000000000000000000000000000",
+  "configurations": [
+    {
+      "path": "examples/pipelines/clean-web-document/clean-web-document.json",
+      "sha256": "dcbc0308272a136cfe6e0180f3c4d77b254bc5be5815cee8ab0b45613fb02405"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "examples/corpus/clean-web-document/inputs/single-file/hydrology-notebook.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #503 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "1b8719d530684bed7a4e220b9320f3615c20faa5f92d01e4ed113911f3ba5b99",
+      "intendedPipeline": "clean-web-document-single-file",
+      "expectedOutcome": "Mojibake in the byline is repaired, title/author/date/url are annotated, the article body is selected as main content with page chrome stripped, and a synthetic email address is flagged (not redacted) by the PII audit."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/inputs/directory-tree/clean-record.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #503 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "2a17b881707ae8b69781d910159e9a70e1cb9e100748c024ebd338c7488e2337",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "No mojibake and no PII; the PII audit's union list is empty. Only a title is present in the annotated metadata (author/date/url are absent, not fabricated)."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/inputs/directory-tree/mojibake-record.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #503 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "f6810434696f448fee583323fa22e4eae861f4aa8829b0f4cd0c9792b99e1639",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "Mojibake in both the title and the body (\"CafÃ©\" -> \"Café\") is repaired before metadata annotation and main-content selection run; no PII is present."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/inputs/directory-tree/pii-record.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #503 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "c71c9e090edc0ba6658f8d2a4cb982a7c377a048343ba66b3758ebda931ea634",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "A synthetic US phone number in the body is flagged (ambiguous confidence, ip/card/email categories absent) by the PII audit; content is left unmodified under the default report policy."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/single-file/content/hydrology-notebook.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "0292833688cc656214c94acd6f20c8b1e8f45e8b46362a2a908b5558db1931ff",
+      "intendedPipeline": "clean-web-document-single-file",
+      "expectedOutcome": "Exact selected main-content plain-text bytes, mojibake repaired, page chrome stripped."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/single-file/sidecar/hydrology-notebook.txt.document-metadata.json",
+      "mediaType": "application/json; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus, with the path-dependent \"documentId\" value (and its hex-encoded occurrence inside the embedded PII-audit payload) normalized to sidecarDocumentIdPlaceholder -- see check.d's normalizeDocumentId.",
+      "license": "MIT",
+      "sha256": "e67006dbca35793157c60a17602fac7c02d938f476c921941c7336797fcd8bad",
+      "intendedPipeline": "clean-web-document-single-file",
+      "expectedOutcome": "Exact document-metadata:v2 sidecar bytes: annotated title/author/date/url plus one reported high-confidence email finding in the embedded PII-audit structured section."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/directory-tree/content/clean-record.html",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "7bff7f0680e1d9ca16e62aeff351e9596fe3957016a9f3995fd886f2ee526488",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "Exact selected main-content plain-text bytes; the mirrored output file keeps its input's .html name even though its content is now plain text."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/directory-tree/sidecar/clean-record.html.document-metadata.json",
+      "mediaType": "application/json; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus, with the path-dependent \"documentId\" value normalized to sidecarDocumentIdPlaceholder -- see check.d's normalizeDocumentId.",
+      "license": "MIT",
+      "sha256": "c22662ba25f73d6054295e48059ba7790fcdc540de49007a94f92b425fbe3183",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "Exact document-metadata:v2 sidecar bytes: only title annotated (author/date/url absent, not fabricated) and an empty PII-audit union list."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/directory-tree/content/mojibake-record.html",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "9fa1ebae55c8f90ea1a26a133f06bf5ba9002e5659f29cd4070e5d98c436eccf",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "Exact selected main-content plain-text bytes with mojibake repaired."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/directory-tree/sidecar/mojibake-record.html.document-metadata.json",
+      "mediaType": "application/json; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus, with the path-dependent \"documentId\" value normalized to sidecarDocumentIdPlaceholder -- see check.d's normalizeDocumentId.",
+      "license": "MIT",
+      "sha256": "f6bc797e2811b58f3b3750c6ca8e439c3d63b4c04f949d75e4894c6e3eb9ca8a",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "Exact document-metadata:v2 sidecar bytes: repaired title annotated, author/date annotated, and an empty PII-audit union list."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/directory-tree/content/pii-record.html",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "d6d1c78d23660760224bdd3d1217fea947d4637f213753409dd32a1447e53420",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "Exact selected main-content plain-text bytes; the phone number stays visible in content under the default report policy."
+    },
+    {
+      "path": "examples/corpus/clean-web-document/expected/directory-tree/sidecar/pii-record.html.document-metadata.json",
+      "mediaType": "application/json; charset=utf-8",
+      "provenance": "Generated from the authored issue #503 input by the shipping scrubbed binary for this checked-in golden corpus, with the path-dependent \"documentId\" value normalized to sidecarDocumentIdPlaceholder -- see check.d's normalizeDocumentId.",
+      "license": "MIT",
+      "sha256": "43f40272b0cc1e4a8d77d5ae65be59e151b2cee5bb15d19d88124a2a37efa9f0",
+      "intendedPipeline": "clean-web-document-directory-tree",
+      "expectedOutcome": "Exact document-metadata:v2 sidecar bytes: one reported ambiguous-confidence phone finding in the embedded PII-audit structured section."
+    }
+  ],
+  "recipes": [
+    {
+      "id": "clean-web-document-single-file",
+      "expectedExit": 0,
+      "cliArguments": ["clean-web-document", "--input", "${INPUT}", "--output", "${OUTPUT}"],
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${CONFIG}"]
+    },
+    {
+      "id": "clean-web-document-directory-tree",
+      "expectedExit": 0,
+      "cliArguments": ["clean-web-document", "--input", "${INPUT}", "--output", "${OUTPUT}"],
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${CONFIG}"]
+    },
+    {
+      "id": "clean-web-document-sidecar-occupied",
+      "expectedExit": 2,
+      "cliArguments": ["clean-web-document", "--input", "${INPUT}", "--output", "${OUTPUT}"],
+      "configArguments": []
+    }
+  ]
+}

@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>scrubbed</title>
-    <meta name="description" content="One local pipeline for cleaning web text into training/eval corpora: encoding repair, main-content extraction, PII scanning, dedup, and language ID — in a single pass, no intermediate files.">
+    <meta name="description" content="Local tools for cleaning web text into training and evaluation corpora: encoding repair, content extraction, PII scanning, language ID, and deduplication.">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1a1a1a; line-height: 1.6; background: #fff; }
@@ -26,7 +26,7 @@
         p { margin-bottom: 1rem; }
         p:last-child { margin-bottom: 0; }
         code { background: #f4f4f4; padding: 0.1rem 0.35rem; font-size: 0.9em; }
-        pre { background: #1a1a1a; color: #eee; padding: 1rem; overflow-x: auto; font-size: 0.82rem; }
+        pre { display: block; width: 100%; background: #1a1a1a; color: #eee; padding: 1rem; overflow-x: auto; font-size: 0.82rem; }
         /* #666 is the one muted tone for all secondary/meta text on this page:
            notes, captions, labels, footer, stat-card prose. Primary content
            stays the body color (#1a1a1a); borders are a separate concern. */
@@ -48,13 +48,15 @@
         .demo-pair .demo-label { font-family: monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 0.35rem; display: block; }
         .demo-pair pre { margin: 0; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; }
         .demo-pair .after pre { background: #0e2a17; }
+        .usage-group { margin: 1.5rem 0; }
+        .usage-group h3 { margin-bottom: 0.45rem; font-family: monospace; font-size: 0.8rem; }
     </style>
 </head>
 <body>
 <main>
     <header>
         <h1>scrubbed</h1>
-        <p class="tagline">One native binary that turns raw scraped web pages into clean training/eval data — encoding repair, main-content extraction, and PII scanning in a single pass per document, plus dedup and language ID as separate stages on the same underlying pipeline. No interpreter, no intermediate files, no chain of separate tools.</p>
+        <p class="tagline">One native binary for turning raw web pages into clean training and evaluation data.</p>
         <div class="links">
             <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source on GitHub</a>
             <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
@@ -69,7 +71,6 @@
                 <li><a href="#verified">Verified against</a></li>
                 <li><a href="#also-shipped">Also shipped</a></li>
                 <li><a href="#status">Status</a></li>
-                <li><a href="#roadmap">Roadmap</a></li>
                 <li><a href="#feedback">Feedback</a></li>
                 <li><a href="#usage">Usage</a></li>
                 <li><a href="#support">Support</a></li>
@@ -78,14 +79,13 @@
     </header>
 
     <h2 id="why">The Why</h2>
-    <p>Bad corpus cleaning quietly costs more than it looks like it does: mojibake nobody caught, nav/ad/footer boilerplate mixed into "content," PII nobody scrubbed, near-duplicate pages nobody deduped — none of it throws an error, it just degrades whatever gets trained on it. Doing this step correctly, and fast enough to run over a real corpus rather than a sample, is table stakes for everything downstream.</p>
+    <p>Encoding damage, boilerplate, PII, and duplicate pages quietly degrade training data. scrubbed cleans that noise and flags near-duplicates before they reach a model.</p>
 
     <h2 id="problem">The problem</h2>
-    <p>Most corpus-cleaning pipelines today are a chain of separate Python tools glued together with intermediate files: <a href="https://github.com/rspeer/python-ftfy" target="_blank" rel="noopener">ftfy</a> to fix encodings, <a href="https://github.com/adbar/trafilatura" target="_blank" rel="noopener">trafilatura</a> to pull the article out of the page, langdetect to tag the language, Presidio to find PII, a separate dedup pass — each one its own interpreter startup, its own read/write of the whole document, its own set of heap allocations and garbage collection sweeps. None of them were built to compose with each other, so both correctness and performance leak out at the seams between tools.</p>
-    <p>scrubbed replaces that chain with one native binary and one shared pipeline instead of five separate tools each with their own interpreter startup and intermediate files. <code>clean-web-document</code> bundles mojibake repair, HTML main-content extraction, and PII scanning into a single pass per document today; dedup and language ID run as separate stages on the same underlying machinery rather than in that same pass yet — see the usage examples below for exactly what's bundled versus separate right now. Where a case is covered, it's built and verified to match the reference tool's output, not just approximate it — see the numbers below. Coverage is still growing (more encodings, more scripts, more languages, more of the pipeline unified into one pass), but the bar for anything shipped is drop-in correctness on what it claims to cover.</p>
+    <p>Corpus cleaning often means chaining several tools and repeatedly reading and writing the same documents. scrubbed combines encoding repair, main-content extraction, and PII scanning in one pipeline, with language ID and near-duplicate decisions available as additional stages.</p>
 
     <h2 id="fit">Where this fits in a training pipeline</h2>
-    <p>Building a corpus for pretraining or fine-tuning is usually four stages: <strong>collect</strong> raw pages, <strong>clean &amp; curate</strong> them into usable text, <strong>package</strong> the result into training-ready shards, then <strong>train</strong>. scrubbed's job is the middle stage &mdash; the part that's normally a chain of separate Python tools today.</p>
+    <p>scrubbed collects pages, cleans files to text, and transforms selected fields in existing JSONL streams.</p>
     <div class="pipeline-steps">
         <div class="step here">Collect<br><span style="font-size:0.78rem;font-weight:normal;">scrubbed crawl</span></div>
         <div class="arrow">&rarr;</div>
@@ -95,14 +95,14 @@
         <div class="arrow">&rarr;</div>
         <div class="step">Train<br><span class="outside">your training run</span></div>
     </div>
-    <p>scrubbed hands off via plain JSONL (or its structured-chunk projection) to whatever tokenizer/shard-writer you already use &mdash; it doesn't tokenize or train. Collection is now a real shipped command too: <code>scrubbed crawl</code> is a local, multithreaded, resumable crawler (durable SQLite-backed frontier, bounded polite fetch, link discovery) &mdash; single-machine only, no distributed/sharded crawling yet. It writes raw pages only, no cleaning inline; run <code>clean-web-document</code> over its output as a separate pass, or point scrubbed straight at pages you already have.</p>
+    <p><code>scrubbed crawl</code> collects raw pages locally; <code>clean-web-document</code> cleans them in a separate pass. scrubbed does not tokenize or train.</p>
 
     <h2 id="see-it-work">See it work</h2>
     <p class="note">Real output from the actual binary, not a mockup.</p>
     <div class="demo-pair">
         <div class="before">
-            <span class="demo-label">Input (UTF-8 read as Latin-1, then re-saved)</span>
-            <pre>The cafÃ© menu featured crÃ¨me brÃ»lÃ©e â a classic dessert.</pre>
+            <span class="demo-label">Input (UTF-8 bytes misread as Windows-1252)</span>
+            <pre>The cafÃ© menu featured crÃ¨me brÃ»lÃ©e â€” a classic dessert.</pre>
         </div>
         <div class="after">
             <span class="demo-label">./scrubbed run --filters fix-mojibake</span>
@@ -131,146 +131,112 @@
   Project. All rights reserved.&lt;/footer&gt;</pre>
         </div>
         <div class="after">
-            <span class="demo-label">./scrubbed clean-web-document</span>
-            <pre>Field notes from the delta survey
+            <span class="demo-label">./scrubbed extract --format main-content-markdown</span>
+            <pre># Field notes from the delta survey
 
-The survey team spent three weeks mapping the river delta's shifting sandbars, recording water depth every two hundred meters along six transects. The main channel has migrated nearly forty meters east since the last survey.</pre>
+The survey team spent three weeks mapping the river delta's shifting sandbars, recording water depth every two hundred meters along six transects\. The main channel has migrated nearly forty meters east since the last survey\.</pre>
         </div>
     </div>
 
     <h2 id="pipeline">The pipeline, one command</h2>
     <pre>scrubbed clean-web-document --input page.html --output page.txt
 scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
-    <p>Repairs mojibake, extracts the article body out of the page (nav/ads/footers dropped), pulls out title/author/date/url, and scans the result for emails/phones/card numbers/IPv4 addresses — writing one metadata sidecar next to the output with both the extracted metadata and the PII audit in it, one process, one pass, parallel across a whole directory tree.</p>
+    <p>Repairs encoding damage, extracts the article, captures metadata, scans for common PII, and writes an audit sidecar.</p>
 
     <h2 id="verified">Verified against the tools it replaces</h2>
-    <p class="note">Every number below comes from <code>benchmarks/external_comparator.d</code>, runnable yourself against real pinned installs of each reference tool &mdash; not a claimed result.</p>
+    <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
     <div class="stats">
         <div class="stat-card">
             <span class="big">39/39 + 48/48</span>
             <span class="label">vs. ftfy, encoding repair</span>
-            <p>Exact match on ftfy's own test corpus, within scrubbed's Latin-1/Windows-1252 scope: every corrupted case fixed, every clean case left untouched.</p>
+            <p>Exact match within scrubbed's Latin-1/Windows-1252 scope.</p>
         </div>
         <div class="stat-card">
             <span class="big">11/11</span>
             <span class="label">vs. langdetect, language ID</span>
-            <p>100% classification agreement on a real held-out run, across scrubbed's 17 supported languages.</p>
+            <p>Classification agreement on 11 of 17 supported languages.</p>
         </div>
         <div class="stat-card">
             <span class="big">21/21</span>
             <span class="label">vs. Presidio, PII detection</span>
-            <p>Exact parity with Presidio on every category: email, card, IP (5/5 each) and phone (6/6, including parenthesized numbers like "(415) 555-0199"). Zero false positives from scrubbed on any category.</p>
+            <p>Exact agreement for email, phone, card, and IPv4 detection.</p>
         </div>
         <div class="stat-card">
             <span class="big">20/20 pages</span>
             <span class="label">vs. trafilatura, extraction</span>
-            <p>Precision 0.895 / recall 0.756 against trafilatura's own extraction as the reference (not authored ground truth &mdash; a cross-tool word-overlap comparison). All 20 pages now select: a stale internal resource cap and a JSON-LD content source the DOM-only scoring pass couldn't see were each real, fixed bugs, not disclosed non-goals &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/html-main-content.md" target="_blank" rel="noopener">docs/html-main-content.md</a> and the tracked issue for details.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">~146x</span>
-            <span class="label">whole pipeline vs. the equivalent Python chain, corpus-scale</span>
-            <p>scrubbed's <code>clean-web-document</code> vs. ftfy&rarr;trafilatura&rarr;langdetect&rarr;Presidio chained, over a 400-file corpus with the Python chain warm, measured as CPU time. Methodology and a smaller per-file comparison in <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">examples/pipeline-benchmark</a>.</p>
+            <p>Directional word overlap against trafilatura output: 0.895 precision, 0.756 recall.</p>
         </div>
         <div class="stat-card">
             <span class="big">~25x</span>
             <span class="label">vs. ftfy alone, whole-process wall time</span>
-            <p>On a 131,072-line (5.9MB) repetitive mojibake file: 0.152&ndash;0.156s vs. ftfy's 3.698&ndash;4.076s. Whole-process timing including startup, exact output verified every run &mdash; one specific workload, not a general throughput claim. Per-tool timing for trafilatura/langdetect/Presidio individually isn't published yet, only the whole-pipeline number above and correctness per tool.</p>
+            <p>One 5.9 MB file made by repeating a sentence 131,072 times; not a general corpus benchmark.</p>
         </div>
     </div>
 
     <h2 id="also-shipped">Also shipped</h2>
     <ul>
-        <li>Boilerplate-stripped main content exported as real Markdown (<code>extract --format=main-content-markdown</code>) &mdash; headings, lists, links, and emphasis preserved, nav/ad/footer chrome removed first by the same selection <code>clean-web-document</code> uses. A separate <code>extract --format=markdown</code> converts an entire raw page (chrome included) for callers that want that instead.</li>
-        <li>A four-class PII scanner (email/phone/card/IPv4) with report, mask, and opt-in redact modes, publishing a content-free audit record.</li>
-        <li>Exact-byte deduplication across a corpus.</li>
-        <li>A deterministic, model-free language identifier — no embedded model, no network call — reachable from the same generic pipeline as every other stage.</li>
-        <li>An opt-in per-document quality signal: order-0 token entropy plus compression ratio, for flagging degenerate/repetitive text.</li>
-        <li>HTML entity decoding (all 2,231 WHATWG named references), smart-quote and line-ending normalization, and a JSONL streaming mode for corpus pipelines that only need specific text fields touched.</li>
-        <li>Real parallelism across files (OS threads, not green threads), zero-copy input reads, atomic output writes, and an opt-in error journal/manifest for resuming interrupted runs.</li>
-        <li>A bounded WARC/1.1 reader (plain, gzip, and zstd-compressed) for reading existing archives.</li>
-        <li><code>scrubbed crawl</code>: a local, multithreaded, resumable crawler &mdash; durable SQLite-backed frontier with permanent duplicate-rejection, bounded polite HTTP fetch via libcurl, HTML link discovery, real OS-thread concurrency with correct per-host throttling under concurrency. Single machine only; no distributed or sharded crawling. Kill it mid-run and it recovers cleanly on restart, no duplicate fetches.</li>
-        <li>Declared topical-tag extraction, a source-rights policy engine for permission/takedown decisions across derived artifacts, and structured chunking with stable, content-addressed chunk IDs for downstream corpus formats.</li>
+        <li>Main-content or full-page Markdown export, preserving headings, lists, links, and emphasis.</li>
+        <li>PII report, mask, and redact modes for email, phone, card, and IPv4 data.</li>
+        <li>Exact-byte deduplication through the document-shard overlay API.</li>
+        <li>Deterministic, model-free language identification.</li>
+        <li>Quality signals for repetitive or degenerate text.</li>
+        <li>HTML entity decoding, text normalization, and selective JSONL streaming.</li>
+        <li>Parallel file processing, atomic output, and resumable runs.</li>
+        <li>A local, multithreaded, resumable crawler.</li>
     </ul>
 
     <h2 id="status">Status</h2>
-    <p>Used today for local, single-machine corpus runs within the scope described above. Proven multi-terabyte-scale operation is still on the roadmap &mdash; see <code>TODO.md</code> in the repo for the current, specific list of what's next.</p>
-
-    <h2 id="roadmap">Roadmap</h2>
-    <p class="note">This section is direction, not a committed timeline or a shipped claim &mdash; only the numbers and features above are guaranteed to work today. It exists so people building on scrubbed can tell what's stable to depend on versus what's still being decided.</p>
-    <p>The path to a first public release is ordered in <a href="https://github.com/schancel/scrubbed/blob/main/docs/release-execution-plan.md" target="_blank" rel="noopener">docs/release-execution-plan.md</a>. Most of it is done: the canonical config/composition root, the complete built-in transform path, extraction/curation parity including near-trafilatura-equivalent HTML extraction (main content, comments, structural fidelity, metadata, dedup, more output formats), and packaging. What's left: bounded Office/PDF extraction adapters, an optional local LLM inference backend, and a real end-to-end example gallery. Direct S3/Parquet CLI wiring (the underlying libraries exist and work, just not wired into the main binary yet), multi-machine distributed execution, and full API/plugin-ecosystem parity with tools like Trafilatura, ftfy, Dolma, or DataTrove remain explicitly deferred past this release.</p>
-    <p>Longer-term direction: the target shape (<a href="https://github.com/schancel/scrubbed/issues/338" target="_blank" rel="noopener">accepted</a>, not yet built) is keeping scrubbed a bounded, single-machine tool at each of a few layers &mdash; crawl, transform/extract, and corpus-wide operations like dedup and clustering &mdash; and letting an existing distributed engine (Ray, Spark, Beam, DataTrove, etc.) chain and scale those across machines, rather than scrubbed building its own distributed job coordinator. Everything beyond that shape &mdash; exact timeline, which orchestrator integrations ship first &mdash; is still open (see <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">open issues</a>). Ingesting more document formats beyond HTML/WARC/plain text is in progress: PDF and DOCX both have a real, unwired extraction seam landed (evidence-only evaluation plus a minimal FFI/text-walker binding, no stage/CLI wiring yet), images/OCR remains evaluated but not adopted &mdash; see <a href="https://github.com/schancel/scrubbed/blob/main/docs/document-adapters-evaluation.md" target="_blank" rel="noopener">docs/document-adapters-evaluation.md</a>.</p>
-    <p>How that's meant to reach petabyte scale without losing the numbers above: the unit an external orchestrator would hand to scrubbed is a whole corpus shard run through the complete fused pipeline in one process &mdash; not one call per stage. Unfusing into per-stage calls (extract, then write; read, then PII-scan, then write; ...) would reintroduce exactly the serialize/materialize overhead this page's benchmarks show scrubbed avoiding. Corpus-wide operations (dedup, near-duplicate clustering, decontamination) are meant to run as separate, explicit passes over small derived fingerprints/hashes computed once while the text is already hot in the fused pass &mdash; not over the full document text again &mdash; so a global pass across petabytes doesn't mean re-scanning petabytes of text. This is the accepted target shape, not yet built: see <a href="https://github.com/schancel/scrubbed/issues/338" target="_blank" rel="noopener">issue #338</a> for the full decision record.</p>
-    <p class="note">The full, current, itemized list lives in <a href="https://github.com/schancel/scrubbed/blob/main/TODO.md" target="_blank" rel="noopener">TODO.md</a> &mdash; that file, not this page, is the source of truth for what's done versus next.</p>
+    <p>Ready for local, single-machine corpus runs. Multi-machine execution and proven multi-terabyte operation are not yet supported.</p>
 
     <h2 id="feedback">Feedback wanted</h2>
-    <p>If you're building or running a corpus-cleaning pipeline at a lab, a startup, or anywhere with real production constraints, I'd genuinely like to hear from you &mdash; especially about whether the roadmap direction above (a fused local pipeline, corpus-global operations as separate passes, orchestrated by whatever distributed system you already run) would actually embed into your stack, and where it wouldn't. A concrete gap &mdash; "this needs to emit format X," "this needs to run under constraint Y," "here's the part of our pipeline this could replace" &mdash; is more useful than general encouragement.</p>
-    <p><a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a>, or comment directly on the <a href="https://github.com/schancel/scrubbed/issues/338" target="_blank" rel="noopener">open architecture proposals</a> linked above.</p>
+    <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
     <h2 id="usage">Usage</h2>
-    <p class="note"><strong>macOS (Apple Silicon) and Linux (x86_64/aarch64)</strong>, both CI-verified &mdash; there's no native Windows port (POSIX-specific subsystems throughout &mdash; <code>dlopen</code>, a <code>sigaction</code>-based <code>SIGINT</code> handler, <code>mmap</code>-based zero-copy reads &mdash; don't map directly to Windows APIs). On Linux, PDF/llama.cpp-backed features are excluded from the build (evaluation-only, no verified Linux binaries yet &mdash; see <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">#379</a>); the core pipeline (encoding repair, extraction, PII, language ID, dedup) is unaffected. Packaging is built and proven &mdash; a GitHub Actions workflow automatically builds and publishes tarballs (macOS arm64, Linux x86_64/aarch64) with checksums on release tags; a <code>.deb</code>, a Homebrew tap, and an <code>.rpm</code> are also built from that same release process with real clean-machine install tests, but none is wired into an automated publish step yet (the Homebrew tap in particular has no live tap repository). No versioned release has been cut yet, so today you still build from source: <a href="https://dlang.org/download.html" target="_blank" rel="noopener">dub</a> and the <a href="https://github.com/ldc-developers/ldc" target="_blank" rel="noopener">LDC compiler</a>. Prebuilt packages will ship with the first release, along with a one-line install script (<a href="https://github.com/schancel/scrubbed/blob/main/packaging/install.sh" target="_blank" rel="noopener">packaging/install.sh</a>, CI-proven end to end &mdash; real download, checksum verification, and install, against a local fixture release) that detects your platform and verifies the release's SHA-256 checksum before installing: <code>curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh</code>.</p>
-    <p class="note"><strong>Windows, via WSL2:</strong> WSL2 runs a real Linux kernel, not a syscall-translation shim, so the existing Linux x86_64 build and <code>.deb</code> above are the relevant artifacts &mdash; not a separate Windows port. They ran correctly end to end (build, a real multi-file <code>clean-web-document</code> corpus run, and a clean-machine <code>.deb</code> install) against a real Linux kernel in the same lightweight-VM shape WSL2 uses. That's strong supporting evidence, not a genuine-WSL2-verified claim &mdash; no actual WSL2/Windows host was reachable for this evaluation. See <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">docs/wsl2-evaluation.md</a> for the exact commands, output, and what's still unverified (a real <code>/mnt/c</code> mount, most notably).</p>
-    <pre>dub build --build=release
+    <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. Until the first tagged release, build from source with <a href="https://dlang.org/download.html" target="_blank" rel="noopener">DUB</a> and <a href="https://github.com/ldc-developers/ldc" target="_blank" rel="noopener">LDC</a>. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
 
-# Crawl a seed list locally, 4 workers, resumable if interrupted
-./scrubbed crawl --seeds seeds.txt --corpus-dir ./crawled --db crawl.sqlite \
-    --concurrency 4 --max-pages 200
+    <div class="usage-group">
+        <h3>Build</h3>
+        <pre>dub build --build=release</pre>
+    </div>
 
-# Then clean what you crawled (raw pages land under ./crawled/raw/)
-./scrubbed clean-web-document --input ./crawled/raw --output ./clean --threads 4
-
-# Or run the whole pipeline directly on pages you already have
-./scrubbed clean-web-document --input page.html --output page.txt
+    <div class="usage-group">
+        <h3>Common commands</h3>
+        <pre>./scrubbed clean-web-document --input page.html --output page.txt
 ./scrubbed clean-web-document --input pages/ --output clean/ --threads 4
+./scrubbed extract --input page.html --output article.md \
+    --format main-content-markdown
+./scrubbed crawl --seeds seeds.txt --corpus-dir crawled/ \
+    --db crawl.sqlite --concurrency 4 --max-pages 200</pre>
+    </div>
 
-# Just extract, in whichever shape you need
-./scrubbed extract --input page.html --output article.md --format main-content-markdown  # boilerplate stripped, real Markdown
-./scrubbed extract --input page.html --output page.md --format markdown       # whole page, unfiltered, as Markdown
-./scrubbed extract --input page.html --output page.tree.json --format tree-json
-
-# Language ID as a standalone stage, reachable like any other
-./scrubbed run --input page.txt --output page.out \
-    --sidecar-output page.langid.json --stage langid=language-id-detect
-
-# PII scan with an audit sidecar, no rewrite of the input --
-# pii-four-class only annotates, so it needs document-metadata-publish
-# chained after it as the actual terminal stage
-./scrubbed run --input page.txt --output page.out \
-    --sidecar-output page.document-metadata.json \
-    --stage pii=pii-four-class --stage publish=document-metadata-publish
-
-# Compose several stages by hand -- each --stage NAME=IMPLEMENTATION
-# opens a stage; --filter tokens attach to whichever one opened last
-./scrubbed run --input page.html --output page.out \
+    <div class="usage-group">
+        <h3>Custom pipeline</h3>
+        <pre>./scrubbed run --input page.html --output page.out \
     --sidecar-output page.document-metadata.json \
     --stage clean=text-transform --filter fix-mojibake \
     --stage extract=html-main-content \
     --stage scan=pii-four-class \
-    --stage publish=document-metadata-publish
+    --stage publish=document-metadata-publish</pre>
+    </div>
 
-# Or skip stages entirely: --filters is shorthand for one single
-# implicit text-transform stage
-./scrubbed run --input path/to/docs --output path/to/clean \
-    --filters normalize-line-endings,strip-control
-./scrubbed run --list-filters
-./scrubbed --help
-
-# Corpus pipelines: stream selected JSON fields through the same filters
-./scrubbed run --input - --output - --jsonl-fields text,title \
+    <div class="usage-group">
+        <h3>JSONL stream</h3>
+        <pre>./scrubbed run --input - --output - --jsonl-fields text,title \
     --dataset-namespace corpus-v1 --source-key shard-0001 \
     --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 \
-    --filters fix-mojibake \
-    < input.jsonl > clean.jsonl</pre>
+    --filters fix-mojibake &lt; input.jsonl &gt; clean.jsonl</pre>
+    </div>
     <p class="note">Full command and flag reference: <a href="https://github.com/schancel/scrubbed/blob/main/docs/cli-commands.md" target="_blank" rel="noopener">docs/cli-commands.md</a>.</p>
 
     <h2 id="support">Support</h2>
-    <p>scrubbed is free, MIT-licensed, and built in the open &mdash; and also genuinely costs real time, expertise, and money to build and maintain: compute for development and benchmarking, and the hours that went into the pipeline, the test suite, and the docs you're reading. If it's useful to you or your team, saved you time, or just makes your data pipeline suck less, consider chipping in.</p>
+    <p>scrubbed is free and MIT-licensed. If it saves you time, you can help fund its maintenance.</p>
     <div class="links">
         <a href="https://github.com/sponsors/schancel" target="_blank" rel="noopener">GitHub Sponsors</a>
         <a href="https://paypal.me/intentionallyblank" target="_blank" rel="noopener">PayPal</a>
         <a href="https://www.patreon.com/givelotus" target="_blank" rel="noopener">Patreon</a>
         <a href="https://shablag.substack.com" target="_blank" rel="noopener">Newsletter (free)</a>
     </div>
-    <p class="note">Every bit helps and is genuinely appreciated &mdash; thank you to anyone who does. None of it is required: the project stays MIT-licensed and fully open either way, no paywalled features, no nagging.</p>
+    <p class="note">Support is optional; the project remains fully open.</p>
 
     <footer>
         <p><a href="https://github.com/schancel/scrubbed/blob/main/LICENSE" target="_blank" rel="noopener">MIT licensed</a> &middot; <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a> &middot; <a href="https://github.com/schancel/scrubbed/tree/main/benchmarks" target="_blank" rel="noopener">Verify the numbers yourself</a> &middot; <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">Open issues</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">#!blag</a></p>

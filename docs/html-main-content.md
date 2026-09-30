@@ -414,6 +414,26 @@ check uses) for near-boundary candidates, not authored blind:
   trusting a borderline signal, exactly the kind of tension trafilatura's own
   `--precision` flag documents for itself.
 
+  **Disclosed limit of this real-page evidence (review round 2):** the table
+  above proves `precision` diverges from `standard` on a real page, and that
+  `recall` never *disqualifies* a candidate `standard` already selects
+  (`recall` is a strict superset of `standard`'s selections here, by
+  construction -- loosening a floor can only admit more candidates, never
+  fewer). It does **not** demonstrate `recall`'s lowered floor *admitting* a
+  real candidate `standard` would reject: across the full 20-page corpus and
+  all five pages `compare_precision_recall_trafilatura.sh` checks, `recall`'s
+  output is byte-identical to `standard` everywhere except this one page
+  (where both already agree). No page in this repo's current corpus snapshot
+  happens to have a top DOM candidate sized strictly between the `recall`
+  and `standard` floors. This half of the floor axis is instead proven with
+  a disclosed synthetic fixture (`html_main_content.d`'s own `unittest`
+  block, "Axis 1b" below) -- the same honest "authored, not found; grounded
+  in the same real mechanism" disclosure this document already gives the
+  sandwich-rule axis's `recall` case just below. Mutating
+  `recallThresholdMultiplier` back to `1.0` (a no-op) makes that fixture's
+  own assertion fail, so the axis is mechanism-tested even without a real
+  corpus page for it yet.
+
 - **Sandwich-rule axis --** two real, German-language pages
   (`utopia-de.html`, `www-chemietechnik-de.html`) each have real embedded
   share/ad/related-classed elements interspersed between real prose
@@ -1040,6 +1060,35 @@ since it is already correctly registered in production.
   axes tune. Confirmed this makes no observable difference on the one real
   corpus page that currently exercises it (`www-homify-de.html` selects
   `selectedStructuredData` identically in all three modes).
+
+  **Known interaction risk, disclosed rather than silently left (review
+  round 2):** because the rescue floor is fixed while the DOM selection
+  floor is not, this combination can *invert* the intended
+  `precision <= standard <= recall` byte-length ordering on a page shaped
+  differently from anything in the current 20-page corpus: a thin-DOM,
+  JSON-LD-rich page where the top DOM candidate clears `recall`'s lowered
+  floor but not `standard`'s or `precision`'s. Concretely (constructed, not
+  observed in this repo's corpus): a 150-byte DOM candidate plus a 600-byte
+  real `articleBody` JSON-LD block. `standard` and `precision` both abstain
+  on the DOM pass and rescue the full 600 bytes; `recall`'s lowered floor
+  accepts the 150-byte DOM candidate directly and never reaches the rescue
+  at all, so `recall` (150 bytes) ends up *shorter* than both `standard` and
+  `precision` (600 bytes each) on that page shape -- the opposite of
+  `recall`'s own "more text" intent. This is a real structural tension
+  between the two mechanisms (`recall`'s "trust a weaker DOM signal rather
+  than abstain" competing with "prefer the JSON-LD rescue when the DOM
+  signal is weak"), not a rounding error a threshold tweak alone would fix:
+  scaling the rescue floor by `recall`'s own multiplier does not help here,
+  since `recall` never reaches the rescue path in this scenario to begin
+  with (its own DOM floor already accepted the weak candidate first).
+  Fixing this properly would mean deciding, independent of `ExtractionMode`,
+  whether the DOM pass should ever prefer a *known-larger* rescue candidate
+  over an already-passing-but-weak DOM one -- a real design question outside
+  this ticket's scope (it would touch `standard`'s own selection rule too,
+  not just the two new presets). Not observed on any of this repo's 20
+  corpus pages today; flagged here as a known, realistic risk (common on
+  SEO-optimized/SPA-rendered sites) for whoever next changes this file to be
+  aware of, not swept under a "no known issues" claim.
 - Reducing `html_tree.d`'s ~1–3x raw-to-observed-byte representation
   amplification itself (issue #411; see "`scienceblogs-de.html`" above for
   the real, measured per-page ratios): fixed there by raising `maxNodes`/

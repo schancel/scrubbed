@@ -1647,6 +1647,48 @@ unittest {
         recallBorderline.text == standardBorderline.text,
         "recall's lowered floor must never disqualify a candidate standard already selects");
 
+    // Axis 1b (review round 2, finding 1): the fixture above only proves
+    // "recall is a superset of standard" (never disqualifies what standard
+    // already selects) -- it does NOT prove recall's lowered floor actually
+    // ever *admits* a candidate standard/precision would reject, since 230
+    // bytes clears every mode's floor except precision's. No real page in
+    // this repo's current 20-page corpus has a top candidate sized strictly
+    // between the `recall` and `standard` floors (confirmed: `recall`'s
+    // output is byte-identical to `standard` on every page
+    // `precision_recall_check.d`/`compare_precision_recall_trafilatura.sh`
+    // exercise). This fixture is authored specifically to close that gap --
+    // a candidate at 150 bytes: below `standard`'s 200-byte floor and
+    // `precision`'s scaled 300-byte floor, but above `recall`'s scaled
+    // 100-byte floor. Its score (490, from the wrapping `<article>`'s own
+    // tag weight plus paragraph-clustering bonus) comfortably clears every
+    // mode's score floor, isolating text length as the sole axis this
+    // fixture tests. Mutation-testable: reverting `recallThresholdMultiplier`
+    // to `1.0` (a no-op) raises `recall`'s floor back to 200 bytes, which
+    // would make `admittedOnlyByRecall.status` below `abstainedBelowThreshold`
+    // instead of `selected`, failing this assertion.
+    string admittedOnlyByRecallText;
+    foreach (_; 0 .. 150) admittedOnlyByRecallText ~= 'x'; // 150 bytes: > 100, < 200.
+    HtmlTree admittedOnlyByRecallTree;
+    admittedOnlyByRecallTree.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null, null),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, admittedOnlyByRecallText),
+    ];
+    auto standardRejectsWeak =
+        extractMainContent(admittedOnlyByRecallTree, true, ExtractionMode.standard);
+    assert(standardRejectsWeak.status == MainContentStatus.abstainedBelowThreshold,
+        "standard must abstain on a 150-byte candidate (below its 200-byte floor)");
+    auto precisionRejectsWeak =
+        extractMainContent(admittedOnlyByRecallTree, true, ExtractionMode.precision);
+    assert(precisionRejectsWeak.status == MainContentStatus.abstainedBelowThreshold,
+        "precision must also abstain on the identical 150-byte candidate");
+    auto admittedOnlyByRecall =
+        extractMainContent(admittedOnlyByRecallTree, true, ExtractionMode.recall);
+    assert(admittedOnlyByRecall.status == MainContentStatus.selected,
+        "recall's lowered floor must actually admit a real candidate standard/precision reject, " ~
+        "not merely never disqualify what standard already selects");
+    assert(admittedOnlyByRecall.text.length == 150);
+
     // Axis 2 (text-collection sandwich-rule strictness): one fixture that
     // distinguishes all three modes at once. A keyword-neutral middle
     // paragraph sits between a negative-keyword-classed previous sibling

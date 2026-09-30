@@ -3,11 +3,20 @@ module effects.html_metadata;
 
 import domain.document : DocumentId;
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
+import std.array : join;
 import std.conv : to;
-import std.json : JSONValue;
+import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
 import std.string : indexOf;
 import std.uni : isWhite;
 import std.utf : decode, replacementDchar, UseReplacementDchar;
+
+/// Aggregate ld+json bytes scanned per document, and JSON parse depth cap,
+/// for the author JSON-LD signal below -- the same bound shape (and same
+/// values) `effects.topical_tags_extract_stage`'s own ld+json handling
+/// already established as this codebase's precedent for bounding untrusted
+/// per-document JSON-LD parsing.
+enum size_t maxAuthorLdJsonAggregateBytes = 128 * 1024;
+enum int maxAuthorLdJsonParseDepth = 32;
 
 enum size_t maxMetadataCandidates = 16;
 enum size_t maxMetadataValueBytes = 512;
@@ -94,6 +103,161 @@ unittest {
 private string attribute(const ref HtmlNode node, string name) pure {
     foreach (a; node.attributes) if (a.name == name) return a.value;
     return null;
+}
+
+/// Concatenates every text-node descendant of `nodeIndex` (any depth),
+/// walking each text node's ancestor chain -- the same ancestor-walk idiom
+/// this file's own head-membership check uses, and the same shape
+/// `effects.topical_tags_extract_stage`'s own `descendantText` helper
+/// already established as this codebase's precedent for pulling an
+/// element's full visible text out of the flat pre-order tree (used there
+/// for `rel="tag"` `<a>` text; used here for `rel="author"` `<a>` text and
+/// hCard/hAtom name text, both of which may be wrapped in a nested `<a>` or
+/// `<span>` rather than sitting as a direct child).
+private string descendantText(const ref HtmlTree tree, size_t nodeIndex) pure {
+    string result;
+    foreach (node; tree.nodes) {
+        if (node.kind != HtmlNodeKind.text) continue;
+        bool isDescendant;
+        for (size_t parent = node.parentIndex; parent != size_t.max;
+                parent = tree.nodes[parent].parentIndex) {
+            if (parent == nodeIndex) { isDescendant = true; break; }
+        }
+        if (isDescendant) result ~= node.text;
+    }
+    return result;
+}
+
+/// Direct (non-recursive) child text, for `<script>` bodies -- the same
+/// helper shape `effects.topical_tags_extract_stage`'s own `directChildText`
+/// already established.
+private string directChildText(const ref HtmlTree tree, size_t nodeIndex) pure {
+    string result;
+    foreach (node; tree.nodes)
+        if (node.parentIndex == nodeIndex && node.kind == HtmlNodeKind.text)
+            result ~= node.text;
+    return result;
+}
+
+/// True if `nodeIndex` is a proper descendant of `ancestorIndex` -- the same
+/// ancestor-walk idiom this file's own head-membership check uses.
+private bool isDescendantOf(const ref HtmlTree tree, size_t nodeIndex, size_t ancestorIndex) pure {
+    for (size_t parent = tree.nodes[nodeIndex].parentIndex; parent != size_t.max;
+            parent = tree.nodes[parent].parentIndex)
+        if (parent == ancestorIndex) return true;
+    return false;
+}
+
+private bool isAsciiWhitespace(char c) pure {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+}
+
+/// Real whitespace-tokenized `class` attribute matching: splits on ASCII
+/// whitespace (the HTML spec's own definition of a "set of space-separated
+/// tokens") and compares each token for exact equality, never a substring
+/// check. A page with, e.g., `class="post-authorized-badge"` does NOT match
+/// token `"author"` under this function -- a real false positive a naive
+/// `indexOf` substring check was confirmed (during this ticket's own
+/// investigation) to produce.
+private bool hasClassToken(string classValue, string token) pure {
+    size_t at;
+    while (at < classValue.length) {
+        while (at < classValue.length && isAsciiWhitespace(classValue[at])) ++at;
+        auto start = at;
+        while (at < classValue.length && !isAsciiWhitespace(classValue[at])) ++at;
+        if (at > start && classValue[start .. at] == token) return true;
+    }
+    return false;
+}
+
+unittest {
+    assert(hasClassToken("author", "author"));
+    assert(hasClassToken("vcard author", "author"));
+    assert(hasClassToken("  vcard   author  ", "author"));
+    assert(hasClassToken("author\tvcard", "author"));
+    assert(!hasClassToken("post-authorized-badge", "author"));
+    assert(!hasClassToken("authors-list", "author"));
+    assert(!hasClassToken("", "author"));
+    assert(!hasClassToken("vcard", "author"));
+}
+
+// ---------------------------------------------------------------------------
+// JSON-LD `Article`/`NewsArticle` `author` extraction. Owned locally (not
+// imported from `effects.topical_tags_extract_stage`, which owns its own
+// ld+json parsing for a different field per that stage's own scope note) --
+// mirrors that module's established `@graph`/`@id` back-reference resolution
+// approach (the Yoast SEO split-node pattern: a `Person` node with its own
+// `@id` living alongside the `Article`/`NewsArticle` node in one `@graph`
+// array, with the article's own `author` field being only `{"@id": "..."}`)
+// for a different field (`author` instead of `keywords`/`about`).
+// ---------------------------------------------------------------------------
+
+private bool isArticleAuthorType(JSONValue entry) pure {
+    if (entry.type != JSONType.object) return false;
+    auto typeField = "@type" in entry.object;
+    if (typeField is null) return false;
+    if (typeField.type == JSONType.string)
+        return typeField.str == "Article" || typeField.str == "NewsArticle";
+    if (typeField.type == JSONType.array) {
+        foreach (entry2; typeField.array)
+            if (entry2.type == JSONType.string &&
+                (entry2.str == "Article" || entry2.str == "NewsArticle")) return true;
+    }
+    return false;
+}
+
+/// `@id` -> `name` for every object in `entries` that carries both a string
+/// `@id` and a string `name` -- built once per ld+json document (which may
+/// be a bare `{...}` object, an `@graph` array, or a top-level array of
+/// nodes) and consulted when an `author` field is itself only `{"@id":
+/// "..."}`, the Yoast-style split-node back-reference.
+private string[string] ldJsonIdMap(JSONValue[] entries) pure {
+    string[string] map;
+    foreach (entry; entries) {
+        if (entry.type != JSONType.object) continue;
+        auto idField = "@id" in entry.object;
+        auto nameField = "name" in entry.object;
+        if (idField !is null && idField.type == JSONType.string &&
+            nameField !is null && nameField.type == JSONType.string)
+            map[idField.str] = nameField.str;
+    }
+    return map;
+}
+
+/// Resolves one author entry -- a plain string, or a `Person`-shaped object
+/// (a direct `name` string, or only an `@id` requiring `idMap` lookup) --
+/// to a display name, or `null` if this entry has no usable name at all.
+private string resolvePersonName(JSONValue entry, const string[string] idMap) pure {
+    if (entry.type == JSONType.string) return entry.str;
+    if (entry.type != JSONType.object) return null;
+    auto nameField = "name" in entry.object;
+    if (nameField !is null && nameField.type == JSONType.string) return nameField.str;
+    auto idField = "@id" in entry.object;
+    if (idField !is null && idField.type == JSONType.string) {
+        auto resolved = idField.str in idMap;
+        if (resolved !is null) return *resolved;
+    }
+    return null;
+}
+
+/// Resolves an `author` field's full value -- a plain string, a single
+/// `Person`-shaped object, or an array of either -- to one display string.
+/// Multiple resolved names (a genuine multi-byline array) are joined with
+/// `"; "`, matching trafilatura's own `tests/eval_authors.py` multi-author
+/// join convention that this ticket's own held-out scoring already mirrors
+/// (see `experiments/metadata/fetch_held_out.sh`'s driver), so a correctly
+/// extracted multi-author byline can still exact-match that convention's
+/// gold value.
+private string ldJsonAuthorValue(JSONValue authorField, const string[string] idMap) pure {
+    if (authorField.type == JSONType.array) {
+        string[] names;
+        foreach (entry; authorField.array) {
+            auto name = resolvePersonName(entry, idMap);
+            if (name.length) names ~= name;
+        }
+        return names.length ? names.join("; ") : null;
+    }
+    return resolvePersonName(authorField, idMap);
 }
 
 /// `twitter:site` is conventionally a "@handle", not a display name (e.g.
@@ -204,10 +368,14 @@ private void decide(ref MetadataField field) pure {
     }
 }
 
-/// Head evidence is eligible for every field except one narrow,
-/// specifically-scoped exception: a body `<a rel="license" href>` license
-/// link (see the second pass below). Node ordinals refer to HtmlTree
-/// pre-order.
+/// Head evidence is eligible for every field except a few narrow,
+/// specifically-scoped exceptions (see the second pass below): a body
+/// `<a rel="license" href>` license link, and three author signals --
+/// `rel="author"` link text, JSON-LD `Article`/`NewsArticle` `author`, and
+/// hCard/hAtom `class`-based author markup -- any of which may legitimately
+/// appear in `<head>` or `<body>` alike, so all are scanned document-wide
+/// rather than being restricted to one or the other. Node ordinals refer to
+/// HtmlTree pre-order.
 HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
     HtmlMetadata result;
     size_t head = size_t.max;
@@ -301,6 +469,82 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
         if (node.kind != HtmlNodeKind.element || node.name != "a") continue;
         if (attribute(node, "rel") == "license")
             offer(result.rights, attribute(node, "href"), "a:rel-license", i, 0, false, true);
+    }
+    // Author, second pass (issue #525): three additional, deterministic,
+    // bounded signals, all lower priority than the head-scoped
+    // `meta[name=author]`/`meta[property=article:author]` signals above
+    // (priority 0/1), in real-world-reliability order:
+    //   - JSON-LD `Article`/`NewsArticle` `author` (priority 2) is explicit
+    //     structured data, the same general precedent
+    //     `effects.topical_tags_extract_stage`'s own JSON-LD handling
+    //     already established for a different field (see the JSON-LD
+    //     helpers above), including `@graph`/`@id` back-reference
+    //     resolution for the real Yoast-SEO split-node pattern.
+    //   - hCard/hAtom `class`-based author markup (priority 3) is explicit,
+    //     deliberate author markup, but slightly weaker: a real held-out
+    //     page's `class="post-authorized-badge"` would be a false positive
+    //     under a naive substring check, which real whitespace-tokenized
+    //     `class` matching (`hasClassToken`) correctly excludes.
+    //   - `<a rel="author">`/`<link rel="author">` link text (priority 4)
+    //     is this section's lowest-priority, weakest tier, checked last: a
+    //     `rel="author"` link's visible text is frequently a bio-page label
+    //     ("About the author") rather than the author's actual name, unlike
+    //     `rel="license"`'s href (used at the same priority as the
+    //     head-scoped `link:license` rule, since it is the identical
+    //     `rel="license"` semantic on a different element) -- this is the
+    //     one signal here that actually mirrors the license second pass's
+    //     narrow "eligible anywhere in the document" exception shape, just
+    //     scored as the weakest of the four author signals rather than
+    //     tied with an existing head rule.
+    // All three are scanned in one combined forward pass alongside the
+    // existing license pass above, since they are likewise narrow,
+    // specifically-scoped exceptions to this function's otherwise-uniform
+    // "only head evidence is eligible" rule -- not a general body-wide walk
+    // for any other field.
+    size_t ldJsonBytesScanned;
+    foreach (i, node; tree.nodes) {
+        if (node.kind != HtmlNodeKind.element) continue;
+        if (node.name == "script" && attribute(node, "type") == "application/ld+json") {
+            auto scriptText = directChildText(tree, i);
+            if (scriptText.length == 0) continue;
+            if (ldJsonBytesScanned + scriptText.length > maxAuthorLdJsonAggregateBytes) continue;
+            ldJsonBytesScanned += scriptText.length;
+            JSONValue root;
+            try root = parseJSON(scriptText, maxAuthorLdJsonParseDepth, JSONOptions.strictParsing);
+            catch (Exception) continue; // invalid JSON syntax: skip this block only
+            JSONValue[] entries;
+            if (root.type == JSONType.array) entries = root.array;
+            else if (root.type == JSONType.object) {
+                auto graphField = "@graph" in root.object;
+                entries = (graphField !is null && graphField.type == JSONType.array) ?
+                    graphField.array : [root];
+            }
+            if (entries.length == 0) continue;
+            auto idMap = ldJsonIdMap(entries);
+            foreach (entry; entries) {
+                if (!isArticleAuthorType(entry)) continue;
+                auto authorField = "author" in entry.object;
+                if (authorField is null) continue;
+                offer(result.author, ldJsonAuthorValue(*authorField, idMap), "ldjson:author", i, 2);
+            }
+            continue;
+        }
+        if ((node.name == "a" || node.name == "link") && attribute(node, "rel") == "author") {
+            offer(result.author, descendantText(tree, i), "a:rel-author", i, 4);
+            continue;
+        }
+        auto classValue = attribute(node, "class");
+        if (classValue.length == 0 || !hasClassToken(classValue, "author")) continue;
+        size_t fnNode = size_t.max;
+        foreach (j, candidate; tree.nodes) {
+            if (fnNode != size_t.max || j == i || candidate.kind != HtmlNodeKind.element) continue;
+            if (!isDescendantOf(tree, j, i)) continue;
+            auto candidateClass = attribute(candidate, "class");
+            if (candidateClass.length && hasClassToken(candidateClass, "fn")) fnNode = j;
+        }
+        auto name = fnNode != size_t.max ?
+            descendantText(tree, fnNode) : descendantText(tree, i);
+        offer(result.author, name, fnNode != size_t.max ? "hcard:fn" : "hcard:author", i, 3);
     }
     decide(result.title); decide(result.author); decide(result.date); decide(result.url);
     decide(result.rights); decide(result.siteName); decide(result.description);
@@ -482,6 +726,196 @@ unittest {
         `<p>Body.</p></body></html>`;
     auto disagreeingMetadata = extractFromHtml(disagreeing);
     assert(disagreeingMetadata.rights.status == "ambiguous");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #525: three additional author signals -- `rel="author"` link text,
+// JSON-LD `Article`/`NewsArticle` `author` (including `@graph`/`@id`
+// back-reference resolution), and hCard/hAtom `class`-based author markup.
+// ---------------------------------------------------------------------------
+
+// Fixture: a head `meta[name=author]` still wins over all three new,
+// lower-priority body signals -- meta tags remain highest priority.
+unittest {
+    auto html = `<html><head><meta name="author" content="Meta Author"></head>` ~
+        `<body>` ~
+        `<div class="author"><span class="fn">HCard Author</span></div>` ~
+        `<script type="application/ld+json">{"@type":"Article","author":"JsonLd Author"}</script>` ~
+        `<a rel="author" href="/authors/x">Rel Author</a>` ~
+        `<p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Meta Author");
+    assert(metadata.author.rule == "author");
+}
+
+// Fixture: real-world `<a rel="author">` byline link, body-positioned (the
+// same narrow "eligible anywhere in the document" exception shape as the
+// existing `rel="license"` precedent), no other author evidence present.
+unittest {
+    auto html = `<html><head><title>A Post</title></head>` ~
+        `<body><p class="byline">By <a rel="author" href="/authors/jane-doe">` ~
+        `Jane Doe</a></p><p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Jane Doe");
+    assert(metadata.author.rule == "a:rel-author");
+}
+
+// Fixture: `<link rel="author">` (a void element -- no possible link text)
+// contributes no candidate at all, rather than a spurious empty match.
+unittest {
+    auto html = `<html><head><link rel="author" href="mailto:jane@example.com"></head>` ~
+        `<body><p>Body text with no other author evidence.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "absent");
+}
+
+// Fixture: JSON-LD `Article.author` as a plain string -- the simplest real
+// shape.
+unittest {
+    auto html = `<html><head><script type="application/ld+json">` ~
+        `{"@context":"https://schema.org","@type":"Article","author":"Jane Doe"}` ~
+        `</script></head><body><p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Jane Doe");
+    assert(metadata.author.rule == "ldjson:author");
+}
+
+// Fixture: JSON-LD `NewsArticle.author` as a `Person` object with a `name`
+// field (no `@graph`/`@id` indirection) -- also proves `NewsArticle`, not
+// just `Article`, is recognized.
+unittest {
+    auto html = `<html><head><script type="application/ld+json">` ~
+        `{"@type":"NewsArticle","author":{"@type":"Person","name":"Jane Doe"}}` ~
+        `</script></head><body><p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Jane Doe");
+    assert(metadata.author.rule == "ldjson:author");
+}
+
+// Fixture: JSON-LD `author` as an array of `Person` objects/strings -- a
+// genuine multi-byline page -- joined with "; ", matching trafilatura's own
+// `tests/eval_authors.py` multi-author join convention (the same convention
+// `experiments/metadata/fetch_held_out.sh`'s own driver already scores
+// against).
+unittest {
+    auto html = `<html><head><script type="application/ld+json">` ~
+        `{"@type":"Article","author":[{"@type":"Person","name":"Jane Doe"},"John Smith"]}` ~
+        `</script></head><body><p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Jane Doe; John Smith");
+}
+
+// Fixture: the real Yoast-SEO `@graph`/`@id` split-node pattern -- the
+// `Article` node's own `author` field is only `{"@id": "..."}`, and the
+// actual `Person` node with a `name` lives elsewhere in the same `@graph`
+// array, identified by a matching `@id`.
+unittest {
+    auto html = `<html><head><script type="application/ld+json">` ~
+        `{"@context":"https://schema.org","@graph":[` ~
+        `{"@type":"Person","@id":"https://example.com/#/schema/person/abc123",` ~
+        `"name":"Jane Doe"},` ~
+        `{"@type":"Article","@id":"https://example.com/#article",` ~
+        `"author":{"@id":"https://example.com/#/schema/person/abc123"},` ~
+        `"headline":"A Post"}` ~
+        `]}</script></head><body><p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Jane Doe");
+    assert(metadata.author.rule == "ldjson:author");
+}
+
+// Fixture: malformed JSON-LD (invalid syntax, and a `BlogPosting` `@type`
+// this slice does not recognize) does not quarantine and does not produce a
+// spurious author candidate.
+unittest {
+    auto html = `<html><head>` ~
+        `<script type="application/ld+json">{not valid json at all</script>` ~
+        `<script type="application/ld+json">{"@type":"BlogPosting","author":"Nobody"}</script>` ~
+        `</head><body><p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "absent");
+}
+
+// Fixture: hCard/hAtom `class="vcard author"` container with a nested
+// `class="fn"` descendant (itself wrapped in an `<a>`, the common real
+// shape) -- name is read from the `.fn` descendant's own text, not the
+// whole container's text.
+unittest {
+    auto html = `<html><head><title>A Post</title></head>` ~
+        `<body><div class="vcard author">By <a class="url fn" ` ~
+        `href="/authors/jane-doe">Jane Doe</a>, staff writer</div>` ~
+        `<p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Jane Doe");
+    assert(metadata.author.rule == "hcard:fn");
+}
+
+// Fixture: hCard-style `class="author"` container with no `.fn` descendant
+// at all -- falls back to the container's own (full descendant) text.
+unittest {
+    auto html = `<html><head><title>A Post</title></head>` ~
+        `<body><span class="author">Jane Doe</span>` ~
+        `<p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "Jane Doe");
+    assert(metadata.author.rule == "hcard:author");
+}
+
+// Fixture: the real false positive a naive `class` substring check (e.g.
+// `indexOf("author") >= 0`) would produce, confirmed during this ticket's
+// own investigation -- `class="post-authorized-badge"` contains the
+// substring "author" but is NOT the whitespace-tokenized class token
+// "author", so real tokenized matching correctly excludes it and no author
+// candidate is produced at all.
+unittest {
+    auto html = `<html><head><title>A Post</title></head>` ~
+        `<body><span class="post-authorized-badge">Verified</span>` ~
+        `<p>Body text with no real author markup at all.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "absent");
+}
+
+// Fixture: `class="authors-list"` (a distinct, longer token, not the exact
+// token "author") is likewise correctly excluded by real tokenized
+// matching.
+unittest {
+    auto html = `<html><body><div class="authors-list">Our Team</div>` ~
+        `<p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "absent");
+}
+
+// Fixture: priority ordering among the three new signals themselves (all
+// lower priority than meta tags, per the earlier fixture above) --
+// JSON-LD (2) beats hCard (3) beats `rel="author"` (4) when more than one
+// is present on the same page with no meta-tag evidence at all.
+unittest {
+    auto html = `<html><head><title>A Post</title>` ~
+        `<script type="application/ld+json">{"@type":"Article","author":"JsonLd Author"}</script>` ~
+        `</head><body>` ~
+        `<div class="author"><span class="fn">HCard Author</span></div>` ~
+        `<a rel="author" href="/authors/x">Rel Author</a>` ~
+        `<p>Body text.</p></body></html>`;
+    auto metadata = extractFromHtml(html);
+    assert(metadata.author.status == "selected");
+    assert(metadata.author.value == "JsonLd Author");
+    assert(metadata.author.rule == "ldjson:author");
+
+    auto htmlNoJsonLd = `<html><head><title>A Post</title></head><body>` ~
+        `<div class="author"><span class="fn">HCard Author</span></div>` ~
+        `<a rel="author" href="/authors/x">Rel Author</a>` ~
+        `<p>Body text.</p></body></html>`;
+    auto metadataNoJsonLd = extractFromHtml(htmlNoJsonLd);
+    assert(metadataNoJsonLd.author.status == "selected");
+    assert(metadataNoJsonLd.author.value == "HCard Author");
+    assert(metadataNoJsonLd.author.rule == "hcard:fn");
 }
 
 class HtmlMetadataOutputLimit : Exception {

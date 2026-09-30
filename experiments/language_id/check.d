@@ -401,36 +401,46 @@ private void mixedLanguageGolden() {
 // (`internalConfidenceFloor`, `mixedMarginBound`) validated against these
 // probes, before considering any other option.
 //
-// That tuning attempt was made and is disclosed here rather than silently
-// skipped. Sweeping both constants against the actual observed distances
-// shows the two distributions structurally overlap and cannot be cleanly
-// separated by either constant:
-//   - `internalConfidenceFloor` (currently 0.15): the lowest genuine
-//     confidently-detected supported-language held-out confidence is 0.273
-//     (Vietnamese). A Swahili probe line force-classifies as Indonesian at
-//     confidence 0.271 — BELOW that genuine floor. No single confidence
-//     floor value separates the two groups without also abstaining genuine
-//     held-out text that is currently correctly classified.
-//   - `mixedMarginBound` (currently 0.02): the lowest genuine
-//     supported-language margin fraction observed is ~0.0264 (Portuguese/
-//     Italian). Excluded-probe margin fractions range from ~0.0213 up to
-//     ~0.0603, overlapping that genuine distribution throughout; raising
-//     the bound enough to catch the higher excluded-probe margins would
-//     also newly abstain most of the genuine low-margin held-out lines
-//     above.
-// Neither existing constant admits a value that cleanly separates these
-// probes from genuine supported-language text, so this checker does not
-// force a passing "always abstains" golden here — that would either be
-// false or would require inventing a new bespoke mechanism, both excluded
-// by the accepted contract. Instead, exactly as the original slice's
-// German-vs-Dutch 0.315/0.316 disclosure did, this golden discloses the
-// specific observed per-line outcome (abstained vs. force-classified, with
-// confidence) and pins the current exact counts as a reproducibility
-// golden, for owner sign-off: Romanian 8/10 lines abstain (2/10 force-
-// classify: Italian at 0.286, French at 0.366); Catalan 4/10 lines abstain
-// (6/10 force-classify, all as Spanish or Italian, confidence 0.400-0.427,
-// the worst case observed of the three); Swahili 7/10 lines abstain (3/10
-// force-classify as Indonesian, confidence 0.271-0.308).
+// That first tuning attempt (sweeping the two *global* constants,
+// `internalConfidenceFloor`/`mixedMarginBound`, as single scalars) was made
+// and is disclosed here rather than silently skipped. It showed the two
+// distributions structurally overlap and cannot be cleanly separated by a
+// single global value: the lowest genuine confidently-detected supported-
+// language held-out confidence was ~0.263 (Telugu), only ~0.008 above the
+// weakest excluded-probe force-classification (Swahili at 0.271). Raising
+// either constant globally at all would have caused regression before
+// fixing anything.
+//
+// Issue #34's owner decision (2026-09-30) was to tighten the confidence
+// threshold further rather than add a closely-related-language heuristic or
+// accept the risk as-is. `source/domain/language_id.d` now does this via
+// `confidenceFloorFor`/`marginBoundFor`: per-target-language overrides keyed
+// on the already-computed winning candidate (`scored[0].language`), each
+// verified to sit strictly between the excluded-neighbor force-
+// classification confidence/margin it catches and the genuine-correct
+// held-out minimum for that same target language — see the block comment
+// above those two functions for the full numbers and reasoning.
+//
+// Result: Romanian and Swahili are now fully fixed (0 force-classifications
+// each, verified below). Catalan is not: its one it-target case (confidence
+// 0.400) sits above the genuine Italian held-out minimum (0.374), and its
+// five es-target cases (confidence 0.407-0.427) all sit above the genuine
+// Spanish held-out minimum (0.351) — neither is separable by any per-target
+// confidence or margin floor without regressing genuine held-out
+// classifications (the margin side gets two of the five es-target cases
+// within ~0.001 of the genuine minimum, too fragile a fit on the specific
+// residual lines to treat as a real, robust separation — see
+// `confidenceFloorFor`'s comment for the exact numbers). This is an honest,
+// disclosed residual gap, not a silently accepted or silently invented fix
+// — exactly as the original slice's German-vs-Dutch 0.315/0.316 disclosure,
+// and the original Catalan 60% finding itself, were both disclosed rather
+// than silently fixed or silently dropped. Current exact counts, pinned as
+// a reproducibility golden: Romanian 10/10 lines abstain (0/10 force-
+// classify — full fix); Catalan 4/10 lines abstain (6/10 force-classify,
+// unchanged from before this fix: 1 as Italian at confidence 0.400, 5 as
+// Spanish at confidence 0.407-0.427 — see docs/language-id.md for the
+// disclosed residual); Swahili 10/10 lines abstain (0/10 force-classify —
+// full fix).
 // ---------------------------------------------------------------------------
 
 private enum excludedNeighborRoot = buildPath(heldoutRoot, "excluded");
@@ -461,9 +471,16 @@ private void excludedNeighborAbstentionProbe(string code, string languageName,
 }
 
 private void excludedNeighborAbstentionGoldens() {
-    excludedNeighborAbstentionProbe("ro", "Romanian", 8, 2);
+    // Post issue-#34-fix counts: Romanian and Swahili are now fully fixed
+    // (0 force-classifications each) by the per-target-language
+    // `confidenceFloorFor`/`marginBoundFor` overrides in
+    // `source/domain/language_id.d`; Catalan's 6/10 force-classification
+    // rate is unchanged (an honest, verified-irreducible residual gap at
+    // the currently embedded profile tables — see the block comment above
+    // this function and docs/language-id.md).
+    excludedNeighborAbstentionProbe("ro", "Romanian", 10, 0);
     excludedNeighborAbstentionProbe("ca-or-gl", "Catalan", 4, 6);
-    excludedNeighborAbstentionProbe("sw", "Swahili", 7, 3);
+    excludedNeighborAbstentionProbe("sw", "Swahili", 10, 0);
 }
 
 // ---------------------------------------------------------------------------

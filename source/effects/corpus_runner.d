@@ -63,21 +63,23 @@ import std.file : SpanMode, dirEntries, exists, isDir, isFile, isSymlink,
 import std.format : format;
 import std.path : baseName, buildPath, dirName;
 import std.stdio : File;
-import std.string : endsWith, indexOf, split;
+import std.string : endsWith, indexOf, join, split;
 import std.uuid : randomUUID;
 import std.json : JSONOptions, JSONType, parseJSON;
 import core.stdc.errno : errno, EINTR, ENOENT;
-import core.sys.posix.fcntl : open, openat, O_CREAT, O_EXCL, O_NOFOLLOW,
-    O_RDONLY, O_WRONLY;
+import core.sys.posix.dirent : DIR, closedir, readdir;
+import core.sys.posix.fcntl : AT_SYMLINK_NOFOLLOW, open, openat, O_CREAT,
+    O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY;
 import core.sys.posix.stdio : renameat;
-import core.sys.posix.sys.stat : fchmod, fstat, posixMkdir = mkdir, stat_t,
-    S_ISREG;
-import core.sys.posix.unistd : close, posixDup = dup, fsync, posixRead = read,
+import core.sys.posix.sys.stat : fchmod, fstat, fstatat, posixMkdir = mkdir,
+    stat_t, S_ISDIR, S_ISLNK, S_ISREG;
+import core.sys.posix.unistd : close, fsync, posixRead = read,
     posixWrite = write, unlinkat;
 import std.string : fromStringz, toStringz;
 
 extern (C) int sqlite3_reset(sqlite3_stmt*);
 extern (C) int sqlite3_clear_bindings(sqlite3_stmt*);
+extern (C) DIR* fdopendir(int);
 
 version (OSX) {
     // Phobos does not export O_DIRECTORY on macOS. The project already uses
@@ -117,6 +119,7 @@ version (unittest) {
     private __gshared size_t scratchArtifactsCurrent;
     private __gshared size_t scratchArtifactsPeak;
     private __gshared string[] decodedDocumentOrder;
+    private __gshared void delegate(string) rootAnchoredHook;
     size_t corpusRunnerPeakOpenScratchFiles() { return openScratchFilesPeak; }
     size_t corpusRunnerPeakBatchRecords() { return batchPeakRecords; }
     size_t corpusRunnerPeakBucketMembers() { return bucketPeakMembers; }
@@ -130,6 +133,7 @@ version (unittest) {
         scratchArtifactsCurrent = 0;
         scratchArtifactsPeak = 0;
         decodedDocumentOrder = null;
+        rootAnchoredHook = null;
     }
     private void trackOpen() {
         ++openScratchFilesCurrent;
@@ -496,6 +500,7 @@ private void resetStatement(sqlite3_stmt* statement) {
 /// before another directory is opened, so descriptor use is independent of
 /// tree depth and breadth.
 private void walkSidecarTree(CorpusScratchDatabase db, string root,
+        int rootFd,
         scope void delegate(string path, string relative, bool directory,
             bool regular, bool symlink) visit) {
     db.exec("DELETE FROM walk_dirs");
@@ -520,16 +525,33 @@ private void walkSidecarTree(CorpusScratchDatabase db, string root,
         dbNeed(sqlite3_step(drop) == SQLITE_DONE, "walk queue delete failed");
         resetStatement(drop);
 
-        auto directoryPath = directoryRelative.length ?
-            buildPath(root, directoryRelative) : root;
-        foreach (entry; dirEntries(directoryPath, SpanMode.shallow, false)) {
-            auto link = entry.isSymlink;
-            auto directory = !link && entry.isDir;
-            auto regular = !link && entry.isFile;
+        auto directoryFd = openRelativeDirectory(rootFd, directoryRelative);
+        auto stream = fdopendir(directoryFd);
+        if (stream is null) {
+            close(directoryFd);
+            throw new Exception("corpus runner: cannot enumerate anchored directory");
+        }
+        scope(exit) closedir(stream);
+        while (true) {
+            errno = 0;
+            auto entry = readdir(stream);
+            if (entry is null) {
+                enforce(errno == 0,
+                    "corpus runner: anchored directory read failed");
+                break;
+            }
+            auto name = entry.d_name.ptr.fromStringz.idup;
+            if (name == "." || name == "..") continue;
+            stat_t info;
+            enforce(fstatat(directoryFd, name.toStringz, &info,
+                    AT_SYMLINK_NOFOLLOW) == 0,
+                "corpus runner: cannot inspect anchored sidecar entry");
+            auto link = S_ISLNK(info.st_mode) != 0;
+            auto directory = !link && S_ISDIR(info.st_mode) != 0;
+            auto regular = !link && S_ISREG(info.st_mode) != 0;
             auto relative = directoryRelative.length ?
-                buildPath(directoryRelative, baseName(entry.name)) :
-                baseName(entry.name);
-            visit(entry.name, relative, directory, regular, link);
+                buildPath(directoryRelative, name) : name;
+            visit(buildPath(root, relative), relative, directory, regular, link);
             if (directory) {
                 bindText(add, 1, relative);
                 dbNeed(sqlite3_step(add) == SQLITE_DONE,
@@ -558,8 +580,11 @@ private void upsertLink(sqlite3_stmt* statement, string documentId,
     resetStatement(statement);
 }
 
-private ubyte[] readBoundedSidecar(string path) {
-    auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
+private ubyte[] readBoundedSidecar(int rootFd, string relativePath) {
+    string leaf;
+    auto parentFd = openRelativeParent(rootFd, relativePath, leaf);
+    scope(exit) close(parentFd);
+    auto fd = openat(parentFd, leaf.toStringz, O_RDONLY | O_NOFOLLOW);
     enforce(fd >= 0, "corpus runner: cannot open metadata sidecar safely");
     scope(exit) close(fd);
     stat_t info;
@@ -653,8 +678,9 @@ private ulong[similarityBands] bandValuesFromLanesV1(
 /// produced) -- such a document is simply not a pruning candidate, not an
 /// error. Bands are derived from the persisted canonical lanes using the
 /// payload's already-validated `byte-shingle-minhash:v1` algorithm version.
-private bool tryDecodeCandidate(string path, out DecodedCandidate result) {
-    auto bytes = readBoundedSidecar(path);
+private bool tryDecodeCandidate(int rootFd, string relativePath,
+        out DecodedCandidate result) {
+    auto bytes = readBoundedSidecar(rootFd, relativePath);
     auto wire = cast(string) bytes;
     auto versionName = metadataVersion(wire);
     auto id = recoverDocumentId(wire);
@@ -702,17 +728,21 @@ private string decisionPathFor(string sidecarPath) {
     return parent == "." ? decisionName : buildPath(parent, decisionName);
 }
 
-private int openRelativeParent(int rootFd, string relative, out string leaf) {
-    enforce(relative.length && relative[0] != '/' && relative.indexOf('\0') < 0,
-        "corpus runner: invalid relative sidecar path");
-    auto components = relative.split('/');
+private int openRelativeDirectory(int rootFd, string relative) {
+    enforce(relative.indexOf('\0') < 0 &&
+            (!relative.length || relative[0] != '/'),
+        "corpus runner: invalid relative directory path");
+    auto components = relative.length ? relative.split('/') : null;
     foreach (component; components)
         enforce(component.length && component != "." && component != "..",
             "corpus runner: noncanonical relative sidecar path");
-    leaf = components[$ - 1];
-    auto current = posixDup(rootFd);
-    enforce(current >= 0, "corpus runner: cannot duplicate sidecar root handle");
-    foreach (component; components[0 .. $ - 1]) {
+    // `dup` would share the directory-stream offset with the root handle;
+    // reopening `.` relative to it creates an independent open description
+    // while remaining bound to the same directory inode.
+    auto current = openat(rootFd, ".".toStringz,
+        O_RDONLY | O_NOFOLLOW | directoryOnly);
+    enforce(current >= 0, "corpus runner: cannot reopen sidecar root handle");
+    foreach (component; components) {
         auto next = openat(current, component.toStringz,
             O_RDONLY | O_NOFOLLOW | directoryOnly);
         close(current);
@@ -721,6 +751,18 @@ private int openRelativeParent(int rootFd, string relative, out string leaf) {
         current = next;
     }
     return current;
+}
+
+private int openRelativeParent(int rootFd, string relative, out string leaf) {
+    enforce(relative.length && relative[0] != '/' && relative.indexOf('\0') < 0,
+        "corpus runner: invalid relative sidecar path");
+    auto components = relative.split('/');
+    foreach (component; components)
+        enforce(component.length && component != "." && component != "..",
+            "corpus runner: noncanonical relative sidecar path");
+    leaf = components[$ - 1];
+    return openRelativeDirectory(rootFd,
+        components.length == 1 ? "" : components[0 .. $ - 1].join("/"));
 }
 
 private string writeDecisionSidecar(int rootFd, string relativeSidecarPath,
@@ -802,6 +844,13 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
     enforce(sidecarRootFd >= 0,
         "prune-near-duplicates: cannot anchor sidecar root safely");
     scope(exit) close(sidecarRootFd);
+    version (unittest) {
+        if (rootAnchoredHook !is null) {
+            auto hook = rootAnchoredHook;
+            rootAnchoredHook = null;
+            hook(sidecarRoot);
+        }
+    }
 
     auto scratch = buildPath(tempDir(), "scrubbed-prune-near-duplicates-" ~
         randomUUID.toString);
@@ -831,7 +880,7 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
     auto addDocument = db.prepare("INSERT INTO documents VALUES(?1,?2)");
     scope(exit) sqlite3_finalize(addDocument);
     db.exec("BEGIN");
-    walkSidecarTree(db, sidecarRoot,
+    walkSidecarTree(db, sidecarRoot, sidecarRootFd,
             (string path, string relative, bool directory, bool regular,
                 bool symlink) {
         enforce(!symlink,
@@ -841,7 +890,7 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
             "prune-near-duplicates: non-regular entry inside sidecar root: " ~ path);
         if (!path.endsWith(documentMetadataPublishSuffixV1)) return;
         DecodedCandidate decoded;
-        if (!tryDecodeCandidate(path, decoded)) return;
+        if (!tryDecodeCandidate(sidecarRootFd, relative, decoded)) return;
         auto idText = decoded.documentId.text;
         insertDocument(addDocument, idText, relative);
         // A document whose signature never received real content
@@ -965,7 +1014,7 @@ ORDER BY links.document_id`);
     auto currentDecision = db.prepare(
         "SELECT 1 FROM decisions WHERE decision_path=?1");
     scope(exit) sqlite3_finalize(currentDecision);
-    walkSidecarTree(db, sidecarRoot,
+    walkSidecarTree(db, sidecarRoot, sidecarRootFd,
             (string path, string relative, bool directory, bool regular,
                 bool symlink) {
         enforce(!symlink,
@@ -1263,11 +1312,22 @@ unittest {
     // 144 documents produce 72 initial runs (16 band rows each), exceeding
     // fanIn^^2 and therefore forcing a second compaction level.
     enum size_t documentCount = 144;
+    string[] expectedIds;
     foreach (i; 0 .. documentCount)
-        writeFixtureSidecar(root, "bulk-" ~ i.to!string, text);
+    {
+        auto name = "bulk-" ~ i.to!string;
+        expectedIds ~= fixtureId(name).text;
+        writeFixtureSidecar(root, name, text);
+    }
+    expectedIds.sort();
 
     auto decisions = runFixture(root, PruneOptions(4, PruningPolicy.keepFirst));
-    assert(decisions.length != 0);
+    assert(decisions.length == 3,
+        "every one of the four capped records must survive multi-level compaction");
+    foreach (i, decision; decisions) {
+        assert(decision.documentId.text == expectedIds[i + 1]);
+        assert(decision.representativeId.text == expectedIds[0]);
+    }
     assert(corpusRunnerPeakBatchRecords() <= runRecords,
         "peak in-flight batch record count must track runRecords, not corpus size");
     assert(corpusRunnerPeakBucketMembers() <= 4,
@@ -1299,6 +1359,7 @@ unittest {
 unittest {
     import std.exception : assertThrown;
 
+    resetCorpusRunnerObservations();
     auto root = freshRoot("v1-validation");
     scope(exit) rmdirRecurse(root);
     auto validId = fixtureId("legacy-valid");
@@ -1310,6 +1371,8 @@ unittest {
         `{"version":"document-metadata:v1","documentId":"` ~
         fixtureId("legacy-malformed").text ~ `"}`);
     assertThrown(runFixture(root));
+    assert(scratchArtifactsCurrent == 0,
+        "malformed-wire failure must clean every scratch artifact");
 }
 
 // Successful reruns reconcile the derived decision set: when a former
@@ -1338,11 +1401,14 @@ unittest {
 unittest {
     import std.exception : assertThrown;
 
+    resetCorpusRunnerObservations();
     auto root = freshRoot("oversize-sidecar");
     scope(exit) rmdirRecurse(root);
     auto oversized = new ubyte[maxTotalEncodedBytesV2 + 1];
     write(buildPath(root, "oversized" ~ documentMetadataPublishSuffixV1), oversized);
     assertThrown(runFixture(root));
+    assert(scratchArtifactsCurrent == 0,
+        "oversize failure must clean every scratch artifact");
 }
 
 version (Posix) unittest {
@@ -1366,9 +1432,9 @@ version (Posix) unittest {
     assert(cast(string) read(sentinel) == "must survive");
 }
 
-// Decision publication is anchored to the root descriptor. If a parent is
-// swapped for a symlink after that descriptor is opened, publication fails
-// closed and cannot redirect a write outside the corpus root.
+// Decision publication and stale removal are anchored to the root descriptor.
+// If a parent is swapped for a symlink after that descriptor is opened, both
+// operations fail closed and cannot redirect outside the corpus root.
 version (Posix) unittest {
     import std.exception : assertThrown;
     import std.file : mkdir, rename, symlink;
@@ -1384,6 +1450,9 @@ version (Posix) unittest {
     scope(exit) close(rootFd);
     rename(nested, buildPath(root, "original"));
     symlink(outside, nested);
+    auto outsideDecision = buildPath(outside,
+        "doc" ~ pruneNearDuplicatesDecisionSuffixV1);
+    write(outsideDecision, "must survive");
 
     auto removed = fixtureId("swap-removed");
     auto representative = fixtureId("swap-representative");
@@ -1391,8 +1460,55 @@ version (Posix) unittest {
         representative, "band=0,key=0000000000000000");
     assertThrown(writeDecisionSidecar(rootFd,
         "nested/doc" ~ documentMetadataPublishSuffixV1, decision));
-    assert(!exists(buildPath(outside,
-        "doc" ~ pruneNearDuplicatesDecisionSuffixV1)));
+    assert(cast(string) read(outsideDecision) == "must survive");
+    assertThrown(removeDecisionSidecar(rootFd,
+        "nested/doc" ~ pruneNearDuplicatesDecisionSuffixV1));
+    assert(cast(string) read(outsideDecision) == "must survive");
+}
+
+// The descriptor opened for the corpus root governs discovery, reads, and
+// writes together. Replacing the pathname after that open cannot make the
+// runner read a replacement corpus and publish those decisions into the
+// originally opened one.
+version (Posix) unittest {
+    import std.file : mkdir, rename;
+
+    auto container = freshRoot("root-swap");
+    scope(exit) rmdirRecurse(container);
+    auto sidecarRoot = buildPath(container, "sidecars");
+    auto replacement = buildPath(container, "replacement");
+    auto anchored = buildPath(container, "anchored");
+    mkdir(sidecarRoot);
+    mkdir(replacement);
+    auto textA = "Original-root duplicate text with enough shingles for a signature.";
+    auto textB = "Replacement-root duplicate text with enough shingles for a signature.";
+    writeFixtureSidecar(sidecarRoot, "a-one", textA);
+    writeFixtureSidecar(sidecarRoot, "a-two", textA);
+    writeFixtureSidecar(replacement, "b-one", textB);
+    writeFixtureSidecar(replacement, "b-two", textB);
+
+    rootAnchoredHook = (string openedRoot) {
+        assert(openedRoot == sidecarRoot);
+        rename(sidecarRoot, anchored);
+        rename(replacement, sidecarRoot);
+    };
+    auto decisions = runFixture(sidecarRoot);
+    assert(decisions.length == 1);
+    assert(decisions[0].documentId == fixtureId("a-one") ||
+        decisions[0].documentId == fixtureId("a-two"));
+
+    size_t anchoredDecisions;
+    foreach (entry; dirEntries(anchored, SpanMode.shallow, false))
+        if (entry.isFile &&
+                entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+            ++anchoredDecisions;
+    size_t replacementDecisions;
+    foreach (entry; dirEntries(sidecarRoot, SpanMode.shallow, false))
+        if (entry.isFile &&
+                entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+            ++replacementDecisions;
+    assert(anchoredDecisions == 1);
+    assert(replacementDecisions == 0);
 }
 
 // Reachability: the stage is genuinely self-registering, and a run through

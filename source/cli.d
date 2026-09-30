@@ -1093,12 +1093,25 @@ private SelectedComposition selectedComposition(string[] compositionTokens,
     auto perDocument = cast(CompiledJob) composition.perDocument();
     if (composition.hasCorpusStages && perDocument.stages.length) {
         bool publishesMetadata;
+        bool annotatesSignatures;
+        bool prunesNearDuplicates;
         foreach (stage; spec.stages)
             if (stage.implementation == "document-metadata-publish")
                 publishesMetadata = true;
-        enforce(publishesMetadata,
-            "a combined corpus composition requires document-metadata-publish " ~
-            "before prune-near-duplicates; otherwise phase 2 would read stale sidecars");
+            else if (stage.implementation == "similarity-signature-annotate")
+                annotatesSignatures = true;
+            else if (stage.implementation == "prune-near-duplicates")
+                prunesNearDuplicates = true;
+        if (prunesNearDuplicates) {
+            enforce(annotatesSignatures,
+                "a combined prune-near-duplicates composition requires " ~
+                "similarity-signature-annotate in phase 1; otherwise phase 2 " ~
+                "would have no current signatures");
+            enforce(publishesMetadata,
+                "a combined prune-near-duplicates composition requires " ~
+                "document-metadata-publish in phase 1; otherwise phase 2 " ~
+                "would read stale sidecars");
+        }
     }
     auto fullIdentityJob = perDocument.withIdentity(composition.identity);
     auto plan = RuntimePlanV1.linearV3(fullIdentityJob, canonicalJobJson(spec));
@@ -3338,6 +3351,18 @@ unittest {
         missingPublisher.msg.canFind("requires document-metadata-publish"));
     assert(!exists(missingPublisherOutput));
     assert(!exists(missingPublisherSidecar));
+
+    auto missingAnnotatorOutput = buildPath(root, "missing-annotator-out");
+    auto missingAnnotatorSidecar = buildPath(root, "missing-annotator-sidecar");
+    auto missingAnnotator = collectException(runApp(["scrubbed", "run",
+        "--input", inputDir, "--output", missingAnnotatorOutput,
+        "--sidecar-output", missingAnnotatorSidecar, "--threads", "1",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(missingAnnotator !is null &&
+        missingAnnotator.msg.canFind("requires similarity-signature-annotate"));
+    assert(!exists(missingAnnotatorOutput));
+    assert(!exists(missingAnnotatorSidecar));
 
     auto outputDir = buildPath(root, "out");
     auto sidecarDir = buildPath(root, "sidecar");

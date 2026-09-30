@@ -64,9 +64,10 @@ streaming loop has returned with `failures == 0`, runs each compiled corpus
 stage once, in order, over the directory `--sidecar-output` populated
 during phase 1.
 
-When both phases are nonempty, the composition must include
-`document-metadata-publish` in phase 1. This is checked before filesystem
-work begins; without it, phase 2 could otherwise consume stale or absent
+When a combined composition runs `prune-near-duplicates`, phase 1 must
+include both `similarity-signature-annotate` and
+`document-metadata-publish`. This is checked before filesystem work begins;
+without either producer, phase 2 could otherwise consume stale or absent
 metadata while the command appeared to succeed.
 
 A composition that declares zero corpus-level stages -- every composition
@@ -201,11 +202,12 @@ opt-in step that materializes a physically pruned corpus at a distinct
 destination remains deliberately out of scope.
 
 Decision publication and stale removal are anchored to one descriptor for
-the verified sidecar root. Every parent component is reopened relative to
-that descriptor with symlink following disabled, and replacement/removal is
-performed relative to the resulting parent descriptor. A concurrent parent
-swap therefore fails closed instead of redirecting a write outside the
-corpus root.
+the verified sidecar root. Discovery and metadata reads use that same
+descriptor, every parent component is reopened relative to it with symlink
+following disabled, and replacement/removal is performed relative to the
+resulting parent descriptor. A renamed root therefore remains one consistent
+corpus, while a parent swapped to a symlink fails closed instead of
+redirecting a read or write outside it.
 
 ### CLI reachability
 

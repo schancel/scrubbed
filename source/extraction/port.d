@@ -115,6 +115,40 @@ abstract class ExtractorConfigurationV1 {}
 alias ExtractorApplyV1 = TextDocumentV1 function(ExtractionInputV1,
     immutable(ExtractorConfigurationV1)) pure;
 
+/// Outcome of one `PdfBytesExtractV1` call -- a byte-stable mirror of
+/// `effects.pdfium_ffi.PdfExtractOutcomeV1` (this module cannot import
+/// `effects.*` at all, per `extraction/README.md`'s own layering rule, so
+/// the two enums are kept independently, translated at the one real
+/// `effects.pdfium_ffi` boundary that knows both). Never a thrown exception
+/// for malformed/encrypted/over-limit input -- matching this codebase's
+/// existing fail-closed-with-typed-reason idiom.
+enum PdfBytesExtractOutcomeV1 : ubyte {
+    ok, malformed, encrypted, pageLimitExceeded, textLimitExceeded,
+}
+
+/// Result of one `PdfBytesExtractV1` call.
+struct PdfBytesExtractResultV1 {
+    PdfBytesExtractOutcomeV1 outcome;
+    /// One entry per real page, in document order. Meaningful iff
+    /// `outcome == PdfBytesExtractOutcomeV1.ok`; empty otherwise.
+    string[] pages;
+}
+
+/// The extraction-layer half of the PDF-bytes-extraction injection (issue
+/// #156's PDFium wiring slice), mirroring `extraction.container.ZipInflateV1`'s
+/// own split exactly: a pure function-pointer type defined here, with the
+/// real, impure, `effects`-layer implementation (`effects.pdfium_ffi`)
+/// injected by a caller that has both layers in view (`cli.d`), since
+/// `extraction/` itself may never import `effects/`. Unlike `ZipInflateV1`
+/// (whose real implementation opens a fresh, stateless system-libz handle on
+/// every call), the real PDFium implementation behind this type must reuse
+/// one already-opened, process-lifetime library handle across every call --
+/// see `extraction.pdf_pdfium_route`'s own module doc for why that forces a
+/// module-global injection slot rather than a per-call closure (this alias
+/// is a plain `function`, not a `delegate`: it has no closure context).
+alias PdfBytesExtractV1 = PdfBytesExtractResultV1 function(
+    const(ubyte)[] pdfBytes, size_t maxPages, size_t maxBytesPerPage) pure;
+
 struct ConfiguredExtractorV1 {
 private:
     ExtractorApplyV1 applyValue;

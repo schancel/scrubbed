@@ -57,6 +57,28 @@ it performs no file, process, network, CLI, or adapter I/O.
   FFI, or file-I/O awareness of its own; a caller resolves the real bytes
   first (e.g. via `container.d`'s admitted ZIP entries plus an injected
   `effects`-layer DEFLATE decompressor).
+- `pdf_pdfium_route.d` bridges an injected `PdfBytesExtractV1` capability
+  (the real, `effects.pdfium_ffi`-backed, mutex-serialized PDFium binding,
+  injected from `cli.d` -- this module itself performs no I/O) into a pure
+  `ExtractorApplyV1`, registered in `registry.d` as `pdf-pdfium` for
+  `DetectionOutcomeV1.pdf`: it reads the whole source via
+  `ExtractionInputV1.source.stream(...)` (no ZIP/container involvement --
+  `DetectionOutcomeV1.pdf` is a direct signature match, never
+  container-inspected), calls the injected capability, and translates its
+  typed outcome (`ok`/`malformed`/`encrypted`/`pageLimitExceeded`/
+  `textLimitExceeded`) into either a rendered `TextDocumentV1` or a
+  fail-closed throw, preserving source identity/provenance the same way
+  `ooxml_route.d` does. See that module's own doc comment for the real
+  reasoning behind its module-global injection slot (no closure context is
+  available across the `extraction`/`effects` layer boundary) and its
+  concurrency resolution (a real `Mutex` around the shared `PdfiumLibrary`
+  in `effects.pdfium_ffi.LockedPdfiumLibraryV1`, since PDFium's own C API is
+  genuinely not safe to call from more than one thread at a time, unlike
+  `ooxml_route.d`'s own conservative-purity-inference cast). This is the
+  second concrete non-plain-text extraction route reachable through the
+  already-shipping v4 CLI dispatch surface, delivered via the existing
+  `--route-option pdfium-library=text:<path>` mechanism -- no new flag or
+  command.
 - `refinement.d` admits only a strong generic-ZIP detection to one bounded
   container inspection, maps the closed refusal vocabulary to normalized
   policy outcomes, and retains the inspector's complete accounting and
@@ -69,11 +91,13 @@ it performs no file, process, network, CLI, or adapter I/O.
   output has a pure checked `TextDocumentV1` construction path. There is no
   global registry or discovery mechanism.
 
-These contracts still have no concrete PDF, image, or OCR adapter, fan-out,
-join, or general workflow graph. DOCX/OOXML is the first concrete Office
-family wired end to end (see `ooxml_route.d` above); headers/footers/
+These contracts still have no concrete image or OCR adapter, fan-out, join,
+or general workflow graph. DOCX/OOXML (`ooxml_route.d`) and PDF
+(`pdf_pdfium_route.d`) are both wired end to end now; headers/footers/
 footnotes, fields, track changes, embedded objects, and legacy `.doc` remain
-explicit non-goals.
+explicit DOCX non-goals, and Poppler/execve PDF wiring
+(`effects.pdf_execve`) remains unwired -- a separate, later slice, per issue
+#156's own established one-real-thing-per-slice discipline.
 
 **Resolved (issue #587):** the real (`effects`-layer-injected) `ZipInflateV1`
 decompressor is now wired into `refinement.d`'s live call into
@@ -97,6 +121,10 @@ directly at the `container.d`/`effects.zlib_ffi` layer.
 
 `registry.d` constructs the executable's finite registry on demand. It
 contains `core-plain-text/v1`, whose required `max-output-bytes` is capped at
-256 MiB, and `ooxml-word/v1` (see `ooxml_route.d` above), which takes no
-options. `plain_text.d` streams the read-only source once into independently
+256 MiB; `ooxml-word/v1` (see `ooxml_route.d` above), which takes no options;
+and `pdf-pdfium/v1` (see `pdf_pdfium_route.d` above), whose required
+`pdfium-library` option is a presence/type check only -- the real
+`dlopen()` of the operator-supplied path happens once in `cli.d`, before the
+registry is even built (see `coreExtractorRegistryV1`'s own doc comment for
+why). `plain_text.d` streams the read-only source once into independently
 owned pieces and validates UTF-8 without flattening a second whole payload.

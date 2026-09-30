@@ -32,6 +32,24 @@ import effects.independent_sinks : IndependentSinkFailure;
 import effects.runner : EffectFailure, EffectPhase;
 import effects.side_output_sink : SideOutputSink;
 import effects.zlib_ffi : zipInflateV1;
+// PDFium (issue #156's PDF-wiring slice) is only verified on macOS arm64
+// (see `effects.pdfium_ffi`'s own platform gate) and is excluded from the
+// Linux build entirely (`dub.json`'s `excludedSourceFiles-linux`), so this
+// import -- and everything that depends on it below -- must itself be
+// conditional; unlike `effects.zlib_ffi`/`extraction.pdf_pdfium_route`
+// (pure D, no platform gate), `effects.pdfium_ffi` genuinely does not exist
+// as a module on a Linux build.
+version (OSX) {
+    version (AArch64) {
+        import effects.pdfium_ffi : installPdfiumLibraryV1, pdfBytesExtractV1,
+            pdfiumLoadFailureMessage;
+        private enum bool pdfiumSupportedPlatformV1 = true;
+    } else {
+        private enum bool pdfiumSupportedPlatformV1 = false;
+    }
+} else {
+    private enum bool pdfiumSupportedPlatformV1 = false;
+}
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
     SourceLocator;
@@ -50,10 +68,14 @@ import job.json : canonicalJobJson, parseJobJson;
 import job.dispatch_cli_tokens : parseDispatchJobTokensV1;
 import job.dispatch_json : canonicalDispatchJobJsonV1,
     parseDispatchJobJsonV1;
+import job.dispatch_spec : DispatchJobSpecV1;
 import extraction.registry : coreExtractorRegistryV1;
 import extraction.contracts : DetectionOutcomeV1;
+import extraction.pdf_pdfium_route : pdfPdfiumImplementationV1,
+    pdfiumLibraryOptionV1;
+import extraction.port : PdfBytesExtractV1;
 import job.legacy : lowerLegacyDefault, lowerLegacyJson, lowerLegacyNames;
-import job.spec : JobOption, JobSpec, JobStageSpec;
+import job.spec : JobOption, JobOptionType, JobSpec, JobStageSpec;
 import filters.entities;
 import filters.mojibake;
 import filters.normalize;
@@ -947,6 +969,41 @@ private JobSpec selectedJob(string[] compositionTokens, bool filtersExplicit,
     return lowerLegacyDefault();
 }
 
+/// Real, effects-layer-backed installation of the `pdf-pdfium` extractor's
+/// PDFium library, performed once here (cli.d has both `extraction` and
+/// `effects` in view -- see `extraction.pdf_pdfium_route`'s own module doc,
+/// "The injection" section, for why that indirection exists at all: neither
+/// `extraction.registry.coreExtractorRegistryV1`'s factory plumbing nor
+/// `extraction.port.PdfBytesExtractV1` can perform the real `dlopen()`
+/// themselves). Returns the pure-typed capability to inject into
+/// `coreExtractorRegistryV1`, or `null` if no route in `spec` uses
+/// `pdf-pdfium` (the common case: no PDF wiring requested by this job).
+///
+/// Throws a clear, content-free diagnostic -- before any document is
+/// processed, matching this slice's own acceptance bar -- if a `pdf-pdfium`
+/// route exists but its `pdfium-library` path fails to load. A missing or
+/// wrong-typed `pdfium-library` option itself is left to
+/// `compileDispatchJobV1`'s own existing generic per-extractor option
+/// validation (`extraction.port.ExtractorRegistrationV1.validateOptions`),
+/// which already reports it clearly as "missing extractor option:
+/// pdfium-library" -- this function does not duplicate that check.
+private PdfBytesExtractV1 resolvePdfBytesExtractV1(const ref DispatchJobSpecV1 spec) {
+    foreach (route; spec.dispatch.routes) {
+        if (route.extractor != pdfPdfiumImplementationV1) continue;
+        static if (pdfiumSupportedPlatformV1) {
+            auto option = pdfiumLibraryOptionV1 in route.options;
+            if (option is null || option.type != JobOptionType.text) return null;
+            auto path = option.asText();
+            enforce(installPdfiumLibraryV1(path), pdfiumLoadFailureMessage);
+            return pdfBytesExtractV1;
+        } else {
+            enforce(false, "pdf-pdfium extractor requires macOS arm64; "
+                ~ "PDFium is not supported on this platform");
+        }
+    }
+    return null;
+}
+
 private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
         bool filtersExplicit, string filterList, bool configExplicit,
         string configContents, bool versionedConfig) {
@@ -958,7 +1015,7 @@ private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
     if (dispatchTokens) {
         auto spec = parseDispatchJobTokensV1(compositionTokens);
         auto canonical = canonicalDispatchJobJsonV1(spec);
-        auto registry = coreExtractorRegistryV1();
+        auto registry = coreExtractorRegistryV1(resolvePdfBytesExtractV1(spec));
         return RuntimePlanV1.dispatchV4(
             compileDispatchJobV1(spec, &registry, null, null, zipInflateV1),
             canonical);
@@ -966,7 +1023,7 @@ private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
     if (configExplicit && versionedConfig && selectedJobVersion(configContents) == 4) {
         auto spec = parseDispatchJobJsonV1(configContents);
         auto canonical = canonicalDispatchJobJsonV1(spec);
-        auto registry = coreExtractorRegistryV1();
+        auto registry = coreExtractorRegistryV1(resolvePdfBytesExtractV1(spec));
         return RuntimePlanV1.dispatchV4(
             compileDispatchJobV1(spec, &registry, null, null, zipInflateV1),
             canonical);

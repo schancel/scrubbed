@@ -81,6 +81,55 @@ JobSpec parseJobTokens(const string[] tokens) {
     return result;
 }
 
+private bool needsShellQuoting(string token) pure {
+    import std.string : indexOf;
+    return token.length == 0 || token.indexOf(' ') >= 0 ||
+        token.indexOf('"') >= 0 || token.indexOf('\t') >= 0 ||
+        token.indexOf('\n') >= 0;
+}
+
+private string quoteForShell(string token) pure {
+    import std.array : replace;
+    return "\"" ~ token.replace("\\", "\\\\").replace("\"", "\\\"") ~ "\"";
+}
+
+/// Render composition tokens -- the exact same ordered
+/// `--stage`/`--stage-option`/`--filter`/`--filter-option` shape
+/// `parseJobTokens` above accepts -- as the literal `run --stage ...` argv a
+/// user could type by hand to reproduce them. This is the inverse of
+/// `parseJobTokens`: pure string assembly over the same token list, no
+/// parsing/compilation/registry lookup, so documentation (a preset's own
+/// `--help` text, for instance) can be generated straight from the tokens
+/// that actually compile instead of separately hand-maintained prose that
+/// can drift out of sync with them. A token is quoted only if it contains
+/// whitespace or a double quote -- none of today's fixed presets' tokens do,
+/// since `--stage ID=IMPLEMENTATION` and `--filter NAME` values are plain
+/// `validateJobKey`-constrained identifiers.
+string tokensAsRunInvocation(const string[] tokens) pure {
+    string result = "run";
+    foreach (token; tokens) {
+        result ~= " ";
+        result ~= needsShellQuoting(token) ? quoteForShell(token) : token;
+    }
+    return result;
+}
+
+unittest {
+    assert(tokensAsRunInvocation([]) == "run");
+    assert(tokensAsRunInvocation(["--stage", "clean=text-transform",
+        "--filter", "fix-mojibake"]) ==
+        "run --stage clean=text-transform --filter fix-mojibake");
+    // A token with an embedded space is quoted (none of today's real
+    // presets need this; proven here so the fallback path is not dead code).
+    assert(tokensAsRunInvocation(["--stage", "a b=text-transform"]) ==
+        `run --stage "a b=text-transform"`);
+    // A token with an embedded double quote is quoted and escaped.
+    assert(tokensAsRunInvocation([`say"hi`]) == `run "say\"hi"`);
+    // Deterministic/total for CTFE use in a UDA (compile-time `enum`).
+    enum string atCompileTime = tokensAsRunInvocation(["--stage", "x=y"]);
+    assert(atCompileTime == "run --stage x=y");
+}
+
 unittest {
     import job.json : canonicalJobJson, jobIdentity, parseJobJson;
     import std.exception : assertThrown;

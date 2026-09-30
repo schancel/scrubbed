@@ -31,8 +31,12 @@ The adapter uses stable keys `local-content:v1` and `local-metadata:v1`.
 - Every path component must be nonempty and neither `.` nor `..`; absolute
   paths, backslashes, and NUL are refused.
 - Both output parent chains must already exist as ordinary, non-symlink
-  directories. The caller-supplied root paths also reject symlinks in every
-  ancestor before canonicalization.
+  directories. The caller-supplied root paths themselves must also be
+  ordinary, non-symlink directories; the adapter then canonicalizes each root
+  via `realpath` internally (issue #467), so a caller does not need to
+  pre-resolve an ancestor symlink it doesn't control (for example, macOS's
+  `/tmp` -> `/private/tmp`) before calling in — the same false-refusal class
+  issue #458 fixed in `route-metadata`'s own preflight.
 - Existing destinations must be regular files with one link.
 - Root aliases, destination aliases, and manifest/output ownership
   collisions are rejected before publishing either output.

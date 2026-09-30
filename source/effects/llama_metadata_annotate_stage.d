@@ -354,7 +354,6 @@ immutable(ubyte)[] encodeLlamaMetadataV1(const LlamaMetadataAnnotation a) pure {
 /// Decodes this module's own `encodeLlamaMetadataV1` wire, for this module's
 /// unittests only.
 private LlamaMetadataAnnotation decodeLlamaMetadataV1(immutable(ubyte)[] wire) {
-    import std.conv : to;
     import std.json : parseJSON;
 
     auto root = parseJSON(cast(string) wire);
@@ -656,6 +655,8 @@ static this() {
 
 version (unittest) {
     import composition.compiler : compileJob;
+    import content.pieces : Content, ContentPiece;
+    import domain.document : Document, OutputName, SourceLocator;
     import job.json : parseJobJson;
     import std.exception : collectException;
     import std.file : mkdirRecurse, rmdirRecurse, tempDir, write;
@@ -665,6 +666,10 @@ version (unittest) {
         auto dir = buildPath(tempDir(), "scrubbed-llama-metadata-test-" ~ randomUUID().toString());
         mkdirRecurse(dir);
         return dir;
+    }
+
+    private Document fixtureDocument() {
+        return Document(SourceLocator("local:v1", "/tmp", "a.bin"), OutputName("a.bin.out"));
     }
 }
 
@@ -682,6 +687,23 @@ unittest {
         if (option.key == "llama-model") { sawModel = true; assert(option.required); }
     }
     assert(sawLibrary && sawModel);
+}
+
+// Content larger than `llamaMetadataMaxInputBytes` quarantines `rawLimit`
+// before `lib` is ever touched -- calls `applyLlamaMetadataAnnotate` directly
+// (bypassing the factory, which would otherwise require a real, operator-
+// supplied library) with a `null` `lib`, proving the size gate runs first and
+// never dereferences `lib` on this path, matching every other parsing
+// stage's own `max-input-bytes`-shaped safety-gate idiom.
+unittest {
+    import stages.contract : DecisionKind;
+
+    auto configuration = new immutable LlamaMetadataAnnotateConfiguration(null, "unused");
+    auto oversized = new ubyte[llamaMetadataMaxInputBytes + 1];
+    auto input = StageDocument(fixtureDocument(), new Content([ContentPiece.own(oversized)]));
+    auto decision = applyLlamaMetadataAnnotate(input, configuration);
+    assert(decision.kind() == DecisionKind.quarantine);
+    assert(decision.reason() == "rawLimit");
 }
 
 // Omitting `llama-library` fails closed with a clear error, exercising the

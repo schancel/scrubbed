@@ -61,7 +61,7 @@ import pipeline : availableFilters;
 import std.algorithm.searching : canFind, startsWith;
 import std.algorithm.iteration : map;
 import std.algorithm.sorting : sort;
-import std.array : array, split;
+import std.array : appender, array, split;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import std.file : FileException, SpanMode, dirEntries, exists,
@@ -2119,6 +2119,14 @@ int runApp(string[] args) {
     auto publication = durableRoute ? null : new PublicationOrder(coordination);
     auto decisionMutex = new Mutex;
     size_t terminalDecisions;
+    // #483: documents whose processing callback threw
+    // `OrderedPublicationCanceled` (the explicit `CANCELED <file>` line).
+    // The scheduler counts them in `InputCounts.failed`; the abort summary
+    // moves them to "canceled in flight". Guarded by `decisionMutex` and
+    // incremented at the point each one is actually resolved (the failure
+    // callback), then read only after `scheduler.finish()` has joined
+    // every worker.
+    size_t orderedCanceledCount;
     // #401: counts, by reason string, of every document that lands in
     // `quarantined` (not `rejected`/`failed`) so the plain (non---explain)
     // summary below can name *why* without printing one line per file. See
@@ -2189,6 +2197,11 @@ int runApp(string[] args) {
             auto durableDecision = cast(DurableDocumentFailure)error;
             auto effectFailure = cast(EffectFailure)error;
             auto orderedCanceled = cast(OrderedPublicationCanceled)error;
+            if (orderedCanceled !is null) {
+                decisionMutex.lock();
+                ++orderedCanceledCount;
+                decisionMutex.unlock();
+            }
             if (explain && runtimePlan.isDispatch && orderedCanceled is null) {
                 auto id = localDocumentId(file, inputPath, inputIsDir);
                 auto dispatchFailure = dispatchFailureFacts(error);
@@ -2291,11 +2304,19 @@ int runApp(string[] args) {
     // counters have nothing to report for them.
     size_t filesDiscovered;
     size_t filesAttempted;
+    // #483: set when the walk stopped on a file that did not itself cause
+    // the abort -- `submitPath` observed a SIGINT, or the scheduler refused
+    // admission because a worker had already failed fatally. That file was
+    // counted in `filesAttempted` but never processed, so the abort summary
+    // reports it as not attempted rather than silently dropping it. (The
+    // producer is single-threaded, so no synchronization is needed.)
+    bool abortFileNotAdmitted;
     void submitPath(string file) {
         bool admissionCanceled;
         try {
             if (interruptRequested()) {
                 admissionCanceled = true;
+                abortFileNotAdmitted = true;
                 interruptedRun = true;
                 throw new Exception(
                     "interrupted (SIGINT); canceling after in-flight work drains");
@@ -2329,6 +2350,7 @@ int runApp(string[] args) {
             }
             if (!scheduler.submit(file, bytes)) {
                 admissionCanceled = true;
+                abortFileNotAdmitted = true;
                 workerFatalAdmission = true;
                 throw new Exception("input admission canceled: " ~ file);
             }
@@ -2433,18 +2455,57 @@ int runApp(string[] args) {
         // file WAS attempted, and is already named by the fatal message
         // this exception carries -- this line adds visibility into the
         // rest of the batch, not a second description of the same file.
+        //
+        // #483: under concurrency, `filesAttempted` also covers documents
+        // that were admitted into the scheduler but had not completed when
+        // `scheduler.cancel()` ran. Those appeared in neither bucket. They
+        // are now counted exactly, from where each one was resolved:
+        //  - `abortCounts.skipped`: queued documents the scheduler discarded
+        //    at its descriptor gate after cancellation (counted under the
+        //    scheduler mutex; `finish()` has joined every task);
+        //  - `orderedCanceledCount`: documents whose callback threw
+        //    `OrderedPublicationCanceled` (the `CANCELED <file>` stderr
+        //    line). The scheduler counts these in `failed`, so they are
+        //    moved out of it here, never counted twice.
+        // Any other worker failure (e.g. the fatal one behind
+        // `workerFatalAdmission`) is reported as `failed`. The file the
+        // walk stopped on is excluded only when it caused the abort itself;
+        // one merely refused admission (SIGINT, prior worker fatal) was
+        // never processed and is counted with the not-attempted files.
+        // Result: every discovered file except the triggering one lands in
+        // exactly one bucket. The new buckets are printed only when nonzero,
+        // so single-threaded output (#449) is unchanged.
         if (!errorJournalPath.length) {
             const displaySucceeded =
                 succeededDisplayCount(abortCounts.succeeded, terminalDecisions);
-            const canceled = filesDiscovered > filesAttempted ?
+            decisionMutex.lock();
+            const orderedCanceled = orderedCanceledCount;
+            decisionMutex.unlock();
+            const inFlight = abortCounts.skipped + orderedCanceled;
+            const failedOther = abortCounts.failed > orderedCanceled ?
+                abortCounts.failed - orderedCanceled : 0;
+            auto canceled = filesDiscovered > filesAttempted ?
                 filesDiscovered - filesAttempted : 0;
-            if (terminalDecisions)
-                writeln("done. ", displaySucceeded, " succeeded, ",
-                    terminalDecisions, " quarantined, ", canceled,
-                    " canceled before this fatal error.");
-            else
-                writeln("done. ", displaySucceeded, " succeeded, ", canceled,
-                    " canceled before this fatal error.");
+            if (inputIsDir && abortFileNotAdmitted) ++canceled;
+            auto summary = appender!string;
+            summary.put("done. ");
+            summary.put(displaySucceeded.to!string);
+            summary.put(" succeeded, ");
+            if (terminalDecisions) {
+                summary.put(terminalDecisions.to!string);
+                summary.put(" quarantined, ");
+            }
+            if (failedOther) {
+                summary.put(failedOther.to!string);
+                summary.put(" failed, ");
+            }
+            if (inFlight) {
+                summary.put(inFlight.to!string);
+                summary.put(" canceled in flight, ");
+            }
+            summary.put(canceled.to!string);
+            summary.put(" canceled before this fatal error.");
+            writeln(summary.data);
         }
         auto workerFatal = scheduler.fatal();
         if (workerFatalAdmission && workerFatal !is null)
@@ -3177,6 +3238,77 @@ unittest {
         "done. 1 succeeded, 1 canceled before this fatal error."),
         "plain mode must summarize the abort, naming both the successful " ~
         "before-file and the never-attempted after-file: " ~ captured);
+}
+
+// #483 regression: the #449 abort summary above undercounted under
+// concurrency. Documents already admitted into the scheduler (so counted
+// in `filesAttempted`) but discarded by `scheduler.cancel()` before they
+// completed (queue-skipped, or failing ordered publication with CANCELED)
+// landed in neither "succeeded" nor "canceled before this fatal error".
+// Timing decides *how many* documents are in flight at the abort, so this
+// test asserts the timing-independent invariant rather than exact buckets:
+// every discovered file except the one that triggered the abort is in
+// exactly one bucket, and the succeeded bucket equals what was written.
+unittest {
+    import std.exception : collectException;
+    import std.file : rmdirRecurse, tempDir;
+    import std.format : format;
+    import std.regex : matchFirst, regex;
+    import std.stdio : stdout;
+
+    auto root = buildPath(tempDir, "scrubbed-483-inflight-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto inputDir = buildPath(root, "in");
+    mkdir(root);
+    mkdir(inputDir);
+    enum goodFiles = 400;
+    foreach (i; 0 .. goodFiles)
+        write(buildPath(inputDir, format!"f%04d.txt"(i)), "ok");
+    // Sorts mid-batch (between f0199 and f0200).
+    write(buildPath(inputDir, "f0199z-toobig.txt"),
+        "this file is well over the lowered per-test byte limit on purpose");
+    enum discovered = goodFiles + 1;
+
+    foreach (depth; ["2", "16"]) {
+        auto outputDir = buildPath(root, "out-" ~ depth);
+        auto capturePath = buildPath(root, "stdout-" ~ depth ~ ".txt");
+        auto savedStdout = stdout;
+        scope(exit) stdout = savedStdout;
+        stdout = File(capturePath, "w");
+        auto error = collectException!Exception(runApp(["scrubbed", "run",
+            "--input", inputDir, "--output", outputDir, "--filters",
+            "normalize-line-endings", "--threads", "4", "--max-queued-docs",
+            depth, "--max-input-bytes", "50"]));
+        stdout.flush();
+        stdout = savedStdout;
+        auto captured = readText(capturePath);
+        assert(error !is null && error.msg.canFind(
+            "input exceeds --max-input-bytes: ") &&
+            error.msg.canFind("f0199z-toobig.txt"),
+            "the fatal classification must be unchanged: " ~
+            (error is null ? "(no error)" : error.msg));
+
+        auto line = matchFirst(captured, regex(
+            `done\. (\d+) succeeded, (?:(\d+) failed, )?` ~
+            `(?:(\d+) canceled in flight, )?` ~
+            `(\d+) canceled before this fatal error\.`));
+        assert(!line.empty, "missing abort summary: " ~ captured);
+        auto succeeded = line[1].to!size_t;
+        auto failed = line[2].length ? line[2].to!size_t : 0;
+        auto inFlight = line[3].length ? line[3].to!size_t : 0;
+        auto notAttempted = line[4].to!size_t;
+        assert(failed == 0, "no worker failed here: " ~ captured);
+        assert(succeeded + inFlight + notAttempted == discovered - 1,
+            format!("depth %s: %s succeeded + %s in flight + %s not attempted" ~
+                " != %s discovered - 1 trigger: %s")(depth, succeeded,
+                inFlight, notAttempted, discovered, captured));
+        auto written = exists(outputDir) ?
+            dirEntries(outputDir, SpanMode.shallow).array.length : 0;
+        assert(written == succeeded, format!(
+            "depth %s: %s outputs written but %s reported succeeded")(depth,
+            written, succeeded));
+    }
 }
 
 // Regression for #294: the side-output publication loop above must not

@@ -44,15 +44,49 @@ releases all reservations.
 - A discovered path rejected after worker-fatal cancellation gets one
   `status=canceled` EXPLAIN record; traversal-error cancellation remains
   distinct.
-- In plain (non-`--explain`) mode, an abort mid-batch (including a
-  `--max-input-bytes` admission failure) prints `done. N succeeded, M
-  canceled before this fatal error.` before the fatal error propagates.
-  `M` counts files already discovered in an already-walked directory's
-  entry list that the walk had not yet reached when it aborted -- it does
-  not count the file that caused the abort (already named separately in
-  the fatal message) and cannot see into a sibling directory the walk had
-  not yet reached at all. This is a diagnostic addition only; it does not
-  change the run-fatal classification above.
+- In plain (non-`--explain`) mode, an abort mid-batch (a
+  `--max-input-bytes` admission failure, a traversal error, a worker-fatal
+  failure the walk then observes, or SIGINT) prints a summary before the
+  fatal error propagates:
+
+  ```
+  done. N succeeded[, Q quarantined][, F failed][, K canceled in flight], M canceled before this fatal error.
+  ```
+
+  The bracketed clauses appear only when their count is nonzero, so a
+  single-threaded abort still prints `done. N succeeded, M canceled before
+  this fatal error.` Each discovered file is counted in exactly one bucket:
+
+  - `N succeeded`: completed and written. This equals the number of
+    outputs the run produced.
+  - `Q quarantined`: completed with a quarantine or reject decision.
+  - `F failed`: a worker failed on the document, for example the
+    worker-fatal failure that stopped the run. That file also gets its own
+    `FATAL` line.
+  - `K canceled in flight`: admitted into the concurrent queue but not
+    finished when the abort cancelled the scheduler. This covers documents
+    still queued, which are discarded without being processed, and
+    documents processed but refused ordered publication, which print
+    `CANCELED <file>: ordered publication canceled after an earlier fatal
+    root` on stderr. Each document is counted once, when the scheduler
+    resolves it. This bucket is essentially always zero with `--threads
+    1`, and under concurrency it can be as large as about
+    `--max-queued-docs` plus `--threads`.
+  - `M canceled before this fatal error`: discovered, but never admitted.
+    That means files in an already-walked directory's entry list that the
+    walk had not reached yet, plus the file the walk stopped on when that
+    file was only refused admission and did not itself cause the abort
+    (SIGINT, or an earlier worker-fatal failure).
+
+  The one file excluded from all buckets is the file that caused the abort
+  itself, for example the file over `--max-input-bytes` or a file that
+  could not be stat'ed. The fatal message already names it. So when a file
+  causes the abort, `N + Q + F + K + M` equals the discovered file count
+  minus one. When the stop comes from SIGINT or a worker failure, the sum
+  equals the discovered file count. The count cannot see into a sibling
+  directory the walk had not reached at all, because those files were
+  never discovered. This summary is diagnostic only and does not change
+  the run-fatal classification above.
 
 This queue is local and ephemeral: it is not a resume manifest or a
 distributed scheduler. The per-document pipeline still materializes

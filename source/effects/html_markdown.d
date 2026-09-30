@@ -52,6 +52,24 @@ private struct Writer {
             bytes.length--;
     }
 
+    // Mirror of `trim()` at the other end. Issue #516 follow-up: a list
+    // item's own content buffer can pick up a leading collapsed space from
+    // pretty-printed indentation between `<li>` and its first real child
+    // (e.g. `<li>\n  Text</li>`) -- `trim()` alone never catches this,
+    // since it only ever strips the END of `bytes`. Left uncaught, that
+    // leading space lands between the list marker ("- "/"N. ") and the
+    // item's real text, widening the marker+space prefix by one column
+    // without widening the continuation-line indent (`maxListIndent`'s own
+    // `prefixLength` slice below) to match, which is exactly what makes a
+    // CommonMark parser misread the item as an indented code block instead
+    // of list content.
+    void trimLeading() pure {
+        size_t start;
+        while (start < bytes.length && (bytes[start] == ' ' || bytes[start] == '\n'))
+            ++start;
+        if (start) bytes = bytes[start .. $];
+    }
+
     void block() pure {
         trim();
         if (bytes.length) put("\n\n");
@@ -101,6 +119,20 @@ unittest {
 
 private bool white(char c) pure {
     return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f';
+}
+
+// Issue #516 follow-up: a text node consisting entirely of pretty-printed
+// indentation/formatting whitespace (e.g. the "\n" between `<ol>` and its
+// first `<li>`, or between successive `<li>`s) is structural noise, not
+// inter-word content -- unlike an ordinary text node's whitespace RUN
+// WITHIN real content (which `clean()` correctly collapses to a single
+// space), a text node that is *nothing but* whitespace between block-level
+// list siblings must contribute nothing at all. Byte-indexed ASCII check,
+// matching `singleLine()`'s own existing convention for this exact
+// question elsewhere in this file.
+private bool isWhitespaceOnlyText(string text) pure {
+    foreach (c; text) if (!white(c)) return false;
+    return true;
 }
 
 // Exported (not just module-private) so `html_main_content_markdown.d` can
@@ -490,6 +522,20 @@ private void renderNode(const ref HtmlTree tree, size_t index,
              child = endOf(tree, child)) {
             if (tree.nodes[child].parentIndex != index) continue;
             if (tree.nodes[child].name != "li") {
+                // A text node that is nothing but pretty-printed
+                // indentation between `<ol>`/`<li>` boundaries (the
+                // routine "<ol>\n<li>...</li>\n<li>...</li>\n</ol>" shape)
+                // is structural noise, not real inter-word content: it
+                // must contribute nothing here, not a collapsed single
+                // space written directly into the list's own markdown
+                // stream (issue #516 follow-up -- before #516's own fix,
+                // `clean()` happened to drop this same whitespace outright
+                // via its isControl-first bug, which is what hid this
+                // latent bug for newline-formatted lists specifically; a
+                // literal space-only text node already triggered it before
+                // #516 too).
+                if (tree.nodes[child].kind == HtmlNodeKind.text &&
+                    isWhitespaceOnlyText(tree.nodes[child].text)) continue;
                 renderNode(tree, child, writer, depth + 1, options, inCell); continue;
             }
             if (!first) writer.put("\n");
@@ -497,6 +543,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             Writer item;
             renderChildren(tree, child, item, depth + 1, options, inCell);
             item.trim();
+            item.trimLeading();
             size_t prefixLength = 2;
             if (name == "ul") writer.put("- ");
             else {
@@ -1097,6 +1144,53 @@ unittest {
     assert(omitted.canFind("> a real quotation"), "quotes default true");
     assert(omitted.canFind("```"), "code default true");
     assert(omitted.canFind("|---|"), "tables default true");
+}
+
+// Issue #516 follow-up: a whitespace-only text node between `<ol>`/`<li>`
+// boundaries (the routine "<ol>\n<li>...</li>\n<li>...</li>\n</ol>" shape a
+// real HTML pretty-printer produces) must not inject a stray space into the
+// list's own markdown stream -- neither before the first item's marker nor
+// as leading whitespace inside an item's own content, both of which shift
+// content off the marker's own column width and make a CommonMark parser
+// misread the item as an indented code block instead of list content
+// (confirmed on real corpus pages during this ticket's own review). This is
+// the newline-formatted-list repro shape specifically, distinct from the
+// synthetic hand-typed `<ul><li>one</li><li>two</li></ul>` fixture already
+// covered two tests above (which has no whitespace-only sibling text nodes
+// to trigger this at all).
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind, startsWith;
+    import std.string : splitLines;
+
+    auto outcome = parseHtml(cast(const(ubyte)[])
+        "<ol>\n<li>\nFirst item text here.\n</li>\n<li>\nSecond item text here.\n</li>\n</ol>");
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto rendered = renderMarkdown(tree);
+    // Every non-blank line here is a list item's own first line: it must
+    // start with its numbered marker at column 0 -- never a leading space
+    // before it (the "<ol>\n<li>" whitespace-only sibling text node's own
+    // regression) and never a doubled space after it (the `<li>\n  text`
+    // leading-whitespace-inside-the-item regression).
+    size_t markerLines;
+    foreach (line; rendered.splitLines()) {
+        if (!line.length) continue;
+        assert(!line.startsWith(" "),
+            "list item line must not start with a stray leading space: \"" ~ line ~ "\"");
+        if (line.startsWith("1. ") || line.startsWith("2. ")) {
+            ++markerLines;
+            assert(!line.startsWith("1.  ") && !line.startsWith("2.  "),
+                "list marker must be followed by exactly one space, not two: \"" ~ line ~ "\"");
+        }
+    }
+    assert(markerLines == 2, "both list items must render with their own intact numbered marker");
+    // `clean()` backslash-escapes a literal trailing `.` (ordinary Markdown
+    // escaping, unrelated to this fixture) -- checked up to the word before
+    // it, not byte-for-byte through the escape.
+    assert(rendered.canFind("1. First item text here"));
+    assert(rendered.canFind("2. Second item text here"));
 }
 
 // Issue #478 real fixture 1/4 -- tables (trafilatura-parity `--no-tables`

@@ -131,7 +131,9 @@ DecodedSimilaritySignaturePayload decodeSimilaritySignaturePayload(
     size_t at;
     enforce(payload.length >= 1, bad);
     DecodedSimilaritySignaturePayload result;
-    result.hasKeys = payload[at++] != 0;
+    auto hasKeys = payload[at++];
+    enforce(hasKeys <= 1, bad ~ ": invalid hasKeys flag");
+    result.hasKeys = hasKeys == 1;
     result.contentLength = cast(size_t) getU64(payload, at);
     enforce(at + 2 <= payload.length, bad);
     size_t versionLength = (cast(size_t) payload[at] << 8) | payload[at + 1];
@@ -171,10 +173,10 @@ unittest {
 
     assertThrown(decodeSimilaritySignaturePayload([]));
     assertThrown(decodeSimilaritySignaturePayload(payload[0 .. $ - 1]));
-    auto tampered = payload.dup;
-    tampered[$ - 1] ^= 0xff;
-    // Flipping a lane/band byte still decodes (no checksum over those
-    // fields); flipping the version tag's own bytes is what must fail.
+    auto malformedFlag = payload.dup;
+    malformedFlag[0] = 2;
+    assertThrown(decodeSimilaritySignaturePayload(malformedFlag));
+    // Flipping the version tag's own bytes must fail.
     auto tamperedVersion = payload.dup;
     tamperedVersion[10] ^= 0xff; // inside the version tag text
     assertThrown(decodeSimilaritySignaturePayload(tamperedVersion));

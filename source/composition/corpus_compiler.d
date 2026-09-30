@@ -132,6 +132,7 @@ CompiledComposition compileComposition(const ref JobSpec spec,
     JobStageSpec[] perDocumentStages;
     JobStageSpec[] corpusStageSpecs;
     bool sawCorpusStage;
+    string firstCorpusStage;
     foreach (stage; spec.stages) {
         auto isPerDocument = perDocumentRegistry.find(stage.implementation) !is null;
         auto isCorpus = corpusRegistry.find(stage.implementation) !is null;
@@ -142,6 +143,8 @@ CompiledComposition compileComposition(const ref JobSpec spec,
         enforce(isPerDocument || isCorpus, "unknown stage: " ~ stage.implementation);
         if (isCorpus) {
             sawCorpusStage = true;
+            if (!firstCorpusStage.length)
+                firstCorpusStage = stage.id ~ " (" ~ stage.implementation ~ ")";
             enforce(stage.filters.length == 0,
                 "corpus-level stage " ~ stage.id ~ " (" ~ stage.implementation ~
                 ") cannot accept filters -- filters are a per-document content " ~
@@ -150,7 +153,8 @@ CompiledComposition compileComposition(const ref JobSpec spec,
         } else {
             enforce(!sawCorpusStage,
                 "stage " ~ stage.id ~ " (" ~ stage.implementation ~ ") is a " ~
-                "per-document stage that appears after a corpus-level stage in this " ~
+                "per-document stage that appears after corpus-level stage " ~
+                firstCorpusStage ~ " in this " ~
                 "composition -- every per-document stage must precede every " ~
                 "corpus-level stage (issue #564's two-phase model: a corpus-level " ~
                 "stage runs only as a strictly later pass over the whole " ~
@@ -286,6 +290,7 @@ unittest {
     auto message = collectExceptionMsg!Exception(
         compileComposition(spec, &perDocumentRegistry, &corpusRegistry));
     assert(message.length != 0);
+    assert(message.canFind("prune"));
     assert(message.canFind("after"));
     assert(message.canFind("corpus-level"));
 }

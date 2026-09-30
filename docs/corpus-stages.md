@@ -158,7 +158,11 @@ merge, then a single sequential scan that groups consecutive equal
 `(bandIndex, bandKeyValue)` records and caps each group at the declared
 bucket cap -- against this sidecar-sourced candidate stream. That module's
 own API is shard-typed and is left **completely untouched**; only its shape
-is mirrored.
+is mirrored. Corpus-sized document paths, cross-bucket links, and final
+decision ordering live in a private, bounded-cache SQLite scratch database;
+sorted runs are compacted incrementally with fixed merge fan-in, so neither
+heap memory, open descriptors, nor simultaneously live run files scale
+linearly with corpus size.
 
 `domain.near_dedup_decision.nearDuplicateLinksInBucket` -- the pure decision
 core -- is called **completely unmodified**, once per bucket, exactly as
@@ -179,14 +183,13 @@ its surviving representative's ID, and the matching `(bandIndex,
 bandKeyValue)` bucket identity. This is unconditional -- there is no flag
 that disables it.
 
-**Non-destructive by construction, not merely by a default flag.** This
-driver never touches `--output`, and never deletes, overwrites, or
-otherwise mutates any already-published per-document output file or
-sidecar (other than adding the decision sidecar above). It only ever
-*decides*. A follow-on opt-in step that also materializes a physically
-pruned copy of the corpus at a distinct destination (mirroring
-`effects.near_dedup_overlay`'s own `prunedDestination` gating) is a
-reasonable next slice; it is deliberately not built here.
+**Non-destructive toward corpus output.** This driver never touches
+`--output` or an existing document-metadata sidecar. Decision sidecars are
+derived state: current decisions are atomically replaced and stale decisions
+from an earlier successful pass are removed, so the directory cannot retain
+a prune verdict for a document that the current pass keeps. A follow-on
+opt-in step that materializes a physically pruned corpus at a distinct
+destination remains deliberately out of scope.
 
 ### CLI reachability
 
@@ -200,6 +203,12 @@ begins. It is not currently supported together with `--manifest`/
 `--error-journal` (durable routes) or a dispatch v4 composition -- both
 interactions are unaudited for this slice, not merely untested, so they
 fail closed rather than silently proceed.
+
+A corpus-only composition may replay an existing sidecar tree produced by
+an earlier run. A combined phase-1/phase-2 composition requires a fresh
+sidecar root, preventing stale metadata from a prior input generation from
+joining the current corpus. Because decision sidecars are mandatory output,
+corpus stages reject `--dry-run` before traversal or mutation.
 
 ## Explicitly deferred (real follow-on decisions, not this slice)
 

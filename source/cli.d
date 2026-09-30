@@ -51,6 +51,8 @@ version (OSX) {
 } else {
     private enum bool pdfiumSupportedPlatformV1 = false;
 }
+import effects.corpus_runner : pruneNearDuplicatesDecisionSuffixV1;
+import effects.document_metadata_publish_stage : documentMetadataPublishSuffixV1;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
     SourceLocator;
@@ -100,7 +102,7 @@ import std.process : environment;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
-import std.string : indexOf, join, lastIndexOf;
+import std.string : endsWith, indexOf, join, lastIndexOf;
 import std.utf : UTFException, validate;
 import std.uuid : randomUUID;
 import crypto.sha256 : Sha256;
@@ -326,6 +328,21 @@ private void preflightSidecarRoots(string inputPath, string outputPath,
         preflightOutput(resolved, false);
         requireUnaliasedFileOrAbsent(sidecarPath, "sidecar destination");
         requireUnaliasedFileOrAbsent(outputPath, "primary destination");
+    }
+}
+
+private void requireFreshCorpusSidecarRoot(string root) {
+    if (!exists(root)) return;
+    foreach (entry; dirEntries(root, SpanMode.depth, false)) {
+        if (entry.isSymlink)
+            throw new OutputPolicyViolation(
+                "corpus sidecar root contains a symlink: " ~ entry.name);
+        if (!entry.isFile) continue;
+        if (entry.name.endsWith(documentMetadataPublishSuffixV1) ||
+                entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+            throw new OutputPolicyViolation(
+                "combined corpus run requires a fresh sidecar root; " ~
+                "found an earlier corpus artifact: " ~ entry.name);
     }
 }
 
@@ -2116,10 +2133,12 @@ int runApp(string[] args) {
     auto runtimePlan = selected.runtimePlan;
     const corpusStages = selected.corpusStages;
     const producesSideOutput = runtimePlan.producesTerminalSideOutput;
-    if (producesSideOutput != sidecarExplicit)
-        throw new Exception(producesSideOutput ?
-            "side-output-producing plan requires --sidecar-output" :
-            "--sidecar-output requires a side-output-producing plan");
+    if (producesSideOutput && !sidecarExplicit)
+        throw new Exception(
+            "side-output-producing plan requires --sidecar-output");
+    if (sidecarExplicit && !producesSideOutput && !corpusStages.length)
+        throw new Exception(
+            "--sidecar-output requires a side-output-producing or corpus-level plan");
     // Issue #564: a corpus-level stage reads already-published
     // document-metadata sidecars, so it needs `--sidecar-output` even for a
     // composition whose per-document half alone produces no terminal side
@@ -2129,6 +2148,10 @@ int runApp(string[] args) {
         throw new Exception(
             "a corpus-level stage (e.g. prune-near-duplicates) requires --sidecar-output: " ~
             "it reads already-published document-metadata sidecars");
+    if (corpusStages.length && dryRun)
+        throw new Exception(
+            "a corpus-level stage cannot run with --dry-run because its decision sidecars " ~
+            "are mandatory outputs");
     // Issue #564: the interaction between a corpus-level phase-2 pass and
     // `--manifest`/`--error-journal`'s own separate identity/ledger
     // semantics has not been audited for this slice -- fail closed rather
@@ -2176,6 +2199,8 @@ int runApp(string[] args) {
     if (sidecarExplicit) {
         preflightSidecarRoots(inputPath, outputPath, sidecarPath, inputIsDir);
         sidecarPath = resolveExistingPrefix(sidecarPath);
+        if (corpusStages.length && producesSideOutput)
+            requireFreshCorpusSidecarRoot(sidecarPath);
     }
     if (!errorTargeted) preflightOutput(outputPath, inputIsDir);
     if (manifestPath.length) {
@@ -3341,6 +3366,34 @@ unittest {
     assert(wellFormedId(representativeId), "malformed representative_id: " ~ representativeId);
     assert(removedId != representativeId);
     assert(decision["bucket_identity"].str.length != 0);
+
+    // Corpus-only replay over an earlier run's sidecars is reachable. It
+    // does not require a per-document side-output producer in this second
+    // composition.
+    auto replayOutput = buildPath(root, "replay-out");
+    assert(runApp(["scrubbed", "run", "--input", inputDir,
+        "--output", replayOutput, "--sidecar-output", sidecarDir,
+        "--threads", "2", "--stage", "prune=prune-near-duplicates"]) == 0);
+
+    // A corpus pass has mandatory decision outputs, so dry-run fails before
+    // any traversal or write rather than mutating the existing decision.
+    auto priorDecision = readText(decisionPaths[0]);
+    auto dryRunError = collectException(runApp(["scrubbed", "run", "--input",
+        inputDir, "--output", buildPath(root, "dry-run-out"),
+        "--sidecar-output", sidecarDir, "--threads", "1", "--dry-run",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(dryRunError !is null && dryRunError.msg.canFind("cannot run with --dry-run"));
+    assert(readText(decisionPaths[0]) == priorDecision);
+
+    // A combined phase-1/phase-2 run requires a fresh sidecar corpus so
+    // stale metadata from an earlier input generation cannot participate.
+    auto reusedError = collectException(runApp(["scrubbed", "run", "--input",
+        inputDir, "--output", buildPath(root, "reused-out"),
+        "--sidecar-output", sidecarDir, "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(reusedError !is null && reusedError.msg.canFind("fresh sidecar root"));
 
     // Compilation rejects a corpus-level stage appearing before a
     // per-document stage, with a clear ordering error.

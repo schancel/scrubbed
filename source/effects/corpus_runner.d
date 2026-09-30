@@ -34,26 +34,24 @@
 /// document's true root) -- reproduced here rather than imported, since that
 /// helper is private to a module this slice must not modify.
 ///
-/// **Non-destructive by construction, not merely by default flag.** This
-/// driver never touches `--output`; it only ever ADDS a new, mandatory
-/// per-pruned-document decision sidecar file next to each pruned document's
-/// existing `.document-metadata.json`. It never deletes or overwrites
-/// already-published output, satisfying issue #564's own non-destructive
-/// safety bar unconditionally -- an opt-in step that also materializes a
-/// physically pruned copy of the corpus (mirroring `effects
-/// .near_dedup_overlay`'s own `prunedDestination`) is a reasonable, real
-/// follow-on this slice deliberately does not build (see this issue's PR
-/// description for the explicit scope call).
+/// **Non-destructive toward corpus output.** This driver never touches
+/// `--output`; it atomically publishes the current derived decision set next
+/// to the metadata sidecars and removes only stale files bearing its own
+/// decision suffix. Materializing a physically pruned corpus remains a
+/// separate opt-in follow-on.
 module effects.corpus_runner;
 
 import domain.document : DocumentId;
-import domain.document_metadata : decodeDocumentMetadataV2;
+import domain.document_metadata : decodeDocumentMetadataV2, maxTotalEncodedBytesV2;
 import domain.near_dedup_decision : NearDedupCandidate, PruningPolicy,
     nearDuplicateLinksInBucket;
 import domain.similarity_signature : similarityBands, similarityLanes;
 import effects.document_metadata_publish_stage : documentMetadataPublishSuffixV1;
+import effects.atomic_piece_sink : writeAtomicPieces;
+import effects.sqlite_ffi;
 import effects.similarity_signature_annotate_stage : decodeSimilaritySignaturePayload,
     similaritySignatureSectionIdV1;
+import content.pieces : Content, ContentPiece;
 import stages.corpus_contract : CorpusDecisionKind, CorpusStageDecision,
     CorpusStageDeclaration, CorpusStageRegistration, CorpusStageRun, CorpusStageSink,
     registerCorpusStage;
@@ -61,12 +59,22 @@ import stages.registry : OptionDeclaration, OptionType, StageOptions;
 import std.algorithm.sorting : sort;
 import std.conv : to;
 import std.exception : enforce;
-import std.file : SpanMode, dirEntries, exists, isFile, mkdir, read, remove, rmdir, write;
+import std.file : SpanMode, dirEntries, exists, isDir, isFile, isSymlink, mkdir,
+    read, remove, rmdir, setAttributes, tempDir;
 import std.format : format;
 import std.path : baseName, buildPath, dirName;
 import std.stdio : File;
 import std.string : endsWith, indexOf;
 import std.uuid : randomUUID;
+import std.json : JSONOptions, JSONType, parseJSON;
+import core.stdc.errno : errno, EINTR;
+import core.sys.posix.fcntl : open, O_CREAT, O_EXCL, O_NOFOLLOW, O_RDONLY, O_WRONLY;
+import core.sys.posix.sys.stat : fstat, stat_t, S_ISREG;
+import core.sys.posix.unistd : close, posixRead = read;
+import std.string : fromStringz, toStringz;
+
+extern (C) int sqlite3_reset(sqlite3_stmt*);
+extern (C) int sqlite3_clear_bindings(sqlite3_stmt*);
 
 enum pruneNearDuplicatesStageKeyV1 = "prune-near-duplicates";
 enum pruneNearDuplicatesDecisionSchemaV1 = "scrubbed-prune-near-duplicates-decision-v1";
@@ -89,30 +97,56 @@ private enum fanIn = 8;
 // `version (SimilarityBucketsCheck)` idiom exactly (independently declared,
 // not shared -- that module must not be touched by this slice).
 // ---------------------------------------------------------------------------
-version (CorpusRunnerCheck) {
+version (unittest) {
     private __gshared size_t openScratchFilesCurrent;
     private __gshared size_t openScratchFilesPeak;
     private __gshared size_t batchPeakRecords;
+    private __gshared size_t bucketPeakMembers;
+    private __gshared size_t scratchArtifactsCurrent;
+    private __gshared size_t scratchArtifactsPeak;
     size_t corpusRunnerPeakOpenScratchFiles() { return openScratchFilesPeak; }
     size_t corpusRunnerPeakBatchRecords() { return batchPeakRecords; }
+    size_t corpusRunnerPeakBucketMembers() { return bucketPeakMembers; }
+    size_t corpusRunnerPeakScratchArtifacts() { return scratchArtifactsPeak; }
     void resetCorpusRunnerObservations() {
         openScratchFilesCurrent = 0;
         openScratchFilesPeak = 0;
         batchPeakRecords = 0;
+        bucketPeakMembers = 0;
+        scratchArtifactsCurrent = 0;
+        scratchArtifactsPeak = 0;
     }
-}
-private void trackOpen() {
-    version (CorpusRunnerCheck) {
+    private void trackOpen() {
         ++openScratchFilesCurrent;
         if (openScratchFilesCurrent > openScratchFilesPeak)
             openScratchFilesPeak = openScratchFilesCurrent;
     }
-}
-private void trackClose() {
-    version (CorpusRunnerCheck) if (openScratchFilesCurrent) --openScratchFilesCurrent;
-}
-private void trackBatch(size_t size) {
-    version (CorpusRunnerCheck) if (size > batchPeakRecords) batchPeakRecords = size;
+    private void trackClose() {
+        if (openScratchFilesCurrent) --openScratchFilesCurrent;
+    }
+    private void trackBatch(size_t size) {
+        if (size > batchPeakRecords) batchPeakRecords = size;
+    }
+    private void trackBucket(size_t size) {
+        if (size > bucketPeakMembers) bucketPeakMembers = size;
+    }
+    private void trackScratchCreate() {
+        ++scratchArtifactsCurrent;
+        if (scratchArtifactsCurrent > scratchArtifactsPeak)
+            scratchArtifactsPeak = scratchArtifactsCurrent;
+    }
+    private void trackScratchRemove() {
+        enforce(scratchArtifactsCurrent > 0,
+            "corpus runner: scratch artifact accounting underflow");
+        --scratchArtifactsCurrent;
+    }
+} else {
+    private void trackOpen() {}
+    private void trackClose() {}
+    private void trackBatch(size_t) {}
+    private void trackBucket(size_t) {}
+    private void trackScratchCreate() {}
+    private void trackScratchRemove() {}
 }
 
 string pruneBucketIdentity(size_t bandIndex, ulong bandKeyValue) pure {
@@ -189,13 +223,23 @@ private void writeFrame(File file, const(ubyte)[] bytes) {
 }
 private bool readFrame(File file, out ubyte[] bytes) {
     ubyte[8] prefix;
-    auto first = file.rawRead(prefix[]);
+    auto first = file.rawRead(prefix[0 .. 1]);
     if (!first.length) return false;
-    enforce(first.length == 8, "corpus runner: short scratch frame header");
+    size_t prefixUsed = first.length;
+    while (prefixUsed < prefix.length) {
+        auto part = file.rawRead(prefix[prefixUsed .. $]);
+        enforce(part.length != 0, "corpus runner: short scratch frame header");
+        prefixUsed += part.length;
+    }
     size_t at;
     auto length = getU64(prefix[], at);
     bytes = new ubyte[cast(size_t) length];
-    enforce(file.rawRead(bytes).length == length, "corpus runner: short scratch frame");
+    size_t used;
+    while (used < bytes.length) {
+        auto part = file.rawRead(bytes[used .. $]);
+        enforce(part.length != 0, "corpus runner: short scratch frame");
+        used += part.length;
+    }
     return true;
 }
 private bool readRecord(File file, out BandCandidate item) {
@@ -212,6 +256,7 @@ private struct RunSet {
         this.manifest = manifest;
         auto file = File(manifest, "wb");
         file.close();
+        trackScratchCreate();
     }
     void append(string path) {
         auto file = File(manifest, "ab");
@@ -228,69 +273,111 @@ private struct RunSet {
         return cast(string) bytes;
     }
 }
-private void flushRun(ref BandCandidate[] batch, ref RunSet runs, string delegate() fresh) {
+private void removeScratch(string path) {
+    remove(path);
+    trackScratchRemove();
+}
+private string mergePaths(const(string)[] paths, string delegate() fresh) {
+    enforce(paths.length > 0 && paths.length <= fanIn,
+        "corpus runner: merge fan-in outside bound");
+    auto output = fresh();
+    auto writer = File(output, "wb");
+    trackOpen();
+    trackScratchCreate();
+    File[] readers;
+    BandCandidate[] heads;
+    bool[] present;
+    scope(exit) {
+        foreach (ref reader; readers) { reader.close(); trackClose(); }
+        writer.close();
+        trackClose();
+    }
+    foreach (path; paths) {
+        readers ~= File(path, "rb");
+        trackOpen();
+        BandCandidate item;
+        present ~= readRecord(readers[$ - 1], item);
+        heads ~= item;
+    }
+    while (true) {
+        size_t minimum = size_t.max;
+        foreach (i, active; present)
+            if (active && (minimum == size_t.max ||
+                    bandCandidateLess(heads[i], heads[minimum])))
+                minimum = i;
+        if (minimum == size_t.max) break;
+        writeFrame(writer, encodeCandidate(heads[minimum]));
+        present[minimum] = readRecord(readers[minimum], heads[minimum]);
+    }
+    return output;
+}
+
+/// Incremental leveled compaction: at most `fanIn - 1` complete runs remain
+/// at each level while ingestion continues, so peak scratch artifact count
+/// grows logarithmically rather than once per input batch.
+private struct RunAccumulator {
+    string[][] levels;
+    string delegate() fresh;
+
+    void add(string path, size_t level = 0) {
+        while (levels.length <= level) levels ~= null;
+        levels[level] ~= path;
+        if (levels[level].length < fanIn) return;
+        auto inputs = levels[level];
+        levels[level] = null;
+        auto merged = mergePaths(inputs, fresh);
+        foreach (input; inputs) removeScratch(input);
+        add(merged, level + 1);
+    }
+
+    RunSet finish() {
+        auto runs = RunSet(fresh());
+        foreach (level; levels)
+            foreach (path; level) runs.append(path);
+        return runs;
+    }
+}
+
+private void flushRun(ref BandCandidate[] batch, ref RunAccumulator runs) {
     batch.sort!((a, b) => bandCandidateLess(a, b));
-    auto path = fresh();
+    auto path = runs.fresh();
     auto file = File(path, "wb");
     trackOpen();
-    scope(exit) { file.close(); trackClose(); }
+    trackScratchCreate();
+    bool closed;
+    scope(exit) if (!closed) { file.close(); trackClose(); }
     foreach (item; batch) writeFrame(file, encodeCandidate(item));
-    runs.append(path);
+    // A leveled add may immediately merge this run, so publish all buffered
+    // bytes before making its path visible to the accumulator.
+    file.close();
+    trackClose();
+    closed = true;
+    runs.add(path);
     batch.length = 0;
 }
+
 private RunSet mergeRuns(RunSet runs, string delegate() fresh) {
     while (runs.count > 1) {
         auto next = RunSet(fresh());
-        {
-            auto manifest = File(runs.manifest, "rb");
-            trackOpen();
-            scope(exit) { manifest.close(); trackClose(); }
-            for (size_t start; start < runs.count; start += fanIn) {
-                auto end = start + fanIn < runs.count ? start + fanIn : runs.count;
-                auto output = fresh();
-                auto writer = File(output, "wb");
-                trackOpen();
-                File[] readers;
-                BandCandidate[] heads;
-                bool[] present;
-                scope(exit) {
-                    foreach (ref reader; readers) { reader.close(); trackClose(); }
-                    writer.close();
-                    trackClose();
-                }
-                foreach (_; start .. end) {
-                    ubyte[] pathBytes;
-                    enforce(readFrame(manifest, pathBytes),
-                        "corpus runner: missing run in manifest");
-                    auto path = cast(string) pathBytes;
-                    readers ~= File(path, "rb");
-                    trackOpen();
-                    BandCandidate item;
-                    present ~= readRecord(readers[$ - 1], item);
-                    heads ~= item;
-                }
-                while (true) {
-                    size_t minimum = size_t.max;
-                    foreach (i, active; present)
-                        if (active && (minimum == size_t.max ||
-                                bandCandidateLess(heads[i], heads[minimum])))
-                            minimum = i;
-                    if (minimum == size_t.max) break;
-                    writeFrame(writer, encodeCandidate(heads[minimum]));
-                    present[minimum] = readRecord(readers[minimum], heads[minimum]);
-                }
-                next.append(output);
-            }
-        }
-        auto old = File(runs.manifest, "rb");
+        auto manifest = File(runs.manifest, "rb");
         trackOpen();
-        scope(exit) { old.close(); trackClose(); }
+        string[] oldPaths;
         while (true) {
-            ubyte[] path;
-            if (!readFrame(old, path)) break;
-            remove(cast(string) path);
+            string[] group;
+            foreach (_; 0 .. fanIn) {
+                ubyte[] pathBytes;
+                if (!readFrame(manifest, pathBytes)) break;
+                auto path = cast(string) pathBytes;
+                group ~= path;
+                oldPaths ~= path;
+            }
+            if (!group.length) break;
+            next.append(mergePaths(group, fresh));
         }
-        remove(runs.manifest);
+        manifest.close();
+        trackClose();
+        foreach (path; oldPaths) removeScratch(path);
+        removeScratch(runs.manifest);
         runs = next;
     }
     return runs;
@@ -299,6 +386,133 @@ private RunSet mergeRuns(RunSet runs, string delegate() fresh) {
 // ---------------------------------------------------------------------------
 // Sidecar discovery and decode.
 // ---------------------------------------------------------------------------
+
+private void dbNeed(bool okay, string operation) {
+    if (!okay) throw new Exception("corpus runner: scratch database " ~ operation);
+}
+
+private final class CorpusScratchDatabase {
+    sqlite3* handle;
+
+    this(string path) {
+        dbNeed(sqlite3_open_v2(path.toStringz, &handle, SQLITE_OPEN_READWRITE,
+            null) == SQLITE_OK, "open failed");
+        dbNeed(sqlite3_busy_timeout(handle, 0) == SQLITE_OK,
+            "busy timeout failed");
+        exec(`PRAGMA journal_mode=OFF;
+PRAGMA synchronous=OFF;
+PRAGMA temp_store=FILE;
+PRAGMA cache_size=-2048;
+PRAGMA locking_mode=EXCLUSIVE;
+CREATE TABLE documents(
+ document_id TEXT PRIMARY KEY,
+ sidecar_path TEXT NOT NULL UNIQUE
+) WITHOUT ROWID;
+CREATE TABLE links(
+ document_id TEXT PRIMARY KEY,
+ representative_id TEXT NOT NULL,
+ bucket_identity TEXT NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE decisions(
+ decision_path TEXT PRIMARY KEY
+) WITHOUT ROWID;`);
+    }
+
+    ~this() { close(); }
+
+    void close() {
+        if (handle is null) return;
+        auto prior = handle;
+        handle = null;
+        dbNeed(sqlite3_close(prior) == SQLITE_OK, "close failed");
+    }
+
+    void exec(string sql) {
+        dbNeed(sqlite3_exec(handle, sql.toStringz, null, null, null) == SQLITE_OK,
+            "statement failed");
+    }
+
+    sqlite3_stmt* prepare(string sql) {
+        sqlite3_stmt* statement;
+        dbNeed(sqlite3_prepare_v2(handle, sql.toStringz, -1, &statement, null) ==
+            SQLITE_OK, "prepare failed");
+        return statement;
+    }
+}
+
+private void bindText(sqlite3_stmt* statement, int index, string value) {
+    dbNeed(sqlite3_bind_text(statement, index, value.toStringz,
+        cast(int) value.length, cast(void*) -1) == SQLITE_OK, "bind failed");
+}
+
+private string columnText(sqlite3_stmt* statement, int index) {
+    auto value = sqlite3_column_text(statement, index);
+    dbNeed(value !is null, "invalid text result");
+    return value.fromStringz.idup;
+}
+
+private void resetStatement(sqlite3_stmt* statement) {
+    dbNeed(sqlite3_reset(statement) == SQLITE_OK, "reset failed");
+    dbNeed(sqlite3_clear_bindings(statement) == SQLITE_OK, "clear bindings failed");
+}
+
+private void insertDocument(sqlite3_stmt* statement, string documentId,
+        string sidecarPath) {
+    bindText(statement, 1, documentId);
+    bindText(statement, 2, sidecarPath);
+    dbNeed(sqlite3_step(statement) == SQLITE_DONE,
+        "duplicate document ID or sidecar path");
+    resetStatement(statement);
+}
+
+private void upsertLink(sqlite3_stmt* statement, string documentId,
+        string representativeId, string bucketIdentity) {
+    bindText(statement, 1, documentId);
+    bindText(statement, 2, representativeId);
+    bindText(statement, 3, bucketIdentity);
+    dbNeed(sqlite3_step(statement) == SQLITE_DONE, "link write failed");
+    resetStatement(statement);
+}
+
+private ubyte[] readBoundedSidecar(string path) {
+    auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
+    enforce(fd >= 0, "corpus runner: cannot open metadata sidecar safely");
+    scope(exit) close(fd);
+    stat_t info;
+    enforce(fstat(fd, &info) == 0 && S_ISREG(info.st_mode),
+        "corpus runner: metadata sidecar is not a regular file");
+    enforce(info.st_size >= 0 && cast(ulong) info.st_size <= maxTotalEncodedBytesV2,
+        "corpus runner: metadata sidecar exceeds wire-size limit");
+
+    auto bytes = new ubyte[maxTotalEncodedBytesV2 + 1];
+    size_t used;
+    while (used < bytes.length) {
+        auto count = posixRead(fd, bytes.ptr + used, bytes.length - used);
+        if (count < 0) {
+            if (errno == EINTR) continue;
+            throw new Exception("corpus runner: metadata sidecar read failed");
+        }
+        if (count == 0) break;
+        used += cast(size_t) count;
+    }
+    enforce(used <= maxTotalEncodedBytesV2,
+        "corpus runner: metadata sidecar exceeds wire-size limit");
+    return bytes[0 .. used];
+}
+
+private string metadataVersion(string wire) {
+    auto root = parseJSON(wire, 16,
+        JSONOptions.strictParsing | JSONOptions.preserveObjectOrder);
+    enforce(root.type == JSONType.object,
+        "corpus runner: metadata sidecar root must be an object");
+    foreach (ref member; root.orderedObject)
+        if (member.key == "version") {
+            enforce(member.value.type == JSONType.string,
+                "corpus runner: metadata sidecar version must be text");
+            return member.value.str;
+        }
+    throw new Exception("corpus runner: metadata sidecar missing version");
+}
 
 /// Recovers a sidecar's own bound `DocumentId` from its raw wire text
 /// WITHOUT first knowing it. `decodeDocumentMetadataV1`/`V2` both require a
@@ -320,10 +534,6 @@ private DocumentId recoverDocumentId(string wire) {
     return DocumentId.fromCanonicalText(wire[start .. end]);
 }
 
-private bool isV2Wire(string wire) {
-    return wire.indexOf(`"version":"document-metadata:v2"`) >= 0;
-}
-
 private struct DecodedCandidate {
     DocumentId documentId;
     bool hasKeys;
@@ -342,8 +552,12 @@ private struct DecodedCandidate {
 /// this module never recomputes a band value itself, so there is no
 /// algorithm-drift risk to check for.
 private bool tryDecodeCandidate(string path, out DecodedCandidate result) {
-    auto wire = cast(string) read(path);
-    if (!isV2Wire(wire)) return false;
+    auto bytes = readBoundedSidecar(path);
+    auto wire = cast(string) bytes;
+    auto versionName = metadataVersion(wire);
+    if (versionName == "document-metadata:v1") return false;
+    enforce(versionName == "document-metadata:v2",
+        "corpus runner: unsupported metadata sidecar version: " ~ versionName);
     auto id = recoverDocumentId(wire);
     auto metadata = decodeDocumentMetadataV2(id, wire);
     foreach (section; metadata.structuredSections) {
@@ -370,65 +584,78 @@ private struct PruneOptions {
 /// identity. Every field written here is internally constructed (a
 /// canonical hex `DocumentId.text`, or `pruneBucketIdentity`'s own fixed
 /// `band=N,key=HEX` shape) and therefore never needs JSON escaping.
-private void writeDecisionSidecar(string sidecarPath, CorpusStageDecision decision) {
+private string decisionPathFor(string sidecarPath) {
     auto base = baseName(sidecarPath);
     enforce(base.endsWith(documentMetadataPublishSuffixV1),
         "corpus runner: unexpected sidecar file name: " ~ base);
     auto stem = base[0 .. $ - documentMetadataPublishSuffixV1.length];
-    auto decisionPath = buildPath(dirName(sidecarPath),
+    return buildPath(dirName(sidecarPath),
         stem ~ pruneNearDuplicatesDecisionSuffixV1);
+}
+
+private string writeDecisionSidecar(string sidecarPath, CorpusStageDecision decision) {
+    auto decisionPath = decisionPathFor(sidecarPath);
     auto json = `{"schema":"` ~ pruneNearDuplicatesDecisionSchemaV1 ~
         `","removed_document_id":"` ~ decision.documentId.text ~
         `","representative_id":"` ~ decision.representativeId.text ~
         `","bucket_identity":"` ~ decision.bucketIdentity ~ `"}` ~ "\n";
-    write(decisionPath, json);
-}
-
-private struct BucketLink {
-    string documentId;
-    string representativeId;
-    string bucketIdentity;
+    auto content = new Content([
+        ContentPiece.own(cast(const(ubyte)[]) json)
+    ]);
+    writeAtomicPieces(decisionPath, content.pieces());
+    return decisionPath;
 }
 
 /// The actual `prune-near-duplicates` driver. Deterministic regardless of
-/// filesystem directory-entry order (sidecar paths are sorted before any
-/// processing -- directory enumeration order is never guaranteed stable
-/// across platforms, mirroring `similarity_buckets.d`'s own "canonicalize
-/// shard order by source path" discipline) and regardless of which order
-/// documents happen to be decoded in (see this module's own
-/// order-permutation unittest below).
+/// filesystem directory-entry order: candidates are externally sorted by
+/// band and document identity before grouping, links are reconciled by a
+/// total document ranking, and decisions are emitted in document-ID order.
 private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink sink,
         PruneOptions options) {
     enforce(options.bucketCap > 0, "prune-near-duplicates: bucket-cap must be positive");
-    enforce(sidecarRoot.length != 0 && exists(sidecarRoot),
+    enforce(sidecarRoot.length != 0 && exists(sidecarRoot) && isDir(sidecarRoot) &&
+            !isSymlink(sidecarRoot),
         "prune-near-duplicates: sidecar root does not exist: " ~ sidecarRoot);
 
-    string[] paths;
-    foreach (entry; dirEntries(sidecarRoot, SpanMode.depth))
-        if (entry.isFile && entry.name.endsWith(documentMetadataPublishSuffixV1))
-            paths ~= entry.name;
-    paths.sort();
-
-    auto scratch = buildPath(sidecarRoot, ".prune-near-duplicates-" ~ randomUUID.toString);
+    auto scratch = buildPath(tempDir(), "scrubbed-prune-near-duplicates-" ~
+        randomUUID.toString);
     mkdir(scratch);
+    setAttributes(scratch, 448); // 0700: scratch is private to this process.
+    CorpusScratchDatabase db;
     scope(exit) {
+        if (db !is null) db.close();
         foreach (entry; dirEntries(scratch, SpanMode.shallow)) remove(entry.name);
         rmdir(scratch);
+        version (unittest) scratchArtifactsCurrent = 0;
     }
     size_t serial;
     string fresh() { return buildPath(scratch, (serial++).to!string ~ ".run"); }
 
-    auto runs = RunSet(fresh());
-    BandCandidate[] batch;
-    string[string] sidecarPathOf; // documentId text -> its sidecar file's own path.
+    auto databasePath = buildPath(scratch, "state.sqlite3");
+    auto databaseFd = open(databasePath.toStringz,
+        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 384);
+    enforce(databaseFd >= 0, "corpus runner: cannot create scratch database");
+    enforce(close(databaseFd) == 0, "corpus runner: cannot close scratch database");
+    trackScratchCreate();
+    db = new CorpusScratchDatabase(databasePath);
 
-    foreach (path; paths) {
+    RunAccumulator accumulator;
+    accumulator.fresh = &fresh;
+    BandCandidate[] batch;
+    auto addDocument = db.prepare("INSERT INTO documents VALUES(?1,?2)");
+    scope(exit) sqlite3_finalize(addDocument);
+    db.exec("BEGIN");
+    foreach (entry; dirEntries(sidecarRoot, SpanMode.depth, false)) {
+        enforce(!entry.isSymlink,
+            "prune-near-duplicates: symlink inside sidecar root: " ~ entry.name);
+        if (entry.isDir) continue;
+        enforce(entry.isFile,
+            "prune-near-duplicates: non-regular entry inside sidecar root: " ~ entry.name);
+        if (!entry.name.endsWith(documentMetadataPublishSuffixV1)) continue;
         DecodedCandidate decoded;
-        if (!tryDecodeCandidate(path, decoded)) continue;
+        if (!tryDecodeCandidate(entry.name, decoded)) continue;
         auto idText = decoded.documentId.text;
-        enforce((idText in sidecarPathOf) is null,
-            "prune-near-duplicates: document ID claimed by more than one sidecar: " ~ idText);
-        sidecarPathOf[idText] = path;
+        insertDocument(addDocument, idText, entry.name);
         // A document whose signature never received real content
         // (hasKeys == false) is excluded here -- never a spurious bucket
         // candidate, matching similarity_buckets.d's own explode().
@@ -437,16 +664,24 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
             batch ~= BandCandidate(idText, bandIndex, decoded.bands[bandIndex], decoded.lanes,
                 decoded.contentLength);
             trackBatch(batch.length);
-            if (batch.length == runRecords) flushRun(batch, runs, &fresh);
+            if (batch.length == runRecords) flushRun(batch, accumulator);
         }
     }
-    if (batch.length) flushRun(batch, runs, &fresh);
+    db.exec("COMMIT");
+    if (batch.length) flushRun(batch, accumulator);
+    auto runs = accumulator.finish();
     if (runs.count) runs = mergeRuns(runs, &fresh);
 
     // Single sequential scan: one already-capped (bandIndex, bandKeyValue)
     // bucket in memory at a time -- never a structure sized by corpus
     // document count.
-    BucketLink[] rawLinks;
+    auto addLink = db.prepare(`INSERT INTO links VALUES(?1,?2,?3)
+ON CONFLICT(document_id) DO UPDATE SET
+ representative_id=excluded.representative_id,
+ bucket_identity=excluded.bucket_identity
+WHERE excluded.representative_id < links.representative_id`);
+    scope(exit) sqlite3_finalize(addLink);
+    db.exec("BEGIN");
     if (runs.count) {
         auto sorted = File(runs.firstPath(), "rb");
         trackOpen();
@@ -457,7 +692,6 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
             auto bandIndex = item.bandIndex;
             auto bandKeyValue = item.bandKeyValue;
             NearDedupCandidate[] members;
-            members.reserve(options.bucketCap);
             size_t groupSize;
             while (hasItem && item.bandIndex == bandIndex && item.bandKeyValue == bandKeyValue) {
                 if (groupSize < options.bucketCap) {
@@ -467,19 +701,23 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
                     signature.hasKeys = true;
                     signature.lanes = item.lanes;
                     members ~= NearDedupCandidate(false, 0, bandIndex, bandKeyValue,
-                        groupSize >= options.bucketCap, signature, item.contentLength);
+                        false, signature, item.contentLength);
+                    trackBucket(members.length);
                 }
                 ++groupSize;
                 hasItem = readRecord(sorted, item);
             }
+            if (groupSize > options.bucketCap)
+                foreach (ref member; members) member.overflowed = true;
             if (members.length >= 2) {
                 auto identity = pruneBucketIdentity(bandIndex, bandKeyValue);
                 foreach (link; nearDuplicateLinksInBucket(members, options.policy))
-                    rawLinks ~= BucketLink(link.documentId.text, link.representativeId.text,
-                        identity);
+                    upsertLink(addLink, link.documentId.text,
+                        link.representativeId.text, identity);
             }
         }
     }
+    db.exec("COMMIT");
 
     // Cross-bucket conflict resolution: a document's signature can explode
     // into up to `similarityBands` independent band rows and land in more
@@ -494,39 +732,63 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
     // document is the one belonging to its winning direct link (before
     // chain resolution), giving the mandatory decision sidecar a concrete,
     // real grouping to name.
-    string[string] representativeOf;
-    string[string] bucketIdentityOfDocument;
-    foreach (link; rawLinks) {
-        auto existing = link.documentId in representativeOf;
-        if (existing is null || link.representativeId < *existing) {
-            representativeOf[link.documentId] = link.representativeId;
-            bucketIdentityOfDocument[link.documentId] = link.bucketIdentity;
+    while (true) {
+        db.exec(`UPDATE links SET representative_id=(
+ SELECT parent.representative_id FROM links AS parent
+ WHERE parent.document_id=links.representative_id)
+WHERE EXISTS(
+ SELECT 1 FROM links AS parent
+ WHERE parent.document_id=links.representative_id)`);
+        if (sqlite3_changes(db.handle) == 0) {
+            break;
         }
-    }
-    auto resolved = representativeOf.dup;
-    foreach (documentId; resolved.keys) {
-        auto root = resolved[documentId];
-        size_t hops;
-        while (auto next = root in resolved) {
-            root = *next;
-            ++hops;
-            enforce(hops <= resolved.length,
-                "prune-near-duplicates: representative chain did not terminate -- " ~
-                "PruningPolicy's per-document ranking must be a fixed, " ~
-                "document-intrinsic total order");
-        }
-        resolved[documentId] = root;
     }
 
-    auto documentIds = resolved.keys;
-    documentIds.sort();
-    foreach (documentId; documentIds) {
-        auto representativeId = resolved[documentId];
+    auto addDecision = db.prepare("INSERT INTO decisions VALUES(?1)");
+    scope(exit) sqlite3_finalize(addDecision);
+    auto decisions = db.prepare(`SELECT links.document_id,
+ links.representative_id,links.bucket_identity,documents.sidecar_path
+FROM links JOIN documents USING(document_id)
+ORDER BY links.document_id`);
+    scope(exit) sqlite3_finalize(decisions);
+    int decisionStep;
+    while ((decisionStep = sqlite3_step(decisions)) == SQLITE_ROW) {
+        auto documentId = columnText(decisions, 0);
+        auto representativeId = columnText(decisions, 1);
+        auto bucketIdentity = columnText(decisions, 2);
+        auto sidecarPath = columnText(decisions, 3);
         auto decision = CorpusStageDecision(DocumentId.fromCanonicalText(documentId),
             CorpusDecisionKind.prune, DocumentId.fromCanonicalText(representativeId),
-            bucketIdentityOfDocument[documentId]);
-        writeDecisionSidecar(sidecarPathOf[documentId], decision);
+            bucketIdentity);
+        auto decisionPath = writeDecisionSidecar(sidecarPath, decision);
+        bindText(addDecision, 1, decisionPath);
+        dbNeed(sqlite3_step(addDecision) == SQLITE_DONE,
+            "decision path write failed");
+        resetStatement(addDecision);
         sink(decision);
+    }
+    dbNeed(decisionStep == SQLITE_DONE, "decision scan failed");
+
+    // Reconcile derived decisions only after all current decisions were
+    // published successfully. Files from an earlier run whose documents no
+    // longer prune are removed; current files remain atomically replaced.
+    auto currentDecision = db.prepare(
+        "SELECT 1 FROM decisions WHERE decision_path=?1");
+    scope(exit) sqlite3_finalize(currentDecision);
+    foreach (entry; dirEntries(sidecarRoot, SpanMode.depth, false)) {
+        enforce(!entry.isSymlink,
+            "prune-near-duplicates: symlink inside sidecar root: " ~ entry.name);
+        if (entry.isDir) continue;
+        enforce(entry.isFile,
+            "prune-near-duplicates: non-regular entry inside sidecar root: " ~ entry.name);
+        if (!entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1)) continue;
+        bindText(currentDecision, 1, entry.name);
+        auto currentStep = sqlite3_step(currentDecision);
+        dbNeed(currentStep == SQLITE_ROW || currentStep == SQLITE_DONE,
+            "decision reconciliation scan failed");
+        auto isCurrent = currentStep == SQLITE_ROW;
+        resetStatement(currentDecision);
+        if (!isCurrent) remove(entry.name);
     }
 }
 
@@ -672,7 +934,8 @@ unittest {
 
     writeFixtureSidecar(root, "alpha", "A completely unrelated first sentence about gardening techniques today.");
     writeFixtureSidecar(root, "beta", "A totally different second sentence concerning astronomy and telescopes.");
-    writeFixtureSidecar(root, "short", "ab"); // hasKeys == false
+    writeFixtureSidecar(root, "short-one", "ab"); // hasKeys == false
+    writeFixtureSidecar(root, "short-two", "cd"); // identical zero lanes
 
     auto decisions = runFixture(root);
     assert(decisions.length == 0);
@@ -682,6 +945,8 @@ unittest {
 // registered factory: the longer document survives as representative even
 // when its ID sorts later.
 unittest {
+    import stages.registry : StageOption;
+
     auto root = freshRoot("keep-longest");
     scope(exit) rmdirRecurse(root);
 
@@ -698,8 +963,10 @@ unittest {
     writeFixtureSidecar(root, firstById, text, 10);
     writeFixtureSidecar(root, laterById, text, 500);
 
-    auto options = PruneOptions(defaultPruneBucketCap, PruningPolicy.keepLongest);
-    auto decisions = runFixture(root, options);
+    StageOptions selected = ["policy": StageOption.text("keep-longest")];
+    auto run = factory(selected);
+    CorpusStageDecision[] decisions;
+    run(root, (CorpusStageDecision decision) { decisions ~= decision; });
     assert(decisions.length == 1);
     assert(decisions[0].representativeId == fixtureId(laterById));
     assert(decisions[0].documentId == fixtureId(firstById));
@@ -708,10 +975,9 @@ unittest {
 // Order-invariance proof (issue #564's own explicit acceptance criterion):
 // the SAME three real document identities (identical `name` parameters, so
 // identical `DocumentId`s), stored under deliberately different
-// subdirectory prefixes in two separate roots so their full sidecar paths
-// -- and therefore `runPruneNearDuplicates`'s own internal `paths.sort()`
-// processing order -- come out reversed between the two roots, still
-// produce byte-for-byte identical decisions either way. (Per-bucket
+// subdirectory prefixes in two separate roots so their filesystem walk
+// order comes out reversed between the two roots, still produce byte-for-
+// byte identical decisions either way. (Per-bucket
 // representative selection is already proven order-invariant by
 // `domain.near_dedup_decision`'s own "chain" unittest, reused completely
 // unmodified here; this test instead exercises this module's own
@@ -752,21 +1018,24 @@ unittest {
     auto decisionsA = runFixture(rootA);
     auto decisionsB = runFixture(rootB);
     assert(decisionsA.length == 2 && decisionsB.length == 2);
+    assert(decisionsA == decisionsB,
+        "ordered full decisions must be identical regardless of walk order");
 
-    auto idsA = [decisionsA[0].documentId, decisionsA[1].documentId];
-    auto idsB = [decisionsB[0].documentId, decisionsB[1].documentId];
-    idsA.sort!((a, b) => a.text < b.text);
-    idsB.sort!((a, b) => a.text < b.text);
-    assert(idsA == idsB, "the same pruned documents must result regardless of walk order");
-    assert(decisionsA[0].representativeId == decisionsA[1].representativeId);
-    assert(decisionsB[0].representativeId == decisionsB[1].representativeId);
-    assert(decisionsA[0].representativeId == decisionsB[0].representativeId,
-        "the same representative must be chosen regardless of walk order");
+    string[] decisionBytes(string root) {
+        string[] result;
+        foreach (entry; dirEntries(root, SpanMode.depth, false))
+            if (entry.isFile &&
+                    entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+                result ~= baseName(entry.name) ~ "\0" ~ cast(string) read(entry.name);
+        result.sort();
+        return result;
+    }
+    assert(decisionBytes(rootA) == decisionBytes(rootB),
+        "serialized decision sidecars must be byte-identical");
 }
 
-// Bucket-cap enforcement: peak in-memory batch size (under
-// `version (CorpusRunnerCheck)`) tracks the declared cap, never corpus size.
-version (CorpusRunnerCheck)
+// Resource enforcement: every live-memory/scratch ceiling tracks the fixed
+// batch, fan-in, and declared bucket cap rather than corpus size.
 unittest {
     resetCorpusRunnerObservations();
     auto root = freshRoot("bucket-cap");
@@ -781,6 +1050,80 @@ unittest {
     assert(decisions.length != 0);
     assert(corpusRunnerPeakBatchRecords() <= runRecords,
         "peak in-flight batch record count must track runRecords, not corpus size");
+    assert(corpusRunnerPeakBucketMembers() <= 4,
+        "peak bucket members must track bucket-cap, not corpus size");
+    assert(corpusRunnerPeakOpenScratchFiles() <= fanIn + 3,
+        "open scratch descriptors must track merge fan-in");
+    assert(corpusRunnerPeakScratchArtifacts() <= fanIn * 2,
+        "leveled compaction must keep scratch artifacts logarithmic");
+    assert(scratchArtifactsCurrent == 0,
+        "all scratch artifacts must be cleaned after the run");
+}
+
+// The configured cap limits actual bucket membership; it is never used as
+// an eager allocation size. A singleton therefore remains cheap even with
+// the largest representable direct-call cap.
+unittest {
+    auto root = freshRoot("lazy-cap");
+    scope(exit) rmdirRecurse(root);
+    writeFixtureSidecar(root, "only", "A keyed singleton document for cap testing.");
+    auto decisions = runFixture(root,
+        PruneOptions(size_t.max, PruningPolicy.keepFirst));
+    assert(decisions.length == 0);
+}
+
+// Successful reruns reconcile the derived decision set: when a former
+// duplicate becomes unique, its old prune verdict must disappear.
+unittest {
+    auto root = freshRoot("stale-decision");
+    scope(exit) rmdirRecurse(root);
+    auto sharedText = "Shared text long enough to produce a deterministic duplicate signature.";
+    writeFixtureSidecar(root, "first", sharedText);
+    writeFixtureSidecar(root, "second", sharedText);
+    assert(runFixture(root).length == 1);
+    string stale;
+    foreach (entry; dirEntries(root, SpanMode.shallow, false))
+        if (entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+            stale = entry.name;
+    assert(stale.length && exists(stale));
+
+    writeFixtureSidecar(root, "second",
+        "Now this document is unrelated to the first one and must not remain pruned.");
+    assert(runFixture(root).length == 0);
+    assert(!exists(stale));
+}
+
+// A sidecar is bounded before parsing/materialization, not after an
+// arbitrarily large read.
+unittest {
+    import std.exception : assertThrown;
+
+    auto root = freshRoot("oversize-sidecar");
+    scope(exit) rmdirRecurse(root);
+    auto oversized = new ubyte[maxTotalEncodedBytesV2 + 1];
+    write(buildPath(root, "oversized" ~ documentMetadataPublishSuffixV1), oversized);
+    assertThrown(runFixture(root));
+}
+
+version (Posix) unittest {
+    import std.exception : assertThrown;
+    import std.file : symlink;
+
+    auto root = freshRoot("symlink-boundary");
+    scope(exit) rmdirRecurse(root);
+    auto outside = freshRoot("symlink-outside");
+    scope(exit) rmdirRecurse(outside);
+    writeFixtureSidecar(outside, "outside-one",
+        "Shared outside text long enough for a signature.");
+    writeFixtureSidecar(outside, "outside-two",
+        "Shared outside text long enough for a signature.");
+    auto sentinel = buildPath(outside, "sentinel.txt");
+    write(sentinel, "must survive");
+    auto linkPath = buildPath(root, "escape");
+    symlink(outside, linkPath);
+    scope(exit) if (exists(linkPath) || isSymlink(linkPath)) remove(linkPath);
+    assertThrown(runFixture(root));
+    assert(cast(string) read(sentinel) == "must survive");
 }
 
 // Reachability: the stage is genuinely self-registering, and a run through

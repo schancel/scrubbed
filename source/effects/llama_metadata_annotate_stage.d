@@ -517,10 +517,23 @@ private ModelResolution resolveModelPath(string identifier) {
 // Stage wiring.
 // ---------------------------------------------------------------------------
 
+/// Bounds raw content to `llamaMetadataMaxPromptBytes` before it becomes the
+/// prompt. This stage does not require valid UTF-8 input (unlike, e.g.,
+/// `quality-ratios-annotate`), so this cannot guarantee the *whole* result is
+/// valid UTF-8 when `raw` itself already wasn't -- but it reuses
+/// `truncateUtf8`'s same boundary discipline so the truncation point itself
+/// never *introduces* a new split multi-byte sequence that valid UTF-8 input
+/// did not already have.
 private string boundedPromptText(const(ubyte)[] raw) pure {
-    immutable bound = raw.length > llamaMetadataMaxPromptBytes ?
+    immutable size_t bound = raw.length > llamaMetadataMaxPromptBytes ?
         llamaMetadataMaxPromptBytes : raw.length;
-    return cast(string) raw[0 .. bound].idup;
+    // Same back-off discipline as `truncateUtf8`, applied directly to `raw`
+    // rather than duplicating it in full first: only back off when `bound`
+    // actually truncates something (`cut < raw.length`), since `raw[cut]`
+    // would otherwise be out of bounds.
+    size_t cut = bound;
+    while (cut > 0 && cut < raw.length && (raw[cut] & 0xC0) == 0x80) --cut;
+    return cast(string) raw[0 .. cut].idup;
 }
 
 /// The single impure boundary this module's purity resolution (module doc
@@ -889,6 +902,37 @@ unittest {
         if (priorHfHub is null) environment.remove("HF_HUB_CACHE"); else environment["HF_HUB_CACHE"] = priorHfHub;
     }
     assert(llamaCacheRoot() == "/tmp/priority-check-llama-cache");
+}
+
+// `boundedPromptText` never splits a multi-byte UTF-8 codepoint at its
+// truncation boundary: a 3-byte character (e.g. U+00E9 'é' is 2 bytes; use a
+// 3-byte one, U+4E2D '中') placed exactly so the bound lands mid-character
+// must back off, not emit a truncated, invalid trailing sequence.
+unittest {
+    // "中" (3 bytes, 0xE4 0xB8 0xAD) + "ab" (2 bytes) repeated so the content
+    // is longer than `llamaMetadataMaxPromptBytes`, chosen so the exact bound
+    // (4096) lands on the character's second byte (a real continuation
+    // byte), not merely "not a multiple of the unit length" -- verified
+    // directly below, not assumed.
+    string unit = "中ab"; // 3 + 2 = 5 bytes per unit
+    string content;
+    while (content.length < llamaMetadataMaxPromptBytes + 5) content ~= unit;
+    assert((cast(ubyte) content[llamaMetadataMaxPromptBytes] & 0xC0) == 0x80,
+        "fixture must actually straddle a multi-byte character at the bound");
+
+    auto bounded = boundedPromptText(cast(const(ubyte)[]) content);
+    assert(bounded.length <= llamaMetadataMaxPromptBytes);
+    import std.utf : UTFException, validate;
+    import std.exception : assertNotThrown;
+    assertNotThrown!UTFException(validate(bounded),
+        "boundedPromptText must never split a multi-byte codepoint at its cut point");
+    // The content is exactly repeated whole units, so the only valid
+    // byte-accurate truncation is to the last whole `unit` boundary at or
+    // below `llamaMetadataMaxPromptBytes`.
+    immutable expectedWholeUnits = llamaMetadataMaxPromptBytes / unit.length;
+    assert(bounded.length == expectedWholeUnits * unit.length,
+        "expected the cut backed off to the last whole character boundary: got " ~
+        bounded.length.to!string);
 }
 
 // Reachability: `[llama-metadata-annotate, document-metadata-publish]`

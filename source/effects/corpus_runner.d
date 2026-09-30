@@ -121,6 +121,7 @@ version (unittest) {
     private __gshared string[] decodedDocumentOrder;
     private __gshared void delegate(string) rootAnchoredHook;
     private __gshared void delegate(string) postDiscoveryHook;
+    private __gshared void delegate() preDecisionCommitHook;
     size_t corpusRunnerPeakOpenScratchFiles() { return openScratchFilesPeak; }
     size_t corpusRunnerPeakBatchRecords() { return batchPeakRecords; }
     size_t corpusRunnerPeakBucketMembers() { return bucketPeakMembers; }
@@ -136,6 +137,7 @@ version (unittest) {
         decodedDocumentOrder = null;
         rootAnchoredHook = null;
         postDiscoveryHook = null;
+        preDecisionCommitHook = null;
     }
     private void trackOpen() {
         ++openScratchFilesCurrent;
@@ -843,6 +845,8 @@ private void verifyMetadataSidecarIdentity(CorpusScratchDatabase db, int rootFd,
 private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
         string relativeSidecarPath,
         string expectedDevice, string expectedInode,
+        string representativeSidecarPath,
+        string representativeDevice, string representativeInode,
         CorpusStageDecision decision) {
     auto relativeDecisionPath = decisionPathFor(relativeSidecarPath);
     auto json = `{"schema":"` ~ pruneNearDuplicatesDecisionSchemaV1 ~
@@ -855,6 +859,8 @@ private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
 
     auto metadataLeaf = baseName(relativeSidecarPath);
     verifyMetadataLeafAt(parentFd, metadataLeaf, expectedDevice, expectedInode);
+    verifyMetadataSidecarIdentity(db, rootFd, representativeSidecarPath,
+        representativeDevice, representativeInode);
 
     stat_t priorInfo;
     auto priorFd = openat(parentFd, leaf.toStringz, O_RDONLY | O_NOFOLLOW);
@@ -894,6 +900,15 @@ private string writeDecisionSidecar(CorpusScratchDatabase db, int rootFd,
     auto closing = fd;
     fd = -1;
     enforce(close(closing) == 0, "corpus runner: decision close failed");
+    version (unittest) {
+        if (preDecisionCommitHook !is null) {
+            auto hook = preDecisionCommitHook;
+            preDecisionCommitHook = null;
+            hook();
+        }
+    }
+    verifyMetadataSidecarIdentity(db, rootFd, representativeSidecarPath,
+        representativeDevice, representativeInode);
     verifyMetadataLeafAt(parentFd, metadataLeaf, expectedDevice, expectedInode);
     enforce(renameat(parentFd, temporary.toStringz,
         parentFd, leaf.toStringz) == 0,
@@ -1116,10 +1131,10 @@ ORDER BY links.document_id`);
         auto decision = CorpusStageDecision(DocumentId.fromCanonicalText(documentId),
             CorpusDecisionKind.prune, DocumentId.fromCanonicalText(representativeId),
             bucketIdentity);
-        verifyMetadataSidecarIdentity(db, sidecarRootFd,
-            representativeSidecarPath, representativeDevice, representativeInode);
         auto decisionPath = writeDecisionSidecar(db, sidecarRootFd,
-            relativeSidecarPath, expectedDevice, expectedInode, decision);
+            relativeSidecarPath, expectedDevice, expectedInode,
+            representativeSidecarPath, representativeDevice,
+            representativeInode, decision);
         bindText(addDecision, 1, decisionPath);
         dbNeed(sqlite3_step(addDecision) == SQLITE_DONE,
             "decision path write failed");
@@ -1579,7 +1594,9 @@ version (Posix) unittest {
     auto decision = CorpusStageDecision(removed, CorpusDecisionKind.prune,
         representative, "band=0,key=0000000000000000");
     assertThrown(writeDecisionSidecar(null, rootFd,
-        "nested/doc" ~ documentMetadataPublishSuffixV1, "", "", decision));
+        "nested/doc" ~ documentMetadataPublishSuffixV1, "", "",
+        "nested/representative" ~ documentMetadataPublishSuffixV1,
+        "", "", decision));
     assert(cast(string) read(outsideDecision) == "must survive");
     assertThrown(removeDecisionSidecar(null, rootFd,
         "nested/doc" ~ pruneNearDuplicatesDecisionSuffixV1));
@@ -1671,8 +1688,8 @@ version (Posix) unittest {
 }
 
 // Metadata leaves are identity-bound too. Replacing only the selected
-// representative after discovery cannot publish or emit a decision that names
-// metadata no longer present in the unchanged directory.
+// representative after its first per-decision check cannot publish or emit a
+// decision that names metadata no longer present in the unchanged directory.
 version (Posix) unittest {
     import std.exception : assertThrown;
     import std.file : mkdir, rename;
@@ -1693,7 +1710,7 @@ version (Posix) unittest {
     auto representativeStem = fixtureId("one").text < fixtureId("two").text ?
         "one" : "two";
 
-    postDiscoveryHook = (string) {
+    preDecisionCommitHook = () {
         rename(buildPath(replacements,
                 "replacement" ~ documentMetadataPublishSuffixV1),
             buildPath(nested,

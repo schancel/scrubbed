@@ -12,7 +12,20 @@ packaging/debian/build.sh . ./scrubbed /tmp/out
 ```
 
 Requires `ldc2`, `dpkg-deb`, `dpkg`, `dpkg-architecture` and `gzip` on
-`PATH` (a real Debian/Ubuntu host or container).
+`PATH` (a real Debian/Ubuntu host or container); `strip` (binutils) is
+used to strip the shipped binary if present, but its absence only prints
+a warning rather than failing the build.
+
+`build.sh` never needs root: `check.d create` generates the bash/fish
+completions against the release binary's real *build-time* path (its
+documented default when no fourth `completionsBinary` argument is given),
+and `build.sh` then rewrites that baked-in path to the real Debian install
+path (`/usr/bin/scrubbed`) in the copies it ships -- the same
+`@SCRUBBED_BIN@`-substitution pattern already used for
+`zsh-completion.in`. `release.yml` instead `sudo install`s the binary to
+its final path *before* calling `create` (fine on a disposable CI
+runner); `build.sh` avoids that because it may run on a real machine, not
+just CI.
 
 ## Runtime dependency evidence (not guessed)
 
@@ -54,6 +67,14 @@ PDFium and llama.cpp FFI modules
 (`source/effects/{pdfium,llama}_ffi.d`) are excluded from the Linux build
 entirely (`dub.json`'s `excludedSourceFiles-linux`) and never `dlopen()`
 anything on Linux; not a packaging concern here.
+
+## Stripped binary
+
+The release binary carries full debug symbols (`dub.json`'s
+`dflags: ["-g"]`) -- `build.sh` runs `strip --strip-unneeded` on the
+shipped copy before packaging, matching standard Debian practice and
+silencing lintian's `unstripped-binary-or-object`. Shrinks the packaged
+binary from ~28MB to ~8MB (verified on a real build).
 
 ## zsh completions: a real functional gap, worked around in packaging only
 

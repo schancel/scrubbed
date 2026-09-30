@@ -955,9 +955,32 @@ is useful, but it is not sufficient on its own.
       resolution (not literal-prefix matching) and dxml's own outright
       refusal of ill-formed XML rather than silent repair. Headers/footers/
       footnotes, fields, track changes, embedded objects, and legacy `.doc`
-      are explicit non-goals. Wiring either family's adapters into a
-      production extraction stage/CLI path, and OCR/image adapters, remain
-      open.
+      are explicit non-goals. A further #156 slice wires the OOXML walker
+      into the already-shipping v4 dispatch pipeline: `container.d` gained a
+      new `AdmittedZipV1.entryBytesV1` accessor that re-invokes the same
+      injected DEFLATE decompressor to produce an entry's bytes on read
+      (bounded by the already-charged expansion budget, no new bomb
+      surface), and `coreExtractorRegistryV1()` now registers an `ooxml-word`
+      extractor for `DetectionOutcomeV1.ooxmlWord`
+      (`source/extraction/ooxml_route.d`) that locates `word/document.xml`,
+      reads it via that accessor, walks it, and renders "good enough" plain
+      text. This is reachable today through the existing generic `--route`/
+      `--action` v4 CLI tokens, no new flag. **Known residual gap, found
+      during this slice and not yet resolved:** `extraction.refinement`'s
+      live call into `inspectZipContainerV1` (via
+      `composition.dispatch_executor`) still never injects a real
+      `ZipInflateV1` decompressor, so a genuinely DEFLATE-compressed
+      real-world `.docx` cannot yet reach the `ooxml-word` route through
+      `scrubbed run` end to end -- only a synthetic STORE-compressed fixture
+      is proven through the live CLI dispatch path today. Real-file DEFLATE
+      decompression correctness is separately, directly proven byte-for-byte
+      against the real system decompressor at the `container.d`/`effects`
+      layer (bypassing dispatch). Wiring a real decompressor into
+      `refinement.d`'s live call is out of this slice's approved scope
+      (`composition.dispatch_executor`/`dispatch_compiler` changes were
+      explicitly prohibited pending owner review) and needs its own
+      follow-up decision. PDF wiring into a production extraction stage/CLI
+      path, and OCR/image adapters, remain open.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

@@ -3809,6 +3809,114 @@ unittest {
     assert(runApp(v3Args) == 0);
 }
 
+unittest {
+    import std.file : rmdirRecurse, tempDir;
+
+    // End-to-end proof (issue #156's DOCX/OOXML wiring slice) that the new
+    // ooxml-word route is reachable through the real, already-shipping v4
+    // CLI dispatch surface -- scrubbed run --route ... --action ... -- via
+    // the actual compileDispatchJobV1/executor path this process runs
+    // (runApp below), not a bypassed unit call to the extractor directly.
+    //
+    // This fixture is deliberately STORE-compressed (method 0), not
+    // DEFLATE: it exists to prove route registration/selection/execution
+    // wiring, which is independent of compression method. A real Word/
+    // LibreOffice-produced DEFLATE-compressed docx's word/document.xml is
+    // separately, directly proven byte-for-byte against the real system
+    // decompressor in effects/zlib_ffi.d's own unittest (a real repo
+    // fixture, docx-training.docx) and in extraction/container.d's own
+    // DEFLATE-admission unit tests -- neither of those needs this process's
+    // dispatch surface, only the container/effects layer. As of this slice,
+    // extraction.refinement's live call into inspectZipContainerV1 (via
+    // composition.dispatch_executor) does not inject a real ZipInflateV1
+    // decompressor, so a genuinely DEFLATE-compressed docx cannot yet reach
+    // this same route through `scrubbed run` -- a real, separate gap this
+    // slice's contract did not cover and this test does not paper over
+    // (see this slice's PR description for the flagged follow-up).
+    ubyte[] buildStoreDocx(string documentXml) {
+        string[] names = ["[Content_Types].xml", "_rels/.rels", "word/document.xml"];
+        ubyte[][] datas = [cast(ubyte[]) "c".dup, cast(ubyte[]) "r".dup,
+            cast(ubyte[]) documentXml.dup];
+        ubyte[] bytes;
+        uint[] offsets;
+        void put16(ushort value) { bytes ~= cast(ubyte) value; bytes ~= cast(ubyte) (value >> 8); }
+        void put32(uint value) { foreach (shift; 0 .. 4) bytes ~= cast(ubyte) (value >> (8 * shift)); }
+        foreach (index, name; names) {
+            auto data = datas[index];
+            offsets ~= cast(uint) bytes.length;
+            put32(0x04034b50);
+            put16(20); put16(0); put16(0);
+            put16(0); put16(0);
+            put32(0);
+            put32(cast(uint) data.length); put32(cast(uint) data.length);
+            put16(cast(ushort) name.length); put16(0);
+            bytes ~= cast(const(ubyte)[]) name;
+            bytes ~= data;
+        }
+        auto centralOffset = cast(uint) bytes.length;
+        foreach (index, name; names) {
+            auto data = datas[index];
+            put32(0x02014b50);
+            put16(20); put16(20);
+            put16(0); put16(0);
+            put16(0); put16(0);
+            put32(0);
+            put32(cast(uint) data.length); put32(cast(uint) data.length);
+            put16(cast(ushort) name.length);
+            put16(0); put16(0);
+            put16(0); put16(0); put32(0);
+            put32(offsets[index]);
+            bytes ~= cast(const(ubyte)[]) name;
+        }
+        auto centralBytes = cast(uint) bytes.length - centralOffset;
+        put32(0x06054b50);
+        put16(0); put16(0);
+        put16(cast(ushort) names.length);
+        put16(cast(ushort) names.length);
+        put32(centralBytes);
+        put32(centralOffset);
+        put16(0);
+        return bytes;
+    }
+
+    auto root = buildPath(tempDir, "scrubbed-ooxml-cli-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdir(root);
+    auto input = buildPath(root, "input.docx");
+    enum documentXml =
+        `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` ~
+        `<w:body>` ~
+        `<w:p><w:r><w:t>First paragraph.</w:t></w:r></w:p>` ~
+        `<w:p><w:r><w:t>Second paragraph.</w:t></w:r></w:p>` ~
+        `</w:body></w:document>`;
+    write(input, buildStoreDocx(documentXml));
+
+    string[] ooxmlTokens = [
+        "--dispatch-option", "detector-prefix-bytes=4096",
+        "--dispatch-option", "detector-evidence-records=16",
+        "--dispatch-option", "detector-warnings=8",
+        "--dispatch-option", "container-max-physical-bytes=33554432",
+        "--dispatch-option", "container-max-expanded-bytes=134217728",
+        "--dispatch-option", "container-max-entries=2048",
+        "--dispatch-option", "container-max-depth=2",
+        "--dispatch-option", "container-max-ratio=100",
+        "--route", "ooxml=ooxml-word"
+    ];
+    foreach (outcome; ["unknown", "plain-text", "html", "pdf", "png",
+            "jpeg", "gif", "ambiguous", "malformed", "encrypted",
+            "unsupported", "generic-zip", "ooxml-word"]) {
+        auto selected = outcome == "ooxml-word" ? "route" : "reject";
+        auto target = selected == "route" ? "ooxml" : "policy";
+        ooxmlTokens ~= ["--action", outcome ~ "=" ~ selected ~ ":" ~ target];
+    }
+    ooxmlTokens ~= "--common";
+
+    auto output = buildPath(root, "output.txt");
+    assert(runApp(["scrubbed", "run", "--input", input, "--output", output,
+        "--threads", "1"] ~ ooxmlTokens) == 0);
+    assert(readText(output) == "First paragraph.\n\nSecond paragraph.");
+}
+
 // Model the late-traversal-fault boundary deterministically: one worker has
 // begun, another file is admitted but queued, then traversal discovers the
 // fault and cancels. The scheduler skips the queued callback by design.

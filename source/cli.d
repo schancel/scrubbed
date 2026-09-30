@@ -4021,6 +4021,183 @@ unittest {
         "TRAINING DOCX\n\nGAMMA THREE\n\nDELTA FOUR");
 }
 
+// Issue #156's PDF-wiring slice: real, end-to-end proof that the new
+// pdf-pdfium route is reachable through the real, already-shipping v4 CLI
+// dispatch surface (scrubbed run --route ... --route-option
+// pdfium-library=... via the actual compileDispatchJobV1/executor path,
+// not a bypassed unit call), against the real repo PDF fixtures --
+// including the real mandatory concurrency proof per the owner decision on
+// issue #156 (2026-09-30): a real Mutex (effects.pdfium_ffi
+// .LockedPdfiumLibraryV1) must genuinely serialize concurrent calls into
+// the one shared, process-lifetime PdfiumLibrary, proven here by real
+// concurrent scrubbed run invocations against two distinct real fixtures,
+// not just a fake-backend proof (see extraction/pdf_pdfium_route.d's own
+// dub-test-safe concurrency unittest for that layer's own proof).
+//
+// This codebase never vendors or fetches libpdfium.dylib (see
+// effects.pdfium_ffi's own module doc), so dub test cannot assume one is
+// present -- run this manually with SCRUBBED_TEST_PDFIUM_LIBRARY=<path to
+// a real, operator-supplied libpdfium.dylib> set, mirroring
+// effects.pdfium_ffi.d's own established "real-artifact proof lives
+// outside CI" convention (PdfiumLibrary.open's own two unittests
+// deliberately avoid needing the real artifact for the same reason).
+unittest {
+    import core.thread : Thread;
+    import std.conv : to;
+    import std.exception : collectException;
+    import std.file : copy, rmdirRecurse, tempDir;
+
+    auto pdfiumLibrary = environment.get("SCRUBBED_TEST_PDFIUM_LIBRARY", "");
+    if (pdfiumLibrary.length == 0) return;
+
+    enum trainingFixture = "experiments/document_adapters/fixtures/pdf-training.pdf";
+    enum layoutFixture = "experiments/document_adapters/fixtures/pdf-heldout-layout.pdf";
+    enum malformedFixture = "experiments/document_adapters/fixtures/pdf-malformed.pdf";
+    enum encryptedFixture = "experiments/pdfium_extract/fixtures/pdf-encrypted.pdf";
+    if (!exists(trainingFixture) || !exists(layoutFixture) ||
+            !exists(malformedFixture) || !exists(encryptedFixture)) return;
+
+    string[] pdfTokens(string routeOptionPath) {
+        string[] tokens = [
+            "--dispatch-option", "detector-prefix-bytes=4096",
+            "--dispatch-option", "detector-evidence-records=16",
+            "--dispatch-option", "detector-warnings=8",
+            "--dispatch-option", "container-max-physical-bytes=33554432",
+            "--dispatch-option", "container-max-expanded-bytes=134217728",
+            "--dispatch-option", "container-max-entries=2048",
+            "--dispatch-option", "container-max-depth=2",
+            "--dispatch-option", "container-max-ratio=100",
+            "--route", "pdf=pdf-pdfium",
+            "--route-option", "pdfium-library=text:" ~ routeOptionPath
+        ];
+        foreach (outcome; ["unknown", "plain-text", "html", "pdf", "png",
+                "jpeg", "gif", "ambiguous", "malformed", "encrypted",
+                "unsupported", "generic-zip", "ooxml-word"]) {
+            auto selected = outcome == "pdf" ? "route" : "reject";
+            auto target = selected == "route" ? "pdf" : "policy";
+            tokens ~= ["--action", outcome ~ "=" ~ selected ~ ":" ~ target];
+        }
+        tokens ~= "--common";
+        return tokens;
+    }
+
+    auto root = buildPath(tempDir, "scrubbed-pdfium-cli-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdir(root);
+
+    auto trainingInput = buildPath(root, "training.pdf");
+    copy(trainingFixture, trainingInput);
+    auto layoutInput = buildPath(root, "layout.pdf");
+    copy(layoutFixture, layoutInput);
+
+    // (1), (2) Real text extraction, through the live CLI dispatch path,
+    // against the pinned #67 ground-truth tokens -- the same bar #583's own
+    // DOCX end-to-end test set, extended here to PDF.
+    auto trainingOutput = buildPath(root, "training-output.txt");
+    assert(runApp(["scrubbed", "run", "--input", trainingInput,
+        "--output", trainingOutput, "--threads", "1"] ~
+        pdfTokens(pdfiumLibrary)) == 0);
+    auto trainingText = readText(trainingOutput);
+    foreach (token; ["TRAINING", "PDF", "ALPHA", "ONE", "BETA", "TWO"])
+        assert(trainingText.canFind(token),
+            "pdf-training.pdf extracted text missing pinned token '" ~
+            token ~ "': " ~ trainingText);
+
+    auto layoutOutput = buildPath(root, "layout-output.txt");
+    assert(runApp(["scrubbed", "run", "--input", layoutInput,
+        "--output", layoutOutput, "--threads", "1"] ~
+        pdfTokens(pdfiumLibrary)) == 0);
+    auto layoutText = readText(layoutOutput);
+    foreach (token; ["LAYOUT", "REPORT", "LEFT", "RIGHT", "FOOTER", "END"])
+        assert(layoutText.canFind(token),
+            "pdf-heldout-layout.pdf extracted text missing pinned token '" ~
+            token ~ "': " ~ layoutText);
+
+    // (3) Malformed PDF: fails closed with a distinct, faithful "malformed"
+    // reason -- not a crash, not silently empty/wrong text.
+    auto malformedInput = buildPath(root, "malformed.pdf");
+    copy(malformedFixture, malformedInput);
+    auto malformedOutput = buildPath(root, "malformed-output.txt");
+    auto malformedError = collectException!Exception(runApp(["scrubbed", "run",
+        "--input", malformedInput, "--output", malformedOutput,
+        "--threads", "1"] ~ pdfTokens(pdfiumLibrary)));
+    assert(malformedError !is null && malformedError.msg.canFind("malformed"),
+        "pdf-malformed.pdf must fail with a distinct 'malformed' reason: " ~
+        (malformedError is null ? "(no exception thrown)" : malformedError.msg));
+    assert(!exists(malformedOutput));
+
+    // (4) Encrypted PDF: fails closed with a distinct, faithful "encrypted"
+    // reason -- never conflated with the generic malformed outcome above.
+    // This is the acceptance bar the task itself calls out: a distinct,
+    // faithful `encrypted` outcome, not a generic failure.
+    auto encryptedInput = buildPath(root, "encrypted.pdf");
+    copy(encryptedFixture, encryptedInput);
+    auto encryptedOutput = buildPath(root, "encrypted-output.txt");
+    auto encryptedError = collectException!Exception(runApp(["scrubbed", "run",
+        "--input", encryptedInput, "--output", encryptedOutput,
+        "--threads", "1"] ~ pdfTokens(pdfiumLibrary)));
+    assert(encryptedError !is null && encryptedError.msg.canFind("encrypted") &&
+        !encryptedError.msg.canFind("malformed"),
+        "pdf-encrypted.pdf must fail with a distinct 'encrypted' reason, " ~
+        "never conflated with 'malformed': " ~
+        (encryptedError is null ? "(no exception thrown)" : encryptedError.msg));
+    assert(!exists(encryptedOutput));
+
+    // (5) A missing/invalid --route-option pdfium-library path fails closed
+    // at job-configuration time, before any document is processed -- a
+    // content-free diagnostic, distinct from the per-document failures
+    // above.
+    auto badLibraryOutput = buildPath(root, "bad-library-output.txt");
+    auto badLibraryError = collectException!Exception(runApp(["scrubbed", "run",
+        "--input", trainingInput, "--output", badLibraryOutput,
+        "--threads", "1"] ~
+        pdfTokens("/nonexistent/path/definitely-not-a-real-pdfium.dylib")));
+    assert(badLibraryError !is null &&
+        badLibraryError.msg.canFind("PDFium library failed to load"),
+        "a bad --route-option pdfium-library path must fail closed with a " ~
+        "content-free diagnostic before any document is processed: " ~
+        (badLibraryError is null ? "(no exception thrown)" : badLibraryError.msg));
+    assert(!exists(badLibraryOutput));
+
+    // (6) The mandatory concurrency proof (owner decision, issue #156,
+    // 2026-09-30): real, concurrent `scrubbed run` invocations -- two lanes,
+    // each repeatedly routing a *different* real fixture through the same
+    // installed PdfiumLibrary at the same time -- must never produce wrong
+    // or cross-contaminated text. A helper function (not a loop body
+    // declaring its own closure) hands each lane's `Thread` a genuine
+    // by-value parameter, avoiding the classic D loop-variable-capture
+    // hazard this same test file's own extraction/pdf_pdfium_route.d
+    // concurrency unittest had to work around.
+    enum concurrentRounds = 15;
+    bool[2] mismatched;
+    void runConcurrentLane(size_t lane, string fixtureInput,
+            const string[] expectedTokens) {
+        foreach (round; 0 .. concurrentRounds) {
+            auto laneOutput = buildPath(root, "concurrent-" ~ lane.to!string ~
+                "-" ~ round.to!string ~ ".txt");
+            auto code = runApp(["scrubbed", "run", "--input", fixtureInput,
+                "--output", laneOutput, "--threads", "1"] ~
+                pdfTokens(pdfiumLibrary));
+            if (code != 0) { mismatched[lane] = true; continue; }
+            auto text = readText(laneOutput);
+            foreach (token; expectedTokens)
+                if (!text.canFind(token)) mismatched[lane] = true;
+        }
+    }
+    Thread makeLane(size_t lane, string fixtureInput, const string[] expectedTokens) {
+        return new Thread({ runConcurrentLane(lane, fixtureInput, expectedTokens); });
+    }
+    auto laneA = makeLane(0, trainingInput,
+        ["TRAINING", "PDF", "ALPHA", "ONE", "BETA", "TWO"]);
+    auto laneB = makeLane(1, layoutInput,
+        ["LAYOUT", "REPORT", "LEFT", "RIGHT", "FOOTER", "END"]);
+    laneA.start; laneB.start; laneA.join; laneB.join;
+    assert(!mismatched[0] && !mismatched[1],
+        "concurrent real PDFium extraction (two lanes, distinct fixtures, " ~
+        "shared PdfiumLibrary) produced wrong or cross-contaminated text " ~
+        "-- the real Mutex in LockedPdfiumLibraryV1 must prevent this");
+}
+
 // Model the late-traversal-fault boundary deterministically: one worker has
 // begun, another file is admitted but queued, then traversal discovers the
 // fault and cancels. The scheduler skips the queued callback by design.

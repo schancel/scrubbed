@@ -469,12 +469,28 @@ final class LockedPdfiumLibraryV1 {
 }
 
 /// See `extraction.pdf_pdfium_route`'s own doc comment, "The injection"
-/// section, for why this is a module-global slot rather than a closure, and
-/// why that is safe under this codebase's real usage (set once, on the CLI
-/// main thread, before any worker thread exists). Not `__gshared`, for the
-/// same single-threaded-access reason `extraction.pdf_pdfium_route`'s own
-/// mirroring slot is not.
-private LockedPdfiumLibraryV1 activePdfiumLibraryV1;
+/// section, for why this is a module-global slot rather than a closure.
+/// Unlike that module's own mirroring slot (`installedPdfBytesExtractV1`,
+/// which is written and read exactly once, both on the CLI's main thread,
+/// before any worker thread exists -- safe as ordinary, thread-local
+/// storage), this slot is genuinely different: it is written once, on the
+/// main thread, but then *read* on every single `pdfBytesExtractV1` call --
+/// which happens once per PDF document, on whichever `--threads` worker
+/// thread actually processes that document
+/// (`composition.dispatch_executor.d`'s own concurrent-dispatch test proves
+/// this is real, not hypothetical). Ordinary D module storage is
+/// thread-local, so an ordinary variable here would leave every worker
+/// thread other than the one that happened to call `installPdfiumLibraryV1`
+/// looking at its own, never-written, `null` copy -- a real bug, not a
+/// theoretical one, caught during this slice's own implementation. Marked
+/// `__gshared` so every thread reads the one real, main-thread-installed
+/// value. Safe as a write-once(-on-the-main-thread)-then-read-many pattern:
+/// the write happens-before any worker thread is spawned (`core.thread
+/// .Thread.start`'s own creation is itself a synchronization point), and
+/// the pointer itself is never reassigned afterward -- only the
+/// `LockedPdfiumLibraryV1` it refers to is ever mutated post-install, and
+/// that mutation is exactly what its own internal `Mutex` protects.
+private __gshared LockedPdfiumLibraryV1 activePdfiumLibraryV1;
 
 /// `dlopen()`s/`dlsym()`s the operator-supplied PDFium library at
 /// `libraryPath` (via `PdfiumLibrary.open`, unchanged), wraps it with a

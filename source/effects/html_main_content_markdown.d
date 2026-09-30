@@ -50,7 +50,8 @@ module effects.html_main_content_markdown;
 
 import effects.html_main_content : extractMainContent, HtmlMainContentOutputLimit,
     MainContentCandidate, MainContentStatus;
-import effects.html_markdown : clean, HtmlMarkdownOutputLimit, renderMarkdownFrom;
+import effects.html_markdown : clean, HtmlMarkdownOutputLimit,
+    MarkdownRenderOptions, renderMarkdownFrom;
 import effects.html_tree : HtmlTree;
 import std.array : split;
 
@@ -95,12 +96,22 @@ private string structuredDataMarkdown(string text) pure {
 /// Runs `extractMainContent` completely unchanged -- same scoring, same
 /// selection, same abstention rules -- and, on either success status,
 /// renders `.markdown`: for `selected`, the winning subtree (and only that
-/// subtree) via `renderMarkdownFrom(tree, result.node)`; for
+/// subtree) via `renderMarkdownFrom(tree, result.node, options)`; for
 /// `selectedStructuredData`, `selection.text` reflowed as flat Markdown
-/// paragraphs (`structuredDataMarkdown`, above). A genuine abstention
-/// carries no `.markdown` (same reasoning as `MainContentResult.text` being
-/// empty on abstention: there is no recovered content to render).
-MainContentMarkdownResult extractMainContentMarkdown(const ref HtmlTree tree) pure {
+/// paragraphs (`structuredDataMarkdown`, above -- `options` does not apply
+/// there: JSON-LD recovery has no DOM inline elements to format, link, or
+/// embed an image from in the first place, only flat escaped text, exactly
+/// as before issue #477). A genuine abstention carries no `.markdown` (same
+/// reasoning as `MainContentResult.text` being empty on abstention: there is
+/// no recovered content to render).
+///
+/// Issue #477: `options` defaults to `MarkdownRenderOptions.init` (full
+/// inline structural fidelity), matching `renderMarkdownFrom`'s own default
+/// -- byte-identical to before this parameter existed for every caller that
+/// does not pass one, so #411's 20/20 corpus result and #438's
+/// JSON-LD-fallback path are unaffected by this addition.
+MainContentMarkdownResult extractMainContentMarkdown(const ref HtmlTree tree,
+        const MarkdownRenderOptions options = MarkdownRenderOptions.init) pure {
     auto selection = extractMainContent(tree);
     MainContentMarkdownResult result;
     result.status = selection.status;
@@ -109,7 +120,7 @@ MainContentMarkdownResult extractMainContentMarkdown(const ref HtmlTree tree) pu
     result.candidatesOverflow = selection.candidatesOverflow;
     result.candidates = selection.candidates;
     if (selection.status == MainContentStatus.selected)
-        result.markdown = renderMarkdownFrom(tree, selection.node);
+        result.markdown = renderMarkdownFrom(tree, selection.node, options);
     else if (selection.status == MainContentStatus.selectedStructuredData)
         result.markdown = structuredDataMarkdown(selection.text);
     return result;
@@ -273,4 +284,74 @@ unittest {
     assert(twoStepResult.markdown.canFind("Second step body text here now\\."));
     assert(twoStepResult.markdown.canFind("\n\n"),
         "two recovered JSON-LD bodies must render as two separate paragraphs");
+}
+
+// Issue #477: `extractMainContentMarkdown`'s new `options` parameter reaches
+// the `selected` path's `renderMarkdownFrom` call unchanged, at the
+// selection-combinator level (not just `html_markdown.d`'s own renderer
+// unit tests). Fixture is the same two real pronats.de excerpts
+// (`html_markdown.d`'s own "formatting" and "links and images" fixtures --
+// see those unittests' doc comments for exact provenance), concatenated
+// inside one `<article>` alongside a `<nav>` boilerplate sibling, mirroring
+// this module's own pre-existing `headingThenParagraph`-style fixture shape
+// (real content standing in for the article body, a `<nav>` standing in for
+// chrome that selection must not leak).
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string formattingExcerpt =
+        "<h3><strong>Arbeit ist wichtig für das Selbstwertgefühl</strong></h3>" ~
+        "<p>Wenn wir von „kritischer Wertschätzung“ der Arbeit der " ~
+        "Kinder sprechen, achten wir auf beides: auf die problematische Form und die " ~
+        "Bedingungen der Arbeit, die der körperlichen und geistigen Entwicklung " ~
+        "entgegenstehen, aber eben auch auf die Möglichkeiten, die sich aus der " ~
+        "Arbeitserfahrung für Kinder ergeben.</p>";
+    string linkImageExcerpt =
+        `<div class="image">` ~
+        `<a href="/assets/Uploads/burkina-appleseller.jpg" title="Äpfelverkäuferin in Burkina Faso - (c) Philip Meade" class="gallery">` ~
+        `<img src="/assets/Uploads/burkina-appleseller.jpg" alt="Äpfelverkäuferin in Burkina Faso - (c) Philip Meade" />` ~
+        `</a></div>` ~
+        `<p class="imageDescription">Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese ` ~
+        `Äpfelverkäuferin aus Burkina Faso. Die Arbeit kann ihnen Möglichkeiten zur ` ~
+        `gesellschaftlichen Teilhabe eröffnen.</p>`;
+    string page = "<nav>Home About Contact</nav><article>" ~
+        formattingExcerpt ~ linkImageExcerpt ~ "</article>";
+
+    auto outcome = parseHtml(cast(const(ubyte)[]) page);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto defaulted = extractMainContentMarkdown(tree);
+    auto explicitOn = extractMainContentMarkdown(tree, MarkdownRenderOptions(true, true, true));
+    auto allOff = extractMainContentMarkdown(tree, MarkdownRenderOptions(false, false, false));
+
+    assert(defaulted.status == MainContentStatus.selected);
+    assert(defaulted.status == explicitOn.status && defaulted.status == allOff.status);
+    assert(defaulted.node == explicitOn.node && defaulted.node == allOff.node,
+        "options must change rendering only, never which subtree selection picks");
+
+    // Default (omitted `options`) is byte-identical to explicitly requesting
+    // full fidelity -- this is the #411/#438 non-regression guarantee at
+    // this combinator's own public entry point, not just `html_markdown.d`'s.
+    assert(defaulted.markdown == explicitOn.markdown);
+    assert(defaulted.markdown.canFind("**Arbeit ist wichtig"),
+        "default must preserve real ** emphasis around the page's own heading");
+    assert(defaulted.markdown.canFind(
+        "[![Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade]" ~
+        "(</assets/Uploads/burkina-appleseller.jpg>)]" ~
+        "(</assets/Uploads/burkina-appleseller.jpg>)"),
+        "default must preserve the real linked thumbnail as nested image-inside-link syntax");
+
+    assert(!allOff.markdown.canFind("**"), "formatting=false must drop ** at this level too");
+    assert(!allOff.markdown.canFind("]("), "links=false must drop [...](...)  at this level too");
+    assert(!allOff.markdown.canFind("!["), "images=false must drop ![...](...)  at this level too");
+    assert(allOff.markdown.canFind("Arbeit ist wichtig für das Selbstwertgefühl"),
+        "all-off must keep the real heading text itself, only strip the ** markers");
+    assert(allOff.markdown.canFind("Äpfelverkäuferin in Burkina Faso"),
+        "all-off must keep the real image's alt text as plain text");
+
+    // Same invariant #438's own fixture above already proves for this
+    // module: chrome never leaks into selected content, options or not.
+    assert(!defaulted.markdown.canFind("Home") && !allOff.markdown.canFind("Home"));
 }

@@ -301,11 +301,42 @@ private size_t longestRun(string value, char marker) pure {
     return longest;
 }
 
+/// Independently-toggleable inline structural fidelity for a Markdown
+/// render: whether inline emphasis (bold/italic), link targets, and image
+/// sources are preserved as real Markdown syntax, or flattened to their
+/// plain inline text. Issue #477 (trafilatura-parity `--formatting`/
+/// `--links`/`--images`).
+///
+/// All three default `true`. Unlike trafilatura -- where these flags opt a
+/// stripped-by-default renderer INTO richness -- this renderer's bold/
+/// italic emphasis, real `[text](<href>)` links, and `![alt](<src>)` image
+/// syntax were already unconditional before this struct existed (#431/
+/// #438's already-shipped behavior). Flipping the *default* to strip them
+/// would regress #411's 20/20 corpus result and #438's JSON-LD-fallback
+/// Markdown path, which issue #477 explicitly disallows regressing. So each
+/// field here opts an already-rich-by-default renderer OUT of one dimension
+/// of that richness for a caller who explicitly wants plainer output --
+/// same three independent dimensions trafilatura exposes, just the opposite
+/// polarity. See this module's doc comment / the issue #477 PR description
+/// for the fuller tradeoff.
+///
+/// Disabling a dimension degrades to exactly the same fallback rendering
+/// this module already used for an *unsafe* link/image target: an anchor's
+/// visible text with no `[...](...)` wrapping, an image's alt text with no
+/// `![...](...)` wrapping. Disabling `formatting` renders `strong`/`b`/
+/// `em`/`i` as a plain (unwrapped) generic element, the same as any other
+/// unrecognized inline element already unwraps.
+struct MarkdownRenderOptions {
+    bool formatting = true;
+    bool links = true;
+    bool images = true;
+}
+
 private void renderChildren(const ref HtmlTree tree, size_t parent,
-    ref Writer writer, size_t depth) pure;
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure;
 
 private void renderNode(const ref HtmlTree tree, size_t index,
-    ref Writer writer, size_t depth) pure {
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure {
     if (depth > 128) throw new HtmlMarkdownOutputLimit;
     ref const node = tree.nodes[index];
     if (node.kind == HtmlNodeKind.text) {
@@ -318,14 +349,18 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     if (name == "br") { writer.put("  \n"); return; }
     if (name == "img") {
         auto alt = clean(attribute(node, "alt"));
-        auto src = attribute(node, "src");
-        if (safeTarget(src)) {
-            writer.put("![");
-            writer.put(alt);
-            writer.put("](<");
-            writer.put(markdownTarget(src));
-            writer.put(">)");
-        } else writer.putText(alt);
+        if (options.images) {
+            auto src = attribute(node, "src");
+            if (safeTarget(src)) {
+                writer.put("![");
+                writer.put(alt);
+                writer.put("](<");
+                writer.put(markdownTarget(src));
+                writer.put(">)");
+                return;
+            }
+        }
+        writer.putText(alt);
         return;
     }
     if (name == "pre") {
@@ -369,12 +404,12 @@ private void renderNode(const ref HtmlTree tree, size_t index,
              child = endOf(tree, child)) {
             if (tree.nodes[child].parentIndex != index) continue;
             if (tree.nodes[child].name != "li") {
-                renderNode(tree, child, writer, depth + 1); continue;
+                renderNode(tree, child, writer, depth + 1, options); continue;
             }
             if (!first) writer.put("\n");
             first = false;
             Writer item;
-            renderChildren(tree, child, item, depth + 1);
+            renderChildren(tree, child, item, depth + 1, options);
             item.trim();
             size_t prefixLength = 2;
             if (name == "ul") writer.put("- ");
@@ -399,7 +434,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     }
     if (name == "blockquote") {
         Writer quote;
-        renderChildren(tree, index, quote, depth + 1);
+        renderChildren(tree, index, quote, depth + 1, options);
         quote.trim();
         writer.block();
         writer.put("> ");
@@ -424,7 +459,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             if (!first) writer.put(" | ");
             first = false;
             Writer cell;
-            renderChildren(tree, child, cell, depth + 1);
+            renderChildren(tree, child, cell, depth + 1, options);
             writer.put(singleLine(cell.finish()));
         }
         writer.block();
@@ -439,9 +474,10 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         foreach (_; 0 .. name[1] - '0') writer.put("#");
         writer.put(" ");
     }
-    if (name == "strong" || name == "b" || name == "em" || name == "i") {
+    if (options.formatting &&
+        (name == "strong" || name == "b" || name == "em" || name == "i")) {
         Writer emphasized;
-        renderChildren(tree, index, emphasized, depth + 1);
+        renderChildren(tree, index, emphasized, depth + 1, options);
         auto content = emphasized.finish();
         size_t left, right = content.length;
         while (left < right && content[left] == ' ') ++left;
@@ -457,35 +493,40 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         if (block) writer.block();
         return;
     }
-    if (name == "a") {
+    if (name == "a" && options.links) {
         auto href = attribute(node, "href");
         const safe = safeTarget(href);
         if (safe) writer.put("[");
-        renderChildren(tree, index, writer, depth + 1);
+        renderChildren(tree, index, writer, depth + 1, options);
         if (safe) {
             writer.put("](<");
             writer.put(markdownTarget(href));
             writer.put(">)");
         }
-    } else renderChildren(tree, index, writer, depth + 1);
+    } else renderChildren(tree, index, writer, depth + 1, options);
     if (block) writer.block();
 }
 
 private void renderChildren(const ref HtmlTree tree, size_t parent,
-    ref Writer writer, size_t depth) pure {
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure {
     for (size_t child = parent + 1; child < endOf(tree, parent);
          child = endOf(tree, child))
         if (tree.nodes[child].parentIndex == parent)
-            renderNode(tree, child, writer, depth);
+            renderNode(tree, child, writer, depth, options);
 }
 
 /// Convert a bounded selected tree without reading HTML or publishing output.
-/// An output-cap exception exposes no partial string to the caller.
-string renderMarkdown(const ref HtmlTree tree) pure {
+/// An output-cap exception exposes no partial string to the caller. `options`
+/// defaults to full inline structural fidelity (formatting/links/images all
+/// preserved) -- the renderer's already-shipped #431/#438 behavior, so every
+/// existing caller that does not pass `options` sees byte-identical output
+/// to before issue #477.
+string renderMarkdown(const ref HtmlTree tree,
+    const MarkdownRenderOptions options = MarkdownRenderOptions.init) pure {
     Writer writer;
     for (size_t i; i < tree.nodes.length; i = endOf(tree, i)) {
         if (tree.nodes[i].parentIndex == size_t.max)
-            renderNode(tree, i, writer, 0);
+            renderNode(tree, i, writer, 0, options);
     }
     writer.trim();
     if (writer.bytes.length) writer.put("\n");
@@ -497,9 +538,13 @@ string renderMarkdown(const ref HtmlTree tree) pure {
 /// node instead of iterating every root -- lets a caller (e.g. main-content
 /// selection) render Markdown for just one selected subtree. `renderNode`
 /// itself is untouched; this only changes which node(s) it is invoked from.
-string renderMarkdownFrom(const ref HtmlTree tree, size_t startIndex) pure {
+/// `options` defaults exactly as `renderMarkdown`'s does (see its own doc
+/// comment) -- byte-identical to before issue #477 for every caller that
+/// does not pass one.
+string renderMarkdownFrom(const ref HtmlTree tree, size_t startIndex,
+    const MarkdownRenderOptions options = MarkdownRenderOptions.init) pure {
     Writer writer;
-    renderNode(tree, startIndex, writer, 0);
+    renderNode(tree, startIndex, writer, 0, options);
     writer.trim();
     if (writer.bytes.length) writer.put("\n");
     // Do not retain the growable buffer's spare capacity in the public result.
@@ -559,4 +604,182 @@ unittest {
     import std.algorithm.searching : canFind;
     assert(!scoped.canFind("Home"));
     assert(!scoped.canFind("Copyright"));
+}
+
+// Issue #477 regression: before `MarkdownRenderOptions` existed, neither
+// `renderMarkdown` nor `renderMarkdownFrom` took a second argument at all --
+// a call passing one (as every test below does) is a compile error on base
+// commit 608196a, not merely a wrong-output failure. That is this ticket's
+// fail-on-base/pass-on-tip proof for genuinely new API surface: there is no
+// prior behavior to regress-test against, only a capability to prove exists
+// and behaves correctly.
+//
+// Default-param proof: omitting `options` entirely must resolve to exactly
+// `MarkdownRenderOptions.init` (all three fields `true`) -- byte-identical
+// to #431/#438's already-shipped unconditional formatting/links/images
+// behavior, so every existing caller (`html_markdown_stage.d`,
+// `html_main_content_markdown.d`, both `*_stage.d` modules) that has never
+// heard of this option struct keeps seeing exactly the output it always
+// has. This is what makes issue #477's "default (off) must not regress
+// #411/#438" requirement true by construction here: the *default* stays
+// full fidelity; a caller opts a field *out*, the reverse of trafilatura's
+// own opt-*in* polarity (see `MarkdownRenderOptions`'s doc comment for why).
+unittest {
+    import effects.html_tree : parseHtml;
+
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<p><strong>bold</strong> and <a href=\"http://example.com/x\">a link</a> " ~
+        "and <img src=\"http://example.com/y.png\" alt=\"alt text\"></p>"));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto omitted = renderMarkdown(tree);
+    auto explicitDefault = renderMarkdown(tree, MarkdownRenderOptions.init);
+    MarkdownRenderOptions allTrue = MarkdownRenderOptions(true, true, true);
+    auto explicitAllTrue = renderMarkdown(tree, allTrue);
+    assert(omitted == explicitDefault);
+    assert(omitted == explicitAllTrue);
+    assert(omitted == "**bold** and [a link](<http://example.com/x>) and " ~
+        "![alt text](<http://example.com/y.png>)\n");
+}
+
+// Issue #477 real fixture 1/3 -- formatting (`--formatting`). Verbatim
+// excerpt (heading text plus the following paragraph, trimmed at a
+// sentence boundary) from pronats.de's "Kindheit und Arbeit" page, resolved
+// via `experiments/html_main_content/fetch_held_out.sh --emit-corpus-dir`
+// from adbar/trafilatura's own pinned real-page eval corpus (fixture 18 of
+// the 20-URL held-out selection) -- real third-party page content, test-
+// only and never shipped in the release binary (see this repository's
+// existing `docs/html-parser-evaluation.md`-adjacent test-fixture policy:
+// real third-party content is acceptable for non-shipped test/comparator
+// fixtures). The `<strong>` wraps a genuine page heading, not authored
+// text, proving `formatting` against real inline markup rather than a
+// synthetic bold tag.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    string html =
+        "<h3><strong>Arbeit ist wichtig für das Selbstwertgefühl</strong></h3>" ~
+        "<p>Wenn wir von „kritischer Wertschätzung“ der Arbeit der " ~
+        "Kinder sprechen, achten wir auf beides: auf die problematische Form und die " ~
+        "Bedingungen der Arbeit, die der körperlichen und geistigen Entwicklung " ~
+        "entgegenstehen, aber eben auch auf die Möglichkeiten, die sich aus der " ~
+        "Arbeitserfahrung für Kinder ergeben.</p>";
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto formattingOn = renderMarkdown(tree, MarkdownRenderOptions(true, true, true));
+    assert(formattingOn ==
+        "### **Arbeit ist wichtig für das Selbstwertgefühl**\n\n" ~
+        "Wenn wir von „kritischer Wertschätzung“ der Arbeit der Kinder sprechen, " ~
+        "achten wir auf beides: auf die problematische Form und die Bedingungen " ~
+        "der Arbeit, die der körperlichen und geistigen Entwicklung entgegenstehen, " ~
+        "aber eben auch auf die Möglichkeiten, die sich aus der Arbeitserfahrung " ~
+        "für Kinder ergeben\\.\n",
+        "formatting=true must preserve real ** emphasis around the page's own heading text");
+
+    auto formattingOff = renderMarkdown(tree, MarkdownRenderOptions(false, true, true));
+    assert(formattingOff ==
+        "### Arbeit ist wichtig für das Selbstwertgefühl\n\n" ~
+        "Wenn wir von „kritischer Wertschätzung“ der Arbeit der Kinder sprechen, " ~
+        "achten wir auf beides: auf die problematische Form und die Bedingungen " ~
+        "der Arbeit, die der körperlichen und geistigen Entwicklung entgegenstehen, " ~
+        "aber eben auch auf die Möglichkeiten, die sich aus der Arbeitserfahrung " ~
+        "für Kinder ergeben\\.\n",
+        "formatting=false must drop ** but keep the same heading structure and text");
+}
+
+// Issue #477 real fixtures 2/3 and 3/3 -- links and images
+// (`--links`/`--images`), combined in one fixture because the real page
+// itself combines them: a genuine linked thumbnail (`<a>` wrapping `<img>`,
+// pronats.de's real "gallery" widget markup) plus, deliberately alongside
+// it, a real `javascript:` "Print" link from the very same page --
+// proving the pre-existing unsafe-target fallback (already covered by
+// `safeTarget`'s own tests) composes correctly with these new independent
+// toggles rather than being bypassed by them. Same corpus/provenance and
+// test-only-fixture policy as the formatting fixture above.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    string html =
+        `<div class="image">` ~
+        `<a href="/assets/Uploads/burkina-appleseller.jpg" title="Äpfelverkäuferin in Burkina Faso - (c) Philip Meade" class="gallery">` ~
+        `<img src="/assets/Uploads/burkina-appleseller.jpg" alt="Äpfelverkäuferin in Burkina Faso - (c) Philip Meade" />` ~
+        `</a></div>` ~
+        `<p class="imageDescription">Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese ` ~
+        `Äpfelverkäuferin aus Burkina Faso. Die Arbeit kann ihnen Möglichkeiten zur ` ~
+        `gesellschaftlichen Teilhabe eröffnen.</p>` ~
+        `<div class="printButton" id="printButton"><a href="javascript:window.print()">Print</a></div>`;
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto allOn = renderMarkdown(tree, MarkdownRenderOptions(true, true, true));
+    assert(allOn ==
+        "[![Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade]" ~
+        "(</assets/Uploads/burkina-appleseller.jpg>)]" ~
+        "(</assets/Uploads/burkina-appleseller.jpg>)\n\n" ~
+        "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
+        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Print\n",
+        "links=true, images=true must render the real linked thumbnail as " ~
+        "nested Markdown image-inside-link syntax");
+
+    auto linksOff = renderMarkdown(tree, MarkdownRenderOptions(true, false, true));
+    assert(linksOff ==
+        "![Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade]" ~
+        "(</assets/Uploads/burkina-appleseller.jpg>)\n\n" ~
+        "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
+        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Print\n",
+        "links=false must drop only the outer [...](...) wrapping -- the real " ~
+        "image markup underneath is untouched, and the already-unsafe " ~
+        "javascript: \"Print\" link (never wrapped even with links=true) is " ~
+        "unaffected either way");
+
+    auto imagesOff = renderMarkdown(tree, MarkdownRenderOptions(true, true, false));
+    assert(imagesOff ==
+        "[Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade]" ~
+        "(</assets/Uploads/burkina-appleseller.jpg>)\n\n" ~
+        "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
+        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Print\n",
+        "images=false must fall back to the real alt text (the same fallback " ~
+        "already used for an unsafe image target) while the outer real link " ~
+        "still wraps it");
+
+    auto allOff = renderMarkdown(tree, MarkdownRenderOptions(false, false, false));
+    assert(allOff ==
+        "Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade\n\n" ~
+        "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
+        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Print\n",
+        "all three off must reduce to plain real text with no Markdown link or " ~
+        "image syntax anywhere");
+}
+
+// Issue #477: a second, independent real `links` fixture with a genuine
+// absolute http(s) target (rather than the relative target above), from a
+// different held-out page (archiv.krimiblog.de, fixture 01 of the same
+// pinned corpus) -- proves the toggle against `safeTarget`'s other allowed
+// scheme shape, not just a relative reference.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    auto outcome = parseHtml(cast(const(ubyte)[])
+        `<p><a href="http://www.cjdmusic.com/">Christopher Dallman</a></p>`);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto linksOn = renderMarkdown(tree, MarkdownRenderOptions(true, true, true));
+    assert(linksOn == "[Christopher Dallman](<http://www.cjdmusic.com/>)\n");
+
+    auto linksOff = renderMarkdown(tree, MarkdownRenderOptions(true, false, true));
+    assert(linksOff == "Christopher Dallman\n",
+        "links=false must fall back to the real anchor's visible text only");
 }

@@ -17,6 +17,25 @@ its byte reservation, but is no longer queued. The scheduler exposes current
 and peak counters for each ceiling, and a blocking join waits for every
 submitted task before returning.
 
+## A different resource axis: corpus-level stages (issue #564)
+
+The ceilings above bound *file-admission concurrency* during phase 1 (the
+per-document streaming pass) -- concurrent-open-file and queued-task
+admission while parsing. A corpus-level stage's own external-sort/
+bucket-cap ceiling (`effects.corpus_runner`'s `prune-near-duplicates`, the
+first consumer) bounds a **different** resource axis entirely --
+external-sort batch size and in-memory bucket-group size during phase 2's
+corpus-wide comparison -- and is deliberately not folded into this table:
+conflating "how many files can be admitted at once" with "how large a
+similarity bucket can grow before spilling to disk" would be a real error,
+not just an inconsistency. It is configured per composition, through the
+same `--stage-option KEY=TYPE:VALUE` syntax every other stage's own options
+already use (e.g. `--stage-option bucket-cap=integer:8192` on the
+`prune-near-duplicates` stage token), rather than a new top-level CLI flag
+in this table -- see `docs/corpus-stages.md` for the full two-phase
+composition model this belongs to. Default: 4096, matching
+`effects.similarity_buckets.defaultSimilarityBucketCap`.
+
 ## File-size admission
 
 - A file larger than the byte ceiling is a **run-fatal resource/admission

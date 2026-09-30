@@ -107,6 +107,13 @@ public:
         requireCompiled;
         return compiledStages;
     }
+    /// Rebinds the execution-equivalent stage list to an enclosing canonical
+    /// composition identity. The two-phase compiler uses this after removing
+    /// corpus stages from the per-document execution half.
+    CompiledJob withIdentity(string identity) {
+        requireCompiled;
+        return CompiledJob(identity, compiledStages.dup);
+    }
 }
 
 private StageOption stageOption(const ref JobOption value) {

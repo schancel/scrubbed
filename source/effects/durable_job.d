@@ -7,6 +7,7 @@ module effects.durable_job;
 
 import domain.document : DocumentId;
 import core.atomic : atomicLoad, atomicStore;
+import core.stdc.errno : errno, EINTR;
 import core.sync.mutex : Mutex;
 import core.time : MonoTime;
 import effects.atomic_piece_sink : OutputPolicyViolation;
@@ -147,6 +148,25 @@ private bool pathIsSymlink(string path) {
     return lstat(path.toStringz, &info) == 0 && S_ISLNK(info.st_mode);
 }
 
+// `pread` is a blocking syscall on a regular file descriptor; under
+// `app.d`'s process-wide SIGINT handler (installed with `sa_flags=0`, no
+// `SA_RESTART` -- see docs/signal-handling.md), a signal landing mid-`pread`
+// returns -1/EINTR instead of transparently resuming. Without this retry, a
+// SIGINT racing this header preflight would surface as a spurious
+// "unstable-database-header" failure instead of either completing the read
+// or being caught by cooperative cancellation elsewhere. Same shape as the
+// EINTR retry already used for raw `read`/`write` in
+// effects.document_shards, effects.mix_export, effects.local_manifest,
+// effects.http_fetch, effects.metadata_route_cli, effects.warc_file, and
+// source/cli.d.
+private ptrdiff_t preadRetry(int fd, void* buffer, size_t count, long offset) {
+    for (;;) {
+        auto amount = pread(fd, buffer, count, offset);
+        if (amount < 0 && errno == EINTR) continue;
+        return amount;
+    }
+}
+
 private bool needsInodeAliasScan(string path) {
     stat_t info;
     need(lstat(path.toStringz, &info) == 0, "destination-stat-failed");
@@ -163,8 +183,8 @@ private void preflightDatabaseHeader(string path, DurableKind kind) {
     ubyte[100] first, second;
     need(fstat(fd, &before) == 0 && before.st_size >= first.length,
         "invalid-database-header");
-    need(pread(fd, first.ptr, first.length, 0) == first.length &&
-        pread(fd, second.ptr, second.length, 0) == second.length &&
+    need(preadRetry(fd, first.ptr, first.length, 0) == first.length &&
+        preadRetry(fd, second.ptr, second.length, 0) == second.length &&
         fstat(fd, &after) == 0 && first[] == second[] &&
         before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
         before.st_size == after.st_size, "unstable-database-header");

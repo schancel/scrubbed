@@ -820,3 +820,107 @@ unittest {
     StageOptions negativeCap = ["bucket-cap": StageOption.integer(-5)];
     assertThrown(factory(negativeCap));
 }
+
+// Cross-validation against issue #480's original, shard-sourced
+// implementation (issue #564's own explicit acceptance criterion): this
+// module's sidecar-sourced path and `effects.near_dedup_overlay`'s
+// shard-sourced path must reach the SAME pruning decisions on identical
+// input content -- run both paths and diff decisions, not just eyeball one
+// path's output.
+//
+// Both paths reuse `domain.near_dedup_decision.nearDuplicateLinksInBucket`
+// completely unmodified, so agreement here is really a proof that this
+// module's own sidecar-sourced grouping (external sort + band recompute +
+// cross-bucket reconciliation) reaches the same bucket membership and the
+// same cross-bucket resolution as `similarity_buckets.d` +
+// `near_dedup_overlay.d`'s shard-sourced grouping, for the same real
+// signatures.
+//
+// Scope note: `near_dedup_overlay.d`'s main annotation overlay is sourced
+// from `finalLinks` (segment-level AND document-level candidates), while
+// this module is document-level only by design (issue #564's explicit
+// scope). For a fixture document short enough to fit in exactly one
+// segment (under `similaritySegmentBytes` = 4096 bytes -- true of every
+// fixture below), `domain.similarity_signature.similaritySignatures`
+// computes that one segment's signature over the exact same byte range as
+// the document-level signature, so the two are numerically identical and
+// `finalLinks`/`finalPruningLinks` provably coincide for these fixtures
+// specifically -- reading the plain annotation overlay is a valid stand-in
+// for the document-level-only decision set here, not in general.
+unittest {
+    import domain.document : SourceLocator;
+    import domain.shard_format : AnnotationRecord, ShardDocument;
+    import effects.document_shards : DocumentShardWriter, OverlayReader;
+    import effects.near_dedup_overlay : NearDedupShard, writeNearDedupOverlays;
+    import effects.similarity_buckets : SimilarityBatchEntry, SimilarityShard,
+        similarityBatchReader, writeSimilarityBucketOverlays;
+    import domain.document : OutputName;
+    import std.file : mkdirRecurse, rmdirRecurse, tempDir;
+
+    auto root = buildPath(tempDir(), "scrubbed-corpus-runner-crossval-" ~ randomUUID().toString());
+    mkdirRecurse(root);
+    scope(exit) rmdirRecurse(root);
+
+    auto sharedText =
+        "Cross-validation fixture sentence long enough for real MinHash shingles in this test.";
+    auto uniqueText =
+        "An entirely unrelated sentence about something different for this crossval fixture only.";
+
+    ShardDocument[] documents = [
+        ShardDocument(SourceLocator("corpus-runner-crossval", "source", "alpha"),
+            OutputName("alpha"), cast(ubyte[]) sharedText.dup),
+        ShardDocument(SourceLocator("corpus-runner-crossval", "source", "beta"),
+            OutputName("beta"), cast(ubyte[]) sharedText.dup),
+        ShardDocument(SourceLocator("corpus-runner-crossval", "source", "gamma"),
+            OutputName("gamma"), cast(ubyte[]) uniqueText.dup),
+    ];
+
+    // --- Path A: the shard-sourced path (issue #480's original implementation). ---
+    auto sourcePath = buildPath(root, "source.shard");
+    {
+        auto sorted = documents.dup;
+        sorted.sort!((a, b) => a.id.text < b.id.text);
+        auto writer = new DocumentShardWriter(sourcePath);
+        foreach (record; sorted) writer.append(record);
+        writer.publish();
+    }
+    SimilarityBatchEntry[] entries;
+    foreach (record; documents)
+        entries ~= SimilarityBatchEntry(
+            similaritySignatures(record.id, record.content), record.contentDigest, 0);
+    auto bucketsPath = buildPath(root, "buckets.overlay");
+    writeSimilarityBucketOverlays([SimilarityShard(sourcePath, bucketsPath)],
+        similarityBatchReader(entries));
+    auto annotationPath = buildPath(root, "annotation.overlay");
+    writeNearDedupOverlays([NearDedupShard(sourcePath, bucketsPath, annotationPath)]);
+
+    string[string] shardPathDecisions; // documentId -> representativeId
+    {
+        auto reader = new OverlayReader(annotationPath);
+        scope(exit) reader.closeReader();
+        AnnotationRecord record;
+        while (reader.next(record))
+            shardPathDecisions[record.documentId] = cast(string) record.fields[2].value;
+    }
+    assert(shardPathDecisions.length != 0, "fixture bug: shard path found no near-duplicates");
+
+    // --- Path B: the sidecar-sourced path (this module). ---
+    auto sidecarRoot = buildPath(root, "sidecar");
+    mkdirRecurse(sidecarRoot);
+    foreach (record; documents) {
+        auto signatures = similaritySignatures(record.id, record.content);
+        auto payload = encodeSimilaritySignaturePayload(signatures.document, record.content.length);
+        auto metadata = DocumentMetadata.empty()
+            .withStructuredSection(similaritySignatureSectionIdV1, payload.idup,
+                "similarity-signature-annotate");
+        auto wire = encodeDocumentMetadataV2(record.id, metadata);
+        write(buildPath(sidecarRoot, record.id.text ~ documentMetadataPublishSuffixV1), wire);
+    }
+    string[string] sidecarPathDecisions; // documentId -> representativeId
+    runPruneNearDuplicates(sidecarRoot, (CorpusStageDecision decision) {
+        sidecarPathDecisions[decision.documentId.text] = decision.representativeId.text;
+    }, PruneOptions.init);
+
+    assert(sidecarPathDecisions == shardPathDecisions,
+        "sidecar-sourced and shard-sourced paths must reach the same pruning decisions");
+}

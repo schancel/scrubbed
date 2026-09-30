@@ -13,6 +13,7 @@ import std.file : exists, remove;
 import std.json : parseJSON;
 import std.string : fromStringz, toStringz;
 import std.uuid : UUID;
+import core.stdc.errno : errno, EINTR;
 import core.sys.posix.fcntl : open, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW;
 import core.sys.posix.sys.stat : fstat, stat_t, S_ISREG;
 import core.sys.posix.unistd : read, write, close, fsync;
@@ -169,13 +170,100 @@ private void preflightOutstandingSort(sqlite3* db) {
     need(sqlite3_step(groups) == SQLITE_DONE, "public-prefix-group-limit");
 }
 
+// `read`/`write` are blocking syscalls; under `app.d`'s process-wide SIGINT
+// handler (installed with `sa_flags=0`, no `SA_RESTART` -- see
+// docs/signal-handling.md), a signal landing mid-syscall returns -1/EINTR
+// instead of transparently resuming. Every other module in this codebase
+// that does raw POSIX read/write (effects.document_shards,
+// effects.mix_export, effects.local_manifest, effects.http_fetch,
+// effects.metadata_route_cli, effects.warc_file, source/cli.d) retries on
+// EINTR; this module previously did not, so a SIGINT racing an
+// `--error-journal` export/verify would surface as a spurious
+// "write-failed"/"read-failed"/"invalid-sidecar" error instead of either
+// completing the I/O or being caught by cooperative cancellation elsewhere.
+//
+// `syscall` defaults to the real `read`/`write` and is only ever overridden
+// by the unittests below, which inject a fake that returns -1/EINTR a
+// controlled number of times -- this codebase has no precedent for real
+// signal-delivery tests (see #469), so this dependency-injection seam
+// covers the retry logic deterministically instead.
+private ptrdiff_t readRetry(int fd, void* buffer, size_t count,
+        typeof(&read) syscall = &read) {
+    for (;;) {
+        auto amount = syscall(fd, buffer, count);
+        if (amount < 0 && errno == EINTR) continue;
+        return amount;
+    }
+}
+
+private ptrdiff_t writeRetry(int fd, const(void)* buffer, size_t count,
+        typeof(&write) syscall = &write) {
+    for (;;) {
+        auto amount = syscall(fd, buffer, count);
+        if (amount < 0 && errno == EINTR) continue;
+        return amount;
+    }
+}
+
 private void writeAll(int fd, const(ubyte)[] bytes) {
     while (bytes.length) {
-        auto n = write(fd, bytes.ptr, bytes.length);
+        auto n = writeRetry(fd, bytes.ptr, bytes.length);
         need(n > 0, "write-failed");
         bytes = bytes[n .. $];
     }
 }
+
+version (unittest) {
+    private int errorExportFakeCallsRemaining;
+
+    private extern(C) ptrdiff_t errorExportFakeReadEintrThenOk(int fd, void* buffer, size_t count) nothrow @nogc {
+        if (errorExportFakeCallsRemaining > 0) {
+            errorExportFakeCallsRemaining--;
+            errno = EINTR;
+            return -1;
+        }
+        return cast(ptrdiff_t) count;
+    }
+
+    private extern(C) ptrdiff_t errorExportFakeReadAlwaysOk(int fd, void* buffer, size_t count) nothrow @nogc {
+        return cast(ptrdiff_t) count;
+    }
+
+    private extern(C) ptrdiff_t errorExportFakeWriteEintrThenOk(int fd, scope const(void)* buffer, size_t count) nothrow @nogc {
+        if (errorExportFakeCallsRemaining > 0) {
+            errorExportFakeCallsRemaining--;
+            errno = EINTR;
+            return -1;
+        }
+        return cast(ptrdiff_t) count;
+    }
+
+    private extern(C) ptrdiff_t errorExportFakeWriteAlwaysOk(int fd, scope const(void)* buffer, size_t count) nothrow @nogc {
+        return cast(ptrdiff_t) count;
+    }
+}
+
+unittest {
+    // Happy path: no EINTR, returns the real syscall's result untouched.
+    ubyte[8] buffer;
+    assert(readRetry(3, buffer.ptr, buffer.length, &errorExportFakeReadAlwaysOk) == buffer.length);
+    assert(writeRetry(3, buffer.ptr, buffer.length, &errorExportFakeWriteAlwaysOk) == buffer.length);
+}
+
+unittest {
+    // Retry path: the injected fake returns -1/EINTR exactly twice before
+    // succeeding; both wrappers must retry through both and return the real
+    // result on the third attempt, not surface the EINTR failure.
+    ubyte[8] buffer;
+    errorExportFakeCallsRemaining = 2;
+    assert(readRetry(3, buffer.ptr, buffer.length, &errorExportFakeReadEintrThenOk) == buffer.length);
+    assert(errorExportFakeCallsRemaining == 0);
+
+    errorExportFakeCallsRemaining = 2;
+    assert(writeRetry(3, buffer.ptr, buffer.length, &errorExportFakeWriteEintrThenOk) == buffer.length);
+    assert(errorExportFakeCallsRemaining == 0);
+}
+
 private int stableOpen(string path) {
     auto fd = open(path.toStringz, O_RDONLY | O_NOFOLLOW);
     need(fd >= 0, "missing-or-unsafe-file");
@@ -325,8 +413,8 @@ private string verifyOne(string path, string kind) {
     auto sf = stableOpen(side);
     scope(exit) close(sf);
     ubyte[sidecarLimit + 1] small;
-    auto sn = read(sf, small.ptr, small.length);
-    need(sn > 0 && sn <= sidecarLimit && read(sf, small.ptr, 1) == 0,
+    auto sn = readRetry(sf, small.ptr, small.length);
+    need(sn > 0 && sn <= sidecarLimit && readRetry(sf, small.ptr, 1) == 0,
         "invalid-sidecar");
     auto raw = cast(string)small[0 .. sn].idup;
     string sha, id;
@@ -345,7 +433,7 @@ private string verifyOne(string path, string kind) {
     ubyte[65536] buffer;
     long total;
     while (true) {
-        auto n = read(fd, buffer.ptr, buffer.length);
+        auto n = readRetry(fd, buffer.ptr, buffer.length);
         need(n >= 0, "read-failed");
         if (n == 0) break;
         total += n;

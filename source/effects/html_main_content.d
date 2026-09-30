@@ -343,6 +343,41 @@ private bool containsCaseInsensitive(string haystack, string needle) pure nothro
     return false;
 }
 
+private bool isAsciiAlnum(char c) pure nothrow @nogc {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+}
+
+// Issue #538: `keywordScoreFor`'s own case-insensitive match, but
+// word-boundary-aware rather than an unanchored substring match. A candidate
+// occurrence at `haystack[i .. i + needle.length]` only counts when it is
+// not immediately preceded or followed by another ASCII alphanumeric
+// character (or is at the string's own edge there) -- the usual class/id
+// tokenization idea (split on non-alphanumeric delimiters, compare whole
+// tokens), restated as a boundary check on each candidate match instead of
+// pre-splitting the haystack, so a multi-token keyword like
+// "registration-banner" (itself containing a `-` delimiter) still matches as
+// one unit without needing sequence-of-tokens matching. Fixes the real
+// false positive this ticket reports: `class="wp-block-heading"` contains
+// "ad" as a substring of "heading" ("he-AD-ing"), but "ad" there is
+// preceded by an alphanumeric 'e', so it is correctly rejected, while
+// `class="ad-banner"` (preceded by nothing, followed by the non-alphanumeric
+// '-') still matches. Same real-corpus false positives independently
+// checked against the pinned benchmark page `utopia-de.html`: "headline",
+// "loaded", "shadow", "download", "gradient" each contain "ad" only with an
+// alphanumeric neighbor and must not be excluded either.
+private bool containsKeywordWord(string haystack, string needle) pure nothrow @nogc {
+    if (needle.length == 0) return true;
+    if (needle.length > haystack.length) return false;
+    outer: for (size_t i; i + needle.length <= haystack.length; ++i) {
+        foreach (j, nc; needle) if (!asciiFoldEq(haystack[i + j], nc)) continue outer;
+        bool precededByAlnum = i > 0 && isAsciiAlnum(haystack[i - 1]);
+        bool followedByAlnum = i + needle.length < haystack.length &&
+            isAsciiAlnum(haystack[i + needle.length]);
+        if (!precededByAlnum && !followedByAlnum) return true;
+    }
+    return false;
+}
+
 // A text node's raw bytes only count as real "own text" if at least one
 // decoded character is non-whitespace; pretty-printed indentation/newlines
 // between element siblings (e.g. a <select>'s many <option> children) are
@@ -369,12 +404,12 @@ private double keywordScoreFor(const ref HtmlNode node) pure {
     auto classValue = attributeValue(node, "class");
     auto idValue = attributeValue(node, "id");
     foreach (kw; positiveKeywords)
-        if ((classValue.length && containsCaseInsensitive(classValue, kw)) ||
-            (idValue.length && containsCaseInsensitive(idValue, kw)))
+        if ((classValue.length && containsKeywordWord(classValue, kw)) ||
+            (idValue.length && containsKeywordWord(idValue, kw)))
             total += keywordWeightUnit;
     foreach (kw; negativeKeywords)
-        if ((classValue.length && containsCaseInsensitive(classValue, kw)) ||
-            (idValue.length && containsCaseInsensitive(idValue, kw)))
+        if ((classValue.length && containsKeywordWord(classValue, kw)) ||
+            (idValue.length && containsKeywordWord(idValue, kw)))
             total -= keywordWeightUnit;
     return total;
 }
@@ -2086,4 +2121,92 @@ unittest {
     auto navCopy = selectedContentTree(navRootTree, navIndex);
     assert(navCopy.nodes.length == 2 && navCopy.nodes[0].name == "nav" &&
         navCopy.nodes[0].parentIndex == size_t.max && navCopy.nodes[1].parentIndex == 0);
+}
+
+// Issue #538: `keywordScoreFor`'s substring match was not word-boundary-aware,
+// so `class="wp-block-heading"` scored as a negative-keyword match purely
+// because "ad" is a substring of "heading" ("he-AD-ing") -- real content
+// loss, confirmed on the pinned benchmark corpus page `utopia-de.html`,
+// which drops two real `<h2 class="wp-block-heading">` section headings
+// from both `.text` and the Markdown path before this fix. Fails before the
+// fix (each class/id below scores negative purely from an unanchored
+// substring hit) and passes after (word-boundary-aware: a keyword only
+// counts when it is not touching another alphanumeric character on either
+// side).
+unittest {
+    HtmlNode elementWithClass(string classValue) pure {
+        return HtmlNode(HtmlNodeKind.element, size_t.max, "h2", null,
+            [HtmlAttribute("class", classValue)]);
+    }
+
+    // The ticket's own real false positive, plus the other real,
+    // non-boilerplate classes/ids it names that also contain "ad" as a
+    // substring but never as a whole word.
+    foreach (classValue; ["wp-block-heading", "headline", "shadow", "download", "gradient"]) {
+        auto node = elementWithClass(classValue);
+        assert(keywordScoreFor(node) == 0.0,
+            `class="` ~ classValue ~ `" must not score as a negative-keyword match (#538)`);
+    }
+
+    auto idElement = HtmlNode(HtmlNodeKind.element, size_t.max, "div", null,
+        [HtmlAttribute("id", "loaded")]);
+    assert(keywordScoreFor(idElement) == 0.0,
+        `id="loaded" must not score as a negative-keyword match (#538)`);
+
+    // Genuine negative-keyword classes -- including ones where the keyword
+    // is only a hyphen-delimited *part* of the class value, and one
+    // (registration-banner) that is itself a hyphenated multi-word keyword
+    // -- must still be excluded exactly as before. (A camelCase compound
+    // like "commentEntry", with no non-alphanumeric delimiter at all between
+    // "comment" and "Entry", is *not* included here: it is a real,
+    // acknowledged tradeoff of word-boundary-aware matching -- shared by
+    // both fix strategies this ticket names, token-splitting or a
+    // boundary scan -- not a case this ticket's acceptance criteria
+    // requires preserving.)
+    foreach (classValue; ["nav", "site-nav", "sidebar", "sidebar-widget", "footer",
+            "page-footer", "header", "site-header", "comment", "comment-list",
+            "menu", "dropdown-menu", "ad", "ad-banner", "advert", "promo",
+            "promo-block", "share", "share-buttons", "social", "social-links",
+            "related", "related-posts", "widget", "breadcrumb",
+            "breadcrumb-trail", "registration-banner"]) {
+        auto node = elementWithClass(classValue);
+        assert(keywordScoreFor(node) < 0.0,
+            `class="` ~ classValue ~ `" must still score as a negative-keyword match`);
+    }
+
+    // Positive keywords share the same match, and are word-boundary-aware
+    // for the same reason.
+    auto contentNode = elementWithClass("content");
+    auto articleBodyNode = elementWithClass("article-body");
+    assert(keywordScoreFor(contentNode) > 0.0);
+    assert(keywordScoreFor(articleBodyNode) > 0.0);
+}
+
+// Same issue, through the real DOM-selection path end to end: the false
+// positive above must not silently drop real content out of either `.text`
+// (`extractMainContent`) or the Markdown path (`selectedContentTree`, which
+// both `.text` and `.markdown` read the same exclusion from).
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+
+    string html = `<html><body><article><h2 class="wp-block-heading">` ~
+        `HeadingMarker Real Section Title</h2><p>` ~ longParagraph ~
+        `</p></article></body></html>`;
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto result = extractMainContent(outcome.tree);
+    assert(result.status == MainContentStatus.selected);
+    assert(result.text.canFind("HeadingMarker Real Section Title"),
+        `a <h2 class="wp-block-heading"> heading must not be dropped as a false ` ~
+        `negative-keyword match on "ad" inside "heading" (#538)`);
+
+    auto content = selectedContentTree(outcome.tree, result.node);
+    bool headingKept;
+    foreach (node; content.nodes)
+        if (node.kind == HtmlNodeKind.element && node.name == "h2") headingKept = true;
+    assert(headingKept, `wp-block-heading <h2> must survive selectedContentTree (#538)`);
 }

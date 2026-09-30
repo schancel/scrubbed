@@ -6,7 +6,10 @@ name: release
 # dub.json's own preBuildCommands platform gate), and publishes a GitHub
 # Release with .tar.gz archives, a SHA256SUMS manifest, the live
 # third_party/** license/notice closure (experiments/package_core/check.d),
-# and bash/zsh/fish completions.
+# and bash/zsh/fish completions. The macOS leg also runs
+# experiments/metadata_route/cli_check.d against the built binary --
+# route-metadata's path-safety proof (route overlap, manifest alias,
+# hardlink rejection; issue #468).
 #
 # The release is created as a draft first and only un-drafted by the final
 # `publish` job once every target has built, packaged, self-verified, and
@@ -97,6 +100,19 @@ jobs:
 
       - name: Build release binary
         run: dub build --compiler=ldc2 --build=release
+
+      - name: Route-metadata path-safety proof (issue #468)
+        # macOS-only: the changed-binary scenario ad-hoc-signs a copy of the
+        # executable with /usr/bin/codesign (required for a modified arm64
+        # Mach-O to execute at all); no Linux equivalent exists, so this
+        # doesn't run on the linux-x86_64/linux-aarch64 legs. See
+        # docs/metadata-route.md#proof-shipping-binary.
+        if: matrix.target == 'macos-arm64'
+        run: |
+          ldc2 -i -O3 -release -preview=dip1000 -Isource \
+            -of=.dub/metadata-route-cli-check \
+            experiments/metadata_route/cli_check.d third_party/sqlite/sqlite3.o
+          .dub/metadata-route-cli-check ./scrubbed
 
       - name: Stage binary at conventional install path for completions
         # `scrubbed completion init` bakes its own resolved thisExePath()

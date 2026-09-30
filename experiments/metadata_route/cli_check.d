@@ -158,10 +158,10 @@ void main(string[] args) {
     auto expectedId = Document(SourceLocator("local-html:v1", input,
         "PRIVATE_SOURCE_CANARY.html"), OutputName("PRIVATE_SOURCE_CANARY.html")).id.text;
     need(json["documentId"].str == expectedId &&
-        json["version"].str == "metadata-json:v2", "typed metadata identity");
+        json["version"].str == "document-metadata:v1", "typed metadata identity");
     foreach (field, expected; ["title": "Primary", "author": "Ada",
             "date": "2024-02-29", "url": "https://example.test/page"])
-        need(json["fields"][field]["value"].str == expected, "stage field " ~ field);
+        need(json["standard"][field]["value"].str == expected, "stage field " ~ field);
     need(!readText(metadataFile).canFind("PRIVATE_SOURCE_CANARY") &&
         !readText(metadataFile).canFind("https://private.invalid/token"),
         "path or secret in metadata");
@@ -269,7 +269,7 @@ void main(string[] args) {
         routeHash("route-content:v2:", "normalize-line-endings,strip-control"),
         "local-content:v1");
     auto ownerMetadataKey = SinkKey(ownerDocument.id, ownerInput,
-        routeHash("route-metadata:v2:", "html-metadata"),
+        routeHash("route-metadata:v3:", "html-metadata-annotate,document-metadata-publish"),
         "local-metadata:v1");
     scope ownerManifest = new LocalManifest(ownerDb);
     auto priorContentRow = ownerManifest.lookup(ownerContentKey).get;

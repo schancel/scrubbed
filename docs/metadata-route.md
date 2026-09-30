@@ -84,3 +84,30 @@ activate the v2 error journal.
 Diagnostics are fixed tokens: `route-invalid-arguments`, `route-incomplete`,
 `route-refused`. Inspect the manifest and output roots for per-sink status —
 the CLI does not print source bytes or private sink keys.
+
+## Proof (shipping binary)
+
+`experiments/metadata_route/cli_check.d` is the release-active actual-binary
+proof for this route: typed metadata identity against the real
+`document-metadata:v1` wire format, replay/verify determinism, a changed-
+binary re-verify, independent-sink failure/retry, and this command's
+path-safety refusals (input/output overlap, manifest alias, and hardlink
+rejection on both the input and an existing destination).
+
+```sh
+dub build --build=release
+ldc2 -i -O3 -release -preview=dip1000 -Isource \
+  -of=.dub/metadata-route-cli-check \
+  experiments/metadata_route/cli_check.d third_party/sqlite/sqlite3.o
+.dub/metadata-route-cli-check ./scrubbed
+```
+
+This step runs automatically on macOS in `.github/workflows/release.yml`
+(issue #468) — the changed-binary scenario ad-hoc-signs a copy of the
+executable with `/usr/bin/codesign`, so it only runs there, not on Linux.
+Two additional invocation modes probe the directory-admission byte/name
+caps under a child RSS ceiling and are not part of ordinary release
+verification: `.dub/metadata-route-cli-check ./scrubbed --cap` (65,537-entry
+cap) and `.dub/metadata-route-cli-check ./scrubbed --name-cap` (16 MiB
+input-relative name-byte cap); run these manually when touching admission
+or cap logic.

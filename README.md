@@ -195,9 +195,10 @@ capability, WARC compression, packaging) live under [docs/](docs/).
 ## Support
 
 If scrubbed is useful to you, you can support ongoing development via
-[PayPal](https://paypal.me/intentionallyblank), [Patreon](https://www.patreon.com/givelotus),
-or by following along at the [newsletter](https://shablag.substack.com).
-Entirely optional -- the project stays MIT-licensed and open either way.
+[GitHub Sponsors](https://github.com/sponsors/schancel), [PayPal](https://paypal.me/intentionallyblank),
+[Patreon](https://www.patreon.com/givelotus), or by following along at the
+[newsletter](https://shablag.substack.com). Entirely optional -- the project
+stays MIT-licensed and open either way.
 
 ## License
 

@@ -150,6 +150,73 @@ immutable string[] commentSectionKeywords = ["comment", "disqus"];
 // thread would be built from.
 private immutable string[] commentSectionRootTags = ["div", "section", "aside", "ol", "ul"];
 
+// Issue #479: a configurable precision/recall extraction mode, analogous to
+// trafilatura's own `--precision`/`--recall` CLI flags ("less noise, more
+// precision" vs "more text, more recall"). Named `standard`/`precision`/
+// `recall` -- matching trafilatura's own naming rather than inventing new
+// terms, since the whole point is a like-for-like tuning knob a caller
+// already familiar with trafilatura's own flags will recognize. `standard`
+// is the pre-existing, still-default behavior: every constant/code path it
+// exercises is byte-for-byte identical to this module's behavior before this
+// ticket (issue #479's own explicit non-regression requirement -- #411's
+// 20/20 corpus result must be unaffected at the default mode). `precision`
+// and `recall` are each a REAL, coordinated, two-axis preset -- not a single
+// raw exposed float with no guidance -- documented in `selectionThresholdsFor`
+// and `excludedFromText`'s own doc comments below:
+//   1. The final selection floor (`minSelectableTextBytes`/`minSelectableScore`)
+//      is scaled: `precision` raises it (abstain rather than guess on a
+//      borderline top candidate); `recall` lowers it (accept a weaker
+//      top-candidate signal rather than abstain).
+//   2. The boilerplate-exclusion "sandwich rule" issue #27 added during text
+//      collection (`excludedFromText`) is tightened for `precision` (either
+//      neighbor being negative-keyword-classed is enough to exclude a
+//      keyword-neutral node, not both) and disabled for `recall` (a
+//      keyword-neutral node is never excluded by adjacency alone, only an
+//      outright negative keyword match on the node itself still excludes
+//      it) -- more text kept inside the winning subtree, some of it noisier.
+// See `docs/html-main-content.md`'s own "Configurable precision/recall
+// extraction mode" section for the real corpus pages this was verified
+// against and the real pinned trafilatura==2.2.0 comparison.
+enum ExtractionMode {
+    standard,
+    precision,
+    recall,
+}
+
+// Issue #479's own real evidence (`docs/html-main-content.md`): raising the
+// floor by 1.5x is what flips `france-attac-org.html`'s real selected lede
+// (score 510, text 210 bytes -- just 10 bytes over the *standard* 200-byte
+// floor) into an explicit `precision`-mode abstention (300-byte floor), while
+// lowering it by 0.5x never turns an already-passing real candidate on this
+// corpus into a failure (loosening a floor can only ever let more
+// candidates through, never fewer) -- `recall`'s own multiplier is chosen to
+// be a real, symmetric "half as strict" counterpart to `precision`'s "1.5x
+// stricter", not independently tuned.
+private enum double precisionThresholdMultiplier = 1.5;
+private enum double recallThresholdMultiplier = 0.5;
+
+private struct SelectionThresholds { size_t minTextBytes; double minScore; }
+
+// The first of `ExtractionMode`'s two coordinated preset axes: scales both
+// halves of the existing "explicit abstention over best-effort guess" floor
+// (see `extractMainContent`'s own doc comment) by a fixed, named multiplier.
+// `standard` returns the exact pre-existing constants unchanged -- the
+// non-regression requirement this ticket's default mode must meet.
+private SelectionThresholds selectionThresholdsFor(ExtractionMode mode) pure nothrow @nogc {
+    final switch (mode) {
+    case ExtractionMode.standard:
+        return SelectionThresholds(minSelectableTextBytes, minSelectableScore);
+    case ExtractionMode.precision:
+        return SelectionThresholds(
+            cast(size_t) (minSelectableTextBytes * precisionThresholdMultiplier),
+            minSelectableScore * precisionThresholdMultiplier);
+    case ExtractionMode.recall:
+        return SelectionThresholds(
+            cast(size_t) (minSelectableTextBytes * recallThresholdMultiplier),
+            minSelectableScore * recallThresholdMultiplier);
+    }
+}
+
 enum MainContentStatus {
     selected,
     // Issue #411: the DOM candidate-scoring pass below abstained (any of the
@@ -639,21 +706,44 @@ private struct CollapsingWriter {
 // is excluded outright; a keyword-neutral node (e.g. the promo's own bare,
 // unclassed `<p>Werden Sie Mitglied...</p>`) is excluded only when BOTH its
 // immediate previous and next siblings under the same parent independently
-// carry a negative keyword match -- a real, observed structural pattern
-// (a plain paragraph sandwiched directly between two `registration-banner*`
-// siblings), not a guess, and narrow enough that an ordinary paragraph
-// standing next to a single unrelated ad/share element is never caught.
+// carry a negative keyword match (`standard`/`precision`'s "both sides"
+// case below) -- a real, observed structural pattern (a plain paragraph
+// sandwiched directly between two `registration-banner*` siblings), not a
+// guess, and narrow enough that an ordinary paragraph standing next to a
+// single unrelated ad/share element is never caught.
+//
+// Issue #479's second `ExtractionMode` preset axis (see `ExtractionMode`'s
+// own doc comment): `precision` widens this same real pattern to "either
+// side is enough" -- willing to drop a keyword-neutral paragraph merely
+// adjacent to one boilerplate-classed sibling, favoring less noise at the
+// cost of occasionally dropping a real, adjacent-to-chrome paragraph.
+// `recall` disables the sandwich heuristic entirely -- a keyword-neutral
+// node is kept regardless of its neighbors, only an outright negative
+// keyword match on the node itself still excludes it -- favoring more text
+// kept, some of it real noise the sandwich rule would otherwise have
+// caught. `standard` is the exact pre-existing "both sides" rule, unchanged
+// -- this ticket's own non-regression requirement for the default mode.
+// Real corpus evidence for the `recall` case:
+// `docs/html-main-content.md`'s own "Configurable precision/recall
+// extraction mode" section shows this exact page's real
+// `registration-banner__text`/`registration-banner__button`-sandwiched
+// paragraph ("erhalten Sie exklusive...") reappearing in `.text` under
+// `recall` where `standard`/`precision` both still exclude it.
 private bool excludedFromText(const ref HtmlTree tree, const size_t[] prevSibling,
-        const size_t[] nextSibling, size_t index) pure {
+        const size_t[] nextSibling, size_t index, ExtractionMode mode) pure {
     double keyword = keywordScoreFor(tree.nodes[index]);
     if (keyword < 0.0) return true;
     if (keyword > 0.0) return false;
+    if (mode == ExtractionMode.recall) return false;
     auto prev = prevSibling[index];
     auto next = nextSibling[index];
     if (prev == size_t.max || next == size_t.max) return false;
     if (tree.nodes[prev].kind != HtmlNodeKind.element ||
         tree.nodes[next].kind != HtmlNodeKind.element) return false;
-    return keywordScoreFor(tree.nodes[prev]) < 0.0 && keywordScoreFor(tree.nodes[next]) < 0.0;
+    bool prevNegative = keywordScoreFor(tree.nodes[prev]) < 0.0;
+    bool nextNegative = keywordScoreFor(tree.nodes[next]) < 0.0;
+    return mode == ExtractionMode.precision ? (prevNegative || nextNegative) :
+        (prevNegative && nextNegative);
 }
 
 // Visible text of one selected subtree, skipping the non-visible
@@ -669,7 +759,8 @@ private bool excludedFromText(const ref HtmlTree tree, const size_t[] prevSiblin
 // the root, so two text nodes that are both direct, unwrapped children of
 // the root (or of the same non-block wrapper) still group as one paragraph.
 private void collectText(const ref HtmlTree tree, const size_t[] prevSibling,
-        const size_t[] nextSibling, size_t index, ref CollapsingWriter cw) pure {
+        const size_t[] nextSibling, size_t index, ref CollapsingWriter cw,
+        ExtractionMode mode) pure {
     size_t lastBlockAncestor = size_t.max; // unset: index is always < size_t.max
     foreach (i; index + 1 .. endOf(tree, index)) {
         if (tree.nodes[i].kind != HtmlNodeKind.text) continue;
@@ -680,7 +771,7 @@ private void collectText(const ref HtmlTree tree, const size_t[] prevSibling,
              parent != index && parent != size_t.max && parent < i;
              parent = tree.nodes[parent].parentIndex) {
             if (hiddenTag(tree.nodes[parent].name)) { hidden = true; break; }
-            if (excludedFromText(tree, prevSibling, nextSibling, parent)) { hidden = true; break; }
+            if (excludedFromText(tree, prevSibling, nextSibling, parent, mode)) { hidden = true; break; }
             if (!foundBlock && blockTag(tree.nodes[parent].name)) {
                 blockAncestor = parent;
                 foundBlock = true;
@@ -831,9 +922,12 @@ private CommentScanResult collectComments(const ref HtmlTree tree) pure {
 /// block that never had to win a scoring contest to leak into the output.
 ///
 /// Selection is a single rule: the highest-scoring node wins. Below
-/// `minSelectableTextBytes`/`minSelectableScore`, having no element
-/// candidate at all, or an exact tie for the top score are each an explicit
-/// abstention (`abstainedBelowThreshold`/`abstainedNoCandidate`/
+/// `minSelectableTextBytes`/`minSelectableScore` (each scaled by the chosen
+/// `ExtractionMode` -- see that enum's own doc comment for issue #479's
+/// precision/recall presets; `mode == standard` uses the two constants
+/// unscaled, exactly as before this ticket), having no element candidate at
+/// all, or an exact tie for the top score are each an explicit abstention
+/// (`abstainedBelowThreshold`/`abstainedNoCandidate`/
 /// `abstainedTie`) — never a best-effort guess -- UNLESS
 /// `structuredDataFallbackText` (issue #411) recovers real schema.org JSON-LD
 /// content the DOM candidate pass could never see at all (content delivered
@@ -862,7 +956,17 @@ private CommentScanResult collectComments(const ref HtmlTree tree) pure {
 /// scanning does not run at all: `.commentsExtracted` stays `false` and
 /// `.comments` stays empty, on every page, regardless of what markup is
 /// actually present.
-MainContentResult extractMainContent(const ref HtmlTree tree, bool includeComments = true) pure {
+///
+/// `mode` (issue #479, default `ExtractionMode.standard`, matching
+/// trafilatura's own "no flag" default): selects one of the two real,
+/// coordinated `precision`/`recall` presets described on `ExtractionMode`'s
+/// own doc comment -- the selection floor and the text-collection sandwich
+/// rule both scale together with the chosen preset. `standard` reproduces
+/// every constant/code path this function used before this ticket exactly,
+/// which is what keeps issue #411's 20/20 corpus result unaffected at the
+/// default mode.
+MainContentResult extractMainContent(const ref HtmlTree tree, bool includeComments = true,
+        ExtractionMode mode = ExtractionMode.standard) pure {
     MainContentResult result;
     const n = tree.nodes.length;
     if (n == 0) {
@@ -956,7 +1060,8 @@ MainContentResult extractMainContent(const ref HtmlTree tree, bool includeCommen
         return abstainOrRescue(tree, result, MainContentStatus.abstainedNoCandidate);
 
     auto best = top[0];
-    if (best.textLength < minSelectableTextBytes || best.score < minSelectableScore)
+    auto thresholds = selectionThresholdsFor(mode);
+    if (best.textLength < thresholds.minTextBytes || best.score < thresholds.minScore)
         return abstainOrRescue(tree, result, MainContentStatus.abstainedBelowThreshold);
     if (topCount >= 2 && top[1].score == best.score)
         return abstainOrRescue(tree, result, MainContentStatus.abstainedTie);
@@ -1000,7 +1105,7 @@ MainContentResult extractMainContent(const ref HtmlTree tree, bool includeCommen
     }
 
     CollapsingWriter collapsing;
-    collectText(tree, prevSibling, nextSibling, best.node, collapsing);
+    collectText(tree, prevSibling, nextSibling, best.node, collapsing, mode);
     result.status = MainContentStatus.selected;
     result.node = best.node;
     result.score = best.score;
@@ -1491,4 +1596,102 @@ unittest {
     assert(!optedOut.commentsExtracted,
         "includeComments=false must suppress detection, not just filter the output");
     assert(optedOut.comments.length == 0);
+}
+
+// Issue #479: `ExtractionMode`'s two real, coordinated preset axes, proven
+// here against hand-built `HtmlTree`s (independent of the native HTML
+// parser, matching this file's own established unittest style). The real,
+// corpus-grounded, real-pinned-trafilatura==2.2.0-corroborated evidence for
+// both axes (`france-attac-org.html`'s real borderline lede for axis 1;
+// `utopia-de.html`/`www-chemietechnik-de.html`'s real embedded share/ad
+// elements for axis 2) lives in
+// `experiments/html_main_content/precision_recall_check.d` and
+// `docs/html-main-content.md`'s "Configurable precision/recall extraction
+// mode" section, not duplicated here -- these fixtures exist to pin the
+// mechanism itself precisely, the same division of labor this file's other
+// unittest blocks already use against `experiments/html_main_content/check.d`'s
+// own synthetic-fixture-only real proof.
+unittest {
+    import std.algorithm.searching : canFind;
+
+    // Axis 1 (selection-floor multiplier): a winning candidate whose text is
+    // just above the *standard* 200-byte floor but below `precision`'s
+    // scaled 300-byte floor -- the same real shape
+    // `france-attac-org.html`'s own lede has (score 510, text 210 bytes).
+    string borderlineText;
+    foreach (_; 0 .. 230) borderlineText ~= 'x'; // 230 bytes: > 200, < 300.
+    HtmlTree borderline;
+    borderline.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null, null),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, borderlineText),
+    ];
+    auto standardBorderline = extractMainContent(borderline, true, ExtractionMode.standard);
+    assert(standardBorderline.status == MainContentStatus.selected,
+        "standard must select this real-shaped borderline candidate");
+    auto omittedBorderline = extractMainContent(borderline);
+    assert(omittedBorderline.status == standardBorderline.status &&
+        omittedBorderline.node == standardBorderline.node &&
+        omittedBorderline.score == standardBorderline.score &&
+        omittedBorderline.text == standardBorderline.text,
+        "omitting `mode` must be byte-for-byte identical to explicit ExtractionMode.standard");
+
+    auto precisionBorderline = extractMainContent(borderline, true, ExtractionMode.precision);
+    assert(precisionBorderline.status == MainContentStatus.abstainedBelowThreshold,
+        "precision's raised floor must abstain on the same candidate standard selects");
+    assert(precisionBorderline.text.length == 0);
+
+    auto recallBorderline = extractMainContent(borderline, true, ExtractionMode.recall);
+    assert(recallBorderline.status == MainContentStatus.selected &&
+        recallBorderline.node == standardBorderline.node &&
+        recallBorderline.text == standardBorderline.text,
+        "recall's lowered floor must never disqualify a candidate standard already selects");
+
+    // Axis 2 (text-collection sandwich-rule strictness): one fixture that
+    // distinguishes all three modes at once. A keyword-neutral middle
+    // paragraph sits between a negative-keyword-classed previous sibling
+    // (`registration-banner__text`, issue #27's own real pattern) and a
+    // keyword-neutral next sibling -- only ONE side is negative, so
+    // `standard`'s "both sides" rule keeps it, `precision`'s "either side"
+    // rule drops it, and `recall`'s disabled rule keeps it regardless.
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+    HtmlTree sandwich;
+    sandwich.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null,
+            [HtmlAttribute("class", "content")]),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, longParagraph),
+        HtmlNode(HtmlNodeKind.element, 0, "li", null, null),
+        HtmlNode(HtmlNodeKind.element, 3, "p", null,
+            [HtmlAttribute("class", "registration-banner__text")]),
+        HtmlNode(HtmlNodeKind.text, 4, null, "Jetzt registrieren"),
+        HtmlNode(HtmlNodeKind.element, 3, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 6, null, "Neutral middle paragraph text."),
+        HtmlNode(HtmlNodeKind.element, 3, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 8, null, "Non-negative sibling text."),
+    ];
+    auto standardSandwich = extractMainContent(sandwich, true, ExtractionMode.standard);
+    assert(standardSandwich.status == MainContentStatus.selected && standardSandwich.node == 0);
+    assert(standardSandwich.text.canFind("Neutral middle paragraph text."),
+        "standard's both-sides rule must keep a paragraph with only one negative neighbor");
+
+    auto precisionSandwich = extractMainContent(sandwich, true, ExtractionMode.precision);
+    assert(precisionSandwich.status == MainContentStatus.selected &&
+        precisionSandwich.node == 0 && precisionSandwich.score == standardSandwich.score,
+        "the sandwich rule must never change which node is selected or its score");
+    assert(!precisionSandwich.text.canFind("Neutral middle paragraph text."),
+        "precision's either-side rule must drop a paragraph with even one negative neighbor");
+    assert(precisionSandwich.text.canFind("Article body sentence."),
+        "precision must not touch real article text unrelated to the sandwich pattern");
+
+    auto recallSandwich = extractMainContent(sandwich, true, ExtractionMode.recall);
+    assert(recallSandwich.status == MainContentStatus.selected &&
+        recallSandwich.node == 0 && recallSandwich.score == standardSandwich.score);
+    assert(recallSandwich.text.canFind("Neutral middle paragraph text."),
+        "recall's disabled sandwich rule must keep the same paragraph too");
+    // recall never touches a node with its OWN outright negative keyword
+    // match either way -- only the sandwich heuristic is disabled.
+    assert(!recallSandwich.text.canFind("Jetzt registrieren"),
+        "recall must still exclude a node with its own negative keyword match");
 }

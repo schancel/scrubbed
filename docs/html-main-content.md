@@ -342,6 +342,153 @@ untruncated separation is real and already available at the
 v3 stage a real, unbounded second output channel is a concrete follow-up,
 not silently dropped.
 
+## Configurable precision/recall extraction mode (issue #479)
+
+Before this ticket, `extractMainContent`'s selection/abstention rule and its
+text-collection boilerplate exclusion (both described above) were fixed --
+one hard-coded floor, one hard-coded sandwich rule, no tuning knob. Issue
+#471's own trafilatura-parity family asked for something analogous to
+trafilatura's own `--precision`/`--recall` CLI flags ("less noise, more
+precision" vs "more text, more recall"), explicitly **not** a single raw
+exposed float with no guidance. `effects.html_main_content.ExtractionMode`
+(`standard`/`precision`/`recall`) is a real, named, documented preset over
+two coordinated axes, both already present in the algorithm above rather
+than new machinery bolted on:
+
+1. **Selection-floor multiplier.** `minSelectableTextBytes`/
+   `minSelectableScore` (the abstention floor "Selection and abstention"
+   above describes) are scaled by a fixed multiplier: `precision` raises it
+   1.5x (abstain rather than trust a borderline top candidate); `recall`
+   lowers it 0.5x (trust a weaker top-candidate signal rather than abstain).
+   `standard` uses the two constants unscaled -- byte-for-byte identical to
+   this module's behavior before this ticket.
+2. **Text-collection sandwich-rule strictness.** The "Boilerplate exclusion
+   during text collection" rule above (issue #27's own sandwich heuristic:
+   a keyword-neutral descendant is excluded when *both* its immediate
+   siblings carry a negative keyword match) is widened for `precision` to
+   "*either* side is enough" (drop more, at the risk of losing a real
+   paragraph merely adjacent to one boilerplate-classed element), and
+   disabled entirely for `recall` (a keyword-neutral node is never excluded
+   by adjacency alone -- only an outright negative keyword match on the node
+   itself still excludes it). `standard` keeps the exact pre-existing "both
+   sides" rule.
+
+Both axes only ever affect `precision`/`recall`; `mode` defaults to
+`ExtractionMode.standard`, which exercises the exact same constants and code
+paths this module used before this ticket -- the non-regression requirement
+below. `html_main_content_stage.d` exposes the identical default/preset shape
+as a real, hyphenated text stage option, `extraction-mode` (one of
+`"standard"`/`"precision"`/`"recall"`), validated at job-compile time
+(`stages.pii_four_class`'s own `policy` option is this repo's existing
+precedent for that validation shape).
+
+**Naming.** `precision`/`recall` (trafilatura's own names) rather than
+inventing new terms: the whole point is a like-for-like tuning knob a caller
+already familiar with trafilatura's own flags recognizes immediately.
+
+**Real corpus evidence, not a guess.** Both axes were found by directly
+instrumenting a sweep of this repo's own 20-page held-out corpus
+(`examples/pipeline-benchmark/corpus/`, the same corpus #411's own 20/20
+check uses) for near-boundary candidates, not authored blind:
+
+- **Selection-floor axis --** `france-attac-org.html`'s real, previously-
+  documented (issue #27) lede selects at score 510 with 210 bytes of text,
+  just 10 bytes over the *standard* 200-byte floor. Raising the floor 1.5x
+  (to 300 bytes) flips this real page from `selected` to
+  `abstainedBelowThreshold` under `precision`, while `recall`'s lowered
+  floor never disqualifies an already-passing candidate (loosening a floor
+  can only ever let more candidates through, never fewer) -- confirmed
+  directly:
+
+  | mode | status | node | text bytes |
+  |---|---|---|---|
+  | standard | selected | 681 | 210 |
+  | precision | abstainedBelowThreshold | -- | 0 |
+  | recall | selected | 681 | 210 |
+
+  This is a real, disclosed trade-off, not a hidden regression: issue #27's
+  own fix confirmed this exact 210-byte lede is the *correct* article
+  content on this page (recall 1.0 against real trafilatura's own gold
+  phrases). `precision` mode sacrifices this genuinely correct short match
+  for safety -- willing to abstain on a real, right answer rather than risk
+  trusting a borderline signal, exactly the kind of tension trafilatura's own
+  `--precision` flag documents for itself.
+
+- **Sandwich-rule axis --** two real, German-language pages
+  (`utopia-de.html`, `www-chemietechnik-de.html`) each have real embedded
+  share/ad/related-classed elements interspersed between real prose
+  paragraphs. `precision`'s widened "either side" rule strips substantially
+  more of that real article-body text than `standard`/`recall`'s "both
+  sides" rule -- the *same* winning node and score in every mode (the
+  sandwich rule only ever changes which descendants' text gets collected
+  from the already-selected subtree, never which subtree is selected):
+
+  | page | standard bytes | precision bytes | recall bytes |
+  |---|---|---|---|
+  | `utopia-de.html` | 4,879 | 3,138 | 4,879 |
+  | `www-chemietechnik-de.html` | 4,072 | 2,421 | 4,072 |
+
+  `recall` equals `standard` on both real pages here because neither page's
+  live snapshot happens to contain a real "both sides negative" sandwich
+  match for `recall`'s relaxation to have anything to disable -- confirmed,
+  not assumed (`precision_recall_check.d` diffs `.text` directly). A
+  synthetic fixture modeled on this repo's own previously-documented (#27)
+  `www-for-me-online-de.html` pattern (`registration-banner__text`/
+  `registration-banner__button` sandwiching a bare paragraph -- no longer
+  present in this repo's *current* live corpus snapshot of that same source
+  page, confirmed directly) demonstrates the `recall`-vs-`standard` side of
+  this same axis end to end; see `precision_recall_check.d`'s own doc
+  comment for the full disclosure.
+
+  Real pinned trafilatura==2.2.0 does **not** itself diverge between
+  `favor_precision`/`favor_recall` on these two specific pages (confirmed
+  directly, disclosed here rather than left implicit) -- this axis is
+  evidence for this module's own mechanism, not part of the acceptance-
+  criterion trafilatura comparison below, which `france-attac-org.html`
+  above satisfies on its own.
+
+**Real pinned trafilatura==2.2.0 comparison** (acceptance criterion 1),
+[`experiments/html_main_content/compare_precision_recall_trafilatura.sh`](../experiments/html_main_content/compare_precision_recall_trafilatura.sh):
+a separate, non-gating, network-and-pip-using acquisition tier (outside
+`dub build`/`dub test` entirely, mirroring `compare_comments_trafilatura.sh`'s
+own established convention) that installs pinned `trafilatura==2.2.0` into a
+throwaway `uv venv`, verifies the exact pin via `uv pip freeze`, and compares
+scrubbed's own per-page, per-mode extracted-text length
+(`precision_recall_check.d --json`) against real trafilatura's own
+`favor_precision`/`favor_recall` extraction output length
+(`trafilatura.extract(html, favor_precision=True)` /
+`favor_recall=True`) over five real corpus pages chosen *because* real
+pinned trafilatura==2.2.0 itself shows a genuine length disagreement on
+them -- not pages where both settings happen to produce the same output,
+which would prove nothing. A real run (2026-09-29, `trafilatura==2.2.0`
+verified via `uv pip freeze`):
+
+| page | trafilatura standard | trafilatura precision | trafilatura recall |
+|---|---|---|---|
+| `france-attac-org.html` | 388 | 255 (**-133**) | 388 |
+| `www-homify-de.html` | 4,745 | 58 (**-4,687**) | 4,745 |
+| `www-dvgw-de.html` | 13,049 | 13,049 | 14,324 (**+1,275**) |
+| `world-kbs-co-kr.html` | 1,601 | 1,601 | 1,804 (**+203**) |
+| `www-munich2022-com.html` | 1,299 | 1,373 (+74) | 1,299 |
+
+Every one of these five real pages shows a genuine, measured
+`--precision`/`--recall` extraction-length disagreement in real pinned
+trafilatura==2.2.0's own output -- confirming each was a genuinely ambiguous
+choice, not a trivial one. `france-attac-org.html` is the primary evidence
+page for acceptance criterion 1: it is the one page in this set where
+scrubbed's **own** `precision`/`recall` modes also genuinely disagree with
+each other (`selected` vs `abstainedBelowThreshold`, the selection-floor
+axis table above), on the identical real, already-checked-into-this-repo
+corpus file real trafilatura was run against. The other four pages are
+disclosed, honest, additional confirmation that real trafilatura itself
+finds this corpus genuinely ambiguous in several different ways -- scrubbed's
+own mechanism does not reproduce every one of trafilatura's own specific
+divergences on those four (different algorithms entirely; the two tools do
+not even agree on `standard`-mode extraction length on any page in this
+corpus), which is disclosed rather than implied away. This is quality-
+matched reporting, not a trafilatura-parity claim, matching this document's
+own established framing for the held-out-tier comparison below.
+
 ## Held-out real-page tier (separate, non-gating)
 
 `experiments/html_main_content/fetch_held_out.sh` is a **separate**
@@ -884,6 +1031,15 @@ since it is already correctly registered in production.
 
 ## Non-goals
 
+- `ExtractionMode` (issue #479) does not scale
+  `structuredDataFallbackText`/`abstainOrRescue`'s own `minSelectableTextBytes`
+  floor for the JSON-LD structured-data rescue (issue #411): that fallback is
+  a distinct, already-frozen mechanism (a second content *source*, not a
+  scoring-weight/threshold question -- see "`www-homify-de.html`" above),
+  not part of the DOM candidate-scoring pipeline the two `ExtractionMode`
+  axes tune. Confirmed this makes no observable difference on the one real
+  corpus page that currently exercises it (`www-homify-de.html` selects
+  `selectedStructuredData` identically in all three modes).
 - Reducing `html_tree.d`'s ~1–3x raw-to-observed-byte representation
   amplification itself (issue #411; see "`scienceblogs-de.html`" above for
   the real, measured per-page ratios): fixed there by raising `maxNodes`/

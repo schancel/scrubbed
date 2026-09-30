@@ -2,7 +2,11 @@
 /// module registers it. Mirrors `html_markdown_stage.d`'s existing pattern:
 /// a raw-byte cap, `parseHtml`, then a pure content-replacing transform over
 /// the parsed tree -- here `effects.html_main_content.extractMainContent`
-/// (landed, frozen, read-only reference) instead of `renderMarkdown`.
+/// instead of `renderMarkdown`. `extractMainContent`'s *default* behavior
+/// (`ExtractionMode.standard`, this stage's own default `extraction-mode`)
+/// remains landed and frozen -- see "Configurable precision/recall
+/// extraction mode" below for issue #479's additive, opt-in `precision`/
+/// `recall` presets.
 ///
 /// Sequenced between `html-metadata-annotate` (#285) and the terminal
 /// `pii-four-class` stage: `[text-transform] -> [html-metadata-annotate] ->
@@ -56,6 +60,23 @@
 /// unbounded second output channel is flagged here as a concrete follow-up,
 /// not silently dropped.
 ///
+/// ## Configurable precision/recall extraction mode (issue #479)
+///
+/// `extractMainContent`'s own `mode` parameter (default
+/// `ExtractionMode.standard`) is exposed here as the `extraction-mode` text
+/// option, one of `"standard"` (default)/`"precision"`/`"recall"` --
+/// matching trafilatura's own naming for its `--precision`/`--recall` CLI
+/// flags. Validated at job-compile time in `factory` (`extractionModeFor`),
+/// the same "invalid value fails job compilation, not per-document
+/// quarantine" idiom `stages.pii_four_class`'s own `policy` option already
+/// establishes, not a new pattern. `"standard"` reproduces this stage's
+/// exact pre-existing behavior -- issue #479's own non-regression
+/// requirement for the default mode. See `effects.html_main_content`'s own
+/// `ExtractionMode` doc comment for the two presets' real, two-axis
+/// mechanism and `docs/html-main-content.md`'s "Configurable precision/
+/// recall extraction mode" section for the real corpus evidence and the
+/// real pinned trafilatura==2.2.0 comparison.
+///
 /// Registered with explicit `StageCardinality.oneToOne` and explicit
 /// `SideOutputCapability.none` (not left at their unspecified defaults):
 /// this stage's real behavior always maps or quarantines and never splits,
@@ -68,8 +89,8 @@ module effects.html_main_content_stage;
 
 import content.pieces : Content, ContentPiece;
 import domain.document_metadata : maxExtensionValueBytes;
-import effects.html_main_content : extractMainContent, HtmlMainContentOutputLimit,
-    MainContentResult, MainContentStatus;
+import effects.html_main_content : ExtractionMode, extractMainContent,
+    HtmlMainContentOutputLimit, MainContentResult, MainContentStatus;
 import effects.html_tree : HtmlFailureReason, checkedHtmlByteLimit,
     defaultExtractHtmlBytes, parseHtml;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
@@ -85,11 +106,26 @@ private class HtmlMainContentConfiguration : StageConfiguration {
     string charset;
     size_t byteLimit;
     bool includeComments;
-    this(string charset, size_t byteLimit, bool includeComments) immutable {
+    ExtractionMode mode;
+    this(string charset, size_t byteLimit, bool includeComments, ExtractionMode mode) immutable {
         this.charset = charset;
         this.byteLimit = byteLimit;
         this.includeComments = includeComments;
+        this.mode = mode;
     }
+}
+
+// Same "validate a restricted text option at job-compile time, not per
+// document" idiom `stages.pii_four_class`'s own `policyFor` already
+// establishes for the identical need (an `enforce`/throwing helper called
+// from `factory`, so an invalid value fails job compilation rather than
+// quarantining a document); restated here rather than shared since that
+// helper is private to `pii_four_class.d`.
+private ExtractionMode extractionModeFor(string value) {
+    if (value == "standard") return ExtractionMode.standard;
+    if (value == "precision") return ExtractionMode.precision;
+    if (value == "recall") return ExtractionMode.recall;
+    throw new Exception("html-main-content: unsupported extraction-mode");
 }
 
 // Same `key in options` / default-value idiom `pii_four_class.d`'s own
@@ -123,7 +159,7 @@ private StageDecision applyHtmlMainContent(StageDocument input,
         return StageDecision.quarantine(reason);
     }
     MainContentResult result;
-    try result = extractMainContent(outcome.tree, configured.includeComments);
+    try result = extractMainContent(outcome.tree, configured.includeComments, configured.mode);
     catch (HtmlMainContentOutputLimit) return StageDecision.quarantine("outputLimit");
     // Issue #411: `selectedStructuredData` is a second, real success status
     // (structured-data-fallback content, not one lost to the DOM candidate
@@ -158,8 +194,15 @@ private ConfiguredStageTransform factory(const ref StageOptions options) {
     // default" shape -- `include-comments=false` is this stage's
     // `--no-comments`-equivalent opt-out.
     auto includeComments = booleanOption(options, "include-comments", true);
+    // Issue #479: default `"standard"`, matching trafilatura's own "no flag"
+    // default -- `extraction-mode=precision`/`extraction-mode=recall` select
+    // one of the two real presets `effects.html_main_content.ExtractionMode`
+    // documents. Validated at job-compile time (`extractionModeFor`, above),
+    // not per document.
+    auto modeName = "extraction-mode" in options;
+    auto mode = extractionModeFor(modeName is null ? "standard" : modeName.asText());
     return ConfiguredStageTransform(&applyHtmlMainContent,
-        new immutable HtmlMainContentConfiguration(charset, byteLimit, includeComments));
+        new immutable HtmlMainContentConfiguration(charset, byteLimit, includeComments, mode));
 }
 
 static this() {
@@ -170,7 +213,8 @@ static this() {
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
          OptionDeclaration("max-html-bytes", OptionType.integer),
-         OptionDeclaration("include-comments", OptionType.boolean)], null, null, &factory,
+         OptionDeclaration("include-comments", OptionType.boolean),
+         OptionDeclaration("extraction-mode", OptionType.text)], null, null, &factory,
         FilterPlacement.none, StageCardinality.oneToOne, SideOutputCapability.none);
     registration.requiresRawHtmlInput = true;
     registration.producesHtmlShape = HtmlOutputShape.nonHtml;
@@ -295,4 +339,80 @@ unittest {
         "an oversized comment section must not fail the whole document");
     enforce(oversizedResult.events[0].payload.metadata.extensionFieldCount() == 0,
         "an oversized comment section must be left out of .metadata, not truncated into it");
+}
+
+// Issue #479: `extraction-mode` option wiring through the compiled stage
+// boundary. The synthetic HTML below is deliberately built to land in the
+// same real, borderline shape `precision_recall_check.d`'s own
+// `france-attac-org.html` real-corpus proof pins directly against the pure
+// function (a winning candidate whose text is just above the *standard*
+// 200-byte floor but below `precision`'s scaled 300-byte floor) -- this test
+// proves the *option* reaches `extractMainContent`'s `mode` parameter
+// correctly through `StageOptions`/`factory`/`applyHtmlMainContent`; the
+// real-corpus, real-trafilatura-corroborated evidence for the mechanism
+// itself lives in `experiments/html_main_content/precision_recall_check.d`
+// and `docs/html-main-content.md`, not duplicated here.
+unittest {
+    import composition.compiler : compileJob;
+    import composition.executor : runCompiledStage;
+    import domain.document : Document, OutputName, SourceLocator;
+    import domain.document_metadata : DocumentMetadata;
+    import job.json : parseJobJson;
+    import stages.contract : EventKind;
+    import std.exception : enforce;
+
+    auto document = Document(SourceLocator("local-html:v1", "/tmp", "a.html"),
+        OutputName("a.html.txt"));
+    string borderlineText;
+    foreach (_; 0 .. 230) borderlineText ~= "x"; // 230 bytes: > 200, < 300.
+    string html = "<article><p>" ~ borderlineText ~ "</p></article>";
+    auto input = StageDocument(document,
+        new Content([ContentPiece.own(cast(const(ubyte)[]) html)]), DocumentMetadata.empty());
+
+    // Default (`extraction-mode` omitted) selects, exactly like `standard`.
+    auto defaultSpec = parseJobJson(`{"version":3,"stages":[{"id":` ~
+        `"extract","implementation":"html-main-content","options":{},"filters":[]}]}`);
+    auto defaultResult = runCompiledStage([input], compileJob(defaultSpec).stages[0]);
+    enforce(defaultResult.events.length == 1 &&
+        defaultResult.events[0].kind == EventKind.emitted,
+        "extraction-mode omitted must default to standard and select this borderline candidate");
+
+    // `extraction-mode=precision` must quarantine the identical input: the
+    // same borderline candidate now fails precision's raised floor.
+    auto precisionSpec = parseJobJson(`{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-main-content","options":{"extraction-mode":"precision"},` ~
+        `"filters":[]}]}`);
+    auto precisionResult = runCompiledStage([input], compileJob(precisionSpec).stages[0]);
+    enforce(precisionResult.events.length == 1 &&
+        precisionResult.events[0].kind == EventKind.quarantined &&
+        precisionResult.events[0].reason == "abstainedBelowThreshold",
+        "extraction-mode=precision must quarantine the same borderline candidate " ~
+        "the default mode selects");
+
+    // `extraction-mode=recall` must select, byte-identical to the default.
+    auto recallSpec = parseJobJson(`{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-main-content","options":{"extraction-mode":"recall"},` ~
+        `"filters":[]}]}`);
+    auto recallResult = runCompiledStage([input], compileJob(recallSpec).stages[0]);
+    enforce(recallResult.events.length == 1 &&
+        recallResult.events[0].kind == EventKind.emitted,
+        "extraction-mode=recall must select the same borderline candidate the default mode does");
+    string defaultBytes, recallBytes;
+    foreach (piece; defaultResult.events[0].payload.content.pieces())
+        foreach (i; 0 .. piece.size) defaultBytes ~= cast(char) piece.at(i);
+    foreach (piece; recallResult.events[0].payload.content.pieces())
+        foreach (i; 0 .. piece.size) recallBytes ~= cast(char) piece.at(i);
+    enforce(defaultBytes == recallBytes,
+        "extraction-mode=recall must never disqualify a candidate the default mode already selects");
+
+    // An unrecognized value fails job compilation (config-time validation),
+    // not a per-document quarantine -- same idiom as `stages.pii_four_class`'s
+    // own `policy` option.
+    auto invalidSpec = parseJobJson(`{"version":3,"stages":[{"id":"extract",` ~
+        `"implementation":"html-main-content","options":{"extraction-mode":"fast"},` ~
+        `"filters":[]}]}`);
+    bool threw;
+    try compileJob(invalidSpec);
+    catch (Exception) threw = true;
+    enforce(threw, "an unsupported extraction-mode value must fail job compilation");
 }

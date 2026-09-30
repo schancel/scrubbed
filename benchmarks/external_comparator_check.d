@@ -24,7 +24,7 @@ import core.sys.posix.sys.wait : WEXITSTATUS, WIFEXITED, WNOHANG, WTERMSIG,
 import core.sys.posix.unistd : _exit, dup2, execvp, fork, setpgid;
 import core.thread : Thread;
 import core.time : MonoTime, msecs, seconds;
-import std.algorithm.searching : endsWith, startsWith;
+import std.algorithm.searching : canFind, endsWith, startsWith;
 import std.conv : to;
 import std.digest : toHexString;
 import std.digest.sha : sha256Of;
@@ -550,6 +550,7 @@ private void checkReport(string path) {
     checkMainContentTrafilaturaCase(report);
     checkLanguageIdLangdetectCase(report);
     checkPiiFourClassPresidioCase(report);
+    checkMainContentJustextCase(report);
 }
 
 // ---- main-content/scrubbed-vs-trafilatura case validation (issue #229's
@@ -851,6 +852,116 @@ private void checkPiiFourClassPresidioCase(JSONValue report) {
         "(email/phone/card/ip)");
 }
 
+// ---- main-content/scrubbed-vs-justext case validation (issue #59's jusText
+// next-slice contract, owner-approved 2026-09-30). Same reported-not-gated
+// stance and reused held-out corpus as main-content/scrubbed-vs-trafilatura
+// above, so this structurally validates required fields/shape rather than
+// recomputing the score -- plus the two fields specific to this case: the
+// jusText interpreter's own snapshot hash (jusText has no console-script
+// binary of its own, see external_comparator.d's own header comment on this
+// case) and each fixture's own selected stoplist, which must be one of the
+// three languages this pinned corpus's HTML `lang` attributes actually
+// declare or the documented English default -- never empty, never an
+// arbitrary string. ----
+
+private enum expectedJustextStoplists = ["German", "English", "French"];
+
+private void checkMainContentJustextCase(JSONValue report) {
+    JSONValue found;
+    bool hasCase;
+    foreach (c; report["cases"].array)
+        if (c["name"].str == "main-content/scrubbed-vs-justext") { found = c; hasCase = true; }
+    require(hasCase, "missing main-content/scrubbed-vs-justext case");
+
+    require(found["scrubbed_binary_sha256"].str.length == 64,
+        "scrubbed_binary_sha256 is not a SHA-256 hex digest");
+    require(found["justext_python_sha256"].str.length == 64,
+        "justext_python_sha256 is not a SHA-256 hex digest");
+    require(found["justext_version"].str.startsWith("__main__.py: jusText v"),
+        "unexpected jusText version string");
+    require(found["justext_stoplist_policy"].str.length != 0,
+        "missing justext_stoplist_policy disclosure");
+    require(found["held_out_corpus_commit"].str == expectedHeldOutCommit,
+        "held-out corpus commit differs from the pinned commit reused from issue #26");
+    require(found["held_out_fixture_count"].integer == expectedHeldOutFixtureCount,
+        "held-out corpus did not resolve all pinned fixtures");
+
+    auto acquisition = found["python_packages_acquisition_order"].array;
+    require(acquisition.length == 3 &&
+        acquisition[0].str.startsWith("justext==") &&
+        acquisition[1].str.startsWith("lxml==") &&
+        acquisition[2].str.startsWith("lxml-html-clean=="),
+        "unexpected jusText package acquisition order");
+    require(found["timeout_seconds"].floating > 0, "missing declared timeout");
+    require(found["max_rss_bytes"].integer > 0, "missing declared resource bound");
+
+    auto samples = found["samples"].array;
+    require(samples.length == 4, "expected four A/B/A/B samples");
+    require(samples[0]["tool"].str == "scrubbed" && samples[1]["tool"].str == "justext" &&
+        samples[2]["tool"].str == "scrubbed" && samples[3]["tool"].str == "justext",
+        "samples lost their A/B/A/B interleave order");
+    foreach (i, sample; samples) {
+        auto status = sample["status"].integer;
+        if (i == 0 || i == 2)
+            require(status == 0 || status == 1,
+                "a scrubbed sample's status is neither a clean run nor an expected " ~
+                "content-driven quarantine");
+        else
+            require(status == 0, "a jusText sample exited nonzero or was signaled");
+        foreach (metric; ["wall_seconds", "user_seconds", "system_seconds", "peak_rss_bytes"])
+            require((metric in sample.object) !is null, "sample missing " ~ metric);
+    }
+
+    require(found["reproducibility"]["scrubbed"].boolean &&
+        found["reproducibility"]["justext"].boolean,
+        "a tool's output-reproducibility check did not pass");
+
+    auto scoring = found["scoring"];
+    require(scoring["gold_fixture_count"].integer == expectedHeldOutFixtureCount,
+        "unexpected gold fixture count");
+    auto fixtures = scoring["fixtures"].array;
+    require(fixtures.length == expectedHeldOutFixtureCount,
+        "scoring fixtures array does not cover all pinned held-out fixtures");
+
+    foreach (toolName; ["scrubbed", "justext"]) {
+        auto summary = scoring[toolName];
+        auto extracted = summary["extractedCount"].integer;
+        auto abstained = summary["abstainedCount"].integer;
+        require(extracted + abstained == expectedHeldOutFixtureCount,
+            toolName ~ "'s extracted/abstained counts do not add up to the fixture count");
+        requireUnitInterval(summary["meanPrecision"].floating, toolName ~ " meanPrecision");
+        requireUnitInterval(summary["meanRecall"].floating, toolName ~ " meanRecall");
+        require(summary["withoutLeakTotal"].integer >= 0,
+            toolName ~ " withoutLeakTotal must be non-negative");
+    }
+
+    bool[string] seenFixtureIds;
+    foreach (fixture; fixtures) {
+        auto id = fixture["id"].str;
+        require(id !in seenFixtureIds, "duplicate scoring fixture id: " ~ id);
+        seenFixtureIds[id] = true;
+        auto stoplist = fixture["justext_stoplist"].str;
+        require(expectedJustextStoplists.canFind(stoplist),
+            "fixture jusText stoplist is not one of the documented selections: " ~ stoplist);
+        foreach (toolName; ["scrubbed", "justext"]) {
+            auto entry = fixture[toolName];
+            auto status = entry["status"].str;
+            require(status == "produced" || status == "abstained",
+                toolName ~ " fixture status must be 'produced' or 'abstained': " ~ status);
+            if (status == "produced") {
+                requireUnitInterval(entry["precision"].floating, toolName ~ " fixture precision");
+                requireUnitInterval(entry["recall"].floating, toolName ~ " fixture recall");
+                require(entry["withoutLeaks"].integer >= 0,
+                    toolName ~ " fixture withoutLeaks must be non-negative");
+            }
+        }
+    }
+    writeln("external comparator report check passed: main-content/scrubbed-vs-justext ",
+        "case has the required provenance, reproducibility, per-fixture stoplist selection, ",
+        "and precision/recall scoring shape (", expectedHeldOutFixtureCount, "/",
+        expectedHeldOutFixtureCount, " held-out fixtures accounted for)");
+}
+
 // ---- Report-level self-test (issue #383): proves `checkReport` itself --
 // not just its independently reimplemented gate primitives above -- fails
 // closed. A synthetic report is assembled that satisfies every case's shape
@@ -1035,6 +1146,54 @@ private JSONValue syntheticPiiCase() {
     return c;
 }
 
+private JSONValue syntheticMainContentJustextCase() {
+    JSONValue[] samples;
+    foreach (i; 0 .. 4)
+        samples ~= syntheticSample(i % 2 == 0 ? "scrubbed" : "justext", 0);
+
+    JSONValue[] fixtures;
+    foreach (i; 0 .. expectedHeldOutFixtureCount) {
+        JSONValue fixture = JSONValue(["id": JSONValue("fixture-" ~ i.to!string)]);
+        fixture["justext_stoplist"] = JSONValue(expectedJustextStoplists[i % 3]);
+        foreach (toolName; ["scrubbed", "justext"]) {
+            JSONValue entry = JSONValue(["status": JSONValue("produced")]);
+            entry["precision"] = JSONValue(1.0);
+            entry["recall"] = JSONValue(1.0);
+            entry["withoutLeaks"] = JSONValue(0);
+            fixture[toolName] = entry;
+        }
+        fixtures ~= fixture;
+    }
+    JSONValue scoring = JSONValue(["gold_fixture_count": JSONValue(expectedHeldOutFixtureCount)]);
+    scoring["fixtures"] = JSONValue(fixtures);
+    foreach (toolName; ["scrubbed", "justext"]) {
+        JSONValue summary = JSONValue(["extractedCount": JSONValue(expectedHeldOutFixtureCount)]);
+        summary["abstainedCount"] = JSONValue(0);
+        summary["meanPrecision"] = JSONValue(1.0);
+        summary["meanRecall"] = JSONValue(1.0);
+        summary["withoutLeakTotal"] = JSONValue(0);
+        scoring[toolName] = summary;
+    }
+
+    JSONValue c = JSONValue(["name": JSONValue("main-content/scrubbed-vs-justext")]);
+    c["scrubbed_binary_sha256"] = JSONValue(syntheticHash("scrubbed-binary-main-content-justext"));
+    c["justext_python_sha256"] = JSONValue(syntheticHash("justext-python"));
+    c["justext_version"] = JSONValue("__main__.py: jusText v3.0.2 (synthetic self-test)");
+    c["justext_stoplist_policy"] = JSONValue("synthetic self-test policy string");
+    c["held_out_corpus_commit"] = JSONValue(expectedHeldOutCommit);
+    c["held_out_fixture_count"] = JSONValue(expectedHeldOutFixtureCount);
+    c["python_packages_acquisition_order"] = JSONValue([
+        JSONValue("justext==3.0.2"), JSONValue("lxml==6.1.3"),
+        JSONValue("lxml-html-clean==0.4.5")]);
+    c["timeout_seconds"] = JSONValue(30.0);
+    c["max_rss_bytes"] = JSONValue(1_048_576);
+    c["samples"] = JSONValue(samples);
+    c["reproducibility"] =
+        JSONValue(["scrubbed": JSONValue(true), "justext": JSONValue(true)]);
+    c["scoring"] = scoring;
+    return c;
+}
+
 // A complete, internally-consistent synthetic report: every case `checkReport`
 // currently validates is present and shaped to pass. Each self-test scenario
 // below starts from a fresh call to this (JSONValue is reference-typed for
@@ -1051,6 +1210,7 @@ private JSONValue buildValidSyntheticReport() {
         syntheticMainContentCase(),
         syntheticLanguageIdCase(),
         syntheticPiiCase(),
+        syntheticMainContentJustextCase(),
     ]);
     return report;
 }
@@ -1132,14 +1292,50 @@ private void checkMojibakeCaseNegativeControl(string caseName, string label) {
         withoutCase(buildValidSyntheticReport(), caseName), false);
 }
 
+// Negative controls specific to main-content/scrubbed-vs-justext (issue #59
+// acceptance criterion: "a corrupted/incomplete jusText-side result must be
+// rejected, not silently accepted", proportionate to -- and here exceeding,
+// since neither trafilatura/langdetect/presidio currently have their own
+// dedicated checkReportGate scenarios -- the existing per-case negative
+// coverage). A corrupted jusText version string, an out-of-policy per-fixture
+// stoplist value, a broken A/B/A/B interleave, and the case omitted entirely
+// must each be rejected by `checkReport`, not silently accepted.
+private void checkMainContentJustextNegativeControl() {
+    checkReportGate("justext-corrupted-version",
+        withCorruptedField(buildValidSyntheticReport(), "main-content/scrubbed-vs-justext",
+            "justext_version", JSONValue("not a real version string")), false);
+    checkReportGate("justext-broken-interleave",
+        withBrokenInterleave(buildValidSyntheticReport(), "main-content/scrubbed-vs-justext"),
+        false);
+    checkReportGate("justext-missing-case",
+        withoutCase(buildValidSyntheticReport(), "main-content/scrubbed-vs-justext"), false);
+    {
+        auto report = buildValidSyntheticReport();
+        JSONValue[] cases;
+        foreach (c; report["cases"].array) {
+            if (c["name"].str == "main-content/scrubbed-vs-justext") {
+                auto fixtures = c["scoring"]["fixtures"].array;
+                fixtures[0]["justext_stoplist"] = JSONValue("Klingon");
+                c["scoring"]["fixtures"] = JSONValue(fixtures);
+            }
+            cases ~= c;
+        }
+        report["cases"] = JSONValue(cases);
+        checkReportGate("justext-out-of-policy-stoplist", report, false);
+    }
+}
+
 private void checkReportGates() {
     checkReportGate("valid-baseline", buildValidSyntheticReport(), true);
     checkMojibakeCaseNegativeControl("mojibake/scrubbed-vs-ftfy", "cp1252");
     checkMojibakeCaseNegativeControl("mojibake/scrubbed-vs-ftfy-windows1251", "windows1251");
+    checkMainContentJustextNegativeControl();
     writeln("external comparator report-check self-test passed: a valid synthetic report is ",
-        "accepted, and both mojibake cases (CP1252 and Windows-1251) are independently ",
+        "accepted, both mojibake cases (CP1252 and Windows-1251) are independently ",
         "rejected on a corrupted expected hash, a corrupted sample, a broken A/B/A/B ",
-        "interleave, or the case being omitted entirely");
+        "interleave, or the case being omitted entirely, and main-content/scrubbed-vs-justext ",
+        "is independently rejected on a corrupted version string, a broken interleave, an ",
+        "out-of-policy per-fixture stoplist, or the case being omitted entirely");
 }
 
 int main(string[] args) {

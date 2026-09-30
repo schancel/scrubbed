@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>scrubbed</title>
-    <meta name="description" content="One local pipeline for cleaning web text into training/eval corpora: encoding repair, main-content extraction, PII scanning, dedup, and language ID — in a single pass, no intermediate files.">
+    <meta name="description" content="Local tools for cleaning web text into training and evaluation corpora: encoding repair, content extraction, PII scanning, language ID, and deduplication.">
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #1a1a1a; line-height: 1.6; background: #fff; }
@@ -71,7 +71,6 @@
                 <li><a href="#verified">Verified against</a></li>
                 <li><a href="#also-shipped">Also shipped</a></li>
                 <li><a href="#status">Status</a></li>
-                <li><a href="#roadmap">Roadmap</a></li>
                 <li><a href="#feedback">Feedback</a></li>
                 <li><a href="#usage">Usage</a></li>
                 <li><a href="#support">Support</a></li>
@@ -155,7 +154,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <div class="stat-card">
             <span class="big">11/11</span>
             <span class="label">vs. langdetect, language ID</span>
-            <p>Classification agreement across 17 supported languages.</p>
+            <p>Classification agreement on 11 of 17 supported languages.</p>
         </div>
         <div class="stat-card">
             <span class="big">21/21</span>
@@ -195,9 +194,6 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <h2 id="status">Status</h2>
     <p>Ready for local, single-machine corpus runs. Multi-machine execution and proven multi-terabyte operation are not yet supported.</p>
 
-    <h2 id="roadmap">Roadmap</h2>
-    <p>Next priorities are the 1.0 example gallery, broader document-format support, and integrations with external storage and orchestration. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/release-execution-plan.md" target="_blank" rel="noopener">release plan</a>, <a href="https://github.com/schancel/scrubbed/blob/main/TODO.md" target="_blank" rel="noopener">TODO</a>, and <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">open issues</a>.</p>
-
     <h2 id="feedback">Feedback wanted</h2>
     <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
@@ -233,6 +229,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <h3>JSONL stream</h3>
         <pre>./scrubbed run --input - --output - --jsonl-fields text,title \
     --dataset-namespace corpus-v1 --source-key shard-0001 \
+    --max-jsonl-line-bytes 1048576 --max-jsonl-output-bytes 2097152 \
     --filters fix-mojibake &lt; input.jsonl &gt; clean.jsonl</pre>
     </div>
     <p class="note">Full command and flag reference: <a href="https://github.com/schancel/scrubbed/blob/main/docs/cli-commands.md" target="_blank" rel="noopener">docs/cli-commands.md</a>.</p>

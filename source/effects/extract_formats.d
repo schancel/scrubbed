@@ -9,7 +9,11 @@
 /// walks the D-owned `HtmlTree` (`effects.html_tree`) directly -- the same
 /// boundary `html_markdown.d` and `html_main_content.d` already consume --
 /// and never calls into `html_markdown.d`'s `renderMarkdown`/`renderTable`/
-/// `clean()`/`singleLine()` or reads their already-rendered Markdown text.
+/// `clean()` or reads their already-rendered Markdown text. The only code
+/// shared with `html_markdown.d` is the low-level tree-walking primitives
+/// in `effects.html_tree_walk` (`endOf`, `attribute`, `hiddenTag`,
+/// `headingLevel`, `safeTarget`, `singleLine`; issue #497), none of which
+/// touches the table/list string-flattening renderers.
 /// This is a real, disclosed judgment call (see issue #481's own handoff
 /// instructions): issue #493 (nested tables corrupt an outer cell with
 /// stray unescaped GFM delimiter syntax, `| Outer | \n |---| \n | before |
@@ -27,10 +31,12 @@ module effects.extract_formats;
 
 import effects.html_main_content : extractMainContent, HtmlMainContentOutputLimit,
     MainContentResult, MainContentStatus;
-import effects.html_tree : HtmlAttribute, HtmlNode, HtmlNodeKind, HtmlTree;
+import effects.html_tree : HtmlAttribute, HtmlNodeKind, HtmlTree;
+import effects.html_tree_walk : attribute, endOf, headingLevel, hiddenTag,
+    safeTarget, singleLine, white;
 import std.array : split;
-import std.uni : isControl, isFormat, isSpace;
-import std.utf : UTFException, encode;
+import std.uni : isControl, isFormat;
+import std.utf : encode;
 
 enum size_t maxExtractFormatBytes = 4 * 1024 * 1024;
 
@@ -38,9 +44,9 @@ class ExtractFormatOutputLimit : Exception {
     this() pure { super("extract-format output exceeds 4 MiB"); }
 }
 
-// ---- Shared low-level helpers (all local to this module; nothing here is
-// imported from or shared with html_markdown.d's own private helpers of the
-// same apparent shape -- see this module's doc comment). ----
+// ---- Module-local low-level helpers (the tree-walking primitives shared
+// with html_markdown.d live in effects.html_tree_walk -- see this module's
+// doc comment). ----
 
 private struct Writer {
     char[] bytes;
@@ -57,72 +63,6 @@ private struct Writer {
         if (!bytes.length) { bytes = null; return null; }
         return assumeUnique(bytes);
     }
-}
-
-/// End (exclusive) of `index`'s subtree in the flat pre-order node array --
-/// identical algorithm to `html_markdown.d`'s own private `endOf`, restated
-/// here rather than imported (that symbol is module-private there).
-private size_t endOf(const ref HtmlTree tree, size_t index) pure {
-    size_t end = index + 1;
-    while (end < tree.nodes.length) {
-        size_t parent = tree.nodes[end].parentIndex;
-        bool descendant;
-        while (parent != size_t.max && parent < end) {
-            if (parent == index) { descendant = true; break; }
-            parent = tree.nodes[parent].parentIndex;
-        }
-        if (!descendant) break;
-        ++end;
-    }
-    return end;
-}
-
-private string attribute(const ref HtmlNode node, string name) pure {
-    foreach (ref const attr; node.attributes)
-        if (attr.name == name) return attr.value;
-    return null;
-}
-
-private bool asciiEqualIgnoreCase(string value, string expected) pure nothrow @nogc {
-    if (value.length != expected.length) return false;
-    foreach (i, c; value) {
-        ubyte folded = cast(ubyte) c;
-        if (folded >= 'A' && folded <= 'Z') folded += 'a' - 'A';
-        if (folded != cast(ubyte) expected[i]) return false;
-    }
-    return true;
-}
-
-private bool safeScheme(string scheme) pure nothrow @nogc {
-    switch (scheme.length) {
-        case 4: return asciiEqualIgnoreCase(scheme, "http");
-        case 5: return asciiEqualIgnoreCase(scheme, "https");
-        case 6: return asciiEqualIgnoreCase(scheme, "mailto");
-        default: return false;
-    }
-}
-
-/// Same policy as `html_markdown.d`'s own `safeTarget`: only a same-page
-/// relative reference or an explicit http(s)/mailto scheme is emitted as a
-/// real target attribute; anything else (javascript:, data:, a
-/// protocol-relative `//host/...`, control/format/space characters) is
-/// rejected, so an untrusted page can never inject an unexpected URI scheme
-/// into the serialized output.
-private bool safeTarget(string target) pure {
-    if (!target.length || target.length > 4096 || target.length >= 2 &&
-        (target[0 .. 2] == "//" || target[0 .. 2] == "\\\\")) return false;
-    if (target[0] == '\\') return false;
-    try {
-        foreach (dchar c; target)
-            if (isControl(c) || isFormat(c) || isSpace(c) ||
-                c == '<' || c == '>' || c == '\\') return false;
-    } catch (UTFException) return false;
-    size_t colon;
-    while (colon < target.length && target[colon] != ':' &&
-        target[colon] != '/' && target[colon] != '?' && target[colon] != '#') ++colon;
-    if (colon < target.length && target[colon] == ':')
-        return safeScheme(target[0 .. colon]);
-    return true;
 }
 
 /// XML-escape ordinary element text content: `&`/`<`/`>` only (`>` is not
@@ -166,28 +106,6 @@ private string xmlAttr(string input) pure {
     return writer.finish();
 }
 
-private bool white(char c) pure {
-    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f';
-}
-
-private string singleLine(string input) pure {
-    Writer writer;
-    bool pending;
-    size_t runStart;
-    foreach (i, c; input) {
-        if (white(c)) {
-            if (!pending) writer.put(input[runStart .. i]);
-            pending = true;
-        } else if (pending) {
-            if (writer.bytes.length) writer.put(" ");
-            pending = false;
-            runStart = i;
-        }
-    }
-    if (!pending) writer.put(input[runStart .. $]);
-    return writer.finish();
-}
-
 /// First `<title>` element's raw text anywhere in the whole parsed tree
 /// (`html_tree.d` keeps `<head>` content in the tree even though
 /// `html_markdown.d`/this module's own content renderers skip it as a
@@ -205,16 +123,6 @@ private string documentTitle(const ref HtmlTree tree) pure {
         if (flattened.length) return flattened;
     }
     return null;
-}
-
-private bool hiddenTag(string name) pure {
-    return name == "script" || name == "style" || name == "template" || name == "head";
-}
-
-private bool headingLevel(string name, out int level) pure {
-    if (name.length != 2 || name[0] != 'h' || name[1] < '1' || name[1] > '6') return false;
-    level = name[1] - '0';
-    return true;
 }
 
 // ==== Generic XML =========================================================

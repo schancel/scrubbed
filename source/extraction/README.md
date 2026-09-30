@@ -20,14 +20,32 @@ it performs no file, process, network, CLI, or adapter I/O.
 - `dispatch.d` selects exactly one route or policy from a complete table.
   Rules are indexed in canonical outcome order, so declaration order cannot
   change precedence.
-- `container.d` inspects a deliberately narrow classic, single-disk,
-  STORE-only ZIP subset before any entry bytes are exposed. It validates the
-  central/local index and canonical paths, applies cumulative byte, ratio,
-  count, and nesting limits, and reports generic ZIP or exact OOXML Word
-  marker evidence. Accepted results snapshot piece descriptors and owned entry
-  names; entry bytes remain behind scoped, read-only logical windows capped at
-  64 KiB. Retained windows never alias a reusable buffer, while borrowed
+- `container.d` inspects a deliberately narrow classic, single-disk ZIP
+  subset (STORE and DEFLATE methods only) before any entry bytes are
+  exposed. It validates the central/local index and canonical paths, applies
+  cumulative byte, ratio, count, and nesting limits, and reports generic ZIP
+  or exact OOXML Word marker evidence. A DEFLATE entry's real expanded byte
+  count is discovered and charged incrementally during an injected
+  `ZipInflateV1` decompressor's admission-time pass, never trusted from the
+  ZIP header's declared (attacker-controlled) size. Accepted results
+  snapshot piece descriptors and owned entry names. `streamEntry` serves
+  STORE entry bytes as scoped, read-only logical windows capped at 64 KiB
+  (unchanged, still STORE-only); `entryBytesV1` additionally returns one
+  admitted entry's complete logical bytes regardless of compression method,
+  for a DEFLATE entry by re-invoking the same injected decompressor and
+  bounding the output at the already-charged expanded-byte budget (no new
+  bomb surface, no unbounded copy beyond what decompression structurally
+  requires). Retained windows never alias a reusable buffer, while borrowed
   backing stays caller-owned and closing its owner invalidates access.
+- `ooxml_route.d` bridges `container.d`'s admitted ZIP entries and
+  `ooxml_document.d`'s text walker into a pure `ExtractorApplyV1`, registered
+  in `registry.d` as `ooxml-word` for `DetectionOutcomeV1.ooxmlWord`: it
+  locates `word/document.xml`, reads it via `entryBytesV1`, walks it, and
+  renders a "good enough" plain-text join of paragraphs and tables,
+  preserving source identity/provenance and failing closed (throwing) on a
+  missing part or malformed XML. This is the first DOCX route reachable
+  through the already-shipping v4 CLI dispatch surface (`--route`/
+  `--action`), with no new flag or command.
 - `ooxml_document.d` walks already-decompressed `word/document.xml` bytes
   (via `dxml`, a pure-D, Boost-1.0, range-based XML 1.0 parser) into
   paragraphs, runs, plain text, and basic table structure, with
@@ -51,11 +69,29 @@ it performs no file, process, network, CLI, or adapter I/O.
   output has a pure checked `TextDocumentV1` construction path. There is no
   global registry or discovery mechanism.
 
-These contracts still have no concrete Office, PDF, image, or OCR adapter,
-fan-out, join, DEFLATE support, or general workflow graph.
+These contracts still have no concrete PDF, image, or OCR adapter, fan-out,
+join, or general workflow graph. DOCX/OOXML is the first concrete Office
+family wired end to end (see `ooxml_route.d` above); headers/footers/
+footnotes, fields, track changes, embedded objects, and legacy `.doc` remain
+explicit non-goals.
+
+**Known residual gap:** the real (`effects`-layer-injected) `ZipInflateV1`
+decompressor is not yet wired into `refinement.d`'s live call into
+`inspectZipContainerV1` (reached from `composition.dispatch_executor` on
+every `scrubbed run`), so a genuinely DEFLATE-compressed real-world `.docx`
+cannot yet reach the `ooxml-word` route through the live CLI end to end --
+only a STORE-compressed fixture is proven through that path today (see
+`source/cli.d`'s own `ooxml-word` dispatch test). Real DEFLATE decompression
+correctness itself is proven separately, byte-for-byte against the real
+system decompressor and a real repo fixture docx, directly at the
+`container.d`/`effects.zlib_ffi` layer (bypassing dispatch). Wiring a real
+decompressor into the live dispatch path needs its own follow-up decision
+(see `TODO.md`).
+
 # Shipping extractor
 
-`registry.d` constructs the executable's finite registry on demand. It contains
-only `core-plain-text/v1`, whose required `max-output-bytes` is capped at 256
-MiB. `plain_text.d` streams the read-only source once into independently owned
-pieces and validates UTF-8 without flattening a second whole payload.
+`registry.d` constructs the executable's finite registry on demand. It
+contains `core-plain-text/v1`, whose required `max-output-bytes` is capped at
+256 MiB, and `ooxml-word/v1` (see `ooxml_route.d` above), which takes no
+options. `plain_text.d` streams the read-only source once into independently
+owned pieces and validates UTF-8 without flattening a second whole payload.

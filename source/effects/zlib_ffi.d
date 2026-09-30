@@ -247,6 +247,11 @@ unittest {
     // discovered size matches the real original plaintext length exactly.
     enforce(documentEvidence.expandedBytes == documentXml.length,
         "real inflate-discovered size did not match the real plaintext");
+    // extraction.container's new read-time accessor (issue #156's next
+    // slice), re-invoking this same real system-zlib decompressor, produces
+    // the exact original plaintext bytes -- not just the right byte count.
+    enforce(result.admitted.entryBytesV1("word/document.xml") == documentXml,
+        "entryBytesV1 did not reproduce the real DEFLATE entry's plaintext");
 
     // Zip-bomb-style extreme ratio, run through the real decompressor: a
     // genuine 211-byte raw-DEFLATE stream (Python zlib over 200,000 zero
@@ -299,6 +304,43 @@ unittest {
     enforce(truncatedResult.status == ZipInspectionStatusV1.refused, "truncated stream was admitted");
     enforce(truncatedResult.reason == ZipInspectionReasonV1.malformed,
         "truncated stream refused for the wrong reason");
+}
+
+unittest {
+    import content.pieces : Content, ContentPiece;
+    import extraction.container : inspectZipContainerV1, ZipInspectionLimitsV1,
+        ZipInspectionStatusV1, ZipPackageKindV1;
+    import std.exception : enforce;
+    import std.file : exists, read;
+
+    // Real end-to-end proof against a real Word-produced .docx already
+    // checked into this repo as a test-only fixture (#67's frozen corpus;
+    // see the project's fixture-licensing precedent) -- every entry in this
+    // real file is genuinely DEFLATE-compressed (method 8), the way Word/
+    // LibreOffice actually produce it, not a hand-authored synthetic
+    // archive. `expectedDocumentXml` below is the real, byte-exact
+    // `word/document.xml` this file contains, independently verified with
+    // Python's own `zipfile` module (a reference implementation, not this
+    // codebase's own decompressor) before being pinned here.
+    auto fixture = "experiments/document_adapters/fixtures/docx-training.docx";
+    if (!exists(fixture)) return; // run from a working directory without the fixture checked out
+
+    enum expectedDocumentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` ~
+        `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">` ~
+        `<w:body><w:p><w:r><w:t>TRAINING DOCX</w:t></w:r></w:p>` ~
+        `<w:p><w:r><w:t>GAMMA THREE</w:t></w:r></w:p>` ~
+        `<w:p><w:r><w:t>DELTA FOUR</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`;
+
+    auto bytes = cast(ubyte[]) read(fixture);
+    auto content = new Content([ContentPiece.own(bytes)]);
+    auto result = inspectZipContainerV1(content, ZipInspectionLimitsV1(), zipInflateV1);
+    enforce(result.status == ZipInspectionStatusV1.admitted,
+        "real docx-training.docx fixture was not admitted");
+    enforce(result.packageKind == ZipPackageKindV1.ooxmlWord,
+        "real docx-training.docx fixture was not detected as ooxmlWord");
+    enforce(result.admitted.entryBytesV1("word/document.xml") ==
+        cast(const(ubyte)[]) expectedDocumentXml,
+        "real docx-training.docx word/document.xml did not match the independently-verified reference inflate");
 }
 
 version (unittest) {

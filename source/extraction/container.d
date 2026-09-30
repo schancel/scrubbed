@@ -210,14 +210,19 @@ private struct AdmittedEntry {
     size_t payloadOffset;
 }
 
-/// Inspector-only capability for streaming admitted STORE entry bytes.
+/// Inspector-only capability for streaming admitted STORE entry bytes, and
+/// for reading one whole admitted entry's logical bytes regardless of its
+/// compression method (see `entryBytesV1` below).
 final class AdmittedZipV1 {
     private ContentSnapshot source;
     private AdmittedEntry[] entriesValue;
+    private ZipInflateV1 inflateValue;
 
-    private this(ContentSnapshot source, AdmittedEntry[] entries) {
+    private this(ContentSnapshot source, AdmittedEntry[] entries,
+            ZipInflateV1 inflate) {
         this.source = source;
         entriesValue = entries.dup;
+        inflateValue = inflate;
     }
 
     ZipEntryEvidenceV1[] entries() const pure {
@@ -256,6 +261,77 @@ final class AdmittedZipV1 {
             }
         }
         enforce(false, "ZIP entry is not admitted");
+    }
+
+    /// Returns one admitted entry's complete logical bytes, regardless of
+    /// compression method -- unlike `streamEntry` above (unchanged, still
+    /// STORE-only, still a streamed callback), this always returns one
+    /// owned buffer. A STORE entry is copied directly, the same physically-
+    /// bounded bytes `streamEntry` already serves. A DEFLATE entry is
+    /// produced by re-invoking the *same* injected `ZipInflateV1`
+    /// decompressor used at admission time (this class never retains
+    /// admission's decompressed output -- only the charged `expandedBytes`
+    /// count survives in `ZipEntryEvidenceV1` -- so producing owned bytes on
+    /// read means genuinely decompressing a second time, not just returning
+    /// a cached copy).
+    ///
+    /// Bounded, not unbounded: the output buffer is allocated at exactly
+    /// `expandedBytes`, the count already charged against
+    /// `ZipInspectionLimitsV1.maxExpandedBytes` during admission, so a
+    /// caller can never be handed more bytes than admission already
+    /// budgeted -- no new bomb surface. If the decompressor's second run
+    /// produces a different byte count than admission's first run (it
+    /// shouldn't, for a real deterministic decompressor over the same
+    /// unchanged input, but this is not trusted blindly), this fails closed
+    /// with an exception rather than returning truncated or overrun bytes.
+    ///
+    /// Tradeoff, documented per this capability's own contract: this is one
+    /// bounded whole-entry accumulation buffer -- the structural minimum a
+    /// caller needing owned decompressed bytes (rather than a streamed
+    /// callback) requires -- plus one bounded copy of the entry's
+    /// compressed input bytes (the same physically-bounded re-read
+    /// `streamEntry` already performs for STORE, and the same shape
+    /// admission's own `inflateDeflateEntry` already used). Neither copy is
+    /// unbounded: the input copy is bounded by the entry's real physical
+    /// `compressedBytes`, and the output buffer is bounded by the already-
+    /// charged `expandedBytes`.
+    const(ubyte)[] entryBytesV1(string canonicalName) pure {
+        enforce(source !is null, "admitted ZIP is not initialized");
+        foreach (entry; entriesValue) {
+            if (entry.evidence.nameValue != canonicalName) continue;
+            enforce(!entry.evidence.directoryValue,
+                "ZIP directory entries have no byte stream");
+            if (!entry.evidence.deflateValue) {
+                source.validateRange(entry.payloadOffset,
+                    entry.evidence.compressedValue);
+                auto result = new ubyte[entry.evidence.compressedValue];
+                foreach (index; 0 .. result.length)
+                    result[index] = source.at(entry.payloadOffset + index);
+                return result;
+            }
+            enforce(inflateValue !is null,
+                "admitted ZIP has no injected DEFLATE decompressor");
+            source.validateRange(entry.payloadOffset,
+                entry.evidence.compressedValue);
+            auto input = new ubyte[entry.evidence.compressedValue];
+            foreach (index; 0 .. input.length)
+                input[index] = source.at(entry.payloadOffset + index);
+            auto output = new ubyte[entry.evidence.expandedValue];
+            size_t filled;
+            auto outcome = inflateValue(input, (const(ubyte)[] chunk) {
+                enforce(chunk.length <= output.length - filled,
+                    "ZIP DEFLATE entry produced more bytes on read than admission charged");
+                output[filled .. filled + chunk.length] = chunk[];
+                filled += chunk.length;
+            });
+            enforce(outcome == ZipInflateOutcomeV1.ok,
+                "ZIP DEFLATE entry could not be decompressed on read");
+            enforce(filled == output.length,
+                "ZIP DEFLATE entry decompressed to fewer bytes on read than admission charged");
+            return output;
+        }
+        enforce(false, "ZIP entry is not admitted");
+        assert(false);
     }
 }
 
@@ -535,7 +611,8 @@ ZipInspectionResultV1 inspectZipContainerV1(Content content,
         if (root.packageKind == ZipPackageKindV1.ooxmlWord)
             result.evidenceValue ~= ZipEvidenceV1.ooxmlWordMarkers;
         sort!((a, b) => a.evidence.nameValue < b.evidence.nameValue)(state.admittedEntries);
-        result.admittedValue = new AdmittedZipV1(snapshot, state.admittedEntries);
+        result.admittedValue = new AdmittedZipV1(snapshot, state.admittedEntries,
+            state.inflate);
     } else {
         result.statusValue = ZipInspectionStatusV1.refused;
         result.reasonValue = state.refusal;
@@ -1241,10 +1318,20 @@ unittest {
     assert(documentEvidence.expandedBytes == documentBytes.length);
     assert(documentEvidence.compressedBytes == documentBytes.length);
 
-    // This slice admits DEFLATE entries but does not yet expose their
-    // decompressed bytes through the streaming capability (next slice).
+    // streamEntry itself is unchanged: still STORE-only, still refuses a
+    // DEFLATE entry outright, exactly as before this capability existed.
     assertThrown(result.admitted.streamEntry("word/document.xml",
         (ZipEntryChunkV1 chunk) {}));
+
+    // The new accessor re-invokes the same injected decompressor to produce
+    // this DEFLATE entry's bytes on read (fakeIdentityInflate echoes its
+    // input back unchanged, so the round trip is exact).
+    assert(result.admitted.entryBytesV1("word/document.xml") ==
+        cast(const(ubyte)[]) documentBytes);
+    // A STORE entry works the same way through the same accessor.
+    assert(result.admitted.entryBytesV1("_rels/.rels") ==
+        cast(const(ubyte)[]) "r");
+    assertThrown(result.admitted.entryBytesV1("missing"));
 
     // No decompressor injected: exactly the pre-DEFLATE-support behavior.
     auto unwired = inspectBytes(docx);
@@ -1255,6 +1342,33 @@ unittest {
     auto unavailable = inspectBytes(docx, ZipInspectionLimitsV1(), &fakeUnavailableInflate);
     assert(unavailable.status == ZipInspectionStatusV1.refused);
     assert(unavailable.reason == ZipInspectionReasonV1.unsupportedFeature);
+}
+
+unittest {
+    import std.exception : assertThrown;
+
+    // entryBytesV1 on a directory entry: refused, same as streamEntry.
+    auto withDirectory = zipFixture([
+        FixtureEntry("a/", null),
+        FixtureEntry("a/b", cast(ubyte[]) "x".dup)
+    ]);
+    auto admitted = inspectBytes(withDirectory);
+    assert(admitted.status == ZipInspectionStatusV1.admitted);
+    assertThrown(admitted.admitted.entryBytesV1("a/"));
+    assert(admitted.admitted.entryBytesV1("a/b") == cast(const(ubyte)[]) "x");
+
+    // A large DEFLATE entry decompresses to exactly its charged size and no
+    // more -- proof the accessor's fixed-size output allocation is sized
+    // from the real admitted `expandedBytes`, not an arbitrary guess.
+    auto bigInput = new ubyte[4096];
+    foreach (index, ref b; bigInput) b = cast(ubyte) index;
+    auto bigZip = zipFixture([
+        FixtureEntry("big.bin", bigInput, 8, 0, cast(uint) bigInput.length,
+            cast(uint) bigInput.length)
+    ]);
+    auto bigResult = inspectBytes(bigZip, ZipInspectionLimitsV1(), &fakeIdentityInflate);
+    assert(bigResult.status == ZipInspectionStatusV1.admitted);
+    assert(bigResult.admitted.entryBytesV1("big.bin") == cast(const(ubyte)[]) bigInput);
 }
 
 unittest {

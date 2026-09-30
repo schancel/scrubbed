@@ -1,0 +1,89 @@
+{
+  "schema": "scrubbed.crawl-corpus.v1",
+  "licenseFile": "examples/corpus/crawl/LICENSE.txt",
+  "claims": {
+    "crawlOnly": true,
+    "mainContentExtraction": false,
+    "piiDetection": false,
+    "trainingReady": false,
+    "localOnly": true
+  },
+  "configurations": [],
+  "artifacts": [
+    {
+      "path": "examples/corpus/crawl/inputs/site/index.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #509 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "e87a1594725b66289bed07665c2948ac377e0c0b46dd381b23b4608cc0556559",
+      "intendedPipeline": "crawl-fixture-site",
+      "expectedOutcome": "The crawl seed (depth 0). Links to two same-origin pages (about.html, contact.html) and one deliberately out-of-scope external-looking link (https://blog.external-example.test/feed) that a --scope allowed-domain crawl (allow-list defaulted to the seed's own origin) must never admit or fetch. Its title carries a literal '&amp;' entity, left undecoded in the raw fetched bytes."
+    },
+    {
+      "path": "examples/corpus/crawl/inputs/site/about.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #509 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "4a318a974b418490d55ab12b330a2ae7e7f6b17ef80ea7bdf3e64c6e78daa2f7",
+      "intendedPipeline": "crawl-fixture-site",
+      "expectedOutcome": "Discovered from index.html at depth 1. Carries the same mojibake byte pattern ('FranÃ§ois', UTF-8 'François' misread as Latin-1/CP1252) already established in examples/corpus/clean-web-document and examples/corpus/quickstart, left unrepaired by crawl itself. Links onward to team.html."
+    },
+    {
+      "path": "examples/corpus/crawl/inputs/site/contact.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #509 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "90cb2589bd547948eecd028b73d4e3cdca084253a8443d5bb6468ec8bcc41b29",
+      "intendedPipeline": "crawl-fixture-site",
+      "expectedOutcome": "Discovered from index.html at depth 1. A terminal leaf: no outbound links, so it contributes zero further discoveries."
+    },
+    {
+      "path": "examples/corpus/crawl/inputs/site/team.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #509 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "b8f1450f3ff8d1bbb02a88836047dbd57c02feb9f6b34798c2dab3e344235354",
+      "intendedPipeline": "crawl-fixture-site",
+      "expectedOutcome": "Discovered from about.html at depth 2. Links onward to resources.html, which lands exactly at --max-depth 3's discovery boundary."
+    },
+    {
+      "path": "examples/corpus/crawl/inputs/site/resources.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #509 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "a8ad1a1bc9a74631a57131f8cd172e637dc339846c8f47bef15d6dacf6344d58",
+      "intendedPipeline": "crawl-fixture-site",
+      "expectedOutcome": "Discovered from team.html at depth 3 (this recipe's --max-depth). A terminal leaf whose own depth equals --max-depth, so even though it has no outbound links, this also proves discovery correctly stops expanding a depth-3 page rather than merely happening to have nothing to discover."
+    },
+    {
+      "path": "examples/corpus/crawl/expected/discovered-pages.json",
+      "mediaType": "application/json; charset=utf-8",
+      "provenance": "Generated from the authored issue #509 fixture site's own known bytes/link graph for this checked-in golden corpus (no crawl or network involved in generating it).",
+      "license": "MIT",
+      "sha256": "4ae5078d9f4cec02f4fff786718fd1e4a3375befb4779701c03acd6f02a984a1",
+      "intendedPipeline": "crawl-fixture-site",
+      "expectedOutcome": "Pinned golden: the exact five in-scope pages (path/depth/discoveredFrom/sha256, origin-normalized so it is port-independent), sorted by path. check.d diffs a real crawl run's manifest.jsonl against this file byte-for-byte after normalization."
+    }
+  ],
+  "recipes": [
+    {
+      "id": "crawl-fixture-site",
+      "expectedExit": 0,
+      "cliArguments": ["crawl", "--seed", "${SEED}", "--corpus-dir", "${CORPUS_DIR}",
+        "--max-pages", "10", "--max-pages-per-host", "10", "--max-depth", "3",
+        "--concurrency", "2", "--min-host-delay-ms", "10", "--scope", "allowed-domain"]
+    },
+    {
+      "id": "crawl-fixture-site-second-run-noop",
+      "expectedExit": 0,
+      "cliArguments": ["crawl", "--seed", "${SEED}", "--corpus-dir", "${CORPUS_DIR}",
+        "--max-pages", "10", "--max-pages-per-host", "10", "--max-depth", "3",
+        "--concurrency", "2", "--min-host-delay-ms", "10", "--scope", "allowed-domain"]
+    },
+    {
+      "id": "clean-web-document-over-raw-crawl-output",
+      "expectedExit": 0,
+      "cliArguments": ["clean-web-document", "--input", "${RAW_DIR}", "--output", "${OUTPUT}"]
+    }
+  ]
+}

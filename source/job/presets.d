@@ -9,7 +9,7 @@
 /// stays confined to the `job` layer so it can never reach either.
 module job.presets;
 
-import job.cli_tokens : parseJobTokens;
+import job.cli_tokens : parseJobTokens, tokensAsRunInvocation;
 import job.spec : JobSpec;
 
 /// Preset name for the sealed four-stage web-document cleanup chain.
@@ -46,6 +46,17 @@ immutable string[] cleanWebDocumentTokensV1 = [
     "--stage", "pii-four-class=pii-four-class",
     "--stage", "document-metadata-publish=document-metadata-publish",
 ];
+
+/// The literal `run --stage ...` invocation that reproduces
+/// `clean-web-document/v1`, rendered -- not hand-typed -- from
+/// `cleanWebDocumentTokensV1` above via `job.cli_tokens.tokensAsRunInvocation`:
+/// the exact same token list `expandCleanWebDocumentPresetV1` (and
+/// `--emit-config`, through it) compiles. A `--help` string that embeds this
+/// constant can never drift out of sync with what the preset actually runs,
+/// because it is derived from the same source of truth instead of being a
+/// separately hand-maintained description of it.
+enum string cleanWebDocumentRunEquivalentV1 =
+    tokensAsRunInvocation(cleanWebDocumentTokensV1);
 
 /// Expand the sealed `clean-web-document/v1` preset into the same pure v3
 /// `JobSpec` model `job.cli_tokens` already parses from `run`'s tokens. Pure
@@ -105,4 +116,24 @@ unittest {
         `"implementation":"document-metadata-publish"}]}`);
     assert(canonicalJobJson(spec) == canonicalJobJson(equivalentJson));
     assert(jobIdentity(spec) == jobIdentity(equivalentJson));
+}
+
+unittest {
+    // The rendered equivalent is a real, byte-identical-round-trippable
+    // `run --stage ...` invocation of the exact same tokens: parsing it back
+    // (splitting on the single spaces `tokensAsRunInvocation` renders
+    // between unquoted tokens) reproduces `cleanWebDocumentTokensV1` itself.
+    assert(cleanWebDocumentRunEquivalentV1 ==
+        "run --stage text-transform=text-transform --filter fix-mojibake " ~
+        "--stage html-metadata-annotate=html-metadata-annotate " ~
+        "--stage html-main-content=html-main-content " ~
+        "--stage pii-four-class=pii-four-class " ~
+        "--stage document-metadata-publish=document-metadata-publish");
+
+    import std.array : split;
+    auto rendered = cleanWebDocumentRunEquivalentV1.split(" ");
+    assert(rendered[0] == "run");
+    assert(rendered[1 .. $] == cleanWebDocumentTokensV1,
+        "the rendered invocation must parse back into the exact same " ~
+        "tokens the preset actually compiles, not just look similar");
 }

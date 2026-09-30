@@ -10,7 +10,8 @@ import effects.document_metadata_publish_stage : documentMetadataPublishKeyV1,
 import effects.error_cli : runErrorCommand;
 import effects.metadata_route_cli : runMetadataRoute;
 import job.json : canonicalJobJson;
-import job.presets : cleanWebDocumentTokensV1, expandCleanWebDocumentPresetV1;
+import job.presets : cleanWebDocumentRunEquivalentV1, cleanWebDocumentTokensV1,
+    expandCleanWebDocumentPresetV1;
 import std.conv : to;
 import std.file : FileException, exists, isDir, isSymlink, thisExePath;
 import std.path : buildNormalizedPath;
@@ -139,15 +140,24 @@ struct Extract {
     string config;
 }
 
-@(Command("clean-web-document").Description(
-    "Run the sealed clean-web-document/v1 preset: text-transform's " ~
-    "fix-mojibake filter, then html-metadata-annotate, html-main-content, " ~
-    "pii-four-class, and terminal document-metadata-publish. No " ~
-    "--stage/--filter overrides; use 'run' for custom composition. " ~
-    "Automatically writes a document-metadata sidecar (annotated " ~
-    "title/author/date/url plus the PII audit, in one blob) beside " ~
-    "--output (see --output help); fails before touching anything if that " ~
-    "derived path already exists."))
+// #563: this Description is built from `cleanWebDocumentRunEquivalentV1` --
+// itself rendered from `cleanWebDocumentTokensV1`, the exact token list
+// `expandCleanWebDocumentPresetV1`/`--emit-config` compiles -- rather than a
+// separately hand-typed enumeration of the stage sequence, so `--help` can
+// never drift out of sync with what the preset actually runs.
+private enum string cleanWebDocumentHelpV1 =
+    "Run the sealed clean-web-document/v1 preset. Equivalent to: " ~
+    cleanWebDocumentRunEquivalentV1 ~ " (plus your own --input/--output, " ~
+    "and optionally --threads/--max-queued-docs/--max-input-bytes/" ~
+    "--max-open-inputs) -- generated from the same compiled stage-token " ~
+    "list --emit-config prints, not hand-maintained prose. No " ~
+    "--stage/--filter/--stage-option/--filter-option overrides accepted " ~
+    "directly; use 'run' for custom composition. Automatically writes a " ~
+    "document-metadata sidecar (annotated title/author/date/url plus the " ~
+    "PII audit, in one blob) beside --output (see --output help); fails " ~
+    "before touching anything if that derived path already exists.";
+
+@(Command("clean-web-document").Description(cleanWebDocumentHelpV1))
 struct CleanWebDocument {
     @(NamedArgument("input", "i").Description("Input file or directory tree"))
     string input;
@@ -1078,6 +1088,72 @@ unittest {
     // The ticket's "ideally also --input" ask: both trailing-slashed,
     // matching the literal README/docs Quick Start invocation verbatim.
     runCase("both-slash", true, true);
+}
+
+// Issue #563: `clean-web-document --help` shows its real equivalent
+// `run --stage ...` composition (`cleanWebDocumentHelpV1`, built from
+// `cleanWebDocumentRunEquivalentV1`), not hand-maintained prose. This is the
+// acceptance criterion's real, end-to-end proof of that equivalence: the
+// rendered invocation, actually split into argv tokens and run through the
+// real top-level `run` command (not `expandCleanWebDocumentPresetV1`/the
+// job layer directly -- this exercises the same argparse/CLI boundary a
+// user copy-pasting the printed text would), must produce byte-identical
+// primary output to running `clean-web-document` directly on the same
+// input. If a future change to `cleanWebDocumentTokensV1` were not
+// reflected in the rendered/help text (the exact drift this ticket exists
+// to prevent), this test -- not just a snapshot of today's help string --
+// would catch it, because it actually executes the rendered text.
+unittest {
+    import std.array : split;
+    import std.file : read;
+
+    auto root = buildPath(tempDir, "scrubbed-563-equivalence-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdirRecurse(root);
+
+    string sentence = "This is a real article sentence with enough words " ~
+        "in it to clear html-main-content's extraction threshold. ";
+    string body;
+    foreach (_; 0 .. 15) body ~= sentence;
+    auto html = `<html><head><title>Equivalence Check</title></head>` ~
+        `<body><nav>Home About Contact</nav><article><h1>Equivalence ` ~
+        `Check</h1><p>` ~ body ~ `</p></article></body></html>`;
+
+    auto input = buildPath(root, "doc.html");
+    write(input, html);
+
+    auto presetOutput = buildPath(root, "preset-out.html");
+    auto presetExit = runCommands(["scrubbed", "clean-web-document",
+        "--input", input, "--output", presetOutput, "--threads", "1"]);
+    assert(presetExit == 0, "clean-web-document must succeed on the fixture");
+
+    // Parse the actual rendered `--help` equivalence text back into argv
+    // tokens -- not a re-import of `cleanWebDocumentTokensV1` -- so this
+    // exercises what `--help` really prints, not just what generated it.
+    auto renderedTokens = cleanWebDocumentHelpV1.split("Equivalent to: ")[1]
+        .split(" (plus")[0].split(" ");
+    assert(renderedTokens[0] == "run",
+        "rendered equivalence text must start with 'run': " ~
+        cleanWebDocumentHelpV1);
+    auto composedTokens = renderedTokens[1 .. $];
+    assert(composedTokens == cleanWebDocumentTokensV1,
+        "tokens parsed back out of the rendered --help text must exactly " ~
+        "match the real compiled preset tokens");
+
+    auto composedOutput = buildPath(root, "composed-out.html");
+    auto composedSidecar = buildPath(root, "composed-out.html.sidecar");
+    auto composedExit = runCommands(["scrubbed", "run", "--input", input,
+        "--output", composedOutput, "--sidecar-output", composedSidecar,
+        "--threads", "1"] ~ composedTokens);
+    assert(composedExit == 0,
+        "a hand-composed run --stage invocation of the rendered tokens " ~
+        "must succeed on the same fixture");
+
+    assert(read(presetOutput) == read(composedOutput),
+        "the rendered --stage composition, run via 'run --stage ...' with " ~
+        "those exact tokens, must produce byte-identical output to " ~
+        "running clean-web-document directly on the same input");
 }
 
 // Issue #473: negative and overflowing values for the numeric CLI flags

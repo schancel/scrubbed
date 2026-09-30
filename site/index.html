@@ -101,8 +101,8 @@
     <p class="note">Real output from the actual binary, not a mockup.</p>
     <div class="demo-pair">
         <div class="before">
-            <span class="demo-label">Input (UTF-8 read as Latin-1, then re-saved)</span>
-            <pre>The cafÃ© menu featured crÃ¨me brÃ»lÃ©e â a classic dessert.</pre>
+            <span class="demo-label">Input (UTF-8 bytes misread as Windows-1252)</span>
+            <pre>The cafÃ© menu featured crÃ¨me brÃ»lÃ©e â€” a classic dessert.</pre>
         </div>
         <div class="after">
             <span class="demo-label">./scrubbed run --filters fix-mojibake</span>
@@ -144,7 +144,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Repairs encoding damage, extracts the article, captures metadata, scans for common PII, and writes an audit sidecar.</p>
 
     <h2 id="verified">Verified against the tools it replaces</h2>
-    <p class="note">Reproducible comparisons live in <code>benchmarks/external_comparator.d</code>.</p>
+    <p class="note">Reproduce the <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">comparators</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">extraction benchmark</a>, or <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake benchmark</a>.</p>
     <div class="stats">
         <div class="stat-card">
             <span class="big">39/39 + 48/48</span>
@@ -164,12 +164,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <div class="stat-card">
             <span class="big">20/20 pages</span>
             <span class="label">vs. trafilatura, extraction</span>
-            <p>All pages selected; precision 0.895 and recall 0.756 by word overlap.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">~146x</span>
-            <span class="label">whole pipeline vs. the equivalent Python chain, corpus-scale</span>
-            <p>CPU time over a 400-file corpus. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">Methodology</a>.</p>
+            <p>Directional word overlap against trafilatura output: 0.895 precision, 0.756 recall.</p>
         </div>
         <div class="stat-card">
             <span class="big">~25x</span>
@@ -187,7 +182,6 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <li>Quality signals for repetitive or degenerate text.</li>
         <li>HTML entity decoding, text normalization, and selective JSONL streaming.</li>
         <li>Parallel file processing, atomic output, and resumable runs.</li>
-        <li>Plain, gzip, and zstd WARC/1.1 input.</li>
         <li>A local, multithreaded, resumable crawler.</li>
     </ul>
 

@@ -458,3 +458,46 @@ unittest {
     // module: chrome never leaks into selected content, options or not.
     assert(!defaulted.markdown.canFind("Home") && !quotesOff.markdown.canFind("Home"));
 }
+
+// Issue #485: Markdown-path twin of `html_main_content.d`'s own #485
+// unittest (see its doc comment for the HTML5 tokenizer mechanics). A
+// literal `</script>` inside a JSON-LD string value truncates the script
+// element; the truncated block must never reach `structuredDataMarkdown`,
+// and the script's own (invisible) prefix must never appear in Markdown.
+// The escaped `<\/script>` twin still renders as recovered JSON-LD, free of
+// the page's `<nav>` chrome. Marker words carry no Markdown-special
+// characters so escaping cannot make a negative assertion pass by accident.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string tailProse = " and some prose after the close tag with a very long real " ~
+        "sentence of readable prose padded out so that there is still comfortably " ~
+        "more than two hundred bytes of genuine paragraph text left over for the " ~
+        "extraction floor to accept without any trouble at all here now for sure " ~
+        "end of body";
+    string pageWith(string closeTag) {
+        return "<html><head>\n<script type=\"application/ld+json\">\n" ~
+            `{"@type":"Article","articleBody":"Some prose before the marker PrefixMarker ` ~
+            closeTag ~ tailProse ~ "\"}\n</script>\n</head><body><nav>NavBoilerplateMarker " ~
+            "Home About Contact</nav></body></html>";
+    }
+
+    auto unescaped = parseHtml(cast(const(ubyte)[]) pageWith("</script>"));
+    assert(unescaped.isParsed);
+    auto unescapedResult = extractMainContentMarkdown(unescaped.tree);
+    assert(unescapedResult.status != MainContentStatus.selectedStructuredData,
+        "truncated JSON-LD must never be promoted to selectedStructuredData");
+    assert(!unescapedResult.markdown.canFind("PrefixMarker"),
+        "text inside the (truncated) script element must never leak into Markdown");
+
+    auto escaped = parseHtml(cast(const(ubyte)[]) pageWith(`<\/script>`));
+    assert(escaped.isParsed);
+    auto escapedResult = extractMainContentMarkdown(escaped.tree);
+    assert(escapedResult.status == MainContentStatus.selectedStructuredData);
+    assert(escapedResult.markdown.canFind("PrefixMarker") &&
+        escapedResult.markdown.canFind("end of body"),
+        "a properly escaped JSON-LD value must be recovered whole");
+    assert(!escapedResult.markdown.canFind("NavBoilerplateMarker"),
+        "recovered JSON-LD Markdown must never carry DOM boilerplate");
+}

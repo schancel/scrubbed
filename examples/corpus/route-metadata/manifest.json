@@ -1,0 +1,50 @@
+{
+  "schema": "scrubbed.route-metadata-corpus.v1",
+  "licenseFile": "examples/corpus/route-metadata/LICENSE.txt",
+  "claims": {
+    "jsonConfigForm": false,
+    "trainingReady": false
+  },
+  "fixtureProvenance": {
+    "kind": "wholly-new",
+    "note": "Authored from scratch for issue #508. Not reused from examples/pipeline-benchmark/corpus/ (real third-party pages, vendored under issue #315's distinct, narrower accepted-risk posture, not for this public example gallery) or from any other corpus in this repository."
+  },
+  "commandNote": {
+    "hasJsonConfigForm": false,
+    "note": "route-metadata (source/effects/metadata_route_cli.d) is dispatched directly from source/cli_commands.d's runCommands() before argparse's generic parse, and its own parseOptions() recognizes only --input/--content-output/--metadata-output/--manifest/--filters/--retry -- there is no --config flag and no JSON-loading code path anywhere in metadata_route_cli.d. This is a real, current limitation of the command itself, not a gap in this example: route-metadata has a CLI-flag form only. This example instead proves CLI-token determinism by running the identical command twice, as two separate real process invocations against the same --input path, and diffing both sinks byte-for-byte."
+  },
+  "artifacts": [
+    {
+      "path": "examples/corpus/route-metadata/inputs/dispatch-note.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #508 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "f37e4c18682ecf2e95919971049e358cdc1d2b66a1698b73b62660f07f326454",
+      "intendedPipeline": "route-metadata",
+      "expectedOutcome": "Synthetic HTML dispatch note carrying a real title/author/date/url/site-name/description metadata block, plus a CRLF and a lone-CR line ending in its body text so route-metadata's default content filters (normalize-line-endings, strip-control) do real, visible work rather than a no-op pass-through."
+    },
+    {
+      "path": "examples/corpus/route-metadata/expected/dispatch-note.content.html",
+      "mediaType": "text/html; charset=utf-8",
+      "provenance": "Generated from the authored issue #508 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "9eec897d0a3220ac874b0838d959aa9c7860dfc11185b4c364cf74075ad88c24",
+      "intendedPipeline": "route-metadata",
+      "expectedOutcome": "The content sink: byte-identical to the input except every CRLF/lone-CR line ending normalized to a single LF (normalize-line-endings); no control bytes were present to strip. HTML markup, attributes, and all metadata-bearing tags pass through completely unmodified -- route-metadata's content filters never parse or alter HTML structure."
+    },
+    {
+      "path": "examples/corpus/route-metadata/expected/dispatch-note.metadata.json",
+      "mediaType": "application/json",
+      "provenance": "Generated from the authored issue #508 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "e4e8829cdc7b070ddfc02a1fdb2093aa8c6162c7a63de840b9ec833f703e84c2",
+      "intendedPipeline": "route-metadata",
+      "expectedOutcome": "The metadata sink: a document-metadata:v1 wire record with the run's own doc:v1:sha256(...) document_id (deterministic per the local --input absolute path, not per content -- see domain.document.DocumentId.from) replaced by the literal token <DOCUMENT_ID>, and the four standard fields (title, author, date, url) plus two extension fields (site-name, description) selected from the input's metadata markup. Every field other than documentId is fully content-deterministic and diffed exactly."
+    }
+  ],
+  "recipe": {
+    "id": "dispatch-note",
+    "expectedExit": 0,
+    "cliArguments": ["route-metadata", "--input", "${INPUT}", "--content-output", "${CONTENT_OUTPUT}", "--metadata-output", "${METADATA_OUTPUT}", "--manifest", "${MANIFEST}"]
+  }
+}

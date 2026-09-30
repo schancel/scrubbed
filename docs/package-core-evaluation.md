@@ -86,3 +86,47 @@ separate clean runtime/container, actual Windows compile and runtime evidence,
 HTML parser adoption and license inventory, versioned artifact/install policy,
 and independent platform/security/license review. The rollback for this
 prerequisite is deleting only this experiment and evaluation document.
+
+## Issue #499 extension: real release workflow and Linux proof (2026-09-30)
+
+This slice replaced the hard-pinned six-file notice list above with a
+two-directional closure check (`experiments/package_core/check.d`,
+`verifyNoticeClosure`): every `third_party/...` path
+`THIRD_PARTY_NOTICES.md` references must exist, and every real
+license/notice-shaped file under `third_party/` (`LICENSE`, `LICENSE.txt`,
+`NOTICE`, `*-LICENSE.txt`) must be referenced by the doc. This closed the
+exact gap this document's six-file list had accumulated since 2026-09-21:
+`third_party/lexbor/LICENSE`, `third_party/lexbor/NOTICE`, and
+`third_party/zstd/LICENSE` are now part of the live-derived closure (along
+with `third_party/lexbor/README.md` and `third_party/zstd/README.md`,
+which the notices doc also references for provenance). The shipped closure
+is now 12 files: root `LICENSE` and `THIRD_PARTY_NOTICES.md`, plus 10
+`third_party/**` paths, computed fresh every run -- nothing is pinned by
+hash any more, so a future undocumented dependency fails loudly instead of
+shipping quietly incomplete.
+
+`.github/workflows/release.yml` (new) fires on `v*` tags, builds all three
+named targets, stamps the tag into `VERSION` at build time only (never
+committed), packages each with the checker above plus generated
+`completions/scrubbed.{bash,zsh,fish}`, and publishes a GitHub Release
+(draft until every target succeeds) with a combined `SHA256SUMS`.
+
+A real, disposable test tag, `v0.0.1-test1`, was pushed against this
+slice's own commit and exercised the actual workflow end to end (run
+[36680526080](https://github.com/schancel/scrubbed/actions/runs/36680526080)).
+Both the release and the tag were deleted immediately after the evidence
+below was collected; nothing from this test run remains published.
+
+| Target | Result | Evidence |
+| --- | --- | --- |
+| macOS arm64 (`macos-15` runner) | PASS | Build+package+self-verify in workflow (1m56s). Locally downloaded the real release asset into an isolated `/tmp` directory (no repo files alongside it) and, with `PATH` reduced to `/usr/bin:/bin`: `sha256sum -c SHA256SUMS` all `OK`; `./scrubbed --version` printed `scrubbed 0.0.1-test1` (the real tag, not the dev placeholder); `--help` exits 0; a Windows-1252/UTF-8 mojibake round trip (`repair --filters normalize-line-endings,fix-mojibake`) correctly produced `Café naïve`; an HTML `<main>` extraction (`extract --format markdown`) correctly produced `# Title` / `Hello world`. All 12 bundled notice files matched the checked-out repo tree byte-for-byte (`cmp`). Bundled `completions/scrubbed.bash`/`.zsh` source cleanly and register `complete -F _scrubbed_completion scrubbed`; `fish` was not available on this host to complete the third-shell proof locally (covered on Linux below, same generation code path). |
+| Linux x86_64 (`ubuntu-24.04` runner) | PASS | Build+package+self-verify in workflow (2m13s). Verified in a **fresh `ubuntu:24.04` Docker container** with no D/DUB/Python preinstalled (only `libcurl4t64`, `zsh`, `fish` added afterward as ordinary runtime/shell packages, matching the documented dynamic-libcurl dependency): `sha256sum -c SHA256SUMS` all `OK`; `--version` printed the real tag; the same mojibake-repair and HTML-to-Markdown goldens passed; all 12 notice files matched the source tree byte-for-byte. With the extracted binary installed at `/usr/local/bin/scrubbed` (the conventional path the bundled completions are generated against), sourcing each of `completions/scrubbed.{bash,zsh,fish}` and actually invoking completion (`_scrubbed_completion` for bash, `complete -p`/`complete -C` for zsh/fish) returned real candidates (`--filter --filter-option --filters`) from the installed binary in all three shells -- a genuine end-to-end completion proof, not just script-registration. |
+| Linux aarch64 (`ubuntu-24.04-arm` runner) | PASS | Build+package+self-verify in workflow (2m33s). Identical fresh-container proof as x86_64 above (`ubuntu:24.04` under `--platform linux/arm64`, native on this arm64 Docker host): checksums, `--version`, mojibake repair, HTML-to-Markdown, all 12 notice bytes, and all three shells' completions with real candidates from the installed binary all passed. |
+| Windows x86_64 | Still UNTESTED | Unchanged from 2026-09-21; explicitly out of scope for #499 (no POSIX port contract, matches `dub.json`'s platform gate). |
+
+This closes the Linux x86_64/aarch64 gap this document's 2026-09-21 pass
+left open (issue #353's compiler-support prerequisite had since landed,
+which is exactly what made this proof possible). Bit-for-bit build
+reproducibility is still not claimed. Windows remains untested and out of
+scope. `.deb`/`.rpm`/Homebrew packaging remain separate, later slices
+(#500/#501/#502).

@@ -192,6 +192,13 @@ for the ordered path to a first public release.
 Deeper engineering write-ups (native HTML parser selection, S3
 capability, WARC compression, packaging) live under [docs/](docs/).
 
+## Support
+
+If scrubbed is useful to you, you can support ongoing development via
+[PayPal](https://paypal.me/intentionallyblank), [Patreon](https://www.patreon.com/givelotus),
+or by following along at the [newsletter](https://shablag.substack.com).
+Entirely optional -- the project stays MIT-licensed and open either way.
+
 ## License
 
 MIT.

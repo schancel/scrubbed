@@ -1,0 +1,40 @@
+{
+  "schema": "scrubbed.near-dedup-corpus.v1",
+  "licenseFile": "examples/corpus/near-dedup/LICENSE.txt",
+  "claims": {
+    "synthetic": true,
+    "trainingReady": false,
+    "physicallyDeletesDocuments": false
+  },
+  "artifacts": [
+    {
+      "path": "examples/corpus/near-dedup/inputs/brief.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #506 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "509ef949f75d5fccda782e54a4070c23a81e785271dfa4e5976db1cd27712cbf",
+      "expectedOutcome": "Near-duplicate of expanded.txt and shorter than it."
+    },
+    {
+      "path": "examples/corpus/near-dedup/inputs/expanded.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #506 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "dc9eba95d46ca0111b5bdd6358b97c62e3904a3cb1f55eb2c4a32672b2d973ba",
+      "expectedOutcome": "Near-duplicate of brief.txt and selected by keep-longest."
+    },
+    {
+      "path": "examples/corpus/near-dedup/inputs/distinct.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #506 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "cbc51d89b2cda1dcf68b89c88ea2120f9277692aa8c75aa75db58e55d41d7419",
+      "expectedOutcome": "Negative control with no pruning decision."
+    }
+  ],
+  "recipes": [
+    {"id": "default", "policy": "keep-first", "explicitPolicy": false},
+    {"id": "keep-first", "policy": "keep-first", "explicitPolicy": true},
+    {"id": "keep-longest", "policy": "keep-longest", "explicitPolicy": true}
+  ]
+}

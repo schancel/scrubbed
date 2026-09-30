@@ -351,13 +351,33 @@ struct MarkdownRenderOptions {
 }
 
 private void renderChildren(const ref HtmlTree tree, size_t parent,
-    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure;
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options,
+    bool inCell = false) pure;
 
 private void renderTable(const ref HtmlTree tree, size_t tableIndex,
     ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure;
 
+// `inCell` marks that `writer` is accumulating content that a caller further
+// up the stack (a `renderTable` data/header cell, or an already-flattened
+// nested table/row reached via this same flag) will pass through
+// `singleLine()` and fold into ONE GFM table cell. `singleLine()` only
+// collapses whitespace/newlines -- it does not escape `|`/`-`, so any real
+// pipe-table syntax (`renderTable`'s own `| ... |` / `|---|` literals, or
+// the plain-bullet-row bare `- `/` | ` literals below) written into that
+// Writer would land as an unescaped, structurally-significant fragment
+// inside the OUTER cell, corrupting its GFM (issue #493: a nested `<table>`
+// produced exactly this -- a stray `|---|` delimiter-row fragment bleeding
+// into the outer table's data cell). Ordinary text content is unaffected:
+// `clean()` already backslash-escapes a literal `|`/`-` in real text, so
+// only the renderer's OWN literal structural characters are the hazard.
+// While `inCell` is set, `table` and `tr` nodes take a degraded, inert path
+// (see their branches below) instead of emitting that literal syntax, and
+// every recursive call propagates `inCell` unchanged so a table nested
+// arbitrarily deep inside a cell (e.g. `<td><div><table>...`) degrades the
+// same way rather than reverting to real table syntax one level down.
 private void renderNode(const ref HtmlTree tree, size_t index,
-    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure {
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options,
+    bool inCell = false) pure {
     if (depth > 128) throw new HtmlMarkdownOutputLimit;
     ref const node = tree.nodes[index];
     if (node.kind == HtmlNodeKind.text) {
@@ -425,12 +445,12 @@ private void renderNode(const ref HtmlTree tree, size_t index,
              child = endOf(tree, child)) {
             if (tree.nodes[child].parentIndex != index) continue;
             if (tree.nodes[child].name != "li") {
-                renderNode(tree, child, writer, depth + 1, options); continue;
+                renderNode(tree, child, writer, depth + 1, options, inCell); continue;
             }
             if (!first) writer.put("\n");
             first = false;
             Writer item;
-            renderChildren(tree, child, item, depth + 1, options);
+            renderChildren(tree, child, item, depth + 1, options, inCell);
             item.trim();
             size_t prefixLength = 2;
             if (name == "ul") writer.put("- ");
@@ -455,7 +475,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     }
     if (name == "blockquote" && options.quotes) {
         Writer quote;
-        renderChildren(tree, index, quote, depth + 1, options);
+        renderChildren(tree, index, quote, depth + 1, options, inCell);
         quote.trim();
         writer.block();
         writer.put("> ");
@@ -471,10 +491,42 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         return;
     }
     if (name == "table" && options.tables) {
+        if (inCell) {
+            // Flatten a table nested inside a cell to inert prose instead
+            // of recursing into `renderTable`'s real `| ... |` / `|---|`
+            // syntax -- see this function's own doc comment (`inCell`)
+            // above for why. Walking its children with `inCell` still set
+            // reaches this same `table`/`tr` degrade for anything nested
+            // deeper, and every real cell's text still survives (only the
+            // pipe/dash structure marking it as a table is lost).
+            renderChildren(tree, index, writer, depth + 1, options, true);
+            return;
+        }
         renderTable(tree, index, writer, depth, options);
         return;
     }
     if (name == "tr") {
+        if (inCell) {
+            // Same rationale as the `table` branch above: the plain
+            // bullet-row degrade below writes a literal leading "- " and
+            // " | " cell separators, which is exactly the same unescaped-
+            // structural-pipe hazard one level down. Render each real
+            // td/th cell's own content directly, joined by a plain space
+            // (never a pipe), keeping `inCell` set throughout.
+            writer.block();
+            bool firstCell = true;
+            for (size_t child = index + 1; child < endOf(tree, index);
+                 child = endOf(tree, child)) {
+                if (tree.nodes[child].parentIndex != index) continue;
+                if (tree.nodes[child].name != "td" && tree.nodes[child].name != "th")
+                    continue;
+                if (!firstCell) writer.put(" ");
+                firstCell = false;
+                renderChildren(tree, child, writer, depth + 1, options, true);
+            }
+            writer.block();
+            return;
+        }
         writer.block();
         writer.put("- ");
         bool first = true;
@@ -484,7 +536,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             if (!first) writer.put(" | ");
             first = false;
             Writer cell;
-            renderChildren(tree, child, cell, depth + 1, options);
+            renderChildren(tree, child, cell, depth + 1, options, true);
             writer.put(singleLine(cell.finish()));
         }
         writer.block();
@@ -508,7 +560,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     if (options.formatting &&
         (name == "strong" || name == "b" || name == "em" || name == "i")) {
         Writer emphasized;
-        renderChildren(tree, index, emphasized, depth + 1, options);
+        renderChildren(tree, index, emphasized, depth + 1, options, inCell);
         auto content = emphasized.finish();
         size_t left, right = content.length;
         while (left < right && content[left] == ' ') ++left;
@@ -528,22 +580,23 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         auto href = attribute(node, "href");
         const safe = safeTarget(href);
         if (safe) writer.put("[");
-        renderChildren(tree, index, writer, depth + 1, options);
+        renderChildren(tree, index, writer, depth + 1, options, inCell);
         if (safe) {
             writer.put("](<");
             writer.put(markdownTarget(href));
             writer.put(">)");
         }
-    } else renderChildren(tree, index, writer, depth + 1, options);
+    } else renderChildren(tree, index, writer, depth + 1, options, inCell);
     if (block) writer.block();
 }
 
 private void renderChildren(const ref HtmlTree tree, size_t parent,
-    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options) pure {
+    ref Writer writer, size_t depth, const ref MarkdownRenderOptions options,
+    bool inCell = false) pure {
     for (size_t child = parent + 1; child < endOf(tree, parent);
          child = endOf(tree, child))
         if (tree.nodes[child].parentIndex == parent)
-            renderNode(tree, child, writer, depth, options);
+            renderNode(tree, child, writer, depth, options, inCell);
 }
 
 // Issue #478 real GFM-shaped pipe table, modeled on pinned trafilatura==
@@ -631,7 +684,13 @@ private void renderTable(const ref HtmlTree tree, size_t tableIndex,
             if (tree.nodes[child].name != "td" && tree.nodes[child].name != "th") continue;
             if (tree.nodes[child].name == "th") hasHeaderCell = true;
             Writer cell;
-            renderChildren(tree, child, cell, depth + 1, options);
+            // `inCell: true` -- this cell's content is about to be flattened
+            // by `singleLine()` and folded into ONE cell of THIS table's own
+            // grid; a nested `<table>` (or its `tr`) reached from here must
+            // degrade to inert prose rather than emit its own real pipe-
+            // table syntax into this same Writer (issue #493; see
+            // `renderNode`'s `inCell` doc comment for the full mechanism).
+            renderChildren(tree, child, cell, depth + 1, options, true);
             cells ~= singleLine(cell.finish());
         }
         if (cells.length > maxCols) maxCols = cells.length;
@@ -1061,6 +1120,97 @@ unittest {
         "--no-tables (confirmed by running it: it drops table content " ~
         "outright rather than degrading it -- a deliberate divergence, see " ~
         "MarkdownRenderOptions's own doc comment)");
+}
+
+// Issue #493 regression: the exact synthetic nested-table repro from the
+// ticket. Before this fix, `renderTable`'s per-cell content collection
+// recursed into a nested `<table>`'s own `renderTable` call using the SAME
+// `Writer` that becomes the outer cell's content; that inner call wrote its
+// own real `| ... |` / `|---|` pipe-table syntax as literal characters
+// (bypassing `clean()`'s escaping, and `singleLine()` does not escape `|`/
+// `-` either), so the outer table's second data row came out as
+// `| before | Inner | |---| | innerdata | after |` -- a stray, literal
+// `|---|` delimiter-row fragment bled into a data cell of a table that
+// declares only 1 column via its header, genuinely malformed GFM. The fix
+// (`renderNode`'s `inCell` flag) flattens a nested table reached from
+// inside a cell to plain prose instead: this test asserts both the exact
+// fixed output AND, defensively, that no data row contains a stray
+// delimiter-row fragment or a pipe count exceeding the table's own declared
+// column width -- so a future regression reintroducing the bug (even with
+// different literal spacing) still fails this test, not just an exact-
+// string diff.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind, count;
+    import std.array : split;
+
+    string html = "<table><tr><th>Outer</th></tr>" ~
+        "<tr><td>before<table><tr><th>Inner</th></tr>" ~
+        "<tr><td>innerdata</td></tr></table>after</td></tr></table>";
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto markdown = renderMarkdown(tree, MarkdownRenderOptions(tables: true));
+    assert(markdown ==
+        "| Outer | \n" ~
+        "|---|\n" ~
+        "| before Inner innerdata after |\n",
+        "a nested table's real content must survive, flattened to plain " ~
+        "prose inside the outer cell, with no pipe-table syntax of its own");
+
+    // Defensive structural check, independent of the exact fixed string
+    // above: no stray `|---|`-shaped delimiter-row fragment appears
+    // anywhere except the outer table's own single real delimiter row, and
+    // no data row has more pipe-delimited segments than the 1-column width
+    // the header itself declares.
+    assert(markdown.split("\n").count!(line => line.canFind("|---|")) == 1,
+        "exactly one real delimiter row -- the outer table's own -- may " ~
+        "contain a `|---|`-shaped run; a nested table's own delimiter row " ~
+        "must never survive as a second, stray occurrence");
+    foreach (line; markdown.split("\n")) {
+        if (!line.length || line == "|---|") continue;
+        // A well-formed 1-column data/header row looks like "| cell | ",
+        // i.e. exactly 2 pipes; a corrupted row (the inner table's own
+        // pipes bleeding through) would have more.
+        assert(line.count('|') == 2,
+            "a data row must have exactly as many pipes as the declared " ~
+            "1-column width implies (2, for the leading/trailing pipes) " ~
+            "-- more would mean a nested table's own pipe syntax leaked " ~
+            "into this row: " ~ line);
+    }
+}
+
+// Issue #493 regression, second shape: the same nested-table hazard when
+// the OUTER table itself is rendered via the pre-#478 plain bullet-row
+// degrade (`tables: false`) rather than real pipe-table syntax -- the
+// ticket's own root-cause note that "base's pre-existing bullet-row `tr`
+// handling has the same latent weakness". Before this fix, the nested
+// table's real `renderTable` call (triggered because `options.tables` is a
+// single flag applying to the whole render, and a NESTED table reached
+// while collecting a bullet-row's cell is still real syntax on base) wrote
+// its own `| ... |` / `|---|` literals into the same flattened bullet line.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string html = "<table><tr><th>Outer</th></tr>" ~
+        "<tr><td>before<table><tr><th>Inner</th></tr>" ~
+        "<tr><td>innerdata</td></tr></table>after</td></tr></table>";
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto markdown = renderMarkdown(tree, MarkdownRenderOptions(tables: false));
+    assert(markdown ==
+        "- Outer\n\n" ~
+        "- before Inner innerdata after\n",
+        "tables=false's own plain bullet-row degrade must also flatten a " ~
+        "nested table to inert prose, not bleed its real pipe syntax into " ~
+        "the bullet line");
+    assert(!markdown.canFind("|---|"),
+        "no real pipe-table delimiter syntax may appear anywhere once " ~
+        "tables=false has degraded every row to a plain bullet line");
 }
 
 // Issue #478 real fixture 2/4 -- lists (nested, ordered/unordered). Verbatim

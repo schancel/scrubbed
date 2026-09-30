@@ -22,6 +22,7 @@ import domain.document : DocumentId, SourceLocator;
 import domain.document_metadata : DocumentMetadata, decodeDocumentMetadataV1,
     encodeDocumentMetadataV2;
 import domain.language_id : LanguageDetectionStatus, decodeLanguageIdentity;
+import effects.html_tree : defaultExtractHtmlBytes, HtmlNodeKind, parseHtml;
 import effects.language_id_detect_stage : languageIdDetectExtensionKeyV1,
     languageIdDetectStageKeyV1;
 import experiments.html_main_content.token_overlap : containsNormalized,
@@ -940,115 +941,53 @@ private string justextStoplistForLangPrefix(string prefix) {
     }
 }
 
-// Case-insensitive ASCII substring search starting at byte offset `from`,
-// operating directly on the original bytes (never on a `toLower`-transformed
-// copy, so returned indices always stay aligned to the original string --
-// relevant because, unlike ASCII, some Unicode uppercase/lowercase mappings
-// change UTF-8 byte length). `needle` must already be lowercase ASCII.
-private ptrdiff_t indexOfAsciiCI(string haystack, string needle, size_t from) {
-    if (needle.length == 0 || from > haystack.length || haystack.length < needle.length)
-        return -1;
-    foreach (i; from .. haystack.length - needle.length + 1) {
-        bool match = true;
-        foreach (j; 0 .. needle.length) {
-            auto c = haystack[i + j];
-            auto lower = (c >= 'A' && c <= 'Z') ? cast(char)(c + 32) : c;
-            if (lower != needle[j]) { match = false; break; }
-        }
-        if (match) return cast(ptrdiff_t) i;
-    }
-    return -1;
-}
-
-// True for the ASCII whitespace bytes legal between/around HTML attributes.
-private bool isAsciiTagSpace(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
-}
-
-// Case-insensitive ASCII exact-match compare (both sides plain bytes, no
-// `toLower`-allocation needed for the short attribute-name tokens this is
-// used on).
-private bool asciiEqualsCI(string a, string b) {
-    if (a.length != b.length) return false;
-    foreach (i; 0 .. a.length) {
-        auto c = a[i];
-        auto lower = (c >= 'A' && c <= 'Z') ? cast(char)(c + 32) : c;
-        if (lower != b[i]) return false;
-    }
-    return true;
-}
-
-// Extracts the actual `lang="xx"`/`lang='xx'`/`lang=xx` (or `xml:lang=...`)
-// attribute's two-letter prefix from the opening `<html ...>` tag only, via
-// a small forward-walking attribute tokenizer (not a full HTML parse --
-// this only selects which of jusText's inbuilt stoplists to use, it is
-// never treated as document content or scored). Case-insensitive
-// (`<HTML LANG="DE">` is real, legal HTML) and tolerant of the full range
-// of legal HTML5 attribute syntax: whitespace around `=` (`lang = "de"`)
-// and unquoted values terminated by whitespace or the tag's close
-// (`lang=de`). Because every attribute's value -- quoted or not -- is fully
-// consumed as the tag is walked left to right, a `lang="xx"`-shaped
-// substring that merely appears *inside* an earlier, still-open attribute's
-// own quoted value (e.g. `data-x='see lang="de" example' lang="fr"`) can
-// never be mistaken for the real attribute: only a name token seen at a
-// genuine attribute-boundary position -- never inside another attribute's
-// value -- can match. Likewise a `lang=` that is the tail of a longer
-// attribute name (`data-lang=`) is never mistaken for the real `lang`
-// attribute, since the name token is compared as a whole, not as a
-// substring. Returns "" when no `<html>` tag or no genuine `lang`
-// attribute is present (e.g. this corpus's own fixture 02, a bare `<html>`
-// with no lang attribute at all).
+// Extracts the actual `lang`/`xml:lang` attribute's two-letter prefix from
+// the document's real <html> element -- via the project's own lexbor-backed
+// HTML parser (effects.html_tree, already used in production for e.g.
+// html_tree_json_stage.d), not hand-rolled byte-level scanning. This only
+// selects which of jusText's inbuilt stoplists to use; the result is never
+// treated as document content or scored.
+//
+// A hand-rolled forward-walking attribute tokenizer previously lived here,
+// and across four independent review passes kept growing a new bug in the
+// same shape: (1) a substring false-match on `data-lang=`, (2) missing
+// case-insensitivity, (3) missing whitespace-around-`=`/unquoted-value
+// support plus a quote-nesting false-match (`data-x='see lang="de"...'`),
+// and (4) the tag-boundary search itself (`indexOf(">", tagStart)`) being
+// quote-unaware, so a literal `>` inside an *earlier* attribute's own
+// quoted value (`<html data-x="a > b" lang="de">`) truncated the tag before
+// the real `lang` attribute was ever reached. A related, never-fixed issue:
+// the `<html` tag-*start* search had no comment/custom-element awareness,
+// so `<!-- <html lang="xx"> --><html lang="de">` (a real, historically
+// common IE-conditional-comment pattern) or `<html-panel lang="xx">` could
+// match the wrong tag's `lang` value. Rather than patch a fifth edge case
+// into the same scanner, this now delegates to a real parser: an HTML
+// comment is never an element, and `html-panel` is never structurally the
+// same tag name as `html`, so both false-match classes are ruled out by
+// construction, not by another ad hoc check. Case-insensitivity
+// (`<HTML LANG="DE">`) is likewise a property of the real HTML5 parser,
+// not of a hand-written comparison.
+//
+// `defaultExtractHtmlBytes` (1 MiB) is used as the parse's raw-byte
+// admission bound -- comfortably above this project's real 20-page
+// pipeline-benchmark corpus's largest fixture (~490 KiB) and matching the
+// same default used for real extraction admission elsewhere in this
+// codebase. Returns "" when parsing fails, no <html> element is found, or
+// it has neither a `lang` nor an `xml:lang` attribute (e.g. this corpus's
+// own fixture 02, a bare `<html>` with no lang attribute at all).
 private string htmlLangPrefix(string html) {
-    auto tagStart = indexOfAsciiCI(html, "<html", 0);
-    if (tagStart < 0) return "";
-    auto tagEnd = html.indexOf(">", tagStart);
-    if (tagEnd < 0) return "";
-    auto tag = html[tagStart .. tagEnd];
-
-    size_t i = 5; // skip the leading "<html" tag-name token itself
-    while (i < tag.length) {
-        while (i < tag.length && isAsciiTagSpace(tag[i])) i++;
-        if (i >= tag.length) break;
-
-        auto nameStart = i;
-        while (i < tag.length && !isAsciiTagSpace(tag[i]) && tag[i] != '=')
-            i++;
-        auto name = tag[nameStart .. i];
-        if (name.length == 0) break; // stray "=" with no attribute name
-
-        while (i < tag.length && isAsciiTagSpace(tag[i])) i++;
-
-        bool isLang = asciiEqualsCI(name, "lang") || asciiEqualsCI(name, "xml:lang");
-
-        if (i >= tag.length || tag[i] != '=') {
-            // Boolean attribute (no value at all), e.g. a bare `lang` with
-            // no `=` -- nothing to consume, and no value to return even if
-            // the name matches, so just move on to the next attribute.
+    auto outcome = parseHtml(cast(const(ubyte)[]) html, null,
+        "external_comparator.htmlLangPrefix", defaultExtractHtmlBytes);
+    if (!outcome.isParsed) return "";
+    foreach (node; outcome.tree.nodes) {
+        if (node.kind != HtmlNodeKind.element || node.name.toLower != "html")
             continue;
+        foreach (attr; node.attributes) {
+            auto lowerName = attr.name.toLower;
+            if (lowerName == "lang" || lowerName == "xml:lang")
+                return attr.value.length >= 2 ? attr.value[0 .. 2].toLower : "";
         }
-        i++; // consume "="
-        while (i < tag.length && isAsciiTagSpace(tag[i])) i++;
-
-        string value;
-        if (i < tag.length && (tag[i] == '"' || tag[i] == '\'')) {
-            auto quote = tag[i];
-            auto valueStart = i + 1;
-            auto valueEnd = tag.indexOf(quote, valueStart);
-            if (valueEnd < 0) {
-                value = tag[valueStart .. $];
-                i = tag.length;
-            } else {
-                value = tag[valueStart .. valueEnd];
-                i = cast(size_t) valueEnd + 1;
-            }
-        } else {
-            auto valueStart = i;
-            while (i < tag.length && !isAsciiTagSpace(tag[i])) i++;
-            value = tag[valueStart .. i];
-        }
-
-        if (isLang)
-            return value.length >= 2 ? value[0 .. 2].toLower : "";
+        return "";
     }
     return "";
 }
@@ -2005,10 +1944,13 @@ private JSONValue assembleReport(JSONValue[] cases, const string[] requiredNames
 }
 
 private void selfTest() {
-    // jusText stoplist selection (issue #59): both quoting styles, a
-    // missing `lang` attribute entirely, an unhandled language falling
-    // back to the documented English default, and a `lang=` substring
-    // outside the `<html>` tag never influencing the choice.
+    // jusText stoplist selection (issue #59), now backed by the real
+    // lexbor-based HTML parser (effects.html_tree) instead of hand-rolled
+    // byte scanning. These first cases are unchanged regression cases from
+    // four earlier review passes' bug fixes (PR #585) -- kept exactly so
+    // they still cover the same scenarios, but they now pass because a
+    // real parser structurally can't make these mistakes, not because of
+    // another hand-tuned scanning rule.
     require(htmlLangPrefix(`<html lang="de-DE">`) == "de",
         "double-quoted lang attribute not detected");
     require(htmlLangPrefix(`<html lang='en'>`) == "en",
@@ -2019,9 +1961,10 @@ private void selfTest() {
         "a lang= substring outside the <html> tag must never be detected");
     require(htmlLangPrefix(`<html>` ~ "\n" ~ `<meta lang="de">`) == "",
         "a lang= substring after the <html> tag's own close must not be detected");
-    // Code-review fix (PR #585): a `lang=` that is the tail of a longer
-    // attribute name (`data-lang=`) must never be mistaken for the real
-    // `lang` attribute, even when it appears earlier in the tag.
+    // a `lang=` that is the tail of a longer attribute name (`data-lang=`)
+    // must never be mistaken for the real `lang` attribute, even when it
+    // appears earlier in the tag -- structurally guaranteed by matching
+    // real, distinct attribute names rather than scanning for a substring.
     require(htmlLangPrefix(`<html data-lang="fr" lang="de">`) == "de",
         "data-lang= must not be mistaken for the real lang attribute");
     require(htmlLangPrefix(`<html data-lang="fr">`) == "",
@@ -2029,16 +1972,18 @@ private void selfTest() {
     // xml:lang (real XHTML spelling) is still accepted via its `:` boundary.
     require(htmlLangPrefix(`<html xml:lang="de">`) == "de",
         "xml:lang= must be accepted as the lang attribute");
-    // Code-review fix (PR #585): both the <html> tag search and the lang=
-    // attribute search must be case-insensitive (legal, real HTML).
+    // Both the <html> tag match and the lang= attribute match must be
+    // case-insensitive (legal, real HTML) -- a property the real HTML5
+    // parser provides by construction (it normalizes element/attribute
+    // names), verified here rather than assumed.
     require(htmlLangPrefix(`<HTML LANG="DE">`) == "de",
         "uppercase <HTML LANG=...> must be detected case-insensitively");
     require(htmlLangPrefix(`<Html Lang='En'>`) == "en",
         "mixed-case <Html Lang=...> must be detected case-insensitively");
-    // Independent-review fix (PR #585, third bug class): whitespace around
-    // `=` and unquoted attribute values are both legal HTML5 syntax the
-    // original literal "lang=" + immediate-quote scan silently missed,
-    // falling through to "no lang attribute" (repro cases A and B).
+    // Whitespace around `=` and unquoted attribute values are both legal
+    // HTML5 syntax (repro cases A and B from an earlier hand-rolled
+    // scanner bug); a real parser handles these as ordinary attribute
+    // syntax, not as edge cases.
     require(htmlLangPrefix(`<html lang = "de">`) == "de",
         "whitespace around = in the lang attribute must still be detected (repro A)");
     require(htmlLangPrefix(`<html lang=de>`) == "de",
@@ -2047,12 +1992,43 @@ private void selfTest() {
         "whitespace before = combined with an unquoted value must still be detected");
     require(htmlLangPrefix(`<html lang= "de">`) == "de",
         "whitespace after = combined with a quoted value must still be detected");
-    // Independent-review fix (PR #585, third bug class): a `lang="xx"`-shaped
-    // substring inside an *earlier* attribute's own quoted value must never
-    // be mistaken for the real, later `lang` attribute (repro case C).
+    // A `lang="xx"`-shaped substring inside an *earlier* attribute's own
+    // quoted value must never be mistaken for the real, later `lang`
+    // attribute (repro case C) -- a real parser tokenizes the earlier
+    // attribute's quoted value as one unit, so no such substring can ever
+    // be seen as a standalone attribute name/value pair.
     require(htmlLangPrefix(`<html data-x='see lang="de" example' lang="fr">`) == "fr",
         "a lang=-shaped substring inside an earlier attribute's quoted value " ~
         "must not override the real lang attribute (repro C)");
+    // Newly found bug (fourth review pass, not yet fixed before this
+    // change): a literal `>` inside an *earlier* attribute's own quoted
+    // value used to truncate the hand-rolled scanner's tag-boundary search
+    // before the real `lang` attribute was ever reached, silently
+    // returning "". A real parser tokenizes the quoted attribute value as
+    // one unit, so an embedded `>` is never mistaken for the tag's close.
+    require(htmlLangPrefix(`<html data-x="a > b" lang="de">`) == "de",
+        "a > inside an earlier attribute's own quoted value must not " ~
+        "truncate the tag before the real lang attribute is reached");
+    // Related, pre-existing, never-fixed bug: the old scanner's `<html`
+    // tag-*start* search had no comment/custom-element boundary awareness,
+    // so a `lang=` inside an HTML comment (a real, historically common
+    // IE-conditional-comment pattern) could be mistaken for the real
+    // <html> tag's own attribute. A real parser never treats comment
+    // contents as markup, so the genuine <html> element below is the only
+    // one ever observed.
+    require(htmlLangPrefix(`<!-- <html lang="xx"> --><html lang="de">`) == "de",
+        "a lang= inside an HTML comment must never be mistaken for the " ~
+        "real <html> element's own lang attribute");
+    // A same-prefixed but structurally different tag name (a custom
+    // element like <html-panel>) must never be mistaken for the real
+    // <html> element either -- matched here by real, distinct element
+    // type, not by a tag-name substring/prefix scan. Per the HTML5
+    // parsing algorithm a second literal <html ...> start tag merges its
+    // attributes onto the document's one real <html> element rather than
+    // creating a second one, which this case also exercises.
+    require(htmlLangPrefix(`<html-panel lang="xx">panel</html-panel><html lang="de">`) == "de",
+        "a custom element like <html-panel> must never be mistaken for " ~
+        "the real <html> element");
     require(justextStoplistFor(`<html lang="de-DE">`) == "German",
         "German stoplist selection regression");
     require(justextStoplistFor(`<html lang='en'>`) == "English",

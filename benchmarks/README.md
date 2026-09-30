@@ -420,6 +420,7 @@ uv pip install --python "$bench_env/justext-venv/bin/python" \
 dub build --build=release --compiler=ldc2
 ldc2 -O3 -release -boundscheck=on -preview=dip1000 -i -Isource -I. \
   benchmarks/external_comparator.d experiments/html_main_content/token_overlap.d \
+  .dub/lexbor/liblexbor_static.a \
   -of="$bench_env/external_comparator"
 "$bench_env/external_comparator" --self-test
 "$bench_env/external_comparator" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" \
@@ -693,6 +694,16 @@ and running it, not assumed from documentation, and are each documented in
    immutable copy's TOCTOU protection, but strictly more verification than
    langdetect/presidio's own python interpreters get today (no mutation
    check on the interpreter at all).
+
+Per-fixture `lang`-attribute detection (point 2 above) is implemented by
+`htmlLangPrefix`, which parses each fixture's HTML with the project's own
+lexbor-backed parser (`effects.html_tree`, already used in production for
+e.g. `html_tree_json_stage.d`) and reads the real `<html>` element's
+`lang`/`xml:lang` attribute, rather than hand-rolled byte scanning -- four
+real bugs were found in a hand-rolled scanner approach across four
+independent review passes, so the build command above now links
+`.dub/lexbor/liblexbor_static.a` (built as a side effect of the `dub build`
+line above it).
 
 A real end-to-end run against the pinned `justext==3.0.2` and the current
 `html-main-content` stage on this held-out corpus (2026-09-30) scored

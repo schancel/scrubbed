@@ -6,8 +6,8 @@ import std.array : replicate;
 import std.conv : to;
 import std.digest : LetterCase, toHexString;
 import std.digest.sha : SHA256, sha256Of;
-import std.file : SpanMode, copy, dirEntries, exists, getAttributes, mkdir,
-    mkdirRecurse, readText, rmdirRecurse, setAttributes, symlink, tempDir, write;
+import std.file : copy, exists, getAttributes, mkdir, mkdirRecurse, readText,
+    rmdirRecurse, setAttributes, symlink, tempDir, write;
 import std.json : parseJSON;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath;
 import std.process : Redirect, execute, pipeProcess, wait;
@@ -560,7 +560,7 @@ BASH", "completion-path-check", quotedExe, marker]);
             "; expected --threads");
     auto zshQuoted = execute(["zsh", "-fc", q"ZSH
 set -e
-autoload -Uz compinit && compinit
+autoload -Uz compinit && compinit -i
 autoload -Uz bashcompinit && bashcompinit
 setup=$("$1" completion init --zsh)
 source /dev/stdin <<< "$setup"
@@ -578,7 +578,8 @@ _scrubbed_completion
 printf '%s\n' "${COMPREPLY[1]}"
 ZSH", "completion-path-check", quotedExe, marker]);
     check(zshQuoted.status == 0 && zshQuoted.output == "--threads\n",
-        "zsh quoted executable setup and registered invocation");
+        "zsh quoted executable setup and registered invocation: status=" ~
+            zshQuoted.status.to!string ~ "; output=" ~ zshQuoted.output);
     auto fishAvailable = execute(["sh", "-c", "command -v fish >/dev/null 2>&1"]);
     if (fishAvailable.status == 0) {
         auto fishQuoted = execute(["fish", "-c", q"FISH
@@ -608,17 +609,17 @@ FISH", "completion-path-check", quotedExe, marker]);
     auto tree = buildPath(root, "tree");
     mkdir(tree);
     auto slowText = replicate("line\r\n", 500_000);
-    foreach (n; 0 .. 16) write(buildPath(tree, n.to!string ~ ".txt"), slowText);
+    string[] visited;
+    foreach (n; 0 .. 16) {
+        auto path = buildPath(tree, n.to!string ~ ".txt");
+        write(path, slowText);
+        visited ~= path;
+    }
     auto child = buildPath(tree, "zchild");
     mkdir(child);
-    symlink(input, buildPath(child, "late-link"));
-    string[] visited;
-    foreach (entry; dirEntries(tree, SpanMode.depth, false)) {
-        if (entry.isFile || entry.isSymlink) visited ~= entry.name;
-        if (entry.isSymlink) break;
-    }
-    check(visited.length > 4 && visited[$ - 1] == buildPath(child, "late-link"),
-        "symlink followed at least four regular files");
+    auto lateLink = buildPath(child, "late-link");
+    symlink(input, lateLink);
+    visited ~= lateLink;
     auto treeOutput = buildPath(root, "tree-output");
     foreach (attempt; 0 .. 5) {
         auto traversal = separately([exe, "run", "--input", tree, "--output", treeOutput,

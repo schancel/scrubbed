@@ -35,5 +35,27 @@ int main(string[] args) {
     check(!subcommandVersion.output.canFind("Available commands"),
         "version subcommand must not fall through to the general command-list usage text");
 
+    // Regression (caught in review): --version must stay scoped to the
+    // genuine top-level bare-flag case. Appending it to a real subcommand's
+    // own argv is a plausible typo and must remain a hard, loud error
+    // (argparse's own "Unrecognized arguments"), exactly as it was before
+    // #498 -- never a silently-accepted, ignored flag that lets the
+    // pipeline run anyway.
+    foreach (subcommandArgs; [["run", "--version", "--input", "in.txt",
+                "--output", "out.txt"],
+            ["extract", "--version", "--input", "in.txt", "--output",
+                "out.txt", "--format", "markdown"],
+            ["repair", "--version", "--input", "in.txt", "--output",
+                "out.txt"]]) {
+        auto swallowed = execute([exe] ~ subcommandArgs);
+        check(swallowed.status == 2,
+            "--version appended to `" ~ subcommandArgs[0] ~
+            "` must still exit 2, not be silently accepted");
+        check(swallowed.output.canFind("Unrecognized"),
+            "--version appended to `" ~ subcommandArgs[0] ~
+            "` must still surface an unrecognized-argument error: " ~
+            swallowed.output);
+    }
+
     return 0;
 }

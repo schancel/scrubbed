@@ -243,20 +243,37 @@ struct RouteMetadata {
     @(NamedArgument("retry").Description("Explicitly retry unresolved sink outputs")) bool retry;
 }
 
+// #498: documentation-only stand-in so argparse's own generated --help
+// lists "version" under "Available commands", matching how every other
+// management verb here (errors-init, route-metadata, clean-web-document,
+// crawl, ...) is self-documenting through the same union. This must NOT be
+// a `NamedArgument` field directly on `Commands`: argparse treats a field
+// there as a "common"/global flag accepted anywhere in argv, including
+// *after* a real subcommand's own token (e.g. `scrubbed run --version` would
+// then be silently accepted and ignored instead of correctly erroring as an
+// unrecognized argument -- confirmed empirically, this was caught and
+// reverted in review). A `Command`-tagged struct in the `SubCommand!` union
+// below, by contrast, is only ever matched as the single command-position
+// token, so it carries no such risk -- but for that same reason (argparse
+// statically rejects any subcommand name starting with its short-name
+// prefix, "typetraits.d: Subcommand name should not begin with '-'") it
+// cannot be spelled `--version` as a second alias here the way `run,clean`
+// or `repair,fix` are; the flag spelling is documented in the description
+// text below instead. The actual `scrubbed --version`/`scrubbed version`
+// invocation is handled earlier in `runCommands`, in the same bare-flag
+// dispatch spot that already special-cases `-h`/`--help`, before this
+// struct is ever parsed -- this variant is never actually reached at
+// runtime (see the `assert(0, "management verbs dispatched before
+// argparse")` case below, shared with every other early-dispatched verb).
+@(Command("version").Description("Print version and exit (same as --version)"))
+struct Version {
+}
+
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
-    // #498: documentation-only -- this field exists so argparse's own
-    // generated --help lists "--version" under "Optional arguments" next to
-    // "-h, --help", matching that flag's documentation style. The actual
-    // `scrubbed --version` (and `scrubbed version`) invocation is handled
-    // earlier in `runCommands`, in the same bare-flag dispatch spot that
-    // already special-cases `-h`/`--help`, before this struct is ever
-    // parsed -- this field is never read at runtime.
-    @(NamedArgument("version").Description("Print version and exit"))
-    bool versionFlag;
-
     SubCommand!(Run, Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
-        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl)
+        ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl,
+        Version)
         command;
 }
 
@@ -794,7 +811,8 @@ int runCommands(string[] argv) {
         } else static if (is(typeof(cmd) == ErrorsInit) ||
             is(typeof(cmd) == ErrorsCopy) || is(typeof(cmd) == ErrorsExport) ||
             is(typeof(cmd) == ErrorsVerify) || is(typeof(cmd) == RouteMetadata) ||
-            is(typeof(cmd) == CleanWebDocument) || is(typeof(cmd) == Crawl)) {
+            is(typeof(cmd) == CleanWebDocument) || is(typeof(cmd) == Crawl) ||
+            is(typeof(cmd) == Version)) {
             assert(0, "management verbs dispatched before argparse");
             return 2;
         } else {
@@ -923,6 +941,34 @@ unittest {
     auto help = runCommandsCapturingStdout(["scrubbed", "--help"]);
     assert(help[1].canFind("--version"),
         "--help output must document --version");
+}
+
+// Regression (caught in review of #498): the first implementation attempt
+// documented `--version` as a plain `NamedArgument` field directly on the
+// top-level `Commands` struct. argparse treats such a field as a
+// "common"/global flag accepted anywhere in argv -- including *after* a
+// real subcommand's own token -- so `scrubbed run --version ...` was
+// silently accepted and the pipeline just ran, instead of erroring on the
+// unrecognized argument the way it did before #498 and the way any other
+// unknown flag still does. `--version` must remain scoped to genuinely
+// being the top-level verb: appending it to a real subcommand's own argv
+// must still be a hard, loud error, never a silent no-op flag.
+unittest {
+    foreach (argv; [["scrubbed", "run", "--version", "--input", "in.txt",
+                "--output", "out.txt"],
+            ["scrubbed", "extract", "--version", "--input", "in.txt",
+                "--output", "out.txt", "--format", "markdown"],
+            ["scrubbed", "repair", "--version", "--input", "in.txt",
+                "--output", "out.txt"]]) {
+        auto result = runCommandsCapturingStderr(argv);
+        assert(result[0] == 2,
+            "--version appended to a real subcommand must still exit 2: " ~
+            argv[1]);
+        assert(result[1].canFind("Unrecognized"),
+            "--version appended to a real subcommand must still surface " ~
+            "an unrecognized-argument error, not be silently swallowed: " ~
+            argv[1] ~ " -> " ~ result[1]);
+    }
 }
 
 // Issue #474: `extract --help` must not claim `--format` has a default --

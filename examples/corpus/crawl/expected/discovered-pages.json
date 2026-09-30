@@ -1,0 +1,33 @@
+[
+  {
+    "path": "/about.html",
+    "depth": 1,
+    "discoveredFrom": "/index.html",
+    "sha256": "4a318a974b418490d55ab12b330a2ae7e7f6b17ef80ea7bdf3e64c6e78daa2f7"
+  },
+  {
+    "path": "/contact.html",
+    "depth": 1,
+    "discoveredFrom": "/index.html",
+    "sha256": "90cb2589bd547948eecd028b73d4e3cdca084253a8443d5bb6468ec8bcc41b29"
+  },
+  {
+    "path": "/index.html",
+    "depth": 0,
+    "discoveredFrom": "seed",
+    "sha256": "e87a1594725b66289bed07665c2948ac377e0c0b46dd381b23b4608cc0556559"
+  },
+  {
+    "path": "/resources.html",
+    "depth": 3,
+    "discoveredFrom": "/team.html",
+    "sha256": "a8ad1a1bc9a74631a57131f8cd172e637dc339846c8f47bef15d6dacf6344d58"
+  },
+  {
+    "path": "/team.html",
+    "depth": 2,
+    "discoveredFrom": "/about.html",
+    "sha256": "b8f1450f3ff8d1bbb02a88836047dbd57c02feb9f6b34798c2dab3e344235354"
+  }
+]
+

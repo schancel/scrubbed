@@ -40,30 +40,46 @@
 ///    to this issue (see this issue's own PR description for that
 ///    verification). When non-empty for a shard, this module additionally
 ///    reads that shard's immutable C01 source in full and republishes every
-///    document that is *not* a non-representative member of `finalLinks`
-///    (computed from the exact same policy-driven decision above) as a new,
-///    physically smaller C01 document shard at that path via the existing
-///    `DocumentShardWriter` -- matching trafilatura's real `--deduplicate`
-///    semantics (removal), not just annotation. A shard that never names a
-///    `prunedDestination` gets no pruned output at all: pruning is strictly
-///    additive and opt-in per shard, on top of the unchanged annotation
-///    overlay this module always writes.
+///    document that is *not* a non-representative member of
+///    `finalPruningLinks` (computed from the exact same policy-driven
+///    decision above, restricted to document-level candidates only -- see
+///    issue #492's own note below) as a new, physically smaller C01
+///    document shard at that path via the existing `DocumentShardWriter`
+///    -- matching trafilatura's real `--deduplicate` semantics (removal),
+///    not just annotation. A shard that never names a `prunedDestination`
+///    gets no pruned output at all: pruning is strictly additive and
+///    opt-in per shard, on top of the unchanged annotation overlay this
+///    module always writes.
 ///
-/// **Post-#480 review fix: only a document's own whole-document signature
-/// ever becomes a clustering candidate.** `similarity_buckets.d` persists a
-/// band membership for both a document's whole-document signature and each
-/// of its per-4096-byte *segment* signatures; every persisted member is
-/// still tamper/staleness-verified against its recomputed band hash below,
-/// but a segment-level member is never turned into a `CandidateRow` --
-/// only `member.segment == false` rows are. A segment captures only a
-/// fragment of a document's content (e.g. shared boilerplate), and
-/// treating a segment-vs-whole-document match as equivalent to a genuine
-/// whole-document match let one shared boilerplate segment cluster -- and,
-/// with pruning enabled, physically delete -- an otherwise entirely unique
-/// large document, even though the two documents' own whole-document
-/// jaccard estimate was well below threshold. See this module's own
-/// regression test (search "segment-conflation") for the exact reproduced
-/// shape.
+/// **Post-#480 review fix, decoupled further by issue #492.** `similarity_
+/// buckets.d` persists a band membership for both a document's
+/// whole-document signature and each of its per-4096-byte *segment*
+/// signatures; every persisted member is still tamper/staleness-verified
+/// against its recomputed band hash below, regardless of level. Round 1 of
+/// #480's review found that treating a segment-vs-whole-document match as
+/// equivalent to a genuine whole-document match let one shared boilerplate
+/// segment cluster -- and, with pruning enabled, physically delete -- an
+/// otherwise entirely unique large document, even though the two
+/// documents' own whole-document jaccard estimate was well below
+/// threshold. The original fix (918a0db) closed this by excluding every
+/// segment-level member from becoming a `CandidateRow` at all, which also
+/// (unintentionally) narrowed the always-on annotation/reporting overlay
+/// below (Phase B/C) -- a capability that predates #480 (segment-level
+/// clustering shipped in #37) and is unrelated to pruning.
+///
+/// Issue #492 decouples the two concerns instead of gating candidacy at
+/// this single chokepoint: every persisted member -- segment-level or
+/// document-level -- becomes a `CandidateRow` again below, restoring
+/// pre-#480 annotation richness (Phase B/C cluster and publish over the
+/// full per-bucket set, see `outputs`/`finalLinks`). Phase D's pruning
+/// decision is nonetheless independently recomputed per bucket from
+/// *only* that same bucket's document-level subset (`documentLevelMembers`
+/// / `pruningOutputs` / `finalPruningLinks`) -- the exact narrower,
+/// data-loss-safe set round 1's fix already established -- so the
+/// blocker stays closed even though annotation is rich again. See this
+/// module's own regression tests (search "segment-conflation" for the
+/// still-closed pruning blocker, and "segment-richness" for restored
+/// annotation candidacy).
 module effects.near_dedup_overlay;
 
 import core.stdc.errno : errno, ENOENT;
@@ -231,24 +247,20 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
                     enforce(signature.bands[member.bandIndex] == member.bandKeyValue,
                         "near dedup overlay: recomputed band key mismatch " ~
                         "(tampered or stale bucket overlay)");
-                    // Issue #480 review round 1 (confirmed, fixed): every
-                    // persisted member is still verified above (tamper/
-                    // staleness detection stays symmetric across document-
-                    // and segment-level members alike), but only a
-                    // document's own whole-document signature may ever
-                    // become a clustering candidate below. A segment
-                    // captures only a fragment of a document's content
-                    // (e.g. shared boilerplate); treating a segment-vs-
-                    // whole-document match as equivalent to a genuine
-                    // whole-document match let one shared boilerplate
-                    // segment cluster -- and, once pruning is enabled,
-                    // physically delete -- an otherwise entirely unique
-                    // large document, even though the two documents' own
-                    // whole-document jaccard estimate was well below
-                    // threshold. See this module's own regression test
-                    // (search "segment-conflation") for the exact
-                    // reproduced shape.
-                    if (member.segment) continue;
+                    // Issue #480 review round 1 (confirmed, fixed) / issue
+                    // #492 (decoupled): every persisted member is still
+                    // verified above (tamper/staleness detection stays
+                    // symmetric across document- and segment-level members
+                    // alike), and every member -- segment-level or
+                    // document-level -- becomes a `CandidateRow` here.
+                    // Segment-level rows are no longer dropped at this
+                    // chokepoint; Phase B below instead resolves each
+                    // bucket twice -- once over its full member set (this
+                    // restores pre-#480 annotation richness) and once more
+                    // over only its document-level subset (the exact
+                    // narrower, data-loss-safe set round 1's fix
+                    // established) -- so pruning eligibility stays
+                    // document-level-only without narrowing annotation.
                     batch ~= CandidateRow(member.bandIndex, member.bandKeyValue,
                         member.overflowed, index, signature, document.content.length);
                     if (batch.length == runRecords) flushRun(batch, runs, &fresh);
@@ -261,8 +273,17 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
     // Phase B: a single sequential scan over the (bandIndex, bandKeyValue,
     // documentId)-sorted candidate stream groups exactly one already-capped
     // bucket into memory at a time -- never a full-corpus structure -- and
-    // hands it, unmodified, to the existing pure decision function.
+    // hands it, unmodified, to the existing pure decision function. Issue
+    // #492: every bucket is resolved *twice* against that one unmodified
+    // decision function -- once over its full `members` (segment-level and
+    // document-level candidates alike, restoring pre-#480 annotation
+    // richness) into `outputs`, and once more over only that same bucket's
+    // `documentLevelMembers` subset (round 1 of #480's own narrower,
+    // data-loss-safe set) into `pruningOutputs`. Both reuse the identical
+    // in-memory grouping this scan already built, so this costs one extra
+    // pure-function call per bucket, never a second pass over disk.
     OutputLink[] outputs;
+    OutputLink[] pruningOutputs;
     if (runs.count) {
         auto sorted = File(runs.firstPath(), "rb");
         scope(exit) sorted.close();
@@ -272,15 +293,22 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
             auto bandIndex = item.bandIndex;
             auto bandKeyValue = item.bandKeyValue;
             NearDedupCandidate[] members;
+            NearDedupCandidate[] documentLevelMembers;
             while (hasItem && item.bandIndex == bandIndex && item.bandKeyValue == bandKeyValue) {
-                members ~= NearDedupCandidate(item.signature.segment,
+                auto candidate = NearDedupCandidate(item.signature.segment,
                     item.signature.segmentOrdinal, item.bandIndex, item.bandKeyValue,
                     item.overflowed, item.signature, item.contentLength);
+                members ~= candidate;
+                if (!candidate.segment) documentLevelMembers ~= candidate;
                 hasItem = readRecord(sorted, item);
             }
             foreach (link; nearDuplicateLinksInBucket(members, policy)) {
                 auto docText = link.documentId.text;
                 outputs ~= OutputLink(docText, sourceIndexOf[docText], link.representativeId.text);
+            }
+            foreach (link; nearDuplicateLinksInBucket(documentLevelMembers, policy)) {
+                auto docText = link.documentId.text;
+                pruningOutputs ~= OutputLink(docText, sourceIndexOf[docText], link.representativeId.text);
             }
         }
     }
@@ -298,30 +326,46 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
     // governing representative selection itself, applied once more as a
     // deterministic, order-invariant tie-break. It makes no new pairwise
     // near-duplicate decision the pure function did not already make on its
-    // own bucket.
-    string[string] representativeOf;
-    foreach (output; outputs) {
-        auto existing = output.documentId in representativeOf;
-        if (existing is null || output.representativeId < *existing)
-            representativeOf[output.documentId] = output.representativeId;
+    // own bucket. Issue #492: this resolution is pure over one `OutputLink[]`
+    // at a time, so it runs unchanged, independently, for both `outputs`
+    // (annotation, the full per-bucket set) and `pruningOutputs`
+    // (pruning eligibility, the document-level-only subset) below --
+    // exactly the module doc's called-for separation of the two concerns.
+    OutputLink[] resolveFinalLinks(OutputLink[] rawOutputs) {
+        string[string] representativeOf;
+        foreach (output; rawOutputs) {
+            auto existing = output.documentId in representativeOf;
+            if (existing is null || output.representativeId < *existing)
+                representativeOf[output.documentId] = output.representativeId;
+        }
+        // Issue #480 review round 1 (secondary concern, resolved): a
+        // document's chosen representative here may itself be a key in
+        // this same map -- i.e. itself a non-representative entry from
+        // some other bucket -- since a document's own signature can
+        // explode into up to `similarityBands` independent band rows and
+        // land in more than one bucket-cluster at once (the same
+        // structural fact the comment above already names). Left
+        // unresolved, a published `representative_id` could name a
+        // document that pruning has itself physically removed.
+        // `resolveRepresentativeChains` rewrites every entry to its true,
+        // never-itself-a-key root before anything is published.
+        representativeOf = resolveRepresentativeChains(representativeOf);
+        OutputLink[] resolved;
+        resolved.reserve(representativeOf.length);
+        foreach (documentId, representativeId; representativeOf)
+            resolved ~= OutputLink(documentId, sourceIndexOf[documentId], representativeId);
+        resolved.sort!((a, b) => a.sourceIndex == b.sourceIndex ?
+            a.documentId < b.documentId : a.sourceIndex < b.sourceIndex);
+        return resolved;
     }
-    // Issue #480 review round 1 (secondary concern, resolved): a document's
-    // chosen representative here may itself be a key in this same map --
-    // i.e. itself a non-representative entry from some other bucket --
-    // since a document's own signature can explode into up to
-    // `similarityBands` independent band rows and land in more than one
-    // bucket-cluster at once (the same structural fact the comment above
-    // already names). Left unresolved, a published `representative_id`
-    // could name a document that pruning has itself physically removed.
-    // `resolveRepresentativeChains` rewrites every entry to its true,
-    // never-itself-a-key root before anything is published.
-    representativeOf = resolveRepresentativeChains(representativeOf);
-    OutputLink[] finalLinks;
-    finalLinks.reserve(representativeOf.length);
-    foreach (documentId, representativeId; representativeOf)
-        finalLinks ~= OutputLink(documentId, sourceIndexOf[documentId], representativeId);
-    finalLinks.sort!((a, b) => a.sourceIndex == b.sourceIndex ?
-        a.documentId < b.documentId : a.sourceIndex < b.sourceIndex);
+    auto finalLinks = resolveFinalLinks(outputs);
+    // Issue #492: the pruning-eligible set is resolved through the exact
+    // same chain-resolution/tie-break logic, independently, over
+    // `pruningOutputs` (document-level candidates only) -- never over the
+    // richer `outputs`/`finalLinks` above. This is what keeps pruning's
+    // data-loss fix closed while annotation regains segment-level
+    // richness. See `finalPruningLinks`'s one use, in Phase D below.
+    auto finalPruningLinks = resolveFinalLinks(pruningOutputs);
 
     // The one-time plan rejects every destination against all source and
     // buckets-overlay paths/inodes across the whole batch, then rechecks the
@@ -350,16 +394,21 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
     }
     enforce(at == finalLinks.length, "near dedup overlay: orphan sorted link");
 
-    // Phase D (issue #480): physical pruning, strictly additive and opt-in
-    // per shard. `finalLinks` (just published above as annotations) is
-    // reused unchanged as the drop set: a document is omitted from a
-    // pruned shard iff it appears as `documentId` (the non-representative
-    // side) in `finalLinks`. Every other document -- including one this
-    // analyzer never touched at all (no bucket membership, or
-    // hasKeys == false) -- is republished byte-for-byte. A shard that never
-    // named a `prunedDestination` does zero extra work here.
+    // Phase D (issue #480, decoupled from annotation by issue #492):
+    // physical pruning, strictly additive and opt-in per shard. Unlike
+    // `finalLinks` (just published above as the richer annotation set),
+    // the drop set here is built from `finalPruningLinks` -- resolved
+    // above from `pruningOutputs`, the document-level-only candidate
+    // subset -- so a document is omitted from a pruned shard iff it
+    // appears as `documentId` (the non-representative side) in
+    // `finalPruningLinks`, never merely because a segment of it happened
+    // to match something in the richer annotation set. Every other
+    // document -- including one this analyzer never touched at all (no
+    // bucket membership, or hasKeys == false) -- is republished
+    // byte-for-byte. A shard that never named a `prunedDestination` does
+    // zero extra work here.
     bool[string] droppedIds;
-    foreach (link; finalLinks) droppedIds[link.documentId] = true;
+    foreach (link; finalPruningLinks) droppedIds[link.documentId] = true;
     foreach (canonicalIndex, shard; shards) {
         if (!shard.prunedDestination.length) continue;
         plan.validateSource(canonicalIndex);
@@ -630,7 +679,46 @@ private struct OutputLink {
 private bool candidateRowLess(CandidateRow a, CandidateRow b) {
     if (a.bandIndex != b.bandIndex) return a.bandIndex < b.bandIndex;
     if (a.bandKeyValue != b.bandKeyValue) return a.bandKeyValue < b.bandKeyValue;
-    return a.signature.documentId.text < b.signature.documentId.text;
+    if (a.signature.documentId.text != b.signature.documentId.text)
+        return a.signature.documentId.text < b.signature.documentId.text;
+    // Issue #492 (review round 2): `nearDuplicateLinksInBucket` keeps only
+    // the *first* signature it sees per document within one bucket call
+    // ("Multiple members may name the same document ... only the first
+    // signature seen per document participates"). A document's own
+    // whole-document signature and one of its segment signatures are
+    // computed from overlapping content, so they very often collide on the
+    // same real LSH band for the same document. Without a deterministic
+    // tie-break here, which of the two "wins" that ambiguous first-seen
+    // slot would be arbitrary sort-order noise -- letting a document enter
+    // the full/annotation cluster only via a segment proxy while its
+    // whole-document row never gets a chance to represent it there (or the
+    // reverse), which could reintroduce exactly the "annotation names a
+    // representative pruning has removed" gap issue #480's round 1 closed.
+    // Always ordering a document's whole-document row before any of its
+    // segment rows makes the full (annotation) per-document participant
+    // deterministically the same signature the document-level-only
+    // (pruning) scan already uses -- the full cluster's membership for
+    // every document is then a strict superset of the document-level
+    // cluster's, never a divergent, order-dependent substitute for it.
+    return !a.signature.segment && b.signature.segment;
+}
+
+unittest {
+    // Issue #492 (review round 3): pins the whole-document-before-segment
+    // tie-break above. Same band, same key, same document -- only the
+    // segment flag differs.
+    import domain.document : SourceLocator;
+    auto id = DocumentId.from(SourceLocator("near-dedup-tiebreak", "source", "doc"));
+    CandidateRow whole, segment;
+    whole.bandIndex = segment.bandIndex = 3;
+    whole.bandKeyValue = segment.bandKeyValue = 42;
+    whole.signature.documentId = segment.signature.documentId = id;
+    segment.signature.segment = true;
+    segment.signature.segmentOrdinal = 1;
+    assert(candidateRowLess(whole, segment),
+        "a document's whole-document row must sort before its segment row in the same bucket");
+    assert(!candidateRowLess(segment, whole),
+        "a segment row must never sort before the same document's whole-document row");
 }
 
 private void number(ref ubyte[] bytes, ulong value) {
@@ -1387,4 +1475,247 @@ unittest {
     assert(duplicateRejected,
         "two shards naming the same prunedDestination path must be rejected");
     assert(!exists(sharedPrunedPath), "a rejected batch must not leave a partial pruned shard behind");
+}
+
+unittest {
+    // Issue #492 (round 2 review): the always-on annotation/reporting
+    // overlay (Phase B/C) must still report a segment-level near-dup match
+    // -- the exact richness #37 shipped and #480's round-1 fix (918a0db)
+    // unintentionally narrowed away by excluding every segment-level bucket
+    // member from ever becoming a `CandidateRow` at all. Reuses the issue's
+    // own round-2 empirical repro shape verbatim: a 7096-byte document made
+    // of 4096 bytes of genuinely unique prose followed by a 3000-byte
+    // trailing segment byte-identical to a small standalone document --
+    // confirmed by the issue body to publish 1 link record before 918a0db
+    // and 0 after. This fixture (fail-before/pass-after against that same
+    // fix; see this module's own history) proves this module is back to 1.
+    // The "segment-conflation" fixture above proves, independently, that
+    // the large document still never gets physically pruned for it --
+    // together the two prove the decoupling this issue asks for.
+    auto root = scratchRoot("segment-richness");
+    scope(exit) rmdirRecurse(root);
+
+    string uniqueContent;
+    while (uniqueContent.length < 4096)
+        uniqueContent ~= "another distinct unrelated passage about deep sea currents. ";
+    uniqueContent = uniqueContent[0 .. 4096];
+
+    string boilerplate;
+    while (boilerplate.length < 3000)
+        boilerplate ~= "standard site footer boilerplate shared verbatim across many pages. ";
+    boilerplate = boilerplate[0 .. 3000];
+
+    auto largeContent = uniqueContent ~ boilerplate;
+    assert(largeContent.length == 7096);
+
+    string largeKey, smallKey;
+    foreach (salt; 0 .. 64) {
+        auto candidateLarge = "richness-large-" ~ salt.to!string;
+        auto candidateSmall = "richness-small-" ~ salt.to!string;
+        auto largeId = testDocument("s", candidateLarge, "x").id;
+        auto smallId = testDocument("s", candidateSmall, "x").id;
+        if (smallId.text < largeId.text) {
+            largeKey = candidateLarge;
+            smallKey = candidateSmall;
+            break;
+        }
+    }
+    assert(largeKey.length != 0,
+        "fixture bug: could not find a salt where the small document's ID sorts before " ~
+        "the large document's within 64 tries");
+
+    auto largeDoc = testDocument("s", largeKey, largeContent);
+    auto smallDoc = testDocument("s", smallKey, boilerplate);
+
+    // Fixture self-check, using the real pipeline's own signature/estimate
+    // functions: confirms this really is the "segment matches, whole
+    // document does not" shape before trusting any conclusion drawn from
+    // it.
+    auto largeSig = similaritySignatures(largeDoc.id, largeDoc.content);
+    auto smallSig = similaritySignatures(smallDoc.id, smallDoc.content);
+    import domain.near_dedup_decision : jaccardEstimate;
+    assert(jaccardEstimate(largeSig.document, smallSig.document) < nearDuplicateThreshold,
+        "fixture bug: the two whole documents must NOT be near-duplicates of each other");
+    assert(largeSig.segments.length >= 2,
+        "fixture bug: the large document must split into at least two segments");
+    assert(jaccardEstimate(largeSig.segments[1], smallSig.document) >= nearDuplicateThreshold,
+        "fixture bug: the large document's second segment must closely match the small document");
+
+    auto documents = [largeDoc, smallDoc];
+    auto destination = buildPath(root, "near-dedup.overlay");
+    auto shard = buildFixtureShard(root, "segment-richness", documents, destination);
+
+    writeNearDedupOverlays([shard]); // default PruningPolicy.keepFirst, no prunedDestination named
+
+    auto records = readAllAnnotations(destination);
+    assert(records.length == 1,
+        "issue #492: a segment-level near-dup match must still be reported by the always-on " ~
+        "annotation overlay -- richness restored to pre-#480 (918a0db) levels");
+
+    auto sourceDocuments = readAllDocuments(shard.source);
+    ShardDocument bySourceId(string id) {
+        foreach (document; sourceDocuments) if (document.id.text == id) return document;
+        assert(false, "missing source document");
+    }
+    auto decoded = decodeCanonicalNearDedupLink(records[0].fields, bySourceId(records[0].documentId));
+    assert(decoded.documentId == largeDoc.id,
+        "the large document is the non-representative side: its own ID sorts after the small " ~
+        "document's");
+    assert(decoded.representativeId == smallDoc.id,
+        "the small boilerplate-only document is named representative for this segment-level match");
+}
+
+unittest {
+    // Issue #492 ("Also recommended"): a real end-to-end multi-bucket
+    // conflict, exercised through this module's actual external-memory
+    // Phase A-D pipeline -- not just the 6 pure synthetic
+    // resolveRepresentativeChains unit tests above, which hand it a map
+    // literal directly and never touch a real shard, bucket overlay, or C01
+    // write at all. Three whole-document-level documents, no segment-level
+    // candidates involved (kept orthogonal to the segment/document-level
+    // decoupling proven by the two fixtures above): "q" shares a large
+    // common passage with both "p" and "r", plus a small tail exclusive to
+    // (passage+p) and a second small tail exclusive to (passage+r) -- so
+    // q's own signature genuinely collides, on real distinct LSH bands
+    // (confirmed below against the real persisted band values, not merely
+    // an aggregate jaccard estimate), with p's signature in one bucket and
+    // with r's signature in another. Critically (confirmed below by an
+    // explicit self-check, not merely assumed), no single band collides
+    // across all three documents at once, so no bucket ever unions
+    // {p,q,r} directly -- each of the two exclusive buckets independently
+    // computes its own local winner, and with document IDs ordered
+    // p < q < r, those two buckets disagree on what q's own local winner
+    // even is: bucket{p,q} names p (q loses, p < q), bucket{q,r} names q
+    // (r loses, q < r). The *raw*, pre-chain-resolution representative map
+    // is therefore a genuine two-hop chain (r -> q -> p), not merely two
+    // buckets flatly agreeing on the same final representative: q itself
+    // is both a loser (to p) and a winner (over r) at once. Verified
+    // separately (see this module's own review history) that stubbing out
+    // the `resolveRepresentativeChains` call entirely makes
+    // `assertNoRepresentativeDangles` fail against this exact fixture --
+    // i.e. chain resolution is genuinely load-bearing here, not just
+    // exercised incidentally.
+    auto root = scratchRoot("multi-bucket-conflict");
+    scope(exit) rmdirRecurse(root);
+
+    string repeatUnique(string prefix, size_t n) {
+        string r;
+        foreach (i; 0 .. n) r ~= prefix ~ i.to!string ~ " ";
+        return r;
+    }
+    // Empirically verified (see this module's own review history) real
+    // MinHash construction: a per-fixture-unique token prefix ("seed"
+    // 422) avoids incidental cross-fixture shingle overlap with any other
+    // unittest in this module, and this specific (base length, tail
+    // length) pair was found, by exhaustive search over real
+    // `similaritySignatures` output, to be one of a small number that
+    // simultaneously satisfies every property this fixture's self-check
+    // asserts below.
+    enum seed = 422;
+    auto base = repeatUnique("b" ~ seed.to!string ~ "w", 20);
+    auto tailP = repeatUnique("p" ~ seed.to!string ~ "t", 6);
+    auto tailR = repeatUnique("r" ~ seed.to!string ~ "t", 6);
+    auto pContent = base ~ tailP;
+    auto qContent = base ~ tailP ~ tailR;
+    auto rContent = base ~ tailR;
+
+    // Find three record-key salts whose hashed DocumentIds sort in exactly
+    // the order this fixture needs: p < q < r. `DocumentId.from` hashes the
+    // source locator, not the literal key text, so candidate salts are
+    // generated and sorted by their real ID rather than assumed from the
+    // key spelling.
+    string[] candidates;
+    foreach (salt; 0 .. 64) candidates ~= "conflict-role-" ~ salt.to!string;
+    candidates.sort!((a, b) =>
+        testDocument("s", a, "x").id.text < testDocument("s", b, "x").id.text);
+    auto pKey = candidates[0];
+    auto qKey = candidates[1];
+    auto rKey = candidates[2];
+
+    auto pDoc = testDocument("s", pKey, pContent);
+    auto qDoc = testDocument("s", qKey, qContent);
+    auto rDoc = testDocument("s", rKey, rContent);
+    assert(pDoc.id.text < qDoc.id.text && qDoc.id.text < rDoc.id.text,
+        "fixture bug: candidate ordering invariant broken");
+
+    // Fixture self-check, using the real pipeline's own signature/estimate
+    // functions: confirms the exact shape this test relies on before
+    // trusting any conclusion drawn from it -- p and q are real
+    // near-duplicates, q and r are real near-duplicates, but p and r
+    // directly are not; p/q's collision and q/r's collision each land on
+    // at least one genuinely different (bandIndex, bandKeyValue) pair the
+    // other pair does not share; and -- the property that makes this a
+    // real chain rather than a flat three-way tie -- no single band
+    // collides across all three documents at once (no bucket ever unions
+    // {p,q,r} directly).
+    import domain.near_dedup_decision : jaccardEstimate;
+    auto pSig = similaritySignatures(pDoc.id, pDoc.content);
+    auto qSig = similaritySignatures(qDoc.id, qDoc.content);
+    auto rSig = similaritySignatures(rDoc.id, rDoc.content);
+    assert(jaccardEstimate(pSig.document, qSig.document) >= nearDuplicateThreshold,
+        "fixture bug: p and q must be real near-duplicates");
+    assert(jaccardEstimate(qSig.document, rSig.document) >= nearDuplicateThreshold,
+        "fixture bug: q and r must be real near-duplicates");
+    assert(jaccardEstimate(pSig.document, rSig.document) < nearDuplicateThreshold,
+        "fixture bug: p and r must NOT be direct near-duplicates");
+    bool pqExclusiveBand, qrExclusiveBand, tripleCollisionBand;
+    foreach (b; 0 .. pSig.document.bands.length) {
+        auto pv = pSig.document.bands[b], qv = qSig.document.bands[b], rv = rSig.document.bands[b];
+        if (pv == qv && pv == rv) tripleCollisionBand = true;
+        if (pv == qv && pv != rv) pqExclusiveBand = true;
+        if (qv == rv && qv != pv) qrExclusiveBand = true;
+    }
+    assert(pqExclusiveBand, "fixture bug: p/q must collide on a real band r does not share");
+    assert(qrExclusiveBand, "fixture bug: q/r must collide on a real band p does not share");
+    assert(!tripleCollisionBand,
+        "fixture bug: no band may collide across all three documents at once -- that would let " ~
+        "a single bucket union {p,q,r} directly and flatten this into a one-hop tie, not the " ~
+        "two-hop chain this fixture exists to exercise");
+
+    auto documents = [pDoc, qDoc, rDoc];
+    auto destination = buildPath(root, "near-dedup.overlay");
+    auto prunedShardPath = buildPath(root, "near-dedup-pruned.shard");
+    auto shard = buildFixtureShard(root, "multi-bucket-conflict", documents, destination);
+    shard.prunedDestination = prunedShardPath;
+
+    writeNearDedupOverlays([shard]); // default PruningPolicy.keepFirst
+    assertNoRepresentativeDangles(destination, prunedShardPath);
+
+    // q's raw, per-bucket representative is p (from the p/q-exclusive
+    // bucket, where p < q wins); r's raw, per-bucket representative is q
+    // (from the q/r-exclusive bucket, where q < r wins) -- q itself, not
+    // p. Without `resolveRepresentativeChains` walking that second hop,
+    // r's published representative would be q, which is itself dropped
+    // from the pruned shard (a genuine dangling reference, exactly the
+    // bug issue #480 round 1 closed). The real, published, chain-resolved
+    // representative for both q and r must be p.
+    auto records = readAllAnnotations(destination);
+    auto sourceDocuments = readAllDocuments(shard.source);
+    ShardDocument bySourceId(string id) {
+        foreach (document; sourceDocuments) if (document.id.text == id) return document;
+        assert(false, "missing source document");
+    }
+    NearDuplicateLink linkFor(string documentId) {
+        foreach (record; records)
+            if (record.documentId == documentId)
+                return decodeCanonicalNearDedupLink(record.fields, bySourceId(documentId));
+        assert(false, "missing expected link for " ~ documentId);
+    }
+    assert(linkFor(qDoc.id.text).representativeId == pDoc.id,
+        "q's published representative must be p -- its own raw, single-bucket winner");
+    assert(linkFor(rDoc.id.text).representativeId == pDoc.id,
+        "r's published representative must resolve to p, not dangle at its raw, one-hop " ~
+        "winner q (which is itself a non-representative pruning drops) -- this is the real " ~
+        "two-hop chain resolveRepresentativeChains exists to walk");
+
+    // Every representative named above must physically survive pruning --
+    // the exact invariant assertNoRepresentativeDangles already checked
+    // end to end, restated here as a direct, human-legible assertion
+    // against the pruned shard.
+    auto prunedDocuments = readAllDocuments(prunedShardPath);
+    bool[string] survivingIds;
+    foreach (document; prunedDocuments) survivingIds[document.id.text] = true;
+    assert((pDoc.id.text in survivingIds) !is null, "p (the representative) must survive pruning");
+    assert((qDoc.id.text in survivingIds) is null, "q is a non-representative and must be pruned");
+    assert((rDoc.id.text in survivingIds) is null, "r is a non-representative and must be pruned");
 }

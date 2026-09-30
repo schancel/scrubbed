@@ -378,6 +378,72 @@ private bool containsKeywordWord(string haystack, string needle) pure nothrow @n
     return false;
 }
 
+// Issue #549: #538's word-boundary requirement above (correctly) also
+// rejects a legitimate compound class/id that concatenates a positive
+// keyword with no delimiter at all, e.g. `class="maintext"` no longer
+// credits `main` -- "main" is followed directly by the alphanumeric 't', so
+// `containsKeywordWord` rejects it as a mid-word occurrence exactly like it
+// rejects "ad" inside "heading". Real corpus regression: the pinned
+// benchmark page `examples/pipeline-benchmark/corpus/www-spdfraktion-de.html`
+// has `<div class="maintext">` wrapping the real article body (including its
+// lede sentence); after #538 that div's score drops by 150 and a nested
+// `<p>` missing the lede wins the candidate selection instead.
+//
+// Fix, scoped to positive keywords only (never applied to `negativeKeywords`
+// -- reopening the unanchored-substring false positive #538 fixed for
+// something like "ad" inside "heading" is exactly what this must not do),
+// and deliberately narrow, matching this ticket's own suggested shape: credit
+// a keyword only when the class/id *value as a whole* is a single unbroken
+// alphanumeric word (no space/hyphen/other delimiter anywhere in it) that
+// starts with the keyword, and only when the remainder of that word does not
+// itself look like a negative-keyword-classed container.
+//
+// Both restrictions are load-bearing, not simplifications:
+//
+// - "whole value, not just a token within it" rules out a case this
+//   module's own existing #538 unit test already pins as negative:
+//   `class="related-posts"` (real corpus keyword pairing) contains the
+//   token "posts", a longer word starting with positive keyword "post" with
+//   only a harmless-looking "s" suffix -- naively crediting any matching
+//   token, not just a value that is a single word outright, flips this
+//   real negative-keyword class's net score from -150 to 0 and breaks that
+//   pinned assertion (found by re-running the full suite after an earlier,
+//   broader version of this fix -- not a theoretical concern).
+// - the negative-keyword suffix guard rules out compounds this repo's own
+//   pinned corpus actually contains -- `mainMenu`, `mainNavBox`
+//   (`examples/pipeline-benchmark/corpus/`) -- where the camelCase suffix
+//   ("Menu", "NavBox") is itself chrome that `containsKeywordWord` already
+//   excludes as its own separate token, but can't reach here because #538's
+//   boundary check also hides "menu"/"nav" as substrings mid-compound the
+//   same way it hides "ad" in "heading". Checking the suffix against
+//   `negativeKeywords` reuses that exact list rather than inventing a
+//   second one, and correctly separates the real cases: `maintext`/
+//   `mainheading` (suffix "text"/"heading", not negative-keyword prefixed
+//   -- credited) from `mainMenu`/`mainNavBox`/`articleFooter`/
+//   `articleHeader` (suffix starts with "menu"/"nav"/"footer"/"header" --
+//   withheld).
+private bool isSingleAlnumWord(string s) pure nothrow @nogc {
+    if (s.length == 0) return false;
+    foreach (c; s) if (!isAsciiAlnum(c)) return false;
+    return true;
+}
+
+private bool suffixStartsWithNegativeKeyword(string suffix) pure nothrow @nogc {
+    outer: foreach (kw; negativeKeywords) {
+        if (kw.length == 0 || kw.length > suffix.length) continue;
+        foreach (j, nc; kw) if (!asciiFoldEq(suffix[j], nc)) continue outer;
+        return true;
+    }
+    return false;
+}
+
+private bool containsKeywordPrefixOfLongerWord(string haystack, string needle) pure nothrow @nogc {
+    if (needle.length == 0 || needle.length >= haystack.length) return false;
+    if (!isSingleAlnumWord(haystack)) return false;
+    foreach (j, nc; needle) if (!asciiFoldEq(haystack[j], nc)) return false;
+    return !suffixStartsWithNegativeKeyword(haystack[needle.length .. $]);
+}
+
 // A text node's raw bytes only count as real "own text" if at least one
 // decoded character is non-whitespace; pretty-printed indentation/newlines
 // between element siblings (e.g. a <select>'s many <option> children) are
@@ -404,8 +470,10 @@ private double keywordScoreFor(const ref HtmlNode node) pure {
     auto classValue = attributeValue(node, "class");
     auto idValue = attributeValue(node, "id");
     foreach (kw; positiveKeywords)
-        if ((classValue.length && containsKeywordWord(classValue, kw)) ||
-            (idValue.length && containsKeywordWord(idValue, kw)))
+        if ((classValue.length && (containsKeywordWord(classValue, kw) ||
+                containsKeywordPrefixOfLongerWord(classValue, kw))) ||
+            (idValue.length && (containsKeywordWord(idValue, kw) ||
+                containsKeywordPrefixOfLongerWord(idValue, kw))))
             total += keywordWeightUnit;
     foreach (kw; negativeKeywords)
         if ((classValue.length && containsKeywordWord(classValue, kw)) ||
@@ -2327,6 +2395,72 @@ unittest {
     auto articleBodyNode = elementWithClass("article-body");
     assert(keywordScoreFor(contentNode) > 0.0);
     assert(keywordScoreFor(articleBodyNode) > 0.0);
+}
+
+// Issue #549: #538's word-boundary fix above also (necessarily) drops
+// positive-keyword credit for a legitimate compound class/id that
+// concatenates a keyword with no delimiter at all -- the real regression
+// this ticket reports, `class="maintext"` on the pinned corpus page
+// `www-spdfraktion-de.html`, losing `main`'s credit because "main" is
+// immediately followed by the alphanumeric "text". Fails before this
+// ticket's fix (score is exactly 0.0, matching the ticket's own reported
+// before/after node-selection change) and passes after
+// (`containsKeywordPrefixOfLongerWord`, positive-keyword-only).
+unittest {
+    HtmlNode elementWithClass(string classValue) pure {
+        return HtmlNode(HtmlNodeKind.element, size_t.max, "div", null,
+            [HtmlAttribute("class", classValue)]);
+    }
+
+    // The ticket's own real case, plus its own second named example.
+    foreach (classValue; ["maintext", "mainheading"]) {
+        auto node = elementWithClass(classValue);
+        assert(keywordScoreFor(node) > 0.0,
+            `class="` ~ classValue ~ `" must credit positive keyword "main" (#549)`);
+    }
+
+    // Real corpus prefix compounds for every other positive keyword whose
+    // suffix does not itself look like a negative-keyword-classed
+    // container (examples/pipeline-benchmark/corpus/): must now also be
+    // credited.
+    foreach (classValue; ["bodytext", "contents", "postmeta"]) {
+        auto node = elementWithClass(classValue);
+        assert(keywordScoreFor(node) > 0.0,
+            `class="` ~ classValue ~ `" must credit its positive-keyword prefix (#549)`);
+    }
+
+    // The guard this ticket's own acceptance criteria calls out: this fix
+    // must not reopen #538's unanchored-substring false positive for
+    // negative keywords. None of these (this repo's own pinned corpus
+    // "utopia-de.html" false positives) may score as a negative-keyword
+    // match, exactly as #538 already requires above.
+    foreach (classValue; ["wp-block-heading", "headline", "shadow", "download", "gradient"]) {
+        auto node = elementWithClass(classValue);
+        assert(keywordScoreFor(node) == 0.0,
+            `class="` ~ classValue ~ `" must still not score as a negative-keyword match (#549 must not reopen #538)`);
+    }
+
+    // The new prefix-of-a-longer-word credit must itself stay guarded:
+    // real corpus compounds (examples/pipeline-benchmark/corpus/) where a
+    // positive keyword prefixes a camelCase suffix that is itself
+    // negative-keyword-classed chrome ("Menu", "NavBox", "Footer",
+    // "Header") must NOT get the new prefix credit -- exactly the false
+    // positive `suffixStartsWithNegativeKeyword` exists to prevent. Net
+    // score stays <= 0 (no negative-keyword match either, since "menu"/
+    // "nav"/"footer"/"header" are themselves mid-word here and still
+    // boundary-rejected by #538's own unchanged negative-keyword check;
+    // this fix only ever withholds credit, it never adds a penalty).
+    foreach (classValue; ["mainMenu", "mainNavBox", "articleFooter", "articleHeader"]) {
+        auto node = elementWithClass(classValue);
+        assert(keywordScoreFor(node) <= 0.0,
+            `class="` ~ classValue ~ `" must not get positive-keyword prefix credit (#549 guard)`);
+    }
+
+    // `id` shares the same match as `class`.
+    auto idElement = HtmlNode(HtmlNodeKind.element, size_t.max, "div", null,
+        [HtmlAttribute("id", "maintext")]);
+    assert(keywordScoreFor(idElement) > 0.0,
+        `id="maintext" must credit positive keyword "main" (#549)`);
 }
 
 // Same issue, through the real DOM-selection path end to end: the false

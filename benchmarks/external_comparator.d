@@ -22,6 +22,7 @@ import domain.document : DocumentId, SourceLocator;
 import domain.document_metadata : DocumentMetadata, decodeDocumentMetadataV1,
     encodeDocumentMetadataV2;
 import domain.language_id : LanguageDetectionStatus, decodeLanguageIdentity;
+import effects.html_tree : defaultExtractHtmlBytes, HtmlNodeKind, parseHtml;
 import effects.language_id_detect_stage : languageIdDetectExtensionKeyV1,
     languageIdDetectStageKeyV1;
 import experiments.html_main_content.token_overlap : containsNormalized,
@@ -39,7 +40,8 @@ import std.json : JSONValue, parseJSON;
 import std.path : buildPath, dirName, dirSeparator, relativePath;
 import std.process : execute;
 import std.stdio : File, stderr, writeln;
-import std.string : fromStringz, indexOf, split, splitLines, strip, toStringz;
+import std.string : fromStringz, indexOf, split, splitLines, strip, toLower,
+    toStringz;
 import std.uuid : randomUUID;
 
 private void require(bool condition, string message) {
@@ -855,6 +857,327 @@ private JSONValue compareMainContentTrafilatura(string scrubbedBinary,
     return result;
 }
 
+// ---- The main-content/scrubbed-vs-justext case (issue #59's jusText
+// next-slice contract, owner-approved 2026-09-30). Mirrors
+// compareMainContentTrafilatura above exactly: same reused held-out corpus
+// (`fetch_held_out.sh --emit-corpus-dir`, no new fixtures authored), same
+// token_overlap.d precision/recall/without-leak scoring, same "quality
+// reported, not gated" stance, same private-path/hostname redaction, and
+// the same mutation-detection INTENT as the executable-snapshot-and-verify
+// discipline elsewhere in this file (see point 3 below for why the
+// mechanism itself has to differ here). Three real quirks, all empirically
+// confirmed at implementation time (2026-09-30) by actually installing and
+// running the pinned package, not assumed from documentation:
+//
+// 1. jusText 3.0.2's standalone `justext` console script was removed
+//    upstream in favor of `python -m justext` (a real `uv pip install
+//    justext==3.0.2` leaves no `justext` entry under the venv's `bin/`).
+//    Its `-s STOPLIST`/`-o OUTPUT_FILE`/positional-HTML-file CLI genuinely
+//    supports single-file invocation with no batch mode of its own -- the
+//    per-file shell loop below exists only for that reason, the same
+//    reason langdetect/presidio's own drivers are looped one file at a
+//    time, not because of a bug like trafilatura's `--keep-dirs` one. A
+//    second, real per-version quirk WAS found by running the pinned CLI
+//    directly: `-o OUTPUT_FILE` is silently ignored (output goes to stdout
+//    instead, no file is created, exit status still 0) unless `-o` is
+//    given *before* the positional HTML file argument; `justextBatchScript`
+//    below places it there deliberately, not incidentally.
+// 2. Unlike trafilatura (which auto-detects each page's language
+//    internally), jusText's `-s STOPLIST` argument is REQUIRED and selects
+//    the exact word list its own boilerplate classifier scores paragraphs
+//    against. Running it against a page in the wrong language is not a
+//    fair, task-equivalent comparison (this issue's own long-standing
+//    "Alternatives" policy: "Compare only exact-output quality-matched
+//    tasks with comparable I/O boundaries; normalize no hidden work
+//    away") -- empirically confirmed at implementation time: `-s English`
+//    against this corpus's own German-language fixture 01 produces zero
+//    output bytes, while the identical page against `-s German` produces
+//    1,002 bytes of real extracted text. `justextStoplistFor` below selects
+//    each fixture's stoplist from that fixture's own already-present,
+//    reused (never authored or invented) HTML `lang` attribute -- covering
+//    exactly the three languages this pinned 20-URL corpus actually
+//    contains (German/English/French, both single- and double-quoted
+//    attribute forms empirically confirmed present) -- with an explicit
+//    English default for the two fixtures that declare no `lang` attribute
+//    at all. `-s None` ("language-independent mode") was also tried and
+//    rejected as a fallback: it is a real, verified crash in the pinned
+//    3.0.2 CLI (`TypeError: unhashable type: 'set'` inside
+//    `justext.core.classify_paragraphs`'s own `define_stoplist` call), not
+//    a usable option.
+// 3. jusText has no console-script binary of its own (point 1 above), and
+//    -- unlike trafilatura's own console script, a tiny wrapper whose
+//    shebang line still points at its ORIGINAL, unmoved interpreter even
+//    after the wrapper file itself is snapshotted/copied elsewhere by
+//    `snapshotExecutable` -- the interpreter binary itself cannot safely be
+//    relocated that way: empirically confirmed at implementation time, a
+//    uv-managed venv's own `bin/python` is a symlink into a shared,
+//    unpacked CPython install (e.g. `~/.local/share/uv/python/cpython-...
+//    /bin/python3.12`) whose own stdlib/path resolution depends on that
+//    install's sibling `lib/` directory tree; a plain byte-for-byte copy
+//    elsewhere (exactly what `snapshotExecutable` does for every other
+//    tool in this file) reproducibly fails at Python startup ("Could not
+//    find platform independent libraries <prefix>" / "ModuleNotFoundError:
+//    No module named 'encodings'") because that sibling tree is left
+//    behind. This case instead hashes the ORIGINAL, unmoved interpreter
+//    path before and after the run (reusing `ExecutableSnapshot`/
+//    `verifySnapshot` unchanged, just without the copy step) -- weaker
+//    than a private immutable copy's TOCTOU protection, but strictly more
+//    verification than langdetect/presidio's own python interpreters get
+//    today (no mutation check on the interpreter at all) -- rather than
+//    silently dropping mutation detection entirely. ----
+
+private enum justextDefaultStoplist = "English";
+
+// Exactly the three languages this pinned held-out corpus's own HTML `lang`
+// attributes actually declare (German/English/French), plus the explicit
+// default above for the two fixtures with no `lang` attribute at all --
+// verified by direct inspection of the live corpus, not assumed.
+private string justextStoplistForLangPrefix(string prefix) {
+    switch (prefix) {
+        case "de": return "German";
+        case "en": return "English";
+        case "fr": return "French";
+        default: return justextDefaultStoplist;
+    }
+}
+
+// Extracts the actual `lang`/`xml:lang` attribute's two-letter prefix from
+// the document's real <html> element -- via the project's own lexbor-backed
+// HTML parser (effects.html_tree, already used in production for e.g.
+// html_tree_json_stage.d), not hand-rolled byte-level scanning. This only
+// selects which of jusText's inbuilt stoplists to use; the result is never
+// treated as document content or scored.
+//
+// A hand-rolled forward-walking attribute tokenizer previously lived here,
+// and across four independent review passes kept growing a new bug in the
+// same shape: (1) a substring false-match on `data-lang=`, (2) missing
+// case-insensitivity, (3) missing whitespace-around-`=`/unquoted-value
+// support plus a quote-nesting false-match (`data-x='see lang="de"...'`),
+// and (4) the tag-boundary search itself (`indexOf(">", tagStart)`) being
+// quote-unaware, so a literal `>` inside an *earlier* attribute's own
+// quoted value (`<html data-x="a > b" lang="de">`) truncated the tag before
+// the real `lang` attribute was ever reached. A related, never-fixed issue:
+// the `<html` tag-*start* search had no comment/custom-element awareness,
+// so `<!-- <html lang="xx"> --><html lang="de">` (a real, historically
+// common IE-conditional-comment pattern) or `<html-panel lang="xx">` could
+// match the wrong tag's `lang` value. Rather than patch a fifth edge case
+// into the same scanner, this now delegates to a real parser: an HTML
+// comment is never an element, and `html-panel` is never structurally the
+// same tag name as `html`, so both false-match classes are ruled out by
+// construction, not by another ad hoc check. Case-insensitivity
+// (`<HTML LANG="DE">`) is likewise a property of the real HTML5 parser,
+// not of a hand-written comparison.
+//
+// `defaultExtractHtmlBytes` (1 MiB) is used as the parse's raw-byte
+// admission bound -- comfortably above this project's real 20-page
+// pipeline-benchmark corpus's largest fixture (~490 KiB) and matching the
+// same default used for real extraction admission elsewhere in this
+// codebase. Returns "" when parsing fails, no <html> element is found, or
+// it has neither a `lang` nor an `xml:lang` attribute (e.g. this corpus's
+// own fixture 02, a bare `<html>` with no lang attribute at all).
+private string htmlLangPrefix(string html) {
+    auto outcome = parseHtml(cast(const(ubyte)[]) html, null,
+        "external_comparator.htmlLangPrefix", defaultExtractHtmlBytes);
+    if (!outcome.isParsed) return "";
+    foreach (node; outcome.tree.nodes) {
+        if (node.kind != HtmlNodeKind.element || node.name.toLower != "html")
+            continue;
+        foreach (attr; node.attributes) {
+            auto lowerName = attr.name.toLower;
+            if (lowerName == "lang" || lowerName == "xml:lang")
+                return attr.value.length >= 2 ? attr.value[0 .. 2].toLower : "";
+        }
+        return "";
+    }
+    return "";
+}
+
+private string justextStoplistFor(string html) {
+    return justextStoplistForLangPrefix(htmlLangPrefix(html));
+}
+
+// One shell-loop sample = one full pass over all held-out fixtures, one
+// `python -m justext` invocation per file (its only supported single-file
+// shape -- it has no batch mode of its own, mirroring langdetect/presidio's
+// own drivers' precedent above/below). Each fixture's own selected stoplist
+// travels alongside its path as an interleaved (file, stoplist) argument
+// pair. `-o` is placed before the positional HTML file deliberately (see
+// this case's own header comment: giving it afterward is a real, verified
+// per-version quirk that silently sends output to stdout instead).
+private string justextBatchScript() {
+    return "python=\"$1\"; outdir=\"$2\"; shift 2; status=0; " ~
+        "while [ $# -gt 0 ]; do f=\"$1\"; lang=\"$2\"; shift 2; " ~
+        "base=$(basename \"$f\"); " ~
+        "\"$python\" -m justext -s \"$lang\" -o \"$outdir/${base%.html}.txt\" \"$f\" " ~
+        "|| status=$?; done; exit \"$status\"";
+}
+
+private JSONValue compareMainContentJustext(string scrubbedBinary,
+        string justextPython, string root, bool darwin, double timeoutSeconds,
+        long maxRssBytes) {
+    auto scrubbedSnapshot = snapshotExecutable(scrubbedBinary, root, "scrubbed-mc-justext-snapshot");
+    // Hashes the jusText interpreter IN PLACE, at its own original path --
+    // never relocated/copied -- and verifies that hash again after the run
+    // (point 3 of this case's header comment: relocating a uv-managed
+    // venv's own `bin/python` the way `snapshotExecutable` copies every
+    // other tool's executable reproducibly breaks Python's own stdlib path
+    // resolution). `justextPython` is used directly as the invoked path
+    // below; `ExecutableSnapshot`/`verifySnapshot` are reused unchanged for
+    // the hash-compare mechanics only, never for a private copy.
+    auto justextSnapshot = ExecutableSnapshot(justextPython, digest(justextPython));
+
+    auto acquisitionOrder = verifyPinnedPackages(
+        checked(["uv", "pip", "freeze", "--python", justextPython]),
+        [PinnedPackage("justext", "3.0.2"), PinnedPackage("lxml", "6.1.3"),
+         PinnedPackage("lxml-html-clean", "0.4.5")]);
+
+    string justextVersion;
+    foreach (line; checked([justextSnapshot.path, "-m", "justext", "-V"]).splitLines)
+        if (line.startsWith("__main__.py: jusText v")) justextVersion = line;
+    require(justextVersion.length != 0, "jusText CLI version was not discoverable via -V");
+
+    // Corpus acquisition: reuses issue #26's own pinned held-out corpus and
+    // scoring module unmodified via the additive `--emit-corpus-dir` flag,
+    // exactly as compareMainContentTrafilatura does above (its own,
+    // separate materialization -- each case in this file is independently
+    // self-contained and independently callable). A nonzero exit here
+    // (network failure, resolution failure, a checked-out commit that
+    // doesn't match the pin) fails the whole case closed.
+    auto corpusDir = buildPath(root, "held-out-corpus-justext");
+    auto heldOutReportPath = buildPath(root, "held-out-report-justext.json");
+    checked(["experiments/html_main_content/fetch_held_out.sh",
+        "--emit-corpus-dir", corpusDir, heldOutReportPath]);
+
+    auto gold = parseJSON(readText(buildPath(corpusDir, "gold.json")));
+    auto goldFixtures = gold["fixtures"].array;
+    require(goldFixtures.length == expectedHeldOutFixtureCount,
+        "held-out corpus did not resolve all " ~
+        expectedHeldOutFixtureCount.to!string ~ " pinned fixtures: got " ~
+        goldFixtures.length.to!string);
+
+    auto htmlInputDir = buildPath(root, "held-out-html-only-justext");
+    auto htmlFiles = materializeHtmlOnlyCorpus(corpusDir, htmlInputDir, goldFixtures);
+    string[] scrubbedOutputNames = htmlFiles; // scrubbed mirrors the input file name exactly.
+    string[] justextOutputNames;
+    foreach (name; htmlFiles) justextOutputNames ~= name[0 .. $ - 5] ~ ".txt"; // strip ".html"
+
+    // Stoplist selection reuses the same already-materialized HTML bytes
+    // (never re-fetched, never a second corpus) -- each fixture's chosen
+    // stoplist is bound into the published report below, per fixture, so
+    // the exact selection is independently auditable.
+    string[] justextStoplists;
+    foreach (name; htmlFiles)
+        justextStoplists ~= justextStoplistFor(readText(buildPath(htmlInputDir, name)));
+    string[] justextArgs;
+    foreach (i, name; htmlFiles) {
+        justextArgs ~= buildPath(htmlInputDir, name);
+        justextArgs ~= justextStoplists[i];
+    }
+
+    JSONValue[] samples;
+    string[2] scrubbedOutputDirs, justextOutputDirs;
+    size_t scrubbedSampleIndex, justextSampleIndex;
+    string[] scrubbedCommand, justextCommand;
+
+    foreach (index; 0 .. 4) {
+        bool useScrubbed = index % 2 == 0;
+        auto tool = useScrubbed ? "scrubbed" : "justext";
+        JSONValue sample;
+        if (useScrubbed) {
+            auto outDir = buildPath(root, "scrubbed-out-justext-" ~ index.to!string);
+            scrubbedCommand = [scrubbedSnapshot.path, "run", "--input", htmlInputDir,
+                "--output", outDir, "--stage", "content=html-main-content",
+                "--threads", "1"];
+            sample = runBoundedSample(scrubbedCommand, darwin, timeoutSeconds);
+            auto status = sample["status"].integer;
+            // Same reasoning as compareMainContentTrafilatura above: exit 1
+            // is an expected content-driven quarantine on this real corpus,
+            // not a crash; the reproducibility check below is what actually
+            // catches a genuine failure.
+            require(status == 0 || status == 1,
+                "scrubbed exited with a status that is neither a clean run nor an " ~
+                "expected content-driven quarantine: " ~ status.to!string);
+            scrubbedOutputDirs[scrubbedSampleIndex++] = outDir;
+        } else {
+            auto outDir = buildPath(root, "justext-out-" ~ index.to!string);
+            mkdirRecurse(outDir);
+            justextCommand = ["/bin/sh", "-c", justextBatchScript(), "sh",
+                justextSnapshot.path, outDir] ~ justextArgs;
+            sample = runBoundedSample(justextCommand, darwin, timeoutSeconds);
+            require(sample["status"].integer == 0,
+                "jusText batch invocation exited nonzero: " ~
+                sample["status"].integer.to!string);
+            justextOutputDirs[justextSampleIndex++] = outDir;
+        }
+        auto peakRss = sample["peak_rss_bytes"].integer;
+        require(peakRss <= maxRssBytes,
+            tool ~ " exceeded the declared resource bound: " ~ peakRss.to!string ~
+            " > " ~ maxRssBytes.to!string ~ " bytes");
+        sample["tool"] = tool;
+        samples ~= sample;
+    }
+    verifySnapshot(scrubbedSnapshot);
+    verifySnapshot(justextSnapshot);
+    require(samples.length == 4 && samples[0]["tool"].str == "scrubbed" &&
+        samples[1]["tool"].str == "justext" && samples[2]["tool"].str == "scrubbed" &&
+        samples[3]["tool"].str == "justext",
+        "main-content/justext comparator lost its A/B/A/B interleave order");
+
+    auto scrubbedSignatureA = directorySignature(scrubbedOutputDirs[0], scrubbedOutputNames);
+    auto scrubbedSignatureB = directorySignature(scrubbedOutputDirs[1], scrubbedOutputNames);
+    require(scrubbedSignatureA == scrubbedSignatureB,
+        "scrubbed produced non-reproducible output between its own two timed samples");
+    auto justextSignatureA = directorySignature(justextOutputDirs[0], justextOutputNames);
+    auto justextSignatureB = directorySignature(justextOutputDirs[1], justextOutputNames);
+    require(justextSignatureA == justextSignatureB,
+        "jusText produced non-reproducible output between its own two timed samples");
+
+    string[] scrubbedOutputPaths, justextOutputPaths;
+    foreach (name; scrubbedOutputNames) scrubbedOutputPaths ~= buildPath(scrubbedOutputDirs[0], name);
+    foreach (name; justextOutputNames) justextOutputPaths ~= buildPath(justextOutputDirs[0], name);
+    auto scrubbedScore = scoreToolAgainstGold(scrubbedOutputPaths, goldFixtures);
+    auto justextScore = scoreToolAgainstGold(justextOutputPaths, goldFixtures);
+
+    JSONValue[] combinedFixtures;
+    foreach (i; 0 .. goldFixtures.length) {
+        JSONValue entry = JSONValue(["id": JSONValue(format("%02d", i + 1))]);
+        entry["scrubbed"] = fixtureEntryJson(scrubbedScore.perFixture[i]);
+        entry["justext"] = fixtureEntryJson(justextScore.perFixture[i]);
+        entry["justext_stoplist"] = JSONValue(justextStoplists[i]);
+        combinedFixtures ~= entry;
+    }
+    JSONValue scoring = JSONValue(["gold_fixture_count": JSONValue(goldFixtures.length)]);
+    scoring["scrubbed"] = toolSummaryJson(scrubbedScore);
+    scoring["justext"] = toolSummaryJson(justextScore);
+    scoring["fixtures"] = JSONValue(combinedFixtures);
+
+    JSONValue result = JSONValue(["name": JSONValue("main-content/scrubbed-vs-justext")]);
+    result["scrubbed_binary_sha256"] = scrubbedSnapshot.sha256;
+    result["justext_python_sha256"] = justextSnapshot.sha256;
+    result["justext_version"] = justextVersion;
+    result["justext_stoplist_policy"] =
+        "selected per fixture from that fixture's own already-present HTML lang attribute " ~
+        "(de->German, en->English, fr->French), defaulting to English when no lang " ~
+        "attribute is present; jusText's -s STOPLIST argument is required, never inferred " ~
+        "by the tool itself";
+    result["held_out_corpus_commit"] = gold["trafilaturaCommit"].str;
+    result["held_out_fixture_count"] = goldFixtures.length;
+    result["python_packages_acquisition_order"] = acquisitionOrder;
+    result["scrubbed_command"] = publicCommandGeneric(scrubbedCommand,
+        [scrubbedSnapshot.path: "<scrubbed-binary>"], root);
+    result["justext_command"] = publicCommandGeneric(justextCommand,
+        [justextSnapshot.path: "<justext-python>"], root);
+    result["timeout_seconds"] = timeoutSeconds;
+    result["max_rss_bytes"] = maxRssBytes;
+    result["samples"] = JSONValue(samples);
+    result["reproducibility"] = JSONValue([
+        "scrubbed": JSONValue(true),
+        "justext": JSONValue(true),
+    ]);
+    result["scoring"] = scoring;
+    return result;
+}
+
 // ---- The language-id/scrubbed-vs-langdetect case (issue #301's accepted
 // next-slice contract). Like the trafilatura case above (and unlike
 // mojibake's exact-byte gate), correctness here is scored by classification
@@ -1621,6 +1944,102 @@ private JSONValue assembleReport(JSONValue[] cases, const string[] requiredNames
 }
 
 private void selfTest() {
+    // jusText stoplist selection (issue #59), now backed by the real
+    // lexbor-based HTML parser (effects.html_tree) instead of hand-rolled
+    // byte scanning. These first cases are unchanged regression cases from
+    // four earlier review passes' bug fixes (PR #585) -- kept exactly so
+    // they still cover the same scenarios, but they now pass because a
+    // real parser structurally can't make these mistakes, not because of
+    // another hand-tuned scanning rule.
+    require(htmlLangPrefix(`<html lang="de-DE">`) == "de",
+        "double-quoted lang attribute not detected");
+    require(htmlLangPrefix(`<html lang='en'>`) == "en",
+        "single-quoted lang attribute not detected");
+    require(htmlLangPrefix(`<html>`) == "",
+        "bare <html> tag with no lang attribute must yield an empty prefix");
+    require(htmlLangPrefix(`<body lang="de">no html tag</body>`) == "",
+        "a lang= substring outside the <html> tag must never be detected");
+    require(htmlLangPrefix(`<html>` ~ "\n" ~ `<meta lang="de">`) == "",
+        "a lang= substring after the <html> tag's own close must not be detected");
+    // a `lang=` that is the tail of a longer attribute name (`data-lang=`)
+    // must never be mistaken for the real `lang` attribute, even when it
+    // appears earlier in the tag -- structurally guaranteed by matching
+    // real, distinct attribute names rather than scanning for a substring.
+    require(htmlLangPrefix(`<html data-lang="fr" lang="de">`) == "de",
+        "data-lang= must not be mistaken for the real lang attribute");
+    require(htmlLangPrefix(`<html data-lang="fr">`) == "",
+        "a tag with only data-lang= (no real lang attribute) must yield an empty prefix");
+    // xml:lang (real XHTML spelling) is still accepted via its `:` boundary.
+    require(htmlLangPrefix(`<html xml:lang="de">`) == "de",
+        "xml:lang= must be accepted as the lang attribute");
+    // Both the <html> tag match and the lang= attribute match must be
+    // case-insensitive (legal, real HTML) -- a property the real HTML5
+    // parser provides by construction (it normalizes element/attribute
+    // names), verified here rather than assumed.
+    require(htmlLangPrefix(`<HTML LANG="DE">`) == "de",
+        "uppercase <HTML LANG=...> must be detected case-insensitively");
+    require(htmlLangPrefix(`<Html Lang='En'>`) == "en",
+        "mixed-case <Html Lang=...> must be detected case-insensitively");
+    // Whitespace around `=` and unquoted attribute values are both legal
+    // HTML5 syntax (repro cases A and B from an earlier hand-rolled
+    // scanner bug); a real parser handles these as ordinary attribute
+    // syntax, not as edge cases.
+    require(htmlLangPrefix(`<html lang = "de">`) == "de",
+        "whitespace around = in the lang attribute must still be detected (repro A)");
+    require(htmlLangPrefix(`<html lang=de>`) == "de",
+        "an unquoted lang attribute value must still be detected (repro B)");
+    require(htmlLangPrefix(`<html lang =de>`) == "de",
+        "whitespace before = combined with an unquoted value must still be detected");
+    require(htmlLangPrefix(`<html lang= "de">`) == "de",
+        "whitespace after = combined with a quoted value must still be detected");
+    // A `lang="xx"`-shaped substring inside an *earlier* attribute's own
+    // quoted value must never be mistaken for the real, later `lang`
+    // attribute (repro case C) -- a real parser tokenizes the earlier
+    // attribute's quoted value as one unit, so no such substring can ever
+    // be seen as a standalone attribute name/value pair.
+    require(htmlLangPrefix(`<html data-x='see lang="de" example' lang="fr">`) == "fr",
+        "a lang=-shaped substring inside an earlier attribute's quoted value " ~
+        "must not override the real lang attribute (repro C)");
+    // Newly found bug (fourth review pass, not yet fixed before this
+    // change): a literal `>` inside an *earlier* attribute's own quoted
+    // value used to truncate the hand-rolled scanner's tag-boundary search
+    // before the real `lang` attribute was ever reached, silently
+    // returning "". A real parser tokenizes the quoted attribute value as
+    // one unit, so an embedded `>` is never mistaken for the tag's close.
+    require(htmlLangPrefix(`<html data-x="a > b" lang="de">`) == "de",
+        "a > inside an earlier attribute's own quoted value must not " ~
+        "truncate the tag before the real lang attribute is reached");
+    // Related, pre-existing, never-fixed bug: the old scanner's `<html`
+    // tag-*start* search had no comment/custom-element boundary awareness,
+    // so a `lang=` inside an HTML comment (a real, historically common
+    // IE-conditional-comment pattern) could be mistaken for the real
+    // <html> tag's own attribute. A real parser never treats comment
+    // contents as markup, so the genuine <html> element below is the only
+    // one ever observed.
+    require(htmlLangPrefix(`<!-- <html lang="xx"> --><html lang="de">`) == "de",
+        "a lang= inside an HTML comment must never be mistaken for the " ~
+        "real <html> element's own lang attribute");
+    // A same-prefixed but structurally different tag name (a custom
+    // element like <html-panel>) must never be mistaken for the real
+    // <html> element either -- matched here by real, distinct element
+    // type, not by a tag-name substring/prefix scan. Per the HTML5
+    // parsing algorithm a second literal <html ...> start tag merges its
+    // attributes onto the document's one real <html> element rather than
+    // creating a second one, which this case also exercises.
+    require(htmlLangPrefix(`<html-panel lang="xx">panel</html-panel><html lang="de">`) == "de",
+        "a custom element like <html-panel> must never be mistaken for " ~
+        "the real <html> element");
+    require(justextStoplistFor(`<html lang="de-DE">`) == "German",
+        "German stoplist selection regression");
+    require(justextStoplistFor(`<html lang='en'>`) == "English",
+        "English stoplist selection regression");
+    require(justextStoplistFor(`<html lang="fr">`) == "French",
+        "French stoplist selection regression");
+    require(justextStoplistFor(`<html lang="ja">`) == justextDefaultStoplist,
+        "an unhandled language must fall back to the documented English default");
+    require(justextStoplistFor(`<html>`) == justextDefaultStoplist,
+        "a missing lang attribute must fall back to the documented English default");
+
     auto ok = verifyPinnedPackages(
         "Using Python 3 at: /tmp/example\nftfy==6.3.1\nwcwidth==0.8.4\n",
         [PinnedPackage("ftfy", "6.3.1"), PinnedPackage("wcwidth", "0.8.4")]);
@@ -1731,10 +2150,10 @@ int main(string[] args) {
             selfTest();
             return 0;
         }
-        if (args.length != 6)
+        if (args.length != 7)
             throw new Exception(
                 "usage: external_comparator SCRUBBED_BINARY FTFY_BINARY TRAFILATURA_BINARY " ~
-                "LANGDETECT_PYTHON PRESIDIO_PYTHON");
+                "LANGDETECT_PYTHON PRESIDIO_PYTHON JUSTEXT_PYTHON");
         auto os = checked(["uname", "-s"]);
         bool darwin = os == "Darwin";
         require(darwin || os == "Linux", "BSD/GNU time only");
@@ -1746,6 +2165,7 @@ int main(string[] args) {
         auto trafilaturaPython = buildPath(dirName(args[3]), "python");
         auto langdetectPython = args[4];
         auto presidioPython = args[5];
+        auto justextPython = args[6];
 
         auto mojibake = compareFtfyMojibake(args[1], args[2], python, root, darwin,
             60.0, 512L * 1024 * 1024);
@@ -1757,11 +2177,15 @@ int main(string[] args) {
             darwin, 60.0, 512L * 1024 * 1024);
         auto piiPresidio = comparePiiFourClassPresidio(args[1], presidioPython, root,
             darwin, 60.0, 512L * 1024 * 1024);
+        auto mainContentJustext = compareMainContentJustext(args[1], justextPython, root,
+            darwin, 180.0, 512L * 1024 * 1024);
         auto report = assembleReport(
-            [mojibake, mojibakeWindows1251, mainContent, languageId, piiPresidio],
+            [mojibake, mojibakeWindows1251, mainContent, languageId, piiPresidio,
+             mainContentJustext],
             ["mojibake/scrubbed-vs-ftfy", "mojibake/scrubbed-vs-ftfy-windows1251",
              "main-content/scrubbed-vs-trafilatura",
-             "language-id/scrubbed-vs-langdetect", "pii-four-class/scrubbed-vs-presidio"]);
+             "language-id/scrubbed-vs-langdetect", "pii-four-class/scrubbed-vs-presidio",
+             "main-content/scrubbed-vs-justext"]);
         report["source_sha"] = checked(["git", "rev-parse", "HEAD"]);
         report["harness_sha256"] = digest("benchmarks/external_comparator.d");
         report["harness_build_command"] =
@@ -1783,6 +2207,7 @@ int main(string[] args) {
         require(!published.canFind(root) && !published.canFind(args[1]) &&
             !published.canFind(args[2]) && !published.canFind(args[3]) &&
             !published.canFind(args[4]) && !published.canFind(args[5]) &&
+            !published.canFind(args[6]) &&
             !published.canFind(checked(["uname", "-n"])),
             "result contains a private run path or hostname");
         writeln(published);

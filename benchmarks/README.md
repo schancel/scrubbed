@@ -414,14 +414,18 @@ uv pip install --python "$bench_env/presidio-venv/bin/python" \
   presidio-analyzer==2.2.364 presidio-anonymizer==2.2.364
 uv pip install --python "$bench_env/presidio-venv/bin/python" \
   "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl"
+uv venv "$bench_env/justext-venv"
+uv pip install --python "$bench_env/justext-venv/bin/python" \
+  justext==3.0.2 lxml==6.1.3 lxml-html-clean==0.4.5
 dub build --build=release --compiler=ldc2
 ldc2 -O3 -release -boundscheck=on -preview=dip1000 -i -Isource -I. \
   benchmarks/external_comparator.d experiments/html_main_content/token_overlap.d \
+  .dub/lexbor/liblexbor_static.a \
   -of="$bench_env/external_comparator"
 "$bench_env/external_comparator" --self-test
 "$bench_env/external_comparator" "$(pwd)/scrubbed" "$bench_env/venv/bin/ftfy" \
   "$bench_env/trafilatura-venv/bin/trafilatura" "$bench_env/langdetect-venv/bin/python" \
-  "$bench_env/presidio-venv/bin/python" \
+  "$bench_env/presidio-venv/bin/python" "$bench_env/justext-venv/bin/python" \
   > "$bench_env/result.json"
 ldc2 -O3 -release benchmarks/external_comparator_check.d \
   -of="$bench_env/external_comparator_check"
@@ -629,6 +633,92 @@ precision/recall are reported, never gated: there is no accepted numeric
 target, and the two tools' per-category counts are never combined or
 compared against each other's as if one were the other's ground truth.
 
+Its sixth case, `main-content/scrubbed-vs-justext` (issue #59's jusText
+next-slice contract, owner-approved 2026-09-30), mirrors the third case,
+`main-content/scrubbed-vs-trafilatura`, exactly: the same real `scrubbed run
+--input <dir> --output <dir> --stage content=html-main-content --threads 1`
+invocation, the same reused 20-URL held-out corpus (`fetch_held_out.sh
+--emit-corpus-dir`, materialized a second, independent time -- each case in
+this file is self-contained and independently callable, so nothing is shared
+between the trafilatura and jusText cases' own corpus materializations), and
+the same `token_overlap.d` precision/recall/without-leak scoring against the
+same gold "with"/"without" probe phrases. jusText (pinned exact version
+`justext==3.0.2`, PyPI, pure Python, with its two direct dependencies also
+pinned -- `lxml==6.1.3` and `lxml-html-clean==0.4.5`) is compared here as the
+field's other well-known heuristic boilerplate-removal extractor, alongside
+trafilatura.
+
+Three real quirks of the pinned jusText CLI were found by actually installing
+and running it, not assumed from documentation, and are each documented in
+`external_comparator.d`'s own header comment on this case in full:
+
+1. jusText 3.0.2 ships no standalone `justext` console script (removed
+   upstream in favor of `python -m justext`); its `-s STOPLIST`/
+   `-o OUTPUT_FILE`/positional-HTML-file CLI genuinely supports single-file
+   invocation with no batch mode of its own, so a per-file shell loop wraps
+   it exactly as langdetect/presidio's own drivers are looped -- **not**
+   because of a bug, unlike trafilatura's `--keep-dirs` one. A second, real
+   per-version bug *was* found this way: `-o OUTPUT_FILE` is silently
+   ignored (output goes to stdout instead, no file is created, exit status
+   still 0) unless `-o` is given *before* the positional HTML file argument;
+   the shell wrapper places it there deliberately.
+2. Unlike trafilatura (which auto-detects each page's language internally),
+   jusText's `-s STOPLIST` argument is required and selects the exact word
+   list its own boilerplate classifier scores paragraphs against; running it
+   against the wrong language is not a fair, task-equivalent comparison
+   (`-s English` against this corpus's own German-language fixture 01
+   produces zero output bytes; the identical page against `-s German`
+   produces 1,002 bytes of real extracted text). Each fixture's stoplist is
+   therefore selected from that fixture's own already-present, reused HTML
+   `lang` attribute (German/English/French, both quoting styles, covering
+   exactly the languages this corpus's pages actually declare), defaulting
+   to English for the two fixtures with no `lang` attribute at all -- never
+   a second corpus or an invented label. `-s None` ("language-independent
+   mode") was tried and rejected as a fallback: it is a real, verified crash
+   in the pinned 3.0.2 CLI (`TypeError: unhashable type: 'set'` inside
+   `justext.core.classify_paragraphs`'s own `define_stoplist` call).
+3. jusText has no console-script binary to snapshot (point 1), and unlike
+   trafilatura's own console script (a tiny wrapper whose shebang line still
+   points at its original, unmoved interpreter even after the wrapper file
+   itself is copied elsewhere), the interpreter binary itself cannot safely
+   be relocated the way `snapshotExecutable` copies every other tool's
+   executable: a uv-managed venv's own `bin/python` is a symlink into a
+   shared, unpacked CPython install whose stdlib/path resolution depends on
+   that install's sibling `lib/` directory tree, and a plain byte-for-byte
+   copy elsewhere reproducibly fails at Python startup ("Could not find
+   platform independent libraries \<prefix\>" / "ModuleNotFoundError: No
+   module named 'encodings'") -- empirically confirmed, not assumed. This
+   case instead hashes the original, unmoved interpreter path before and
+   after the run (reusing the same `ExecutableSnapshot`/`verifySnapshot`
+   compare mechanics, just without the copy step) -- weaker than a private
+   immutable copy's TOCTOU protection, but strictly more verification than
+   langdetect/presidio's own python interpreters get today (no mutation
+   check on the interpreter at all).
+
+Per-fixture `lang`-attribute detection (point 2 above) is implemented by
+`htmlLangPrefix`, which parses each fixture's HTML with the project's own
+lexbor-backed parser (`effects.html_tree`, already used in production for
+e.g. `html_tree_json_stage.d`) and reads the real `<html>` element's
+`lang`/`xml:lang` attribute, rather than hand-rolled byte scanning -- four
+real bugs were found in a hand-rolled scanner approach across four
+independent review passes, so the build command above now links
+`.dub/lexbor/liblexbor_static.a` (built as a side effect of the `dub build`
+line above it).
+
+A real end-to-end run against the pinned `justext==3.0.2` and the current
+`html-main-content` stage on this held-out corpus (2026-09-30) scored
+scrubbed at mean precision 0.0668 / mean recall 0.8430 (0/20 fixtures
+abstained) and jusText at mean precision 0.0406 / mean recall 0.8878 (1/20
+fixtures abstained, fixture 15 -- a real German-language page jusText's own
+classifier extracted zero paragraphs from even with the correct `-s German`
+stoplist, not a harness defect); both tools' own two-sample reproducibility
+check passed. As with the trafilatura case, precision/recall are reported,
+not gated: there is no accepted numeric target, and low absolute precision on
+both tools reflects this held-out corpus's own gold annotation shape (short
+"with"/"without" probe phrases rather than a full annotated gold article, the
+same #26-inherited metric caveat the trafilatura case's own documentation
+already notes) rather than either tool performing poorly in absolute terms.
+
 The report schema is `scrubbed-external-comparator-v1`. **This is an
 intentional, fail-closed format break, not a bug**: it does not read or
 replay `cli_baseline.d`'s prior `scrubbed-cli-baseline-v1` report shape, and
@@ -652,13 +742,16 @@ with no partial sample retained), process-group timeout (a synthetic command
 that backgrounds a long-running grandchild is timed out, and the grandchild's
 PID is confirmed gone, not just the direct child's), and resource refusal
 (a peak RSS above the declared bound fails the case). Its `--self-test` mode
-also assembles a synthetic report covering all five cases and proves
+also assembles a synthetic report covering all six cases and proves
 `--check` itself fails closed: both mojibake cases -- CP1252's
 `mojibake/scrubbed-vs-ftfy` and its Windows-1251 sibling
 `mojibake/scrubbed-vs-ftfy-windows1251` -- are independently proven to reject
 a corrupted expected hash, a corrupted sample, a broken A/B/A/B interleave,
-or the case being omitted from the report entirely, and an otherwise-valid
-synthetic report is proven to pass. Its
+or the case being omitted from the report entirely; `main-content/scrubbed-
+vs-justext` (issue #59) is independently proven to reject a corrupted
+`justext_version` string, a broken A/B/A/B interleave, an out-of-policy
+per-fixture stoplist value, or the case being omitted from the report
+entirely; and an otherwise-valid synthetic report is proven to pass. Its
 `--check <report.json>` mode also structurally validates a real run's
 report and confirms both migrated mojibake cases,
 `mojibake/scrubbed-vs-ftfy` and `mojibake/scrubbed-vs-ftfy-windows1251`,
@@ -691,7 +784,18 @@ four-sample A/B/A/B interleave, both tools' output-reproducibility flags, and
 the per-category scoring object's shape (non-negative true/false-positive/
 negative counts and precision/recall within `[0,1]` for each of exactly
 email/phone/card/ip) -- again without recomputing the precision/recall
-scores itself, since those are reported, not gated.
+scores itself, since those are reported, not gated. It likewise validates
+`main-content/scrubbed-vs-justext`'s required provenance (executable and
+in-place-hashed interpreter hashes, the dynamically discovered jusText
+version, held-out corpus commit and fixture count, the three-package
+acquisition order, and a non-empty `justext_stoplist_policy` disclosure
+string), its four-sample A/B/A/B interleave and per-sample timing fields,
+both tools' output-reproducibility flags, and the scoring object's shape
+(per-tool extracted/abstained counts that add up to 20, precision/recall
+within `[0,1]`, one scored entry per held-out fixture, and each fixture's own
+`justext_stoplist` value restricted to the three documented selections) --
+again without recomputing precision/recall itself, since those are reported,
+not gated.
 
 The timed sample child (`/usr/bin/time` and the command it wraps) owns its
 own process group: `runBoundedSample` forks, the child calls `setpgid(0, 0)`

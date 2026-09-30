@@ -241,6 +241,21 @@ refused. No existing caller passes a v2-capability-bearing value to
 one yet), so this is a forward-looking safety guard, not a behavior change
 for any value reachable before this slice.
 
+### A second convergence: `similarity-signature-v1` (issue #564)
+
+`effects.similarity_signature_annotate_stage` is the second real producer to
+converge onto `.withStructuredSection`, after `pii-four-class`'s
+`pii-audit-v1`. It publishes a document-level `domain.similarity_signature
+.SimilaritySignature` -- `hasKeys`, the 64-lane MinHash array, all 16 bands,
+and the document's raw content length -- under section id
+`similarity-signature-v1`, sourced from the same reasoning that moved
+`pii-four-class` here: the 64-lane array alone is 512 bytes, exactly
+`maxExtensionValueBytes`'s scalar cap, with zero room left for any other
+field. The encoded payload is roughly 675 bytes, comfortably inside the 2
+MiB per-section cap. See `docs/corpus-stages.md` for the corpus-level
+`prune-near-duplicates` stage that reads this section back out of a
+published sidecar.
+
 ## Proof (focused checker)
 
 `experiments/document_metadata/check.d`:

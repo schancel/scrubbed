@@ -299,8 +299,10 @@ private ulong sanitizedNumericValue(string raw) {
 /// Same sentinel-on-invalid behavior as `sanitizedNumericValue`, but
 /// returns the safe-to-forward decimal string form for building a
 /// `forwarded` argv for `runApp` (which re-parses it with `std.getopt`).
+/// An empty value (`--threads=`) also becomes `"0"`, matching argparse's
+/// old `TYPE.init` behavior for an empty numeric value; forwarding `""`
+/// would make getopt throw its own raw conversion error instead.
 private string sanitizedNumericToken(string raw) {
-    if (!raw.length) return raw;
     return sanitizedNumericValue(raw).to!string;
 }
 
@@ -963,11 +965,11 @@ unittest {
     assert(sanitizedNumericValue("42") == 42);
     assert(sanitizedNumericToken("42") == "42");
     assert(sanitizedNumericToken("007") == "7");
-    // Absent (empty) stays absent -- callers only forward when the flag was
-    // actually present on the command line, so this is never actually
-    // reached as a "0" sentinel by a real invocation.
+    // Empty inline value (`--threads=`) is the "0" sentinel too, exactly as
+    // argparse's old `TYPE.init` binding produced -- forwarding "" would
+    // leak std.getopt's raw conversion error instead.
     assert(sanitizedNumericValue("") == 0);
-    assert(sanitizedNumericToken("") == "");
+    assert(sanitizedNumericToken("") == "0");
 
     // Negative: the ticket's exact repro shape ("-1", "-5").
     assert(sanitizedNumericValue("-1") == 0);
@@ -1033,6 +1035,16 @@ unittest {
     assert(!overflow.msg.canFind("Overflow") && !overflow.msg.canFind("convert"),
         "an overflowing --threads must not leak argparse's raw std.conv wording, got: " ~
         overflow.msg);
+
+    // Empty inline value: on base argparse bound `--threads=` to 0 and the
+    // clean 0-value message fired; it must still, not std.getopt's raw
+    // "Argument '' ... could not be converted" text.
+    auto emptyInline = collectException!Exception(runCommands(["scrubbed",
+        "run", "--input", input, "--output", output, "--threads="]));
+    assert(emptyInline !is null);
+    assert(emptyInline.msg == "--threads must be positive",
+        "--threads= must produce the existing 0-value message, got: " ~
+        emptyInline.msg);
 
     // #472 regression guard: a merely-oversized (but perfectly convertible)
     // value must still hit the *upper-bound* check, completely unaffected

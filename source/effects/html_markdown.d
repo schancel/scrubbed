@@ -43,8 +43,23 @@ private struct Writer {
         return length;
     }
 
+    // Issue #527 item 2: a text node's own leading collapsed-whitespace
+    // space (from `clean()`'s "one or more whitespace chars at the run's
+    // start collapse to a single space" rule) is a real, meaningful word
+    // separator when it follows other TEXT (the existing ' '-vs-' ' dedup
+    // below), but pure noise when it follows a NEWLINE already written to
+    // `bytes` -- whether that newline came from a `<br>`'s own hard-break
+    // marker or (via `block()`) a block-level separator. A newline already
+    // visually separates the next line's content; a stray extra space
+    // right after it is never meaningful. Real-corpus repro (world-kbs-
+    // co-kr.html, a `<br>`-separated single paragraph, pretty-printed with
+    // a newline after every `<br>`): "...colder.<br />\nMax Lee..." used to
+    // render as "...colder.  \n Max Lee..." (bogus leading space on the
+    // continuation line); with the '\n' case added below it renders as
+    // "...colder.  \nMax Lee...".
     void putText(string value) pure {
-        if (value.length && bytes.length && bytes[$ - 1] == ' ' &&
+        if (value.length && bytes.length &&
+            (bytes[$ - 1] == ' ' || bytes[$ - 1] == '\n') &&
             value[0] == ' ') put(value[1 .. $]);
         else put(value);
     }
@@ -52,6 +67,19 @@ private struct Writer {
     void trim() pure {
         while (bytes.length && (bytes[$ - 1] == ' ' || bytes[$ - 1] == '\n'))
             bytes.length--;
+    }
+
+    // Issue #527 item 2: strips only trailing literal ' ' characters (never
+    // '\n'), unlike `trim()`. Used right before a `<br>` writes its own
+    // canonical two-space hard-break marker, so pre-existing trailing
+    // whitespace collapsed onto the same line (e.g. a text node's own
+    // trailing collapsed space, from pretty-printed source HTML with a
+    // newline right before the `<br>`) doesn't inflate that marker past two
+    // spaces. Never strips a preceding '\n' -- an immediately preceding
+    // `<br>` (a "double <br>" blank line) must keep its own already-written
+    // hard-break marker intact.
+    void trimTrailingSpaces() pure {
+        while (bytes.length && bytes[$ - 1] == ' ') bytes.length--;
     }
 
     // Mirror of `trim()` at the other end. Issue #516 follow-up: a list
@@ -224,6 +252,28 @@ unittest {
     // than collapsing them, exactly as before this fix.
     assert(clean("first\nsecond", true) == "first\nsecond");
     assert(clean("first\tsecond", true) == "first\tsecond");
+    // Issue #527 item 5, investigated and left as-is (won't-fix): a literal
+    // CRLF pair here doubles into "\n\n" (each byte independently matches
+    // the `c == '\r' -> '\n'` remap followed by the `c == '\n'` branch, so
+    // the pair emits two newlines instead of collapsing to one). This is a
+    // real, narrow oddity of `clean()`'s own code-mode contract in
+    // isolation, but it is provably unreachable through this repository's
+    // only two real callers (`nodeText(tree, index)` in the `pre`/`code`
+    // branches of `renderNode`, both a few lines below): every one of
+    // them is always parser-mediated text, and HTML5 tokenization (which
+    // this repository's lexbor binding implements) mandates normalizing
+    // every CR and CRLF to a bare LF during preprocessing, before a single
+    // byte of text ever reaches a DOM text node -- confirmed empirically,
+    // not assumed, by parsing `<pre>line one\r\nline two</pre>` through
+    // this repository's own `parseHtml` and inspecting the resulting tree
+    // node's raw bytes: no `\r` (0x0D) byte survives, only `\n` (0x0A).
+    // This assert exists to PIN that specific, unreachable-in-production
+    // edge case's current behavior (added by #516, unchanged here), not to
+    // exercise something a real caller can trigger -- adding CRLF-collapsing
+    // logic to a `pure`, already-well-tested function purely to correct an
+    // input shape nothing in this codebase can ever produce would add real
+    // surface area for zero real user-facing benefit, so this ticket leaves
+    // the behavior exactly as pinned.
     assert(clean("first\r\nsecond", true) == "first\n\nsecond");
 }
 
@@ -358,7 +408,21 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     }
     string name = node.name;
     if (hiddenTag(name)) return;
-    if (name == "br") { writer.put("  \n"); return; }
+    if (name == "br") {
+        // Issue #527 item 2: real-corpus repro (www-tofugu-com.html's
+        // address block, `<p>\n5 Chome-3-23 Minatocho\n<br>\n...`) -- the
+        // text node right before `<br>` ends with its own trailing
+        // collapsed space (from the newline in the source right before the
+        // tag), so writing the canonical "  \n" marker unconditionally
+        // produced three trailing spaces ("Minatocho   \n") instead of the
+        // canonical two. Trimming only trailing ' ' chars first (never
+        // '\n', so a preceding `<br>`'s own already-written hard-break
+        // marker survives a "double <br>" blank line) keeps the marker at
+        // exactly two spaces regardless of what preceded it.
+        writer.trimTrailingSpaces();
+        writer.put("  \n");
+        return;
+    }
     if (name == "img") {
         auto alt = clean(attribute(node, "alt"));
         if (options.images) {
@@ -565,13 +629,29 @@ private void renderNode(const ref HtmlTree tree, size_t index,
     if (name == "a" && options.links) {
         auto href = attribute(node, "href");
         const safe = safeTarget(href);
+        // Issue #527 item 1: space- or newline-separated HTML inside the
+        // anchor (e.g. `<a> <span>Head</span> </a>`, or the same written
+        // across lines) collapses, via `clean()`, to a real leading/
+        // trailing space in the rendered link text -- writing "[" and "]"
+        // directly around that content used to trap the padding INSIDE the
+        // brackets ("[ Head ](...)"). Render into a scratch buffer first
+        // and move any leading/trailing space outside the brackets, exactly
+        // mirroring the `strong`/`em` trim above.
+        Writer linked;
+        renderChildren(tree, index, linked, depth + 1, options, inCell);
+        auto content = linked.finish();
+        size_t left, right = content.length;
+        while (left < right && content[left] == ' ') ++left;
+        while (right > left && content[right - 1] == ' ') --right;
+        writer.putText(content[0 .. left]);
         if (safe) writer.put("[");
-        renderChildren(tree, index, writer, depth + 1, options, inCell);
+        if (left < right) writer.put(content[left .. right]);
         if (safe) {
             writer.put("](<");
             writer.put(markdownTarget(href));
             writer.put(">)");
         }
+        writer.putText(content[right .. $]);
     } else renderChildren(tree, index, writer, depth + 1, options, inCell);
     if (block) writer.block();
 }
@@ -719,6 +799,14 @@ string renderMarkdown(const ref HtmlTree tree,
         if (tree.nodes[i].parentIndex == size_t.max)
             renderNode(tree, i, writer, 0, options);
     }
+    // Issue #527 item 2: a whitespace-only ROOT text node before the first
+    // real top-level content (e.g. `<body> <a href="/menu">Menu</a>...`,
+    // real-corpus repro deleuze-enacademic-com.html) collapses to a single
+    // leading space that nothing else ever trims -- every OTHER whitespace
+    // boundary in this renderer is covered by a block-level `trim()`/
+    // `block()` call or (since the fix just above) `putText`'s own after-
+    // newline dedup, but there is no "before" for the very first byte.
+    writer.trimLeading();
     writer.trim();
     if (writer.bytes.length) writer.put("\n");
     // Do not retain the growable buffer's spare capacity in the public result.
@@ -736,6 +824,8 @@ string renderMarkdownFrom(const ref HtmlTree tree, size_t startIndex,
     const MarkdownRenderOptions options = MarkdownRenderOptions.init) pure {
     Writer writer;
     renderNode(tree, startIndex, writer, 0, options);
+    // See `renderMarkdown`'s own comment above this same call.
+    writer.trimLeading();
     writer.trim();
     if (writer.bytes.length) writer.put("\n");
     // Do not retain the growable buffer's spare capacity in the public result.
@@ -1610,4 +1700,99 @@ unittest {
         "code=false must render both the real inline mentions and the real " ~
         "pre block as ordinary prose text -- no backticks, no fence -- " ~
         "keeping the real text");
+}
+
+// Issue #527 item 1 regression: space- or newline-separated HTML inside an
+// `<a>` used to render with the collapsed padding trapped INSIDE the
+// brackets ("[ Head ](...)"), for both the space-separated shape (pre-
+// existing before #516) and the newline-separated shape (a distinct real
+// repro, `<a href="/x">\nHead\n</a>`, that #516's own isWhite-before-
+// isControl fix newly exposed the same way, since a bare newline now
+// collapses to a space like any other whitespace run instead of being
+// dropped outright). Fail-before/pass-after verified by temporarily
+// reverting the `a` branch to render straight into `writer` (dropping the
+// scratch-buffer trim) and confirming both cases regress to bracket-
+// internal padding.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    foreach (html; [`<p><a href="/x"> Head </a></p>`,
+                     "<p><a href=\"/x\">\nHead\n</a></p>"]) {
+        auto outcome = parseHtml(cast(const(ubyte)[]) html);
+        assert(outcome.isParsed);
+        auto md = renderMarkdown(outcome.tree);
+        // The moved-out-of-brackets padding then lands exactly at the
+        // enclosing <p>'s own leading/trailing edge, where the pre-existing
+        // block()/trimLeading() trimming already removes it -- proving the
+        // padding is gone, not merely relocated to another visible spot.
+        // Before this fix the padding sat INSIDE the brackets instead
+        // ("[ Head ](</x>)\n"), which neither of those trims can reach.
+        assert(md == "[Head](</x>)\n",
+            "padding must not remain trapped inside the brackets: " ~ md);
+    }
+}
+
+// Issue #527 item 2 regression, three independent real-corpus repros, each
+// pinned to its own real symptom:
+//
+// 1. A whitespace-only ROOT text node before the first top-level content
+//    (real repro: deleuze-enacademic-com.html) leaves a stray single
+//    leading space at the very start of the document that nothing else
+//    ever trims.
+// 2. A text node's own trailing collapsed space landing right before a
+//    `<br>` (real repro: www-tofugu-com.html's address block,
+//    `<p>\n5 Chome-3-23 Minatocho\n<br>\n...`) used to inflate the
+//    canonical two-space hard-break marker to three spaces.
+// 3. A text node's own leading collapsed space landing right after a
+//    `<br>`'s hard-break marker (real repro: world-kbs-co-kr.html's
+//    `<br>`-separated single paragraph, pretty-printed with a newline
+//    after every `<br>`) used to leave a stray leading space on the
+//    continuation line -- and, for two adjacent `<br>`s separated only by
+//    formatting whitespace, a stray line of nothing but spaces between
+//    them.
+//
+// Fail-before/pass-after verified per-case: (1) by temporarily removing the
+// `writer.trimLeading()` call added to `renderMarkdown`/`renderMarkdownFrom`;
+// (2) by temporarily removing the `writer.trimTrailingSpaces()` call added
+// to the `br` branch; (3) by temporarily reverting `putText`'s dedup
+// condition to only `bytes[$ - 1] == ' '` (dropping the `|| bytes[$ - 1] ==
+// '\n'` disjunct). Each reversion reproduces exactly its own symptom below
+// and no other test in this module regresses, confirming the three fixes
+// are independent.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    // (1) leading space at document start.
+    string leadingHtml =
+        `<body> <a href="/menu">Menu</a>` ~ "\n" ~ `<p>Text</p></body>`;
+    auto leading = parseHtml(cast(const(ubyte)[]) leadingHtml);
+    assert(leading.isParsed);
+    auto leadingMd = renderMarkdown(leading.tree);
+    assert(leadingMd == "[Menu](</menu>)\n\nText\n",
+        "a leading whitespace-only root text node must not leave a stray " ~
+        "space at the very start of the document: " ~ leadingMd);
+
+    // (2) trailing space inflates the <br> hard-break marker past two
+    // spaces when the preceding text node's own trailing whitespace was
+    // collapsed right up against it.
+    string beforeBrHtml = `<p>Line one` ~ "\n" ~ `<br>Line two</p>`;
+    auto beforeBr = parseHtml(cast(const(ubyte)[]) beforeBrHtml);
+    assert(beforeBr.isParsed);
+    auto beforeBrMd = renderMarkdown(beforeBr.tree);
+    assert(beforeBrMd == "Line one  \nLine two\n",
+        "a text node's own trailing collapsed space must not inflate the " ~
+        "<br> hard-break marker past two spaces: " ~ beforeBrMd);
+
+    // (3) leading space after a <br>'s hard-break marker, plus the
+    // double-<br> "blank spaces-only line" shape.
+    string afterBrHtml =
+        `<p>one<br>` ~ "\n" ~ `two<br>` ~ "\n" ~ `<br>` ~ "\n" ~ `three</p>`;
+    auto afterBr = parseHtml(cast(const(ubyte)[]) afterBrHtml);
+    assert(afterBr.isParsed);
+    auto afterBrMd = renderMarkdown(afterBr.tree);
+    assert(afterBrMd == "one  \ntwo  \n  \nthree\n",
+        "a text node's own leading collapsed space right after a <br> " ~
+        "must not leave a stray space on the continuation line, and a " ~
+        "formatting-only text node between two <br>s must not leave a " ~
+        "spaces-only line: " ~ afterBrMd);
 }

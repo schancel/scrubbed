@@ -65,6 +65,58 @@ private struct Writer {
     }
 }
 
+/// Issue #527 item 4: collapses every ASCII-HTML-whitespace run (`white()`,
+/// already imported from `effects.html_tree_walk`) to a single space,
+/// without trimming leading/trailing whitespace -- unlike `singleLine()`
+/// (used for `<heading>`/`<code>` text just below), which also trims both
+/// ends. That full trim is right for a heading's own single, standalone
+/// line of text, but wrong for an ordinary inline text node inside a
+/// `<paragraph>`/`<item>`/`<cell>`: trimming a text node's own edge would
+/// erase the real word-separator space between it and an adjacent sibling
+/// inline node (e.g. the space in `<b>bold</b> text`) -- the same "missing
+/// separator glues words" bug class as issue #527 item 3, one structural
+/// level up. Same byte-at-a-time algorithm as `singleLine()`, minus its
+/// final both-ends trim.
+private string collapseWhitespace(string input) pure {
+    Writer writer;
+    bool pending;
+    size_t runStart;
+    foreach (i, c; input) {
+        if (white(c)) {
+            if (!pending) writer.put(input[runStart .. i]);
+            pending = true;
+        } else if (pending) {
+            writer.put(" ");
+            pending = false;
+            runStart = i;
+        }
+    }
+    if (pending) writer.put(" ");
+    else writer.put(input[runStart .. $]);
+    return writer.finish();
+}
+
+/// Issue #527 item 4: trims only leading/trailing ASCII-HTML-whitespace
+/// bytes (`white()`), on the already-assembled `<paragraph>`/`<item>`/
+/// `<cell>` string (escaped text plus this module's own `<link>`/`<bold>`/
+/// etc. tags -- never touched by this, since none of those tags themselves
+/// contain a literal whitespace byte). Applied once, at the same three
+/// outer-block call sites `singleLine` is already applied for a
+/// `<heading>`'s own text, so a `<paragraph>`/`<item>`/`<cell>` that begins
+/// or ends with a source text node's own collapsed boundary space (left
+/// alone by `collapseWhitespace` above, which deliberately keeps it to
+/// avoid gluing that node to a PRECEDING/FOLLOWING sibling -- #527 item 3's
+/// bug class) doesn't leak that boundary space to its own outer edge, where
+/// there is no sibling left to separate from. Unlike `singleLine`, this
+/// never collapses an INTERIOR run (already handled per text node by
+/// `collapseWhitespace`), so it is safe to run over the whole tagged string.
+private string trimAsciiWhitespace(string input) pure {
+    size_t left, right = input.length;
+    while (left < right && white(input[left])) ++left;
+    while (right > left && white(input[right - 1])) --right;
+    return input[left .. right];
+}
+
 /// XML-escape ordinary element text content: `&`/`<`/`>` only (`>` is not
 /// strictly required by the XML spec but is escaped anyway, matching every
 /// other real XML serializer's conservative default). Control/format
@@ -237,7 +289,10 @@ private void renderXmlContainer(const ref HtmlTree tree, size_t containerIndex,
         auto content = pending.finish();
         if (!hasNonWhitespace(content)) return;
         if (inlineIsBare) w.put(content);
-        else { w.put(pad); w.put("<paragraph>"); w.put(content); w.put("</paragraph>\n"); }
+        else {
+            w.put(pad); w.put("<paragraph>"); w.put(trimAsciiWhitespace(content));
+            w.put("</paragraph>\n");
+        }
     }
     size_t containerEnd = endOf(tree, containerIndex);
     for (size_t i = containerIndex + 1; i < containerEnd; ) {
@@ -263,7 +318,7 @@ private void renderXmlContainer(const ref HtmlTree tree, size_t containerIndex,
         }
         if (node.name == "p") {
             flush();
-            auto paragraph = renderXmlInlineToString(tree, i);
+            auto paragraph = trimAsciiWhitespace(renderXmlInlineToString(tree, i));
             if (hasNonWhitespace(paragraph)) {
                 w.put(pad); w.put("<paragraph>"); w.put(paragraph); w.put("</paragraph>\n");
             }
@@ -330,7 +385,7 @@ private void renderXmlList(const ref HtmlTree tree, size_t listIndex, ref Writer
             renderXmlContainer(tree, child, w, indent + 2, true);
             w.put(itemPad);
         } else {
-            renderXmlInline(tree, child, w);
+            w.put(trimAsciiWhitespace(renderXmlInlineToString(tree, child)));
         }
         w.put("</item>\n");
     }
@@ -390,7 +445,7 @@ private void renderXmlTable(const ref HtmlTree tree, size_t tableIndex, ref Writ
                 renderXmlContainer(tree, child, w, indent + 3, true);
                 w.put(cellPad);
             } else {
-                renderXmlInline(tree, child, w);
+                w.put(trimAsciiWhitespace(renderXmlInlineToString(tree, child)));
             }
             w.put("</cell>\n");
         }
@@ -440,7 +495,7 @@ private void renderXmlInline(const ref HtmlTree tree, size_t parent, ref Writer 
 
 private void renderXmlInlineNode(const ref HtmlTree tree, size_t index, ref Writer w) pure {
     ref const node = tree.nodes[index];
-    if (node.kind == HtmlNodeKind.text) { w.put(xmlText(node.text)); return; }
+    if (node.kind == HtmlNodeKind.text) { w.put(xmlText(collapseWhitespace(node.text))); return; }
     if (hiddenTag(node.name)) return;
     if (node.name == "br") { w.put("\n"); return; }
     if (node.name == "img") {
@@ -544,7 +599,7 @@ private void renderTeiContainer(const ref HtmlTree tree, size_t containerIndex,
         auto content = pending.finish();
         if (!hasNonWhitespace(content)) return;
         if (inlineIsBare) w.put(content);
-        else { w.put(pad); w.put("<p>"); w.put(content); w.put("</p>\n"); }
+        else { w.put(pad); w.put("<p>"); w.put(trimAsciiWhitespace(content)); w.put("</p>\n"); }
     }
     size_t containerEnd = endOf(tree, containerIndex);
     for (size_t i = containerIndex + 1; i < containerEnd; ) {
@@ -570,7 +625,7 @@ private void renderTeiContainer(const ref HtmlTree tree, size_t containerIndex,
         }
         if (node.name == "p") {
             flush();
-            auto paragraph = renderTeiInlineToString(tree, i);
+            auto paragraph = trimAsciiWhitespace(renderTeiInlineToString(tree, i));
             if (hasNonWhitespace(paragraph)) {
                 w.put(pad); w.put("<p>"); w.put(paragraph); w.put("</p>\n");
             }
@@ -644,7 +699,7 @@ private void renderTeiList(const ref HtmlTree tree, size_t listIndex, ref Writer
             renderTeiContainer(tree, child, w, indent + 2, true);
             w.put(itemPad);
         } else {
-            renderTeiInline(tree, child, w);
+            w.put(trimAsciiWhitespace(renderTeiInlineToString(tree, child)));
         }
         w.put("</item>\n");
     }
@@ -732,7 +787,7 @@ private void renderTeiTable(const ref HtmlTree tree, size_t tableIndex, ref Writ
             // `<row>`/`<cell>` already (see this function's own doc
             // comment); no real cell text is ever dropped either way.
             auto cellContent = hadBlock ? xmlText(singleLine(plainInlineText(tree, child))) :
-                renderTeiInlineToString(tree, child);
+                trimAsciiWhitespace(renderTeiInlineToString(tree, child));
             if (header) { row.put("<hi rend=\"bold\">"); row.put(cellContent); row.put("</hi>"); }
             else row.put(cellContent);
         }
@@ -763,7 +818,7 @@ private void renderTeiInline(const ref HtmlTree tree, size_t parent, ref Writer 
 
 private void renderTeiInlineNode(const ref HtmlTree tree, size_t index, ref Writer w) pure {
     ref const node = tree.nodes[index];
-    if (node.kind == HtmlNodeKind.text) { w.put(xmlText(node.text)); return; }
+    if (node.kind == HtmlNodeKind.text) { w.put(xmlText(collapseWhitespace(node.text))); return; }
     if (hiddenTag(node.name)) return;
     if (node.name == "br") { w.put("<lb/>"); return; }
     if (node.name == "img") {
@@ -980,6 +1035,59 @@ unittest {
     assert(xml.canFind("<cell>innerdata</cell>"));
     assert(xml.canFind("before"), "loose text alongside a nested table must not be dropped");
     assert(xml.canFind("after"), "loose text alongside a nested table must not be dropped");
+}
+
+// Issue #527 item 4: `renderXmlContainer`'s ordinary `selected`-status path
+// left raw `\n`/`\t` in `<paragraph>`/`<item>`/`<cell>` text (pretty-printed
+// source HTML whitespace passed straight through `xmlText`, which
+// deliberately keeps literal tab/newline/CR since they're well-formed XML
+// text bytes), while `<heading>` text right next to it was already
+// collapsed via `singleLine`. Both `renderXml` and `renderXmlTei` share the
+// same underlying bug (each has its own `xmlText(node.text)` text-node
+// branch) and both are fixed and tested here. Real-corpus-shaped repro:
+// pretty-printed HTML with a newline+indentation between an inline element
+// and the following text, exactly the shape `<td>`/`<p>`/`<li>` content
+// commonly has.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+    auto outcome = parseHtml(cast(const(ubyte)[]) (
+        "<article><h1>\n  Pretty\tprinted\n  title\n</h1>\n" ~
+        "<p>\n  " ~ longParagraph ~ "\n  <b>bold</b>\n  tail text\n</p>\n" ~
+        "<ul><li>\n  Item\ttext\n</li></ul>\n" ~
+        "<table><tr><td>\n  cell\ttext\n</td></tr></table></article>"));
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto xml = renderXml(tree);
+    assertWellFormedXml(xml);
+    assert(!xml.canFind("\t") && !xml.canFind("Pretty\n") && !xml.canFind("Item\n") &&
+        !xml.canFind("cell\n") && !xml.canFind("bold</bold>\n"),
+        "raw \\n/\\t from pretty-printed source HTML must not leak into " ~
+        "<paragraph>/<item>/<cell> text: " ~ xml);
+    assert(xml.canFind("<heading level=\"1\">Pretty printed title</heading>"),
+        "heading collapsing (the pre-existing, already-correct behavior) " ~
+        "must be unaffected");
+    assert(xml.canFind("Article body sentence. Article body sentence."),
+        "whitespace WITHIN a paragraph's own long real text must still " ~
+        "collapse to single spaces, not be altered some other way");
+    assert(xml.canFind("<bold>bold</bold> tail text"),
+        "the real word-separator space between an inline element and " ~
+        "following text must survive collapsing (not glued to \"boldtail\")");
+    assert(xml.canFind("<item>Item text</item>"));
+    assert(xml.canFind("<cell>cell text</cell>"));
+
+    auto tei = renderXmlTei(tree);
+    assertWellFormedXml(tei);
+    assert(!tei.canFind("\t") && !tei.canFind("Pretty\n") && !tei.canFind("Item\n") &&
+        !tei.canFind("cell\n") && !tei.canFind("bold</hi>\n"),
+        "same fix must apply to the TEI renderer's own separate text-node " ~
+        "branch: " ~ tei);
+    assert(tei.canFind("<ab rend=\"h1\" type=\"header\">Pretty printed title</ab>"));
+    assert(tei.canFind("<hi rend=\"bold\">bold</hi> tail text"));
 }
 
 unittest {

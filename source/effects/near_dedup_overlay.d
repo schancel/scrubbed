@@ -40,14 +40,16 @@
 ///    to this issue (see this issue's own PR description for that
 ///    verification). When non-empty for a shard, this module additionally
 ///    reads that shard's immutable C01 source in full and republishes every
-///    document that is *not* a non-representative member of `finalLinks`
-///    (computed from the exact same policy-driven decision above) as a new,
-///    physically smaller C01 document shard at that path via the existing
-///    `DocumentShardWriter` -- matching trafilatura's real `--deduplicate`
-///    semantics (removal), not just annotation. A shard that never names a
-///    `prunedDestination` gets no pruned output at all: pruning is strictly
-///    additive and opt-in per shard, on top of the unchanged annotation
-///    overlay this module always writes.
+///    document that is *not* a non-representative member of
+///    `finalPruningLinks` (computed from the exact same policy-driven
+///    decision above, restricted to document-level candidates only -- see
+///    issue #492's own note below) as a new, physically smaller C01
+///    document shard at that path via the existing `DocumentShardWriter`
+///    -- matching trafilatura's real `--deduplicate` semantics (removal),
+///    not just annotation. A shard that never names a `prunedDestination`
+///    gets no pruned output at all: pruning is strictly additive and
+///    opt-in per shard, on top of the unchanged annotation overlay this
+///    module always writes.
 ///
 /// **Post-#480 review fix, decoupled further by issue #492.** `similarity_
 /// buckets.d` persists a band membership for both a document's
@@ -677,7 +679,28 @@ private struct OutputLink {
 private bool candidateRowLess(CandidateRow a, CandidateRow b) {
     if (a.bandIndex != b.bandIndex) return a.bandIndex < b.bandIndex;
     if (a.bandKeyValue != b.bandKeyValue) return a.bandKeyValue < b.bandKeyValue;
-    return a.signature.documentId.text < b.signature.documentId.text;
+    if (a.signature.documentId.text != b.signature.documentId.text)
+        return a.signature.documentId.text < b.signature.documentId.text;
+    // Issue #492 (review round 2): `nearDuplicateLinksInBucket` keeps only
+    // the *first* signature it sees per document within one bucket call
+    // ("Multiple members may name the same document ... only the first
+    // signature seen per document participates"). A document's own
+    // whole-document signature and one of its segment signatures are
+    // computed from overlapping content, so they very often collide on the
+    // same real LSH band for the same document. Without a deterministic
+    // tie-break here, which of the two "wins" that ambiguous first-seen
+    // slot would be arbitrary sort-order noise -- letting a document enter
+    // the full/annotation cluster only via a segment proxy while its
+    // whole-document row never gets a chance to represent it there (or the
+    // reverse), which could reintroduce exactly the "annotation names a
+    // representative pruning has removed" gap issue #480's round 1 closed.
+    // Always ordering a document's whole-document row before any of its
+    // segment rows makes the full (annotation) per-document participant
+    // deterministically the same signature the document-level-only
+    // (pruning) scan already uses -- the full cluster's membership for
+    // every document is then a strict superset of the document-level
+    // cluster's, never a divergent, order-dependent substitute for it.
+    return !a.signature.segment && b.signature.segment;
 }
 
 private void number(ref ubyte[] bytes, ulong value) {
@@ -1538,17 +1561,22 @@ unittest {
     // q's own signature genuinely collides, on real distinct LSH bands
     // (confirmed below against the real persisted band values, not merely
     // an aggregate jaccard estimate), with p's signature in one bucket and
-    // with r's signature in another, each bucket independently naming a
-    // *different* local winner for q ("p" in one, "r" in the other). "p"
-    // and "r" are themselves below the near-duplicate threshold directly,
-    // so nothing here is a single flat three-way tie. Phase C's real,
-    // published tie-break then has to pick between q's two genuinely
-    // different raw per-bucket candidates -- and r, an outright bucket
-    // *winner* on its own band, still ends up correctly resolved to the
-    // same true representative via the shared bucket where all three
-    // co-occur, proving the real pipeline's connected-component/tie-break
-    // machinery (not a hand-fed synthetic map) is what `assertNoRepresentativeDangles`
-    // is checked against here.
+    // with r's signature in another. Critically (confirmed below by an
+    // explicit self-check, not merely assumed), no single band collides
+    // across all three documents at once, so no bucket ever unions
+    // {p,q,r} directly -- each of the two exclusive buckets independently
+    // computes its own local winner, and with document IDs ordered
+    // p < q < r, those two buckets disagree on what q's own local winner
+    // even is: bucket{p,q} names p (q loses, p < q), bucket{q,r} names q
+    // (r loses, q < r). The *raw*, pre-chain-resolution representative map
+    // is therefore a genuine two-hop chain (r -> q -> p), not merely two
+    // buckets flatly agreeing on the same final representative: q itself
+    // is both a loser (to p) and a winner (over r) at once. Verified
+    // separately (see this module's own review history) that stubbing out
+    // the `resolveRepresentativeChains` call entirely makes
+    // `assertNoRepresentativeDangles` fail against this exact fixture --
+    // i.e. chain resolution is genuinely load-bearing here, not just
+    // exercised incidentally.
     auto root = scratchRoot("multi-bucket-conflict");
     scope(exit) rmdirRecurse(root);
 
@@ -1557,15 +1585,24 @@ unittest {
         foreach (i; 0 .. n) r ~= prefix ~ i.to!string ~ " ";
         return r;
     }
-    auto base = repeatUnique("mmmmm", 28);
-    auto tailP = repeatUnique("ppppp", 4);
-    auto tailR = repeatUnique("qqqqq", 4);
+    // Empirically verified (see this module's own review history) real
+    // MinHash construction: a per-fixture-unique token prefix ("seed"
+    // 422) avoids incidental cross-fixture shingle overlap with any other
+    // unittest in this module, and this specific (base length, tail
+    // length) pair was found, by exhaustive search over real
+    // `similaritySignatures` output, to be one of a small number that
+    // simultaneously satisfies every property this fixture's self-check
+    // asserts below.
+    enum seed = 422;
+    auto base = repeatUnique("b" ~ seed.to!string ~ "w", 20);
+    auto tailP = repeatUnique("p" ~ seed.to!string ~ "t", 6);
+    auto tailR = repeatUnique("r" ~ seed.to!string ~ "t", 6);
     auto pContent = base ~ tailP;
     auto qContent = base ~ tailP ~ tailR;
     auto rContent = base ~ tailR;
 
     // Find three record-key salts whose hashed DocumentIds sort in exactly
-    // the order this fixture needs: p < r < q. `DocumentId.from` hashes the
+    // the order this fixture needs: p < q < r. `DocumentId.from` hashes the
     // source locator, not the literal key text, so candidate salts are
     // generated and sorted by their real ID rather than assumed from the
     // key spelling.
@@ -1574,23 +1611,25 @@ unittest {
     candidates.sort!((a, b) =>
         testDocument("s", a, "x").id.text < testDocument("s", b, "x").id.text);
     auto pKey = candidates[0];
-    auto rKey = candidates[1];
-    auto qKey = candidates[2];
+    auto qKey = candidates[1];
+    auto rKey = candidates[2];
 
     auto pDoc = testDocument("s", pKey, pContent);
-    auto rDoc = testDocument("s", rKey, rContent);
     auto qDoc = testDocument("s", qKey, qContent);
-    assert(pDoc.id.text < rDoc.id.text && rDoc.id.text < qDoc.id.text,
+    auto rDoc = testDocument("s", rKey, rContent);
+    assert(pDoc.id.text < qDoc.id.text && qDoc.id.text < rDoc.id.text,
         "fixture bug: candidate ordering invariant broken");
 
     // Fixture self-check, using the real pipeline's own signature/estimate
     // functions: confirms the exact shape this test relies on before
     // trusting any conclusion drawn from it -- p and q are real
     // near-duplicates, q and r are real near-duplicates, but p and r
-    // directly are not, and p/q's collision and q/r's collision each land
-    // on at least one genuinely different (bandIndex, bandKeyValue) pair
-    // the other pair does not share (not merely the same band all three
-    // coincidentally collide on).
+    // directly are not; p/q's collision and q/r's collision each land on
+    // at least one genuinely different (bandIndex, bandKeyValue) pair the
+    // other pair does not share; and -- the property that makes this a
+    // real chain rather than a flat three-way tie -- no single band
+    // collides across all three documents at once (no bucket ever unions
+    // {p,q,r} directly).
     import domain.near_dedup_decision : jaccardEstimate;
     auto pSig = similaritySignatures(pDoc.id, pDoc.content);
     auto qSig = similaritySignatures(qDoc.id, qDoc.content);
@@ -1601,16 +1640,21 @@ unittest {
         "fixture bug: q and r must be real near-duplicates");
     assert(jaccardEstimate(pSig.document, rSig.document) < nearDuplicateThreshold,
         "fixture bug: p and r must NOT be direct near-duplicates");
-    bool pqExclusiveBand, qrExclusiveBand;
+    bool pqExclusiveBand, qrExclusiveBand, tripleCollisionBand;
     foreach (b; 0 .. pSig.document.bands.length) {
         auto pv = pSig.document.bands[b], qv = qSig.document.bands[b], rv = rSig.document.bands[b];
+        if (pv == qv && pv == rv) tripleCollisionBand = true;
         if (pv == qv && pv != rv) pqExclusiveBand = true;
         if (qv == rv && qv != pv) qrExclusiveBand = true;
     }
     assert(pqExclusiveBand, "fixture bug: p/q must collide on a real band r does not share");
     assert(qrExclusiveBand, "fixture bug: q/r must collide on a real band p does not share");
+    assert(!tripleCollisionBand,
+        "fixture bug: no band may collide across all three documents at once -- that would let " ~
+        "a single bucket union {p,q,r} directly and flatten this into a one-hop tie, not the " ~
+        "two-hop chain this fixture exists to exercise");
 
-    auto documents = [pDoc, rDoc, qDoc];
+    auto documents = [pDoc, qDoc, rDoc];
     auto destination = buildPath(root, "near-dedup.overlay");
     auto prunedShardPath = buildPath(root, "near-dedup-pruned.shard");
     auto shard = buildFixtureShard(root, "multi-bucket-conflict", documents, destination);
@@ -1619,11 +1663,14 @@ unittest {
     writeNearDedupOverlays([shard]); // default PruningPolicy.keepFirst
     assertNoRepresentativeDangles(destination, prunedShardPath);
 
-    // q's own real per-bucket candidates genuinely differ ("p" from the
-    // p/q-exclusive band, "r" from the q/r-exclusive band); Phase C's real
-    // tie-break resolves that live conflict to "p" (the smaller ID), and r
-    // -- linked to p only via the bucket where all three co-occur -- also
-    // correctly resolves to "p", not left dangling or orphaned to itself.
+    // q's raw, per-bucket representative is p (from the p/q-exclusive
+    // bucket, where p < q wins); r's raw, per-bucket representative is q
+    // (from the q/r-exclusive bucket, where q < r wins) -- q itself, not
+    // p. Without `resolveRepresentativeChains` walking that second hop,
+    // r's published representative would be q, which is itself dropped
+    // from the pruned shard (a genuine dangling reference, exactly the
+    // bug issue #480 round 1 closed). The real, published, chain-resolved
+    // representative for both q and r must be p.
     auto records = readAllAnnotations(destination);
     auto sourceDocuments = readAllDocuments(shard.source);
     ShardDocument bySourceId(string id) {
@@ -1637,9 +1684,11 @@ unittest {
         assert(false, "missing expected link for " ~ documentId);
     }
     assert(linkFor(qDoc.id.text).representativeId == pDoc.id,
-        "q's published representative must be p -- the real cross-bucket tie-break winner");
+        "q's published representative must be p -- its own raw, single-bucket winner");
     assert(linkFor(rDoc.id.text).representativeId == pDoc.id,
-        "r's published representative must also resolve to p");
+        "r's published representative must resolve to p, not dangle at its raw, one-hop " ~
+        "winner q (which is itself a non-representative pruning drops) -- this is the real " ~
+        "two-hop chain resolveRepresentativeChains exists to walk");
 
     // Every representative named above must physically survive pruning --
     // the exact invariant assertNoRepresentativeDangles already checked
@@ -1649,6 +1698,6 @@ unittest {
     bool[string] survivingIds;
     foreach (document; prunedDocuments) survivingIds[document.id.text] = true;
     assert((pDoc.id.text in survivingIds) !is null, "p (the representative) must survive pruning");
-    assert((rDoc.id.text in survivingIds) is null, "r is a non-representative and must be pruned");
     assert((qDoc.id.text in survivingIds) is null, "q is a non-representative and must be pruned");
+    assert((rDoc.id.text in survivingIds) is null, "r is a non-representative and must be pruned");
 }

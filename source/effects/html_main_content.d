@@ -806,6 +806,26 @@ private struct CollapsingWriter {
         if (any) pendingParagraphBreak = true;
     }
 
+    // Issue #527 item 3: `<td>`/`<th>` are not block tags (see `blockTag`'s
+    // own doc comment -- table CELLS are deliberately not block-level for
+    // this boundary detector; only the enclosing `<table>` is), so two
+    // adjacent cells with no whitespace text between their tags in the
+    // source (`<td>cell one</td><td>cell two</td>`, the ticket's own
+    // example) never trip `paragraphBreak`'s block-ancestor-changed check
+    // and `feed` never sees any whitespace character to set `pendingSpace`
+    // from either -- "cell one" and "cell two" glue into "cell onecell
+    // two" with no separator at all. This is a lighter break than
+    // `paragraphBreak`: it guarantees at least one space (like real
+    // whitespace `feed` would have collapsed to), not a blank line --
+    // matching #516's own fix one structural level up: a missing
+    // separator becomes a single collapsed space, not invented structure.
+    // If a paragraph break is already pending (a real block boundary was
+    // also crossed), that stronger break already wins in `feed` regardless
+    // of `pendingSpace`, so setting both here is harmless.
+    void wordBreak() pure nothrow @nogc {
+        if (any) pendingSpace = true;
+    }
+
     void feed(string chunk) pure {
         size_t at;
         while (at < chunk.length) {
@@ -874,6 +894,28 @@ unittest {
     assert(cwNul.writer.bytes == "ninthtenth",
         "a non-whitespace control character (NUL) must still be dropped " ~
         "outright, not converted to a space (#516)");
+}
+
+// Issue #527 item 3, at the primitive itself: `wordBreak()` must insert
+// exactly one space between two `feed()` calls with no whitespace of their
+// own, matching what a real whitespace character between them would have
+// produced -- and must never fire before any real content exists (`any`
+// still false), same guard as `paragraphBreak()`.
+unittest {
+    CollapsingWriter cw;
+    cw.feed("cell one");
+    cw.wordBreak();
+    cw.feed("cell two");
+    assert(cw.writer.bytes == "cell one cell two",
+        "wordBreak() must insert exactly one separating space between two " ~
+        "feed() calls with no whitespace of their own (#527 item 3)");
+
+    CollapsingWriter cwLeading;
+    cwLeading.wordBreak();
+    cwLeading.feed("first");
+    assert(cwLeading.writer.bytes == "first",
+        "wordBreak() before any real content must be a no-op, same as " ~
+        "paragraphBreak()'s own `any`-guarded behavior");
 }
 
 // Issue #27 Case 2 (for-me-online.de-pubertaet.html): a
@@ -1057,11 +1099,22 @@ private bool matchesCommentSectionKeyword(const ref HtmlNode node) pure {
 private void collectPlainSubtreeText(const ref HtmlTree tree, size_t start, size_t end,
         ref CollapsingWriter cw) pure {
     size_t lastBlockAncestor = size_t.max;
+    // Issue #527 item 3: nearest `<td>`/`<th>` ancestor (size_t.max when
+    // none), tracked the same bounded way as `blockAncestor` just below but
+    // independently -- `td`/`th` are deliberately NOT in `blockTag` (a cell
+    // is not a block boundary; two cells in the same row are still "the
+    // same paragraph" for `.text` purposes), so a change of cell between
+    // two text nodes that share the same block ancestor would otherwise
+    // never call anything on `cw` at all, and `feed` has no whitespace
+    // character of its own to fall back on when the source has none between
+    // the two `<td>` tags.
+    size_t lastCellAncestor = size_t.max;
     foreach (i; start + 1 .. end) {
         if (tree.nodes[i].kind != HtmlNodeKind.text) continue;
         bool hidden;
         size_t blockAncestor = start;
         bool foundBlock;
+        size_t cellAncestor = size_t.max;
         for (size_t parent = tree.nodes[i].parentIndex;
              parent != start && parent != size_t.max && parent < i;
              parent = tree.nodes[parent].parentIndex) {
@@ -1070,11 +1123,17 @@ private void collectPlainSubtreeText(const ref HtmlTree tree, size_t start, size
                 blockAncestor = parent;
                 foundBlock = true;
             }
+            if (cellAncestor == size_t.max &&
+                    (tree.nodes[parent].name == "td" || tree.nodes[parent].name == "th"))
+                cellAncestor = parent;
         }
         if (hidden) continue;
         if (blockAncestor != lastBlockAncestor) cw.paragraphBreak();
+        else if (cellAncestor != size_t.max && cellAncestor != lastCellAncestor)
+            cw.wordBreak();
         cw.feed(tree.nodes[i].text);
         lastBlockAncestor = blockAncestor;
+        lastCellAncestor = cellAncestor;
     }
 }
 
@@ -1521,6 +1580,34 @@ unittest {
     assert(divResult.node == 0);
     assert(divResult.text == "Notice inside a div.\n\n" ~ paragraph,
         "a <div> boundary must break the same as other block tags");
+
+    // Issue #527 item 3: adjacent `<td>` cells with no whitespace text
+    // between their tags in the source (this ticket's own repro shape)
+    // must not glue into one run -- `<td>`/`<th>` are deliberately not
+    // block tags (a real "\n\n" break inside a table row would be wrong),
+    // but a single collapsed space at the cell boundary is required, same
+    // as #516's own "missing separator becomes one space" fix one
+    // structural level up.
+    HtmlTree tableCells;
+    tableCells.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "article", null,
+            [HtmlAttribute("class", "content")]),
+        HtmlNode(HtmlNodeKind.element, 0, "p", null, null),
+        HtmlNode(HtmlNodeKind.text, 1, null, longParagraph),
+        HtmlNode(HtmlNodeKind.element, 0, "table", null, null),
+        HtmlNode(HtmlNodeKind.element, 3, "tr", null, null),
+        HtmlNode(HtmlNodeKind.element, 4, "td", null, null),
+        HtmlNode(HtmlNodeKind.text, 5, null, "cell one"),
+        HtmlNode(HtmlNodeKind.element, 4, "td", null, null),
+        HtmlNode(HtmlNodeKind.text, 7, null, "cell two"),
+    ];
+    auto tableCellsResult = extractMainContent(tableCells);
+    assert(tableCellsResult.status == MainContentStatus.selected);
+    assert(tableCellsResult.node == 0);
+    assert(tableCellsResult.text == paragraph ~ "\n\ncell one cell two",
+        "adjacent <td> cells with no whitespace between their tags in the " ~
+        "source must not glue into one word (\"cell onecell two\"): " ~
+        tableCellsResult.text);
 
     // Edge case: a whitespace-only block sandwiched between two real ones
     // (e.g. pretty-printed indentation living directly in a <div>) must not

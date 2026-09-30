@@ -142,58 +142,87 @@ private void candidateBoundProof() {
     need(result.candidatesOverflow, "41 element candidates did not flag overflow");
 }
 
+// Issue #527 item 6: these four `expectSelected` goldens (score AND text)
+// were stale -- pre-dating issue #335 Slice 1 (commit 7f333a4, "emit
+// paragraph breaks at block-element boundaries"), which is what the `\n\n`
+// now inside each string below reflects (before #335, the heading and each
+// `<p>` glued directly together with no separator at all, e.g. "...Funding"
+// immediately followed by "The city council..."). This was independently
+// re-derived by bisection (`git log`/checking out 3ea6db2, 7f333a4,
+// a7e5c5c and every commit since against this exact fixture set) and cross-
+// checked against this repository's own prior, first-party disclosure: PR
+// #27 (commit a7e5c5c, 2026-09-27) already found and recorded this SAME
+// staleness -- see `docs/html-main-content.md`'s "Disclosed finding:
+// experiments/html_main_content/check.d has pre-existing, unrelated golden
+// drift" section -- confirming it predates #27 itself (so several commits
+// before this ticket's own cited base 7de913a) and is unrelated to
+// anything #27, or this ticket, changed. `forum-thread-shaped`'s much
+// larger score delta (719 -> 864, not the small handful of points the
+// other three moved by) has a second, additional, equally legitimate cause
+// on top of #335: issue #538 (commit 2d032fa, "word-boundary-aware
+// negative-keyword match") correctly stopped the negative keyword "ad"
+// from matching as a false substring inside this fixture's own
+// `class="thread-content"` ("thre-AD-content"), which had been wrongly
+// applying a -150 penalty; removing that false match is exactly what
+// pushes the score up. None of this is a regression -- both #335 and #538
+// are real, deliberate, already-reviewed-and-merged correctness
+// improvements to the selector/renderer that this experiment's own goldens
+// simply never caught up to. Fixed here by updating the goldens to the
+// current, correct values (permitted explicitly by this ticket for a
+// confirmed-stale expectation), not by changing any selection/scoring/
+// rendering behavior.
 void main() {
     auto root = buildPath("experiments", "html_main_content", "fixtures");
 
-    expectSelected(root, "news-article-shaped", 18, 1325,
-        "Local Council Approves New Park FundingThe city council voted unanimously " ~
-        "on Tuesday evening to approve a new round of funding for the downtown park " ~
-        "renovation project, citing strong public support gathered over several " ~
-        "months of community meetings.Council members said the funding would cover " ~
-        "new playground equipment, expanded walking trails, and a renovated public " ~
-        "plaza, with construction expected to begin next spring after final design " ~
-        "review.Residents who attended the meeting praised the decision, noting " ~
-        "that the park has been a focal point for neighborhood gatherings for over " ~
-        "three decades and was in need of significant repair.");
+    expectSelected(root, "news-article-shaped", 18, 1320,
+        "Local Council Approves New Park Funding\n\nThe city council voted " ~
+        "unanimously on Tuesday evening to approve a new round of funding for the " ~
+        "downtown park renovation project, citing strong public support gathered " ~
+        "over several months of community meetings.\n\nCouncil members said the " ~
+        "funding would cover new playground equipment, expanded walking trails, and " ~
+        "a renovated public plaza, with construction expected to begin next spring " ~
+        "after final design review.\n\nResidents who attended the meeting praised " ~
+        "the decision, noting that the park has been a focal point for neighborhood " ~
+        "gatherings for over three decades and was in need of significant repair.");
 
-    expectSelected(root, "blog-post-shaped", 12, 1042,
-        "Learning to Bake Sourdough at HomeSourdough bread relies on a naturally " ~
-        "fermented starter rather than commercial yeast, which gives the finished " ~
-        "loaf its distinctive tang and chewy crumb structure that many home bakers " ~
-        "spend years perfecting.Feeding your starter consistently, at the same " ~
-        "time each day, keeps the wild yeast and bacteria culture active and " ~
-        "predictable, which in turn makes the dough's rise far easier to plan " ~
-        "around a normal schedule.Once the dough has proofed, a hot Dutch oven " ~
-        "traps steam during the first few minutes of baking, producing the " ~
-        "crackling crust that distinguishes a good sourdough loaf from an " ~
-        "ordinary sandwich bread.");
+    expectSelected(root, "blog-post-shaped", 12, 1037,
+        "Learning to Bake Sourdough at Home\n\nSourdough bread relies on a " ~
+        "naturally fermented starter rather than commercial yeast, which gives the " ~
+        "finished loaf its distinctive tang and chewy crumb structure that many " ~
+        "home bakers spend years perfecting.\n\nFeeding your starter consistently, " ~
+        "at the same time each day, keeps the wild yeast and bacteria culture " ~
+        "active and predictable, which in turn makes the dough's rise far easier to " ~
+        "plan around a normal schedule.\n\nOnce the dough has proofed, a hot Dutch " ~
+        "oven traps steam during the first few minutes of baking, producing the " ~
+        "crackling crust that distinguishes a good sourdough loaf from an ordinary " ~
+        "sandwich bread.");
 
-    expectSelected(root, "docs-page-shaped", 14, 709,
-        "Getting StartedThis guide walks new users through installing the " ~
-        "toolkit, configuring a first project, and running an initial build, " ~
-        "and is the recommended starting point before consulting any individual " ~
-        "reference section below.IntroductionThe toolkit ships as a single " ~
+    expectSelected(root, "docs-page-shaped", 14, 703,
+        "Getting Started\n\nThis guide walks new users through installing the " ~
+        "toolkit, configuring a first project, and running an initial build, and is " ~
+        "the recommended starting point before consulting any individual reference " ~
+        "section below.\n\nIntroduction\n\nThe toolkit ships as a single " ~
         "self-contained binary with no external runtime dependency, so most " ~
         "environments can begin using it immediately after downloading the " ~
-        "appropriate release archive.SetupInstall the command line tool with " ~
-        "your package manager of choice, then verify the installation by " ~
-        "running the version command, which should print a matching release " ~
-        "number back to the terminal.UsageRun the build command from the " ~
-        "project root to produce output artifacts, and pass the watch flag " ~
-        "during development to automatically rebuild whenever a source file " ~
-        "on disk changes.");
+        "appropriate release archive.\n\nSetup\n\nInstall the command line tool " ~
+        "with your package manager of choice, then verify the installation by " ~
+        "running the version command, which should print a matching release number " ~
+        "back to the terminal.\n\nUsage\n\nRun the build command from the project " ~
+        "root to produce output artifacts, and pass the watch flag during " ~
+        "development to automatically rebuild whenever a source file on disk " ~
+        "changes.");
 
-    expectSelected(root, "forum-thread-shaped", 12, 719,
-        "Best practices for organizing a home workshop?I've been slowly " ~
-        "filling my garage with tools over the last few years and it's turned " ~
-        "into a disaster. Does anyone have a system that actually works for " ~
-        "keeping hand tools and power tools organized long term?Pegboard " ~
-        "changed everything for me. I traced an outline around each tool so " ~
-        "it's obvious immediately when something is missing or was put back " ~
-        "in the wrong spot after a project finished last spring.Second the " ~
-        "pegboard suggestion, and I'd add labeled bins for small hardware " ~
-        "like screws and anchors, sorted by size rather than by project, " ~
-        "since projects change but sizes generally don't.");
+    expectSelected(root, "forum-thread-shaped", 12, 864,
+        "Best practices for organizing a home workshop?\n\nI've been slowly filling " ~
+        "my garage with tools over the last few years and it's turned into a " ~
+        "disaster. Does anyone have a system that actually works for keeping hand " ~
+        "tools and power tools organized long term?\n\nPegboard changed everything " ~
+        "for me. I traced an outline around each tool so it's obvious immediately " ~
+        "when something is missing or was put back in the wrong spot after a " ~
+        "project finished last spring.\n\nSecond the pegboard suggestion, and I'd " ~
+        "add labeled bins for small hardware like screws and anchors, sorted by " ~
+        "size rather than by project, since projects change but sizes generally " ~
+        "don't.");
 
     // Adversarial cases: both abstention paths this contract requires.
     expectAbstained(root, "nav-heavy-near-empty", MainContentStatus.abstainedBelowThreshold);
@@ -202,8 +231,29 @@ void main() {
 
     // The two below-threshold cases are bound by different halves of the
     // "minimum-length/score" rule, not the same one twice.
+    //
+    // Issue #527 item 6: `candidates[0]` (the single highest-scoring
+    // element) is no longer the fixture's own `<nav>` here -- this
+    // fixture's four bare `<a>` links plus `<body>`/`<head>`/`<html>` all
+    // score exactly 0.0 too (no tag/keyword match either way), genuinely
+    // tied with each other and ahead of the negatively-tagged, negatively-
+    // scored `<nav>`. Which node among an exact tie sorts first is an
+    // unspecified implementation detail (this repository's own documented
+    // contract is only "the highest-scoring element node wins" --
+    // `docs/html-main-content.md`'s own "Selection and abstention"
+    // section), not something #527 introduced or is in scope to redesign;
+    // confirmed pre-existing and already disclosed alongside the four
+    // `expectSelected` goldens just above (see this function's own doc
+    // comment) via the same bisection. What this assertion actually needs
+    // to prove -- that the fixture's real near-miss element (a text-rich
+    // but negatively-tagged `<nav>`) fails specifically on the SCORE half
+    // of the threshold, not the length half -- still holds; it just has to
+    // look up that element's own candidate entry directly rather than
+    // trust position 0.
     auto navHeavy = runFixture(root, "nav-heavy-near-empty");
-    need(navHeavy.candidates[0].textLength >= 200 && navHeavy.candidates[0].score < 150.0,
+    auto navCandidate = navHeavy.candidates[0];
+    foreach (c; navHeavy.candidates) if (c.tag == "nav") { navCandidate = c; break; }
+    need(navCandidate.textLength >= 200 && navCandidate.score < 150.0,
         "nav-heavy case should fail on score with length already sufficient");
     auto tooShort = runFixture(root, "below-minimum-length");
     need(tooShort.candidates[0].score >= 150.0 && tooShort.candidates[0].textLength < 200,

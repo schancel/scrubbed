@@ -1,0 +1,88 @@
+<!--
+  Authored for scrubbed issue #504 by Shammah Chancellor.
+
+  One synthetic page engineered to exercise every structural-fidelity
+  dimension `extract --format=...` and the #471 family (#475 comments,
+  #476 metadata, #477 inline fidelity, #478 block fidelity, #481 csv/xml/
+  xml-tei) cover, in a single small fixture:
+
+    - nav/header/footer chrome that must be excluded from selected main
+      content (but still visible in the whole-page `markdown`/`tree-json`
+      modes, which are not main-content-scoped)
+    - a comment section (`<div id="comments" class="comments">` wrapping
+      `<div class="commentEntry"><div class="commentContent" id="comment-
+      NNN">`), the exact real-corpus shape `html_main_content.d`'s own
+      `commentSectionKeywords` doc comment and unittests document
+      (archiv-krimiblog-de.html's shape)
+    - inline formatting: bold (`<strong>`), italic (`<em>`)
+    - a link (`<a href="https://...">`, a safe http(s) target)
+    - an image (`<img src="https://..." alt="...">`, a safe http(s) target)
+    - a list (`<ul><li>`)
+    - a blockquote (`<blockquote><p>`)
+    - a table with a caption and a header row (`<table><caption><tr><th>`)
+    - a code block (`<pre>`)
+
+  Every value (names, places, readings) is invented for this fixture; no
+  real person, organization, or dataset is referenced.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Delta Survey Field Notes</title>
+</head>
+<body>
+<header><nav>Home About Contact</nav></header>
+<article>
+<h1>Delta Survey Field Notes</h1>
+<p>The seven-person survey team spent three weeks mapping the tidal delta
+with <a href="https://example.com/permits">a full research permit</a> in
+hand, recording every transect in careful detail. Progress stayed
+<strong>steady</strong> even when the weather turned, and the crew stayed
+<em>focused</em> on finishing the western channel before the spring tides
+returned.</p>
+<h2>Instruments and method</h2>
+<p>Two sonar rigs and a hand-held current meter formed the core kit for the
+season, backed by a paper logbook that every team member signed at the end
+of each shift so nothing was lost between rotations.</p>
+<img src="https://example.com/images/survey-team.jpg" alt="The survey team wading through the delta at low tide">
+<h2>Observations</h2>
+<ul>
+<li>Salinity rose sharply above the second channel bend, consistent with
+the dry-season baseline the team expected going in.</li>
+<li>Sediment cores at station four showed three distinct depositional
+layers, more than any other station sampled this season.</li>
+</ul>
+<blockquote><p>The western channel behaves nothing like the model
+predicted, the lead hydrologist wrote in the shared logbook on the
+twelfth day of the survey.</p></blockquote>
+<h2>Sample readings</h2>
+<table>
+<caption>Selected transect depth readings</caption>
+<tr><th>Transect</th><th>Depth (m)</th><th>Salinity (ppt)</th></tr>
+<tr><td>1</td><td>2.1</td><td>18</td></tr>
+<tr><td>2</td><td>1.8</td><td>22</td></tr>
+<tr><td>4</td><td>2.6</td><td>15</td></tr>
+</table>
+<h2>Data export snippet</h2>
+<pre>station,depth_m,salinity_ppt
+1,2.1,18
+2,1.8,22
+4,2.6,15</pre>
+<p>Full instrument logs and the complete depth-by-depth dataset are
+archived with the department, which calls it the "reference dataset" for
+anyone who wants to reproduce the transect-by-transect salinity curve
+described above in full.</p>
+</article>
+<div id="comments" class="comments">
+<h2>Comments</h2>
+<div class="commentEntry"><div class="commentContent" id="comment-101">Great
+writeup -- did the sonar rig need recalibration after the storm on day
+nine?</div></div>
+<div class="commentEntry"><div class="commentContent" id="comment-102">Station
+four's layering matches what our own team saw further upstream last
+spring.</div></div>
+</div>
+<footer>Copyright 2026 Delta Survey Project. <a href="https://example.com/legal">Legal</a></footer>
+</body>
+</html>

@@ -68,7 +68,7 @@ import stages.corpus_contract : CorpusDecisionKind, CorpusStageDecision;
 import stages.pii_four_class;
 import stages.text_transform;
 import job.cli_tokens : parseJobTokens;
-import job.json : canonicalJobJson, parseJobJson;
+import job.json : canonicalJobJson, jobIdentity, parseJobJson;
 import job.dispatch_cli_tokens : parseDispatchJobTokensV1;
 import job.dispatch_json : canonicalDispatchJobJsonV1,
     parseDispatchJobJsonV1;
@@ -1090,8 +1090,18 @@ private SelectedComposition selectedComposition(string[] compositionTokens,
     auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
         configExplicit, configContents, versionedConfig);
     auto composition = compileComposition(spec);
-    auto plan = RuntimePlanV1.linearV3(cast(CompiledJob) composition.perDocument(),
-        canonicalJobJson(spec));
+    auto perDocument = cast(CompiledJob) composition.perDocument();
+    if (composition.hasCorpusStages && perDocument.stages.length) {
+        bool publishesMetadata;
+        foreach (stage; spec.stages)
+            if (stage.implementation == "document-metadata-publish")
+                publishesMetadata = true;
+        enforce(publishesMetadata,
+            "a combined corpus composition requires document-metadata-publish " ~
+            "before prune-near-duplicates; otherwise phase 2 would read stale sidecars");
+    }
+    auto fullIdentityJob = perDocument.withIdentity(composition.identity);
+    auto plan = RuntimePlanV1.linearV3(fullIdentityJob, canonicalJobJson(spec));
     return SelectedComposition(plan, composition.corpusStages());
 }
 
@@ -2133,6 +2143,8 @@ int runApp(string[] args) {
     auto runtimePlan = selected.runtimePlan;
     const corpusStages = selected.corpusStages;
     const producesSideOutput = runtimePlan.producesTerminalSideOutput;
+    const hasPerDocumentPhase = !runtimePlan.isDispatch &&
+        runtimePlan.linear.stages.length != 0;
     if (producesSideOutput && !sidecarExplicit)
         throw new Exception(
             "side-output-producing plan requires --sidecar-output");
@@ -2199,7 +2211,7 @@ int runApp(string[] args) {
     if (sidecarExplicit) {
         preflightSidecarRoots(inputPath, outputPath, sidecarPath, inputIsDir);
         sidecarPath = resolveExistingPrefix(sidecarPath);
-        if (corpusStages.length && producesSideOutput)
+        if (corpusStages.length && hasPerDocumentPhase)
             requireFreshCorpusSidecarRoot(sidecarPath);
     }
     if (!errorTargeted) preflightOutput(outputPath, inputIsDir);
@@ -3313,6 +3325,20 @@ unittest {
     write(buildPath(inputDir, "doc-three.txt"),
         "An entirely unrelated sentence about something completely different from the other two.\n");
 
+    // A nonempty phase 1 cannot feed phase 2 unless it publishes the
+    // metadata phase 2 consumes. Reject before creating either output tree.
+    auto missingPublisherOutput = buildPath(root, "missing-publisher-out");
+    auto missingPublisherSidecar = buildPath(root, "missing-publisher-sidecar");
+    auto missingPublisher = collectException(runApp(["scrubbed", "run",
+        "--input", inputDir, "--output", missingPublisherOutput,
+        "--sidecar-output", missingPublisherSidecar, "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(missingPublisher !is null &&
+        missingPublisher.msg.canFind("requires document-metadata-publish"));
+    assert(!exists(missingPublisherOutput));
+    assert(!exists(missingPublisherSidecar));
+
     auto outputDir = buildPath(root, "out");
     auto sidecarDir = buildPath(root, "sidecar");
     auto code = runApp(["scrubbed", "run", "--input", inputDir, "--output", outputDir,
@@ -3367,6 +3393,24 @@ unittest {
     assert(removedId != representativeId);
     assert(decision["bucket_identity"].str.length != 0);
 
+    // The ordinary CLI --stage-option path configures the corpus stage.
+    // A cap of one over this duplicate bucket suppresses every link.
+    auto cappedOutput = buildPath(root, "capped-out");
+    auto cappedSidecar = buildPath(root, "capped-sidecar");
+    assert(runApp(["scrubbed", "run", "--input", inputDir,
+        "--output", cappedOutput, "--sidecar-output", cappedSidecar,
+        "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates",
+        "--stage-option", "bucket-cap=integer:1"]) == 0);
+    size_t cappedDecisions;
+    foreach (entry; dirEntries(cappedSidecar, SpanMode.depth, false))
+        if (entry.isFile &&
+                entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+            ++cappedDecisions;
+    assert(cappedDecisions == 0);
+
     // Corpus-only replay over an earlier run's sidecars is reachable. It
     // does not require a per-document side-output producer in this second
     // composition.
@@ -3417,6 +3461,27 @@ unittest {
         "--stage", "prune=prune-near-duplicates"]));
     assert(singleFileError !is null);
     assert(singleFileError.msg.canFind("directory input"));
+}
+
+// Runtime identity is the full two-phase composition identity, not the
+// stripped phase-1 identity. Corpus-only option changes therefore produce
+// different execution identities while canonical JSON agrees with it.
+unittest {
+    auto prefix = [
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates",
+        "--stage-option"
+    ];
+    auto first = selectedComposition(prefix ~ ["policy=text:keep-first"],
+        false, null, false, null, false);
+    auto longest = selectedComposition(prefix ~ ["policy=text:keep-longest"],
+        false, null, false, null, false);
+    assert(first.runtimePlan.identity != longest.runtimePlan.identity);
+    assert(first.runtimePlan.identity ==
+        jobIdentity(parseJobJson(first.runtimePlan.canonical)));
+    assert(longest.runtimePlan.identity ==
+        jobIdentity(parseJobJson(longest.runtimePlan.canonical)));
 }
 
 // #448 regression, part 1: a deterministic, in-process proof that

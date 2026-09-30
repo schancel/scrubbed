@@ -22,9 +22,10 @@ unchanged per-document `Stage` contract.
 - **Phase 1 (unchanged).** Every per-document `--stage` in a composition
   runs exactly as it always has, via `stages.contract.runStage` /
   `composition.job_executor.runCompiledJob`, streaming one document at a
-  time to durable output. Nothing in this capability touches that code
-  path -- `composition.compiler.compileJob`, `composition.executor`, and
-  `effects.runner` are byte-for-byte unmodified.
+  time to durable output. The compiled stage list remains unchanged; its
+  runtime identity is rebound to the canonical identity of the full
+  two-phase composition so corpus-stage options participate in execution
+  identity.
 - **Phase 2 (new).** Once phase 1 has fully drained (every admitted file
   parsed, decided, and published), each corpus-level `--stage` runs once,
   in declared order, over the just-completed corpus.
@@ -62,6 +63,11 @@ phase 1 exactly as it does today over `perDocument`, and only after that
 streaming loop has returned with `failures == 0`, runs each compiled corpus
 stage once, in order, over the directory `--sidecar-output` populated
 during phase 1.
+
+When both phases are nonempty, the composition must include
+`document-metadata-publish` in phase 1. This is checked before filesystem
+work begins; without it, phase 2 could otherwise consume stale or absent
+metadata while the command appeared to succeed.
 
 A composition that declares zero corpus-level stages -- every composition
 that existed before this capability -- produces a `CompiledComposition`
@@ -162,7 +168,10 @@ is mirrored. Corpus-sized document paths, cross-bucket links, and final
 decision ordering live in a private, bounded-cache SQLite scratch database;
 sorted runs are compacted incrementally with fixed merge fan-in, so neither
 heap memory, open descriptors, nor simultaneously live run files scale
-linearly with corpus size.
+linearly with corpus size. The tree walk queues relative directories in that
+scratch database and opens only one shallow iterator at a time, keeping
+directory descriptors bounded independently of tree depth. Scratch state is
+created atomically with owner-only permissions.
 
 `domain.near_dedup_decision.nearDuplicateLinksInBucket` -- the pure decision
 core -- is called **completely unmodified**, once per bucket, exactly as
@@ -190,6 +199,13 @@ from an earlier successful pass are removed, so the directory cannot retain
 a prune verdict for a document that the current pass keeps. A follow-on
 opt-in step that materializes a physically pruned corpus at a distinct
 destination remains deliberately out of scope.
+
+Decision publication and stale removal are anchored to one descriptor for
+the verified sidecar root. Every parent component is reopened relative to
+that descriptor with symlink following disabled, and replacement/removal is
+performed relative to the resulting parent descriptor. A concurrent parent
+swap therefore fails closed instead of redirecting a write outside the
+corpus root.
 
 ### CLI reachability
 

@@ -18,6 +18,7 @@
 module composition.corpus_compiler;
 
 import composition.compiler : CompiledJob, compileJob;
+import job.json : jobIdentity;
 import job.spec : JobOption, JobOptionType, JobOptions, JobSpec, JobStageSpec,
     validateJobSpec;
 import pipeline : FilterRegistry, availableFilterRegistry;
@@ -73,13 +74,17 @@ private:
     bool initialized;
     CompiledJob perDocumentJob;
     CompiledCorpusStage[] corpusStagesList;
+    string compositionIdentity;
 
     @disable this();
 
-    this(CompiledJob perDocument, CompiledCorpusStage[] corpusStages) {
+    this(CompiledJob perDocument, CompiledCorpusStage[] corpusStages,
+            string identity) {
+        enforce(identity.length != 0, "compiled composition identity is required");
         initialized = true;
         perDocumentJob = perDocument;
         corpusStagesList = corpusStages;
+        compositionIdentity = identity;
     }
 
     void requireCompiled() const {
@@ -90,6 +95,7 @@ public:
     const(CompiledJob) perDocument() const { requireCompiled; return perDocumentJob; }
     const(CompiledCorpusStage)[] corpusStages() const { requireCompiled; return corpusStagesList; }
     bool hasCorpusStages() const { requireCompiled; return corpusStagesList.length != 0; }
+    string identity() const { requireCompiled; return compositionIdentity; }
 }
 
 private StageOption stageOption(const ref JobOption value) {
@@ -175,7 +181,8 @@ CompiledComposition compileComposition(const ref JobSpec spec,
             stage.implementation.idup, run);
     }
 
-    return CompiledComposition(compiledJob, compiledCorpusStages);
+    return CompiledComposition(compiledJob, compiledCorpusStages,
+        jobIdentity(spec));
 }
 
 // ---------------------------------------------------------------------------
@@ -188,7 +195,8 @@ version (unittest) {
     import stages.corpus_contract : CorpusStageDeclaration, CorpusStageRegistration,
         CorpusStageSink;
     import stages.registry : ConfiguredStageTransform, FilterPlacement,
-        SideOutputCapability, StageCardinality, StageConfiguration, StageRegistration;
+        OptionDeclaration, OptionType, SideOutputCapability, StageCardinality,
+        StageConfiguration, StageRegistration;
 
     private StageDecision testPerDocumentApply(StageDocument input,
             immutable(StageConfiguration)) pure {
@@ -215,7 +223,7 @@ version (unittest) {
     private CorpusStageRegistry testCorpusRegistry() {
         CorpusStageRegistry registry;
         registry.add(CorpusStageRegistration(CorpusStageDeclaration("test-corpus-stage"),
-            null, &testCorpusRun));
+            [OptionDeclaration("policy", OptionType.text, false)], &testCorpusRun));
         return registry;
     }
 }
@@ -239,6 +247,33 @@ unittest {
     auto directJob = compileJob(spec, &perDocumentRegistry);
     assert(composition.perDocument().identity == directJob.identity);
     assert(composition.perDocument().stages().length == directJob.stages().length);
+}
+
+// The enclosing identity covers corpus-stage configuration even though the
+// executable per-document stage list is unchanged. This is the identity the
+// CLI binds to phase 1 so two pruning policies cannot share one job identity.
+unittest {
+    import job.json : parseJobJson;
+
+    auto firstSpec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"first","implementation":"test-per-document","options":{},"filters":[]},` ~
+        `{"id":"prune","implementation":"test-corpus-stage",` ~
+        `"options":{"policy":"keep-first"},"filters":[]}]}`);
+    auto longestSpec = parseJobJson(`{"version":3,"stages":[` ~
+        `{"id":"first","implementation":"test-per-document","options":{},"filters":[]},` ~
+        `{"id":"prune","implementation":"test-corpus-stage",` ~
+        `"options":{"policy":"keep-longest"},"filters":[]}]}`);
+    auto perDocumentRegistry = testPerDocumentRegistry();
+    auto corpusRegistry = testCorpusRegistry();
+    auto first = compileComposition(firstSpec, &perDocumentRegistry, &corpusRegistry);
+    auto longest = compileComposition(longestSpec, &perDocumentRegistry, &corpusRegistry);
+
+    assert(first.perDocument.identity == longest.perDocument.identity,
+        "the stripped per-document halves should remain execution-equivalent");
+    assert(first.identity != longest.identity,
+        "corpus options must contribute to the enclosing job identity");
+    assert(first.identity == jobIdentity(firstSpec));
+    assert(longest.identity == jobIdentity(longestSpec));
 }
 
 // A per-document stage followed by a corpus-level stage compiles cleanly,

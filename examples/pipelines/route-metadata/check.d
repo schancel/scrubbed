@@ -217,11 +217,18 @@ private void runRecipe(string repository, string executable) {
     need(cast(const(ubyte)[]) read(runA.contentPath) ==
         cast(const(ubyte)[]) read(runB.contentPath),
         "content sink differs between two separate real runs of the identical command");
-    auto metadataTextA = readText(runA.metadataPath);
-    auto metadataTextB = readText(runB.metadataPath);
-    need(metadataTextA == metadataTextB,
+    auto metadataBytesA = read(runA.metadataPath);
+    need(cast(const(ubyte)[]) metadataBytesA ==
+        cast(const(ubyte)[]) read(runB.metadataPath),
         "metadata sink differs between two separate real runs of the identical command " ~
         "(same --input path, so even documentId must match exactly)");
+    // Raw bytes, not readText(): this text is only decoded for the
+    // documentId-token regex substitution below, which is run exclusively
+    // against this run's own (always well-formed) live output -- never
+    // against a pinned golden, which is deliberately kept byte-for-byte so a
+    // corrupted golden fails with a clean assertion instead of an unhandled
+    // std.utf.UTFException.
+    auto metadataTextA = cast(string) metadataBytesA;
 
     // --- Content sink: pinned golden, and proof the filters did real work ---
     auto rawInput = read(inputPath);
@@ -241,9 +248,13 @@ private void runRecipe(string repository, string executable) {
     // check.d -- because DocumentId.from binds to --input's absolute path,
     // which is not reproducible across machines/temp directories) ---
     checkDocumentId(metadataTextA, "run-a metadata sink");
-    auto expectedMetadata = readText(buildPath(repository,
+    // Raw bytes, not readText(): a deliberately corrupted golden (e.g. one
+    // byte flipped in a way that breaks UTF-8 validity) must fail this
+    // assertion cleanly, not surface an unhandled std.utf.UTFException.
+    auto expectedMetadataBytes = read(buildPath(repository,
         "examples/corpus/route-metadata/expected/dispatch-note.metadata.json"));
-    need(withDocumentIdToken(metadataTextA) == expectedMetadata,
+    need(cast(const(ubyte)[]) withDocumentIdToken(metadataTextA) ==
+        cast(const(ubyte)[]) expectedMetadataBytes,
         "metadata sink (modulo documentId) differs from its pinned golden");
     need(metadataTextA.canFind(`"title":{"value":"Independent Sink Routing Dispatch"`),
         "metadata sink missing expected title field");
@@ -264,7 +275,8 @@ private void runRecipe(string repository, string executable) {
     need(!exists(runA.contentPath), "content sink deletion did not take effect");
     need(exists(runA.metadataPath),
         "metadata sink vanished after the content sink was deleted -- sinks are not independent");
-    need(withDocumentIdToken(readText(runA.metadataPath)) == expectedMetadata,
+    need(cast(const(ubyte)[]) withDocumentIdToken(cast(string) read(runA.metadataPath)) ==
+        cast(const(ubyte)[]) expectedMetadataBytes,
         "metadata sink bytes changed after the unrelated content sink was deleted");
 
     // Direction 2 (run B): move the metadata sink out of its root entirely,

@@ -19,6 +19,7 @@ import effects.html_metadata_annotate_stage : htmlMetadataAnnotateStageKeyV1;
 import effects.html_tree : defaultExtractHtmlBytes;
 import effects.independent_sinks : IndependentLocalSinks, IndependentPayloads,
     IndependentSinkFailure, contentSinkKey, metadataSinkKey;
+import effects.interrupt : interruptRequested;
 import effects.local_manifest : LocalManifest, SinkKey, SinkState, configDigest,
     inputDigest;
 import job.legacy : lowerLegacyNames;
@@ -329,6 +330,23 @@ int runMetadataRoute(const string[] args) {
         scope manifest = new LocalManifest(o.manifest);
         bool incomplete;
         foreach (file; files) {
+            // #482: poll the process-wide SIGINT flag once per file, before
+            // starting it, mirroring `cli.runApp`'s `submitPath` and
+            // `cli.runExtract`'s admission loop -- this route previously
+            // never observed SIGINT at all and ran every admitted file to
+            // completion regardless. Each file this route processes is
+            // committed independently and atomically (`IndependentLocalSinks`
+            // below), so stopping between files rather than mid-file drains
+            // exactly the in-flight document, the same cooperative,
+            // per-file granularity `run`/`repair`/`extract` use (see
+            // docs/signal-handling.md). A fixed-token diagnostic, not a
+            // dynamic message, to match this route's existing exit
+            // diagnostics (`route-invalid-arguments`/`route-incomplete`/
+            // `route-refused`): no source bytes, paths, or metadata.
+            if (interruptRequested()) {
+                stderr.writeln("scrubbed: route-interrupted");
+                return 2;
+            }
             checkedTarget(o.contentRoot, file.name, false);
             checkedTarget(o.metadataRoot, file.name, false);
             auto size = checkedEntry(file.path, false).st_size;
@@ -591,4 +609,59 @@ unittest {
         "the content sink must have actually landed in the real directory the symlink resolves to");
     assert(exists(buildPath(real_, "metadata", "page.html")),
         "the metadata sink must have actually landed in the real directory the symlink resolves to");
+}
+
+/// Issue #482 regression: `route-metadata` never polled the process-wide
+/// SIGINT flag at all, so `kill -INT`/Ctrl-C had zero effect on it -- the
+/// route ran every admitted file to completion regardless. Same
+/// deterministic, in-process shape as `source/cli.d`'s #448/#482
+/// `interruptRequested()` tests: pre-set the flag before `runMetadataRoute`
+/// ever processes a file, so the very first file in the batch must be
+/// rejected. This proves the wiring (the per-file loop's own
+/// `interruptRequested()` check -> the fixed-token `route-interrupted`
+/// diagnostic and exit code 2) without needing a real OS signal or timing
+/// race; the real-subprocess/real-`kill -INT` proof is recorded manually in
+/// docs/signal-handling.md, exactly as #448's own real-signal timing proof
+/// was.
+unittest {
+    import effects.interrupt : requestInterrupt, resetInterruptedForTest;
+    import core.stdc.stdlib : free;
+    import core.sys.posix.stdlib : realpath;
+    import std.file : exists, mkdirRecurse, rmdirRecurse, tempDir, write;
+    import std.path : buildPath;
+    import std.string : fromStringz, toStringz;
+    import std.uuid : randomUUID;
+
+    auto resolvedTempPtr = realpath(tempDir.toStringz, null);
+    assert(resolvedTempPtr !is null, "could not resolve tempDir()");
+    auto resolvedTemp = fromStringz(resolvedTempPtr).idup;
+    free(resolvedTempPtr);
+
+    auto root = buildPath(resolvedTemp, "scrubbed-metadata-route-482-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+
+    auto inputDir = buildPath(root, "input");
+    auto contentDir = buildPath(root, "content");
+    auto metadataDir = buildPath(root, "metadata");
+    auto manifestPath = buildPath(root, "manifest.sqlite3");
+    mkdirRecurse(inputDir);
+    mkdirRecurse(contentDir);
+    mkdirRecurse(metadataDir);
+    write(buildPath(inputDir, "page.html"),
+        "<html><head><title>Interrupt me</title></head><body>hi</body></html>");
+
+    resetInterruptedForTest();
+    scope(exit) resetInterruptedForTest();
+    requestInterrupt(0);
+
+    auto exitCode = runMetadataRoute(["--input", inputDir,
+        "--content-output", contentDir, "--metadata-output", metadataDir,
+        "--manifest", manifestPath]);
+    assert(exitCode == 2,
+        "a pre-set interrupt flag must stop route-metadata with exit 2, not run to completion");
+    assert(!exists(buildPath(contentDir, "page.html")),
+        "no content sink should be published once the interrupt flag is already set");
+    assert(!exists(buildPath(metadataDir, "page.html")),
+        "no metadata sink should be published once the interrupt flag is already set");
 }

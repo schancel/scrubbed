@@ -559,6 +559,17 @@ int runExtract(string requestedInput, string requestedOutput,
     try {
         if (isTree) {
             foreach (entry; dirEntries(input, SpanMode.depth, false)) {
+                // #482: mirror `runApp`'s `submitPath` -- poll the SIGINT
+                // flag once per discovered file, before admitting it, so
+                // `extract` stops admitting new work and drains whatever it
+                // already started through the same `scheduler.cancel();
+                // scheduler.finish();` path a fatal admission failure uses
+                // just below, instead of running the whole tree to
+                // completion regardless of SIGINT (see
+                // docs/signal-handling.md).
+                if (interruptRequested())
+                    throw new Exception(
+                        "interrupted (SIGINT); canceling after in-flight work drains");
                 if (entry.isSymlink)
                     throw new Exception("refusing symlink in extract input tree: " ~ entry.name);
                 if (!entry.isFile) continue;
@@ -567,6 +578,9 @@ int runExtract(string requestedInput, string requestedOutput,
                     throw new Exception("extract admission canceled");
             }
         } else {
+            if (interruptRequested())
+                throw new Exception(
+                    "interrupted (SIGINT); canceling after in-flight work drains");
             auto size = getSize(input);
             if (!scheduler.submit(input, size > byteLimit ? byteLimit + 1 : size))
                 throw new Exception("extract admission canceled");
@@ -1673,43 +1687,28 @@ unittest {
     assert(succeededDisplayCount(0, 0) == 0);
 }
 
-// SIGINT graceful shutdown (fixes #448). `app.d` installs `requestInterrupt`
-// as the process's SIGINT handler before calling into this module, so the
-// flag it sets here may be stored from a signal handler running on an
-// arbitrary thread at an arbitrary point in `runApp` below (or before it
-// starts, or after it returns). Keep `requestInterrupt` to exactly this one
-// atomic store: no GC, no throwing, no locking -- anything else is unsafe to
-// run from a signal handler. `runApp`'s file walk (`submitPath`, called for
-// every discovered file and for the single-file case) polls
-// `interruptRequested()` cooperatively between files and, on a true result,
-// throws to stop admitting new work; that already flows into the same
-// graceful-cancellation path (`scheduler.cancel(); scheduler.finish();`) a
-// fatal processing failure uses below, draining already-admitted work rather
-// than dying mid-write. See docs/signal-handling.md for the chosen behavior
-// and its limits (cooperative, per-file granularity -- not preemptive).
-private shared bool interruptRequestedFlag = false;
-
-/// Async-signal-safe. Do not add anything here beyond the atomic store.
-/// The `int` parameter is the signal number `signal(2)`'s callback ABI
-/// requires; unused, since one process installs this for SIGINT alone.
-extern(C) void requestInterrupt(int) nothrow @nogc {
-    import core.atomic : atomicStore;
-    atomicStore(interruptRequestedFlag, true);
-}
-
-private bool interruptRequested() nothrow @nogc {
-    import core.atomic : atomicLoad;
-    return atomicLoad(interruptRequestedFlag);
-}
-
-version (unittest) {
-    // Test-only reset: production has exactly one process-lifetime SIGINT,
-    // so nothing outside the unittest build needs to un-flag this.
-    private void resetInterruptedForTest() nothrow @nogc {
-        import core.atomic : atomicStore;
-        atomicStore(interruptRequestedFlag, false);
-    }
-}
+// SIGINT graceful shutdown (fixes #448; extended to `runExtract` below, and
+// to `route-metadata`, by #482). `app.d` installs `requestInterrupt` as the
+// process's SIGINT handler before calling into this module, so the flag it
+// sets may be stored from a signal handler running on an arbitrary thread at
+// an arbitrary point during any command's run (or before one starts, or
+// after it returns). The flag itself, `requestInterrupt`, and
+// `interruptRequested()` now live in `effects.interrupt` -- not here --
+// purely so `effects.metadata_route_cli` (`route-metadata`) can poll it from
+// its own per-file loop without importing `cli`, which this project's
+// layering forbids for `effects` modules (`scripts/check_modules.d`). This
+// `public import` re-exports both names unchanged, so `app.d` (which may
+// import only `cli`) and every existing call site below (`runApp`'s
+// `submitPath`, `runExtract`'s admission loop) keep working exactly as
+// before. `runApp`'s file walk polls `interruptRequested()` cooperatively
+// between files and, on a true result, throws to stop admitting new work;
+// that flows into the same graceful-cancellation path
+// (`scheduler.cancel(); scheduler.finish();`) a fatal processing failure
+// uses below, draining already-admitted work rather than dying mid-write.
+// See docs/signal-handling.md for the chosen behavior and its limits
+// (cooperative, per-file granularity -- not preemptive) for each command.
+public import effects.interrupt : requestInterrupt, interruptRequested;
+version (unittest) import effects.interrupt : resetInterruptedForTest;
 
 int runApp(string[] args) {
     auto metricsPath = environment.get("SCRUBBED_DURABLE_METRICS_V1", "");
@@ -3042,6 +3041,44 @@ unittest {
     auto error = collectException!Exception(runApp(["scrubbed", "run",
         "--input", inputDir, "--output", outputDir, "--threads", "1"]));
     assert(error !is null, "a pre-set interrupt flag must stop runApp, not run to completion");
+    assert(error.msg.canFind("interrupted (SIGINT)"),
+        "exception message must name the actual cause: " ~ error.msg);
+    assert(!exists(outputDir) || dirEntries(outputDir, SpanMode.shallow).empty,
+        "no file should be admitted once the interrupt flag is already set: " ~
+        (exists(outputDir) ? dirEntries(outputDir, SpanMode.shallow).array.to!string : "(no output dir)"));
+}
+
+// #482 regression: `runExtract` (backing the `extract` command) used to be
+// the one CLI entry point in this module that never polled
+// `interruptRequested()` at all -- SIGINT during `extract` silently ran the
+// whole batch to completion. Same deterministic, in-process shape as the
+// #448 test just above: pre-set the flag before `runExtract` ever admits a
+// file, so every discovered file must be rejected. This proves the wiring
+// (the tree-walk's own `interruptRequested()` check -> the same
+// `scheduler.cancel(); scheduler.finish();` graceful path a fatal admission
+// failure already used) -- not the OS's signal delivery, which is verified
+// separately against the real release binary (see docs/signal-handling.md).
+unittest {
+    import std.exception : collectException;
+    import std.file : rmdirRecurse, tempDir;
+    import std.range : empty;
+
+    auto root = buildPath(tempDir, "scrubbed-extract-sigint-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto inputDir = buildPath(root, "in");
+    mkdir(root);
+    mkdir(inputDir);
+    foreach (i; 0 .. 5)
+        write(buildPath(inputDir, "f" ~ i.to!string ~ ".html"),
+            "<html><body>hello " ~ i.to!string ~ "</body></html>");
+
+    resetInterruptedForTest();
+    scope(exit) resetInterruptedForTest();
+    requestInterrupt(0);
+
+    auto outputDir = buildPath(root, "out");
+    auto error = collectException!Exception(runExtract(inputDir, outputDir));
+    assert(error !is null, "a pre-set interrupt flag must stop runExtract, not run to completion");
     assert(error.msg.canFind("interrupted (SIGINT)"),
         "exception message must name the actual cause: " ~ error.msg);
     assert(!exists(outputDir) || dirEntries(outputDir, SpanMode.shallow).empty,

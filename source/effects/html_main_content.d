@@ -294,11 +294,30 @@ private bool hiddenTag(string name) pure nothrow @nogc {
 // `writer.block()` around its own dedicated quoting branch), it's just
 // handled in a separate code path there because of its "> " line-prefix
 // formatting, which has no bearing on this boundary-detection use.
+//
+// Issue #517: widened with `ul`/`ol`/`pre` (html_markdown.d's renderNode
+// already opens a block around each of those) and with the HTML5
+// sectioning/landmark containers in `sectioningBlockTag` below. Without
+// them, text on either side of a `<section>`/`<nav>`/`<ul>` boundary was
+// glued into one run ("...foo.Home About").
 private bool blockTag(string name) pure nothrow @nogc {
     bool heading = name.length == 2 && name[0] == 'h' &&
         name[1] >= '1' && name[1] <= '6';
     return heading || name == "p" || name == "div" || name == "li" ||
-        name == "table" || name == "blockquote";
+        name == "table" || name == "blockquote" || name == "ul" ||
+        name == "ol" || name == "pre" || sectioningBlockTag(name);
+}
+
+/// Issue #517: the HTML5 sectioning/landmark containers. They are block
+/// boundaries for `.text` (`blockTag`), but html_markdown.d's renderNode
+/// gives them no block separation of its own and otherwise treats them
+/// exactly like `div` (it never names any of them). So
+/// `effects.html_main_content_markdown` renames them to `div` in its own
+/// copy of the selected subtree before rendering, which gives the Markdown
+/// path the same boundaries as the text path.
+bool sectioningBlockTag(string name) pure nothrow @nogc {
+    return name == "article" || name == "aside" || name == "footer" ||
+        name == "header" || name == "main" || name == "nav" || name == "section";
 }
 
 private string attributeValue(const ref HtmlNode node, string name) pure {
@@ -840,8 +859,25 @@ unittest {
 // `registration-banner__text`/`registration-banner__button`-sandwiched
 // paragraph ("erhalten Sie exklusive...") reappearing in `.text` under
 // `recall` where `standard`/`precision` both still exclude it.
+//
+// Issue #517: a bare `<nav>` element is excluded by tag, in every mode,
+// ahead of the keyword checks. This is the tag-level twin of the existing
+// `"nav"` negative keyword, which already excludes `<div class="nav">` in
+// every mode including `recall`. Only `nav` is excluded by tag here. The
+// other `negativeContentTags` (`aside`/`header`/`footer`/`figure`/...)
+// still count against scoring but are kept once inside the winning
+// subtree: an in-article `<aside>` pull quote, `<header>` byline or
+// `<figure>` caption is often real content. See `docs/html-main-content.md`
+// ("Tag-level nav exclusion and text/Markdown agreement") for the
+// trafilatura comparison and the held-out corpus measurement.
+//
+// This is the only exclusion rule for the selected subtree. Both `.text`
+// (`extractMainContent`) and `.markdown` (`effects.html_main_content_markdown`)
+// read it through `selectedContentTree`, so the two outputs cannot
+// disagree on what they drop.
 private bool excludedFromText(const ref HtmlTree tree, const size_t[] prevSibling,
         const size_t[] nextSibling, size_t index, ExtractionMode mode) pure {
+    if (tree.nodes[index].name == "nav") return true;
     double keyword = keywordScoreFor(tree.nodes[index]);
     if (keyword < 0.0) return true;
     if (keyword > 0.0) return false;
@@ -857,42 +893,81 @@ private bool excludedFromText(const ref HtmlTree tree, const size_t[] prevSiblin
         (prevNegative && nextNegative);
 }
 
-// Visible text of one selected subtree, skipping the non-visible
-// script/style/template/head descendants exactly as html_markdown.d's
-// nodeText does (a bounded ancestor walk, not recursion), plus any
-// descendant `excludedFromText` marks as boilerplate (issue #27 Case 2).
-// Also tracks each text node's nearest block-level ancestor (same walk,
-// same bound) so a change of block ancestor between one text node and the
-// next -- e.g. an `</h1>` followed by a `<p>`, or one `<li>` followed by the
-// next -- emits an explicit paragraph break instead of the ordinary
-// whitespace collapse. `blockAncestor` defaults to `index` itself (the
-// selected subtree root) when no block-tag ancestor is found closer than
-// the root, so two text nodes that are both direct, unwrapped children of
-// the root (or of the same non-block wrapper) still group as one paragraph.
-private void collectText(const ref HtmlTree tree, const size_t[] prevSibling,
-        const size_t[] nextSibling, size_t index, ref CollapsingWriter cw,
-        ExtractionMode mode) pure {
-    size_t lastBlockAncestor = size_t.max; // unset: index is always < size_t.max
-    foreach (i; index + 1 .. endOf(tree, index)) {
-        if (tree.nodes[i].kind != HtmlNodeKind.text) continue;
-        bool hidden;
-        size_t blockAncestor = index;
-        bool foundBlock;
-        for (size_t parent = tree.nodes[i].parentIndex;
-             parent != index && parent != size_t.max && parent < i;
-             parent = tree.nodes[parent].parentIndex) {
-            if (hiddenTag(tree.nodes[parent].name)) { hidden = true; break; }
-            if (excludedFromText(tree, prevSibling, nextSibling, parent, mode)) { hidden = true; break; }
-            if (!foundBlock && blockTag(tree.nodes[parent].name)) {
-                blockAncestor = parent;
-                foundBlock = true;
-            }
+// Immediate previous/next *element* sibling of every node, for
+// `excludedFromText`'s sandwich rule (issue #27 Case 2). A single forward
+// pass: pre-order means one node's whole subtree is a contiguous run of
+// higher indices before its next sibling begins, so the last child seen so
+// far for a given parent is always that child's true immediate previous
+// sibling by the time the next one is reached. Only element nodes take
+// part: pretty-printed whitespace between two sibling elements is its own
+// intervening text node in the flat tree (e.g. "...</p>\n    <p>...", the
+// exact shape between the real for-me-online.de promo <p>s), and it must
+// not break "immediate sibling" into "immediate non-whitespace-text
+// sibling" -- excludedFromText only ever queries an element's siblings, so
+// a text node is simply skipped rather than recorded here.
+private void linkSiblings(const ref HtmlTree tree, size_t[] prevSibling,
+        size_t[] nextSibling) pure {
+    const n = tree.nodes.length;
+    prevSibling[] = size_t.max;
+    nextSibling[] = size_t.max;
+    auto lastChildOfParent = new size_t[n];
+    lastChildOfParent[] = size_t.max;
+    size_t lastRootChild = size_t.max;
+    foreach (i; 0 .. n) {
+        if (tree.nodes[i].kind != HtmlNodeKind.element) continue;
+        auto p = tree.nodes[i].parentIndex;
+        size_t* last = p == size_t.max ? &lastRootChild : &lastChildOfParent[p];
+        if (*last != size_t.max) {
+            nextSibling[*last] = i;
+            prevSibling[i] = *last;
         }
-        if (hidden) continue;
-        if (blockAncestor != lastBlockAncestor) cw.paragraphBreak();
-        cw.feed(tree.nodes[i].text);
-        lastBlockAncestor = blockAncestor;
+        *last = i;
     }
+}
+
+/// Issue #517: the selected subtree as its own standalone `HtmlTree`, with
+/// every descendant `excludedFromText` rejects (and that descendant's whole
+/// subtree) already removed. `root` becomes index 0 with no parent; the
+/// remaining nodes keep their pre-order and are re-indexed. Node contents
+/// are otherwise copied unchanged, and non-visible `script`/`style`/
+/// `template`/`head` descendants are kept, since every renderer already
+/// skips those itself.
+///
+/// This is the one place the selected subtree's boilerplate exclusion is
+/// applied. `.text` (`extractMainContent`) collects from this tree and
+/// `.markdown` (`effects.html_main_content_markdown`) renders from it, so
+/// the two outputs drop exactly the same descendants. Before this, only
+/// `.text` applied the exclusion; `.markdown` rendered the raw selected
+/// node, so e.g. `<nav class="nav">` inside a selected `<div>` was missing
+/// from `.text` but present in `.markdown`.
+HtmlTree selectedContentTree(const ref HtmlTree tree, size_t root,
+        ExtractionMode mode = ExtractionMode.standard) pure {
+    const n = tree.nodes.length;
+    auto prevSibling = new size_t[n];
+    auto nextSibling = new size_t[n];
+    linkSiblings(tree, prevSibling, nextSibling);
+
+    HtmlTree result;
+    result.observedBytes = tree.observedBytes;
+    const end = endOf(tree, root);
+    // Original index -> index in `result`, for the kept nodes only.
+    auto remap = new size_t[end - root];
+    for (size_t i = root; i < end;) {
+        ref const node = tree.nodes[i];
+        if (i != root && node.kind == HtmlNodeKind.element &&
+                excludedFromText(tree, prevSibling, nextSibling, i, mode)) {
+            i = endOf(tree, i);
+            continue;
+        }
+        remap[i - root] = result.nodes.length;
+        // A kept node's parent is always itself kept: excluding an element
+        // skips its whole subtree above.
+        size_t parent = i == root ? size_t.max : remap[node.parentIndex - root];
+        result.nodes ~= HtmlNode(node.kind, parent, node.name, node.text,
+            node.attributes.dup);
+        ++i;
+    }
+    return result;
 }
 
 private bool commentSectionRootTag(string name) pure nothrow @nogc {
@@ -910,17 +985,25 @@ private bool matchesCommentSectionKeyword(const ref HtmlNode node) pure {
     return false;
 }
 
-// Same hidden-tag/block-boundary text collection as `collectText`, minus
-// `excludedFromText`'s sandwich rule: that rule exists to strip a small
-// embedded promotional run out of an otherwise-legitimate *article*
-// container (issue #27 Case 2), which has no bearing on a comment
-// section's own text -- there is no "real content vs. embedded boilerplate"
-// distinction to make once a subtree has already been identified as a
-// comment section in full. `prevSibling`/`nextSibling` are also not
-// available here: comment-section scanning (`collectComments`) runs
-// unconditionally, before -- and independent of -- the ordinary DOM
-// candidate pass's own abstention/selection decision, so those arrays
-// (computed only once that pass has already selected) do not exist yet.
+// Visible text of one subtree, skipping the non-visible
+// script/style/template/head descendants exactly as html_markdown.d's
+// nodeText does (a bounded ancestor walk, not recursion). Also tracks each
+// text node's nearest block-level ancestor (same walk, same bound) so a
+// change of block ancestor between one text node and the next -- e.g. an
+// `</h1>` followed by a `<p>`, or one `<li>` followed by the next -- emits
+// an explicit paragraph break instead of the ordinary whitespace collapse.
+// `blockAncestor` defaults to `start` itself (the subtree root) when no
+// block-tag ancestor is found closer than the root, so two text nodes that
+// are both direct, unwrapped children of the root (or of the same non-block
+// wrapper) still group as one paragraph.
+//
+// No boilerplate exclusion happens here. The selected main content is
+// collected from `selectedContentTree`, which has already removed what
+// `excludedFromText` rejects. Comment sections are collected from the
+// original tree with no exclusion at all: the sandwich rule exists to strip
+// a small embedded promotional run out of an otherwise-legitimate *article*
+// container (issue #27 Case 2), which has no bearing on a comment section's
+// own text once the whole subtree has been identified as a comment section.
 private void collectPlainSubtreeText(const ref HtmlTree tree, size_t start, size_t end,
         ref CollapsingWriter cw) pure {
     size_t lastBlockAncestor = size_t.max;
@@ -1025,7 +1108,8 @@ private CommentScanResult collectComments(const ref HtmlTree tree) pure {
 /// + keywordWeight) * (1 - linkDensity)` — link density is the strongest
 /// established deterministic boilerplate signal, so it discounts everything
 /// else rather than being an independent term. Once a node is selected,
-/// collecting its text (`collectText`) additionally skips any descendant
+/// collecting its text (`selectedContentTree`) additionally skips any `<nav>`
+/// descendant (issue #517) or descendant
 /// whose class/id matches a negative keyword, plus a keyword-neutral
 /// descendant sandwiched directly between two such matches (`excludedFromText`;
 /// issue #27) -- a boilerplate exclusion distinct from scoring itself, since
@@ -1177,46 +1261,9 @@ MainContentResult extractMainContent(const ref HtmlTree tree, bool includeCommen
     if (topCount >= 2 && top[1].score == best.score)
         return abstainOrRescue(tree, result, MainContentStatus.abstainedTie);
 
-    // Sibling links for `excludedFromText`'s sandwich rule (issue #27 Case
-    // 2), computed only once selection is final. A single forward pass:
-    // because pre-order means one node's whole subtree is a contiguous run
-    // of higher indices before its next sibling begins, the last child seen
-    // so far for a given parent is always that child's true immediate
-    // previous sibling by the time the next one is reached.
-    auto prevSibling = new size_t[n];
-    auto nextSibling = new size_t[n];
-    prevSibling[] = size_t.max;
-    nextSibling[] = size_t.max;
-    // Only element nodes participate: pretty-printed whitespace between two
-    // sibling elements is its own intervening text node in the flat tree
-    // (e.g. "...</p>\n    <p>...", the exact shape between the real
-    // for-me-online.de promo <p>s), and it must not break "immediate
-    // sibling" into "immediate non-whitespace-text sibling" -- excludedFromText
-    // only ever queries an element's siblings, so a text node is simply
-    // skipped rather than recorded here.
-    auto lastChildOfParent = new size_t[n];
-    lastChildOfParent[] = size_t.max;
-    size_t lastRootChild = size_t.max;
-    foreach (i; 0 .. n) {
-        if (tree.nodes[i].kind != HtmlNodeKind.element) continue;
-        auto p = tree.nodes[i].parentIndex;
-        if (p == size_t.max) {
-            if (lastRootChild != size_t.max) {
-                nextSibling[lastRootChild] = i;
-                prevSibling[i] = lastRootChild;
-            }
-            lastRootChild = i;
-        } else {
-            if (lastChildOfParent[p] != size_t.max) {
-                nextSibling[lastChildOfParent[p]] = i;
-                prevSibling[i] = lastChildOfParent[p];
-            }
-            lastChildOfParent[p] = i;
-        }
-    }
-
     CollapsingWriter collapsing;
-    collectText(tree, prevSibling, nextSibling, best.node, collapsing, mode);
+    auto content = selectedContentTree(tree, best.node, mode);
+    collectPlainSubtreeText(content, 0, content.nodes.length, collapsing);
     result.status = MainContentStatus.selected;
     result.node = best.node;
     result.score = best.score;
@@ -1701,7 +1748,7 @@ unittest {
     // scienceblogs-de.html's real shape: an <article> with real body text,
     // followed by a sibling <div id="comments"> wrapping one or more real
     // comment entries. The comment section must not appear in `.text` (it
-    // already didn't, before this ticket -- `collectText` only ever walks
+    // already didn't, before this ticket -- `selectedContentTree` only ever walks
     // the *selected* node's own subtree, and this comments div is a sibling,
     // not a descendant, of the winning <article>) but must now be separately
     // identified and extracted into `.comments`.
@@ -1967,4 +2014,76 @@ unittest {
     // match either way -- only the sandwich heuristic is disabled.
     assert(!recallSandwich.text.canFind("Jetzt registrieren"),
         "recall must still exclude a node with its own negative keyword match");
+}
+
+// Issue #517: block separation at sectioning/list/pre boundaries, and
+// tag-level `<nav>` exclusion inside the selected subtree. Marker words are
+// plain alphanumerics so no escaping can make a negative assertion vacuous.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    // ~460 bytes of direct text, so the <div> itself outscores a child
+    // <section>/<article>/<main>/<p> and its +300 positive-tag weight.
+    string lede = "LedeStart the survey team spent three weeks mapping the river " ~
+        "delta and recording water depth every two hundred meters along six " ~
+        "transects while the main channel migrated nearly forty meters east " ~
+        "since the previous survey was completed and the second leg of the " ~
+        "survey repeated every one of those transects a month later to check " ~
+        "how quickly the sandbars were moving after the spring floods had " ~
+        "passed through the lower reaches of the delta LedeEnd";
+    MainContentResult extract(string inner, ExtractionMode mode = ExtractionMode.standard) {
+        auto outcome = parseHtml(cast(const(ubyte)[]) ("<html><body><div>" ~ lede ~
+            inner ~ "</div></body></html>"));
+        assert(outcome.isParsed);
+        auto result = extractMainContent(outcome.tree, true, mode);
+        assert(result.status == MainContentStatus.selected);
+        assert(outcome.tree.nodes[result.node].name == "div",
+            "the fixture's own <div> must be the selected node");
+        return result;
+    }
+
+    // Separators: each of these tags used to glue onto "LedeEnd".
+    foreach (tag; ["section", "article", "header", "footer", "aside", "main",
+            "ul", "ol", "pre"]) {
+        string inner = tag == "ul" || tag == "ol" ?
+            "<" ~ tag ~ "><li>TailMarker words</li></" ~ tag ~ ">" :
+            "<" ~ tag ~ ">TailMarker words</" ~ tag ~ ">";
+        auto text = extract(inner).text;
+        assert(text.canFind("LedeEnd\n\nTailMarker words"),
+            "<" ~ tag ~ "> must start a new paragraph in .text, got: " ~ text);
+        assert(!text.canFind("LedeEndTailMarker"), "<" ~ tag ~ "> text glued on");
+    }
+    // ...and the text after the boundary is a new block as well.
+    auto after = extract("<section>InsideMarker</section>AfterMarker").text;
+    assert(after.canFind("InsideMarker\n\nAfterMarker"), after);
+
+    // Nav policy: a bare <nav> inside the selected subtree is dropped by tag,
+    // in every extraction mode, like the existing class="nav" keyword rule.
+    foreach (mode; [ExtractionMode.standard, ExtractionMode.precision,
+            ExtractionMode.recall]) {
+        auto navResult = extract("<nav>NavTagMarker Home About Contact</nav>" ~
+            "<p>TrailingMarker</p>", mode);
+        assert(!navResult.text.canFind("NavTagMarker"),
+            "a <nav> descendant of the selected node leaked into .text");
+        assert(navResult.text.canFind("LedeEnd") && navResult.text.canFind("TrailingMarker"),
+            "real content around the <nav> must survive");
+    }
+    // A positive class does not rescue a <nav>: the tag decides, as it
+    // already does for the scoring pass (`hasNegativeTagAncestor`).
+    assert(!extract(`<nav class="post-content">NavTagMarker</nav>`).text.canFind("NavTagMarker"));
+    // Other negative-scoring tags are kept once inside the winning subtree.
+    assert(extract("<aside>AsideMarker</aside>").text.canFind("AsideMarker"));
+    assert(extract("<header>HeaderMarker</header>").text.canFind("HeaderMarker"));
+    assert(extract("<footer>FooterMarker</footer>").text.canFind("FooterMarker"));
+    // The selected node itself is never excluded, even if it is a <nav>.
+    auto navRoot = parseHtml(cast(const(ubyte)[]) ("<html><body><nav>" ~ lede ~
+        "</nav></body></html>"));
+    assert(navRoot.isParsed);
+    auto navRootTree = navRoot.tree;
+    size_t navIndex;
+    foreach (i, ref node; navRootTree.nodes) if (node.name == "nav") navIndex = i;
+    auto navCopy = selectedContentTree(navRootTree, navIndex);
+    assert(navCopy.nodes.length == 2 && navCopy.nodes[0].name == "nav" &&
+        navCopy.nodes[0].parentIndex == size_t.max && navCopy.nodes[1].parentIndex == 0);
 }

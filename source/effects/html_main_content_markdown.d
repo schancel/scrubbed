@@ -48,8 +48,9 @@
 /// never there.
 module effects.html_main_content_markdown;
 
-import effects.html_main_content : extractMainContent, HtmlMainContentOutputLimit,
-    MainContentCandidate, MainContentStatus;
+import effects.html_main_content : ExtractionMode, extractMainContent,
+    HtmlMainContentOutputLimit, MainContentCandidate, MainContentStatus,
+    sectioningBlockTag, selectedContentTree;
 import effects.html_markdown : clean, HtmlMarkdownOutputLimit,
     MarkdownRenderOptions, renderMarkdownFrom;
 import effects.html_tree : HtmlTree;
@@ -96,7 +97,7 @@ private string structuredDataMarkdown(string text) pure {
 /// Runs `extractMainContent` completely unchanged -- same scoring, same
 /// selection, same abstention rules -- and, on either success status,
 /// renders `.markdown`: for `selected`, the winning subtree (and only that
-/// subtree) via `renderMarkdownFrom(tree, result.node, options)`; for
+/// subtree) via `renderMarkdownFrom(..., options)`; for
 /// `selectedStructuredData`, `selection.text` reflowed as flat Markdown
 /// paragraphs (`structuredDataMarkdown`, above -- `options` does not apply
 /// there: JSON-LD recovery has no DOM inline elements to format, link, or
@@ -110,18 +111,33 @@ private string structuredDataMarkdown(string text) pure {
 /// -- byte-identical to before this parameter existed for every caller that
 /// does not pass one, so #411's 20/20 corpus result and #438's
 /// JSON-LD-fallback path are unaffected by this addition.
+///
+/// Issue #517: the `selected` path renders `selectedContentTree` (the
+/// selected subtree with `.text`'s boilerplate exclusion already applied),
+/// not the raw selected node, so `.markdown` and `.text` drop exactly the
+/// same descendants. In that copy, the sectioning containers
+/// (`sectioningBlockTag`: `section`/`article`/`nav`/...) are renamed to
+/// `div`: renderNode treats them exactly like `div` except that it gives
+/// them no block separation, so without the rename their text glued onto
+/// the neighbouring text, which `.text` no longer does. `mode` (default
+/// `standard`) is passed to `extractMainContent` and `selectedContentTree`
+/// alike.
 MainContentMarkdownResult extractMainContentMarkdown(const ref HtmlTree tree,
-        const MarkdownRenderOptions options = MarkdownRenderOptions.init) pure {
-    auto selection = extractMainContent(tree);
+        const MarkdownRenderOptions options = MarkdownRenderOptions.init,
+        ExtractionMode mode = ExtractionMode.standard) pure {
+    auto selection = extractMainContent(tree, true, mode);
     MainContentMarkdownResult result;
     result.status = selection.status;
     result.node = selection.node;
     result.score = selection.score;
     result.candidatesOverflow = selection.candidatesOverflow;
     result.candidates = selection.candidates;
-    if (selection.status == MainContentStatus.selected)
-        result.markdown = renderMarkdownFrom(tree, selection.node, options);
-    else if (selection.status == MainContentStatus.selectedStructuredData)
+    if (selection.status == MainContentStatus.selected) {
+        auto content = selectedContentTree(tree, selection.node, mode);
+        foreach (ref node; content.nodes)
+            if (sectioningBlockTag(node.name)) node.name = "div";
+        result.markdown = renderMarkdownFrom(content, 0, options);
+    } else if (selection.status == MainContentStatus.selectedStructuredData)
         result.markdown = structuredDataMarkdown(selection.text);
     return result;
 }
@@ -540,4 +556,66 @@ unittest {
         "a properly escaped JSON-LD value must be recovered whole");
     assert(!escapedResult.markdown.canFind("NavBoilerplateMarker"),
         "recovered JSON-LD Markdown must never carry DOM boilerplate");
+}
+
+// Issue #517: `.text` and `.markdown` must drop the same descendants of the
+// selected node, and put block boundaries in the same places. Before this,
+// `.markdown` rendered the raw selected node, so a `<nav class="nav">`
+// (negative keyword) was missing from `.text` but present in `.markdown`,
+// and a `<section>` glued onto the preceding text in both. Marker words
+// are plain alphanumerics so escaping cannot make a negative assertion
+// vacuous.
+unittest {
+    import effects.html_main_content : ExtractionMode, MainContentResult;
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string lede = "LedeStart the survey team spent three weeks mapping the river " ~
+        "delta and recording water depth every two hundred meters along six " ~
+        "transects while the main channel migrated nearly forty meters east " ~
+        "since the previous survey was completed and the second leg of the " ~
+        "survey repeated every one of those transects a month later to check " ~
+        "how quickly the sandbars were moving after the spring floods had " ~
+        "passed through the lower reaches of the delta LedeEnd";
+    // The boilerplate comes last, behind a spare paragraph, so `precision`'s
+    // "either neighbour is negative" sandwich rule cannot also drop the
+    // <section>/closing paragraph the positive assertions look for.
+    string page = "<html><body><div>" ~ lede ~
+        "<section>SectionMarker words</section>" ~
+        "<p>ClosingMarker words</p><p>SpareParagraph</p>" ~
+        `<nav class="nav">NavClassMarker Home About</nav>` ~
+        "<nav>NavTagMarker Contact</nav>" ~
+        `<div class="share">ShareMarker</div></div></body></html>`;
+    auto outcome = parseHtml(cast(const(ubyte)[]) page);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    foreach (mode; [ExtractionMode.standard, ExtractionMode.precision,
+            ExtractionMode.recall]) {
+        MainContentResult plain = extractMainContent(tree, true, mode);
+        auto combined = extractMainContentMarkdown(tree, MarkdownRenderOptions.init, mode);
+        assert(plain.status == MainContentStatus.selected);
+        assert(combined.status == plain.status && combined.node == plain.node);
+        assert(tree.nodes[combined.node].name == "div");
+
+        foreach (marker; ["NavClassMarker", "NavTagMarker", "ShareMarker"]) {
+            assert(!plain.text.canFind(marker), marker ~ " leaked into .text");
+            assert(!combined.markdown.canFind(marker), marker ~ " leaked into .markdown");
+        }
+        foreach (marker; ["LedeStart", "SectionMarker", "ClosingMarker"]) {
+            assert(plain.text.canFind(marker), marker ~ " missing from .text");
+            assert(combined.markdown.canFind(marker), marker ~ " missing from .markdown");
+        }
+        // Same block boundary at the <section> in both outputs.
+        assert(plain.text.canFind("LedeEnd\n\nSectionMarker words\n\nClosingMarker"),
+            plain.text);
+        assert(combined.markdown.canFind("LedeEnd\n\nSectionMarker words\n\nClosingMarker"),
+            combined.markdown);
+    }
+
+    // Sectioning tags are only renamed in the rendering copy: the caller's
+    // tree is untouched.
+    size_t sections;
+    foreach (ref node; tree.nodes) if (node.name == "section") ++sections;
+    assert(sections == 1, "extractMainContentMarkdown must not mutate its input tree");
 }

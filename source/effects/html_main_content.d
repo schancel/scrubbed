@@ -531,27 +531,40 @@ private bool tagNameAt(string raw, size_t start, string name) pure nothrow @nogc
         (next >= '0' && next <= '9') || next == '-' || next == '_');
 }
 
-// Issue #484: mirrors `hiddenTag`'s DOM-path exclusion of `<script>`/
-// `<style>` *descendants*, not just their own tags, for this JSON-LD
-// fallback's naive tag-stripper -- without this, a `<script>`/`<style>`
-// element embedded inside a recovered JSON-LD string value has its tags
-// removed by the ordinary per-tag stripping below but its non-visible text
-// content left behind as if it were real prose (exactly the leak this
-// ticket reports). Given `raw[i] == '<'`, returns the number of bytes
-// spanned by a `<script>`/`<style>` *opening* tag found there through its
-// matching closing tag's final `>` (0 when `raw[i]` is not such an opening
-// tag, in which case the caller's ordinary single-tag stripping still
-// applies). An opening tag with no matching close consumes to end-of-string,
-// matching a real HTML tokenizer's raw-text-element handling (an
-// unterminated `<script>`/`<style>` swallows the rest of the document
-// rather than leaking as visible text) -- same "abstain toward hiding, not
-// leaking" bias as `hiddenTag`'s own use.
+// Issue #484 (script/style), extended by Issue #513 (template): mirrors
+// `hiddenTag`'s DOM-path exclusion of `<script>`/`<style>`/`<template>`
+// *descendants*, not just their own tags, for this JSON-LD fallback's naive
+// tag-stripper -- without this, one of those elements embedded inside a
+// recovered JSON-LD string value has its tags removed by the ordinary
+// per-tag stripping below but its non-visible text content left behind as
+// if it were real prose (exactly the leak both tickets report). `head` is
+// deliberately NOT covered here: `hiddenTag`'s inclusion of it exists to
+// stop a whole `<head>` subtree (title/meta/link/style/script, encountered
+// while walking the real parsed DOM) from being read as page body text, but
+// this fallback only ever strips markup found *inside a single decoded
+// JSON string value* (an `articleBody`/step/answer field) -- there is no
+// parsed `<head>` element there for that exclusion to apply to, and a
+// literal "<head>" substring occurring in such a string is just ordinary
+// text content to strip tags from like any other element, not a reason to
+// discard everything between it and a matching "</head>". So this function
+// covers exactly `script`/`style`/`template`, not all of `hiddenTag`, and
+// the two are intentionally different for that reason -- not because this
+// one is incomplete. Given `raw[i] == '<'`, returns the number of bytes
+// spanned by a `<script>`/`<style>`/`<template>` *opening* tag found there
+// through its matching closing tag's final `>` (0 when `raw[i]` is not such
+// an opening tag, in which case the caller's ordinary single-tag stripping
+// still applies). An opening tag with no matching close consumes to
+// end-of-string, matching a real HTML tokenizer's raw-text-element handling
+// (an unterminated `<script>`/`<style>`/`<template>` swallows the rest of
+// the document rather than leaking as visible text) -- same "abstain toward
+// hiding, not leaking" bias as `hiddenTag`'s own use.
 private size_t hiddenElementSpanLength(string raw, size_t i) pure nothrow @nogc {
     size_t j = i + 1;
     if (j >= raw.length || raw[j] == '/') return 0; // a closing tag, not opening
     string tag;
     if (tagNameAt(raw, j, "script")) tag = "script";
     else if (tagNameAt(raw, j, "style")) tag = "style";
+    else if (tagNameAt(raw, j, "template")) tag = "template";
     else return 0;
 
     size_t k = j + tag.length;
@@ -578,10 +591,12 @@ private size_t hiddenElementSpanLength(string raw, size_t i) pure nothrow @nogc 
 // direct word concatenation), then decodes any character references left
 // over (`_render_text`'s own two-step "unescape, then strip markup" shape,
 // just in the opposite order -- decoding after stripping means a decoded
-// `&lt;`/`&gt;` can never be mistaken for a real tag boundary). Issue #484:
-// a `<script>`/`<style>` element's own text content is dropped along with
-// its tags (`hiddenElementSpanLength`), not merely un-tagged into visible
-// text, matching the DOM-selection path's `hiddenTag` exclusion.
+// `&lt;`/`&gt;` can never be mistaken for a real tag boundary). Issue #484,
+// extended by Issue #513: a `<script>`/`<style>`/`<template>` element's own
+// text content is dropped along with its tags (`hiddenElementSpanLength`),
+// not merely un-tagged into visible text -- see that function's own doc
+// comment for exactly which of the DOM-selection path's `hiddenTag`
+// exclusions this does and doesn't mirror, and why.
 private string plainTextFromStructuredData(string raw) pure {
     char[] stripped;
     stripped.reserve(raw.length);
@@ -1691,6 +1706,51 @@ unittest {
     assert(!styleInStructuredDataResult.text.canFind("color:red"),
         "hidden <style> text embedded inside a JSON-LD string value leaked");
     assert(styleInStructuredDataResult.text.canFind("Article body sentence."));
+
+    // Issue #513: `<template>` gets the same exclusion as `<script>`/
+    // `<style>` above -- the ticket's own reproduction
+    // (`plainTextFromStructuredData("a <template>evilI</template> b")`
+    // previously returned "a evilI  b", leaking the template text as
+    // visible main content). Fail-before/pass-after: before extending
+    // `hiddenElementSpanLength` to recognize "template", this assert failed
+    // because "evilTemplateText" reached the final output untagged.
+    HtmlTree templateInStructuredData;
+    templateInStructuredData.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 0, null,
+            `{"@type":"Article","articleBody":"<template>evilTemplateText<\/template>` ~
+            longParagraph ~ `"}`),
+    ];
+    auto templateInStructuredDataResult = extractMainContent(templateInStructuredData);
+    assert(templateInStructuredDataResult.status == MainContentStatus.selectedStructuredData);
+    assert(!templateInStructuredDataResult.text.canFind("evilTemplateText"),
+        "hidden <template> text embedded inside a JSON-LD string value leaked (issue #513)");
+    assert(templateInStructuredDataResult.text.canFind("Article body sentence."));
+
+    // Issue #513: pins `tagNameAt`'s trailing tag-name boundary check --
+    // without it, `hiddenElementSpanLength` would treat `<scripted>`/
+    // `<style-x>` as if they were `<script>`/`<style>` (a bare prefix
+    // match), hiding their real text content. Verified as a real guard, not
+    // a tautological one: temporarily deleting the boundary check in
+    // `tagNameAt` (the `after >= raw.length ... return !(...)` tail) makes
+    // both `canFind` asserts below fail, because "keep1"/"keep2" then get
+    // swallowed as if they were hidden <script>/<style> bodies; restoring
+    // the check makes them pass again.
+    HtmlTree tagNameBoundary;
+    tagNameBoundary.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 0, null,
+            `{"@type":"Article","articleBody":"<scripted>keep1<\/scripted> ` ~
+            `<style-x>keep2<\/style-x>` ~ longParagraph ~ `"}`),
+    ];
+    auto tagNameBoundaryResult = extractMainContent(tagNameBoundary);
+    assert(tagNameBoundaryResult.status == MainContentStatus.selectedStructuredData);
+    assert(tagNameBoundaryResult.text.canFind("keep1"),
+        "tagNameAt's trailing boundary check must not mistake <scripted> for <script> (issue #513)");
+    assert(tagNameBoundaryResult.text.canFind("keep2"),
+        "tagNameAt's trailing boundary check must not mistake <style-x> for <style> (issue #513)");
 }
 
 // Issue #516, through the real DOM-selection path (the actual lexbor

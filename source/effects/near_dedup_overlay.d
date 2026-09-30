@@ -703,6 +703,24 @@ private bool candidateRowLess(CandidateRow a, CandidateRow b) {
     return !a.signature.segment && b.signature.segment;
 }
 
+unittest {
+    // Issue #492 (review round 3): pins the whole-document-before-segment
+    // tie-break above. Same band, same key, same document -- only the
+    // segment flag differs.
+    import domain.document : SourceLocator;
+    auto id = DocumentId.from(SourceLocator("near-dedup-tiebreak", "source", "doc"));
+    CandidateRow whole, segment;
+    whole.bandIndex = segment.bandIndex = 3;
+    whole.bandKeyValue = segment.bandKeyValue = 42;
+    whole.signature.documentId = segment.signature.documentId = id;
+    segment.signature.segment = true;
+    segment.signature.segmentOrdinal = 1;
+    assert(candidateRowLess(whole, segment),
+        "a document's whole-document row must sort before its segment row in the same bucket");
+    assert(!candidateRowLess(segment, whole),
+        "a segment row must never sort before the same document's whole-document row");
+}
+
 private void number(ref ubyte[] bytes, ulong value) {
     foreach_reverse (shift; [0, 8, 16, 24, 32, 40, 48, 56])
         bytes ~= cast(ubyte)(value >> shift);

@@ -114,11 +114,26 @@ private alias FPDFText_GetText_t = extern (C) int function(void*, int, int, usho
 
 version (unittest) {
     private enum FakePdfiumFailureV1 {
-        loadPage, loadTextPage, countChars, blankPage, getText
+        loadPage, loadTextPage, countChars, blankPage, getText, success
     }
-    private FakePdfiumFailureV1 fakePdfiumFailureV1;
+    private __gshared FakePdfiumFailureV1 fakePdfiumFailureV1;
+    private __gshared Mutex fakePdfiumProbeMutexV1;
+    private __gshared size_t fakePdfiumActiveV1;
+    private __gshared size_t fakePdfiumPeakV1;
     private extern (C) void* fakeLoadMemDocumentV1(
             const(void)*, int, const(char)*) {
+        if (fakePdfiumFailureV1 == FakePdfiumFailureV1.success) {
+            import core.thread : Thread;
+            import core.time : msecs;
+
+            synchronized (fakePdfiumProbeMutexV1) {
+                ++fakePdfiumActiveV1;
+                if (fakePdfiumActiveV1 > fakePdfiumPeakV1)
+                    fakePdfiumPeakV1 = fakePdfiumActiveV1;
+            }
+            Thread.sleep(20.msecs);
+            synchronized (fakePdfiumProbeMutexV1) --fakePdfiumActiveV1;
+        }
         return cast(void*) 1;
     }
     private extern (C) void fakeCloseHandleV1(void*) {}
@@ -137,10 +152,16 @@ version (unittest) {
         case FakePdfiumFailureV1.blankPage: return 0;
         case FakePdfiumFailureV1.loadPage:
         case FakePdfiumFailureV1.loadTextPage:
-        case FakePdfiumFailureV1.getText: return 1;
+        case FakePdfiumFailureV1.getText:
+        case FakePdfiumFailureV1.success: return 1;
         }
     }
-    private extern (C) int fakeGetTextV1(void*, int, int, ushort*) {
+    private extern (C) int fakeGetTextV1(void*, int, int, ushort* output) {
+        if (fakePdfiumFailureV1 != FakePdfiumFailureV1.getText) {
+            output[0] = 'X';
+            output[1] = 0;
+            return 2;
+        }
         return 0;
     }
 }
@@ -610,6 +631,52 @@ unittest {
     auto locked = new LockedPdfiumLibraryV1(unopened, "/test/pdfium");
     locked.close();
     assertThrown!Exception(locked.extract([], 1, 1));
+}
+
+unittest {
+    import core.sync.semaphore : Semaphore;
+    import core.thread : Thread;
+
+    auto lib = new PdfiumLibrary();
+    lib.fLoadMemDocument = &fakeLoadMemDocumentV1;
+    lib.fCloseDocument = &fakeCloseHandleV1;
+    lib.fGetPageCount = &fakePageCountV1;
+    lib.fLoadPage = &fakeLoadPageV1;
+    lib.fClosePage = &fakeCloseHandleV1;
+    lib.fTextLoadPage = &fakeLoadTextPageV1;
+    lib.fTextClosePage = &fakeCloseHandleV1;
+    lib.fTextCountChars = &fakeCountCharsV1;
+    lib.fTextGetText = &fakeGetTextV1;
+    auto locked = new LockedPdfiumLibraryV1(lib, "/test/pdfium");
+
+    fakePdfiumFailureV1 = FakePdfiumFailureV1.success;
+    fakePdfiumProbeMutexV1 = new Mutex();
+    fakePdfiumActiveV1 = 0;
+    fakePdfiumPeakV1 = 0;
+    enum workers = 8;
+    auto ready = new Semaphore(0);
+    auto release = new Semaphore(0);
+    bool[workers] failed;
+    Thread[workers] threads;
+    Thread makeWorker(size_t index) {
+        return new Thread({
+            ready.notify();
+            release.wait();
+            auto result = locked.extract([cast(ubyte) '%'], 1, 16);
+            failed[index] = result.outcome != PdfExtractOutcomeV1.ok ||
+                result.pages != ["X"];
+        });
+    }
+    foreach (i; 0 .. workers) {
+        threads[i] = makeWorker(i);
+        threads[i].start();
+    }
+    foreach (_; 0 .. workers) ready.wait();
+    foreach (_; 0 .. workers) release.notify();
+    foreach (thread; threads) thread.join();
+    assert(fakePdfiumPeakV1 == 1,
+        "LockedPdfiumLibraryV1 must serialize every native PDFium entry");
+    foreach (didFail; failed) assert(!didFail);
 }
 
 /// The real implementation behind `extraction.port.PdfBytesExtractV1`,

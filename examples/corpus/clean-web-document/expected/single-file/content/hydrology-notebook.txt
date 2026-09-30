@@ -1,0 +1,5 @@
+Hydrology Field Notebook: Week Twelve
+
+The stream gauge readings this week confirm a steady rise in discharge following the early winter thaw, consistent with the trend recorded across the previous three seasons of the ongoing watershed survey.
+
+François Girard, who coordinates the sensor network, asked that any anomalies in the downstream sensor be reported directly to jane.doe@example.org before the next scheduled maintenance visit.

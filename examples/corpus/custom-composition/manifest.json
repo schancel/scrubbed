@@ -1,0 +1,115 @@
+{
+  "schema": "scrubbed.custom-composition-corpus.v1",
+  "licenseFile": "examples/corpus/custom-composition/LICENSE.txt",
+  "claims": {
+    "sealedPreset": false,
+    "trainingReady": false
+  },
+  "configuration": {
+    "path": "examples/pipelines/custom-composition/pipeline.json",
+    "sha256": "7a633c233a4accd66927f7f0e7829634cc4a17db32e3cd3f9e43f079bdba3d3f"
+  },
+  "artifacts": [
+    {
+      "path": "examples/corpus/custom-composition/inputs/clean.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #505 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "5827fb79687d49505d0baf04eccea77a0c19f1633ba1327c03baf8dcef023dc2",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Already-clean UTF-8 Spanish text; fix-mojibake is a no-op, and language-id-detect confidently classifies it as es."
+    },
+    {
+      "path": "examples/corpus/custom-composition/inputs/repair.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #505 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "34527f1a21b1181eedb5bb1f8a030f77ddbf96e6b7c34463513ecfaecce3797e",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Latin-1/Windows-1252 mojibake-corrupted English text; fix-mojibake repairs it before language-id-detect confidently classifies the repaired text as en."
+    },
+    {
+      "path": "examples/corpus/custom-composition/inputs/short.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #505 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "bc4e14672c233835a3b6b4e6c87071091c59546091faf8a0d7bd2033fe504d15",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Deliberately too-short plain-English snippet (well under the 60-total-n-gram floor); language-id-detect abstains with the typed tooShort reason, never a guessed language."
+    },
+    {
+      "path": "examples/corpus/custom-composition/expected/clean.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #505 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "5827fb79687d49505d0baf04eccea77a0c19f1633ba1327c03baf8dcef023dc2",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Exact primary output bytes: byte-identical to the input (fix-mojibake no-op, language-id-detect/document-metadata-publish pass content through unchanged)."
+    },
+    {
+      "path": "examples/corpus/custom-composition/expected/repair.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #505 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "d330c43554abd606dd58f7c1e2cb17573a78acc545cf63e36741f3c1723f2b22",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Exact primary output bytes: the mojibake-repaired UTF-8 English text."
+    },
+    {
+      "path": "examples/corpus/custom-composition/expected/short.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #505 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "bc4e14672c233835a3b6b4e6c87071091c59546091faf8a0d7bd2033fe504d15",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Exact primary output bytes: byte-identical to the input (nothing in this composition rewrites content)."
+    },
+    {
+      "path": "examples/corpus/custom-composition/expected/clean.language-id.json",
+      "mediaType": "application/json",
+      "provenance": "Generated from the authored issue #505 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "98410bc5c76f898ac0c8eea1dfdbe3693cf752d628ee9f751befcb691238ce62",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Decoded language-id-detect record: a confident Spanish (es) classification, with its pinned per-mille confidence."
+    },
+    {
+      "path": "examples/corpus/custom-composition/expected/repair.language-id.json",
+      "mediaType": "application/json",
+      "provenance": "Generated from the authored issue #505 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "b6c4f304e913ab32cb4cfa879d441aa1f8003faeab486c053bab6ca983c4006c",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Decoded language-id-detect record: a confident English (en) classification, with its pinned per-mille confidence."
+    },
+    {
+      "path": "examples/corpus/custom-composition/expected/short.language-id.json",
+      "mediaType": "application/json",
+      "provenance": "Generated from the authored issue #505 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "32cb7dcde80538994d771a3b9de6bcdb16e355c2c41577cb8568cce60f3f0587",
+      "intendedPipeline": "custom-composition",
+      "expectedOutcome": "Decoded language-id-detect record: a genuine abstention with the typed tooShort reason -- proof abstention is real data, not an error or a silent guess."
+    }
+  ],
+  "recipes": [
+    {
+      "id": "clean",
+      "expectedExit": 0,
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${CONFIG}"],
+      "cliArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--stage", "clean=text-transform", "--filter", "fix-mojibake", "--filter-option", "encodings=text:latin1,cp1252", "--filter-option", "max-passes=integer:2", "--stage", "detect=language-id-detect", "--stage", "pub=document-metadata-publish"]
+    },
+    {
+      "id": "repair",
+      "expectedExit": 0,
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${CONFIG}"],
+      "cliArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--stage", "clean=text-transform", "--filter", "fix-mojibake", "--filter-option", "encodings=text:latin1,cp1252", "--filter-option", "max-passes=integer:2", "--stage", "detect=language-id-detect", "--stage", "pub=document-metadata-publish"]
+    },
+    {
+      "id": "short",
+      "expectedExit": 0,
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${CONFIG}"],
+      "cliArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--stage", "clean=text-transform", "--filter", "fix-mojibake", "--filter-option", "encodings=text:latin1,cp1252", "--filter-option", "max-passes=integer:2", "--stage", "detect=language-id-detect", "--stage", "pub=document-metadata-publish"]
+    }
+  ]
+}

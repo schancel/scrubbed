@@ -65,7 +65,9 @@ enum double nonLatinScriptBound = 0.3;
 /// Best-vs-second-best relative margin floor, normalized against the
 /// worst-case out-of-place distance. Below this the top two candidates are
 /// too close to call and the result abstains via `mixedOrAmbiguous` rather
-/// than arbitrarily picking one.
+/// than arbitrarily picking one. This is the *default* used for every
+/// target language except where `marginBoundFor` below pins a tighter,
+/// per-target-language override (issue #34's excluded-neighbor fix).
 enum double mixedMarginBound = 0.02;
 
 /// Absolute relative-confidence floor below which the best candidate is
@@ -73,7 +75,12 @@ enum double mixedMarginBound = 0.02;
 /// race against the second-best candidate (e.g. no supported language
 /// matches the text well at all). This is an internal detection floor,
 /// independent of `routeLanguage`'s caller-supplied external threshold; no
-/// default is pinned for that one in this slice.
+/// default is pinned for that one in this slice. This is the *default* used
+/// for every target language except where `confidenceFloorFor` below pins a
+/// tighter, per-target-language override (issue #34's excluded-neighbor
+/// fix). See `confidenceFloorFor`/`marginBoundFor`, defined further down
+/// (after `SupportedLanguage`), for the per-language overrides and the exact
+/// verified numbers behind each one.
 enum double internalConfidenceFloor = 0.15;
 
 /// The six values `hi`/`bn`/`ta`/`te`/`gu`/`pa` (11-16) are this slice's
@@ -5532,6 +5539,131 @@ private LanguageDetectionResult abstain(LanguageAbstentionReason reason) pure no
     return result;
 }
 
+// ---------------------------------------------------------------------------
+// Per-target-language threshold overrides (issue #34).
+//
+// Prior grooming passes on issue #34 disclosed, and
+// `experiments/language_id/check.d`'s `excludedNeighborAbstentionGoldens`
+// independently reproduces, that three unsupported-but-similar languages
+// force-classify into a supported one at the single global
+// `internalConfidenceFloor`/`mixedMarginBound` values: Romanian into `it`
+// or `fr`, Swahili into `id`, and Catalan into `it` or `es`. The owner's
+// 2026-09-30 decision on issue #34 was to fix this by tightening the
+// confidence threshold further, explicitly choosing that over adding a
+// closely-related-language heuristic (detecting *which* unsupported
+// language the text is) or accepting the disclosed risk as-is.
+//
+// A single global floor cannot be raised at all without regression: the
+// lowest genuine-correct confidence across the full 170-line held-out set
+// is ~0.263 (Telugu), only ~0.008 above the weakest excluded-neighbor
+// force-classification (Swahili at 0.271). But keyed on the already-
+// computed winning candidate (`scored[0].language` in `detectLanguage`,
+// exactly the same value the result already carries), the *per-target*
+// distributions separate far more cleanly for some target languages than
+// others. `confidenceFloorFor` and `marginBoundFor` below hold the
+// per-target overrides verified against the current embedded profile
+// tables and fixtures; every override was chosen to sit strictly between
+// the highest excluded-neighbor force-classification value it must catch
+// and the lowest genuine-correct held-out value for that same target
+// language, so raising it cannot regress any currently-correct held-out
+// classification. This was verified two ways: (1) directly, by inspecting
+// the full sorted genuine-correct confidence/margin lists per target
+// language against the full 170-line held-out set, and (2) empirically, by
+// confirming the held-out confusion-matrix golden (166/170 correct, 0
+// misclassified, 4 abstained) is unchanged after applying these overrides.
+//
+//   - `it` (confidence 0.33, was 0.15): catches Romanian's it-target
+//     force-classification (confidence 0.286). Genuine Italian held-out
+//     minimum confidence is 0.374 -- real headroom (~0.044) on both sides.
+//     Does NOT catch Catalan's it-target force-classification (confidence
+//     0.400): that value sits ABOVE the genuine Italian minimum (0.374), so
+//     no it-target confidence floor can catch it without also newly
+//     abstaining 4 genuine Italian held-out lines (confidences 0.374,
+//     0.381, 0.390, 0.394). This is an irreducible residual gap at the
+//     currently embedded profile tables -- see docs/language-id.md.
+//   - `id` (confidence 0.35, was 0.15): catches all three of Swahili's
+//     id-target force-classifications (confidences 0.271, 0.279, 0.308).
+//     Genuine Indonesian held-out minimum confidence is 0.397 -- real
+//     headroom (~0.045-0.09) on both sides. Full fix: Swahili force-
+//     classifies zero times after this change.
+//   - `fr` (margin 0.04, was the global 0.02): Romanian's fr-target
+//     force-classification (confidence 0.366) sits only ~0.003 below the
+//     genuine French held-out confidence minimum (0.369) -- too thin a gap
+//     in confidence space to tighten robustly. Its raw margin (0.026),
+//     however, sits comfortably below the genuine French held-out margin
+//     minimum (0.051) -- real headroom (~0.011-0.025) on both sides -- so
+//     the margin side of the existing threshold logic, not the confidence
+//     side, is the mechanism that closes this specific case. Full fix
+//     (combined with the `it` override above): Romanian force-classifies
+//     zero times after this change.
+//   - `es` is deliberately left at the global default. Catalan's five
+//     es-target force-classifications (confidences 0.407, 0.407, 0.421,
+//     0.424, 0.427) all sit ABOVE the genuine Spanish held-out minimum
+//     confidence (0.351; second-lowest 0.371), so no es-target confidence
+//     floor can catch any of them without regression. The same check in
+//     margin space also fails to cleanly separate: two of the five Catalan
+//     es-target margins (0.028, 0.035) sit below the genuine Spanish
+//     held-out margin minimum (0.051) and could technically be caught, but
+//     only with a floor within ~0.0003-0.001 of that genuine minimum --
+//     razor-thin, and the other three Catalan margins (0.050, 0.058, 0.060)
+//     remain uncatchable regardless. Forcing that fragile a partial fix
+//     would fit the specific residual fixture lines rather than reflect a
+//     real, robust separation, so it is not done here. Combined with the
+//     `it` override above, Catalan's residual gap after this change is the
+//     full original 6/10 force-classification rate, disclosed in
+//     docs/language-id.md and in `excludedNeighborAbstentionGoldens`'s own
+//     comment block, exactly as the German/Dutch 0.315/0.316 disclosure and
+//     the original Catalan 60% finding were both disclosed rather than
+//     silently fixed or silently dropped.
+double confidenceFloorFor(SupportedLanguage winner) pure nothrow @nogc {
+    final switch (winner) {
+        case SupportedLanguage.it: return 0.33;
+        case SupportedLanguage.id: return 0.35;
+        case SupportedLanguage.en:
+        case SupportedLanguage.es:
+        case SupportedLanguage.fr:
+        case SupportedLanguage.de:
+        case SupportedLanguage.pt:
+        case SupportedLanguage.nl:
+        case SupportedLanguage.tr:
+        case SupportedLanguage.vi:
+        case SupportedLanguage.pl:
+        case SupportedLanguage.hi:
+        case SupportedLanguage.bn:
+        case SupportedLanguage.ta:
+        case SupportedLanguage.te:
+        case SupportedLanguage.gu:
+        case SupportedLanguage.pa:
+            return internalConfidenceFloor;
+    }
+}
+
+/// See the block comment above `confidenceFloorFor`, which this mirrors:
+/// only `fr` is overridden, to close Romanian's fr-target force-
+/// classification on the margin side rather than the confidence side.
+double marginBoundFor(SupportedLanguage winner) pure nothrow @nogc {
+    final switch (winner) {
+        case SupportedLanguage.fr: return 0.04;
+        case SupportedLanguage.en:
+        case SupportedLanguage.es:
+        case SupportedLanguage.de:
+        case SupportedLanguage.pt:
+        case SupportedLanguage.it:
+        case SupportedLanguage.nl:
+        case SupportedLanguage.tr:
+        case SupportedLanguage.vi:
+        case SupportedLanguage.pl:
+        case SupportedLanguage.id:
+        case SupportedLanguage.hi:
+        case SupportedLanguage.bn:
+        case SupportedLanguage.ta:
+        case SupportedLanguage.te:
+        case SupportedLanguage.gu:
+        case SupportedLanguage.pa:
+            return mixedMarginBound;
+    }
+}
+
 private uint confidenceToPerMille(double confidence) {
     if (confidence < 0.0) confidence = 0.0;
     if (confidence > 1.0) confidence = 1.0;
@@ -5571,8 +5703,13 @@ LanguageDetectionResult detectLanguage(const(ubyte)[] text) {
     double margin = worstCase > 0.0 ?
         cast(double)(scored[1].distance - scored[0].distance) / worstCase : 0.0;
 
-    if (margin < mixedMarginBound) return abstain(LanguageAbstentionReason.mixedOrAmbiguous);
-    if (rawConfidence < internalConfidenceFloor)
+    // Both checks are keyed on the already-computed winning candidate
+    // (`scored[0].language`, exactly the value the result below carries),
+    // via the per-target-language overrides in `marginBoundFor`/
+    // `confidenceFloorFor` -- see the block comment above them for the
+    // full rationale and verified numbers (issue #34).
+    if (margin < marginBoundFor(scored[0].language)) return abstain(LanguageAbstentionReason.mixedOrAmbiguous);
+    if (rawConfidence < confidenceFloorFor(scored[0].language))
         return abstain(LanguageAbstentionReason.belowConfidenceThreshold);
 
     LanguageDetectionResult result;

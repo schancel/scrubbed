@@ -95,6 +95,75 @@ Per node, purely from already-observed `HtmlNode` data, the pass tracks:
   between two `registration-banner*`-classed ones that no keyword-table
   entry alone could reach.
 
+- **Tag-level `<nav>` exclusion** (issue #517) — a `<nav>` descendant of
+  the selected node is skipped by tag, in every extraction mode, the same
+  way a `class="nav"` descendant already was. See "Tag-level nav exclusion
+  and text/Markdown agreement" below.
+- **Block boundaries** — while collecting text, a change of nearest block
+  ancestor starts a new paragraph. Block ancestors are headings, `p`, `div`,
+  `li`, `table`, `blockquote`, `ul`, `ol`, `pre`, and the sectioning
+  containers `article`/`aside`/`footer`/`header`/`main`/`nav`/`section`.
+  The last three and the sectioning containers were added by issue #517;
+  before that, text on either side of them was glued into one run.
+
+### Tag-level nav exclusion and text/Markdown agreement (issue #517)
+
+**One exclusion rule for both outputs.** `selectedContentTree` copies the
+selected subtree with every descendant that `excludedFromText` rejects
+removed. `.text` is collected from that copy, and
+`extractMainContentMarkdown` renders `.markdown` from the same copy. Before
+this, only `.text` applied the exclusion: `.markdown` rendered the raw
+selected node, so a `<nav class="nav">` or `<div class="share">` inside the
+selected `<div>` was missing from `.text` but present in `.markdown`. In its
+copy, the Markdown path also renames the sectioning containers to `div`.
+`html_markdown.d`'s renderer handles them exactly like `div` except that it
+gives them no block separation, so the rename gives `.markdown` the same
+boundaries as `.text`. `extract_formats.d` (csv/xml/xml-tei) still renders
+the raw selected node and has the same mismatch; it is not changed here.
+
+**Why `<nav>` is excluded by tag, in every mode.** Three things were
+weighed:
+
+- *trafilatura parity.* At the pinned commit
+  (`1e31e3e9eb2e4f6fbfd4bc04355bc74005a780e6`), `htmlprocessing.tree_cleaning`
+  deletes every element in `settings.MANUALLY_CLEANED` before extraction
+  starts, whatever it is nested in. That list includes `nav`, `aside`,
+  `footer`, `menu`, `form` and `figure`. The only mode difference is that
+  `focus == "recall"` undoes the whole deletion if it would leave no `<p>`
+  in the document. So trafilatura never keeps a `<nav>` that sits inside
+  its selected container, in any mode.
+- *Recall on real pages.* No selected subtree on the 20-page
+  `examples/pipeline-benchmark/corpus/` or the 20 held-out pages contains a
+  `<nav>`, so the rule changes no `.text` output on either set (held-out
+  `meanRecall` 0.8405 and `withoutLeakTotal` 0, both unchanged). A `<nav>`
+  inside an article body is navigation markup almost by definition.
+- *Consistency with the scoring pass and #479's modes.* The scoring pass
+  already treats `nav` as a negative tag, and the class/id keyword `nav`
+  already excludes a descendant in every mode, `recall` included: #479's
+  `recall` preset relaxes only the neighbour-based sandwich rule, never a
+  node's own negative signal. A tag is the node's own signal, so it is
+  excluded in every mode. Tying it to `precision` alone would make
+  `<nav>` and `<div class="nav">` behave differently in `standard`.
+
+Only `nav` is excluded by tag. `aside`, `header`, `footer` and `figure` are
+also negative tags for scoring, and trafilatura deletes `aside`, `footer`
+and `figure` too, but inside an article they often hold real content: a pull
+quote, a byline, an image caption. Excluding them would lose that content,
+and the corpus gives no evidence either way, since no selected subtree in it
+contains an `aside`. The rule is one line in `excludedFromText`, so widening
+it later, or narrowing it back, is a small change.
+
+**Known side effect in `.markdown`.** Agreement means `.markdown` now drops
+everything `.text` already dropped. On the corpus that is mostly real
+boilerplate: share/like widgets (`kleinegruenemonster`), the
+`registration-banner` promo (`for-me-online`), an advertising disclosure
+(`laweekly`), teaser headlines (`chemietechnik`) and a rating widget
+(`tofugu`). But `utopia-de.html` also loses two real `<h2
+class="wp-block-heading">` section headings, because the negative keyword
+`ad` is a substring of `heading`. `.text` has dropped those headings since
+the keyword table was added. This is the blunt substring match disclosed
+above, not something this change introduced.
+
 Both tables and every weight/threshold constant are private to
 `source/effects/html_main_content.d`; `positiveContentTags`,
 `negativeContentTags`, `positiveKeywords`, and `negativeKeywords` are exported
@@ -251,8 +320,8 @@ already-claimed root (e.g. `scienceblogs-de.html`'s individual
 is `true` whenever at least one root was found, even when the recovered text
 is empty (`france-attac-org.html`'s real shape above) -- a different, more
 honest fact than a page with no comment markup at all. Text collection
-(`collectPlainSubtreeText`) shares `collectText`'s hidden-tag/block-boundary
-logic but not its sandwich-exclusion rule (issue #27's Case 2 exists to
+(`collectPlainSubtreeText`, the same routine main content uses) walks the
+original tree without `excludedFromText`'s sandwich-exclusion rule (issue #27's Case 2 exists to
 strip a small embedded promotional run out of an *article* container; a
 comment section has no such "real content vs. embedded boilerplate"
 distinction to make once identified as a comment section in full).

@@ -79,10 +79,10 @@
     </header>
 
     <h2 id="why">The Why</h2>
-    <p>Encoding damage, boilerplate, PII, and duplicate pages quietly degrade training data. scrubbed removes that noise before it reaches a model.</p>
+    <p>Encoding damage, boilerplate, PII, and duplicate pages quietly degrade training data. scrubbed cleans that noise and flags near-duplicates before they reach a model.</p>
 
     <h2 id="problem">The problem</h2>
-    <p>Corpus cleaning often means chaining several tools and repeatedly reading and writing the same documents. scrubbed combines encoding repair, main-content extraction, and PII scanning in one pipeline, with language ID and dedup available as additional stages.</p>
+    <p>Corpus cleaning often means chaining several tools and repeatedly reading and writing the same documents. scrubbed combines encoding repair, main-content extraction, and PII scanning in one pipeline, with language ID and near-duplicate decisions available as additional stages.</p>
 
     <h2 id="fit">Where this fits in a training pipeline</h2>
     <p>scrubbed collects pages, cleans files to text, and transforms selected fields in existing JSONL streams.</p>
@@ -177,7 +177,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <ul>
         <li>Main-content or full-page Markdown export, preserving headings, lists, links, and emphasis.</li>
         <li>PII report, mask, and redact modes for email, phone, card, and IPv4 data.</li>
-        <li>Exact-byte deduplication across a corpus.</li>
+        <li>Exact-byte deduplication through the document-shard overlay API.</li>
         <li>Deterministic, model-free language identification.</li>
         <li>Quality signals for repetitive or degenerate text.</li>
         <li>HTML entity decoding, text normalization, and selective JSONL streaming.</li>

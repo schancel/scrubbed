@@ -1,4 +1,4 @@
-University archive banner
+University archive banner CORRUPTED-FOR-CI-PROOF
 
 [Catalog](</catalog>) \| Unsafe action
 

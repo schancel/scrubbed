@@ -44,14 +44,20 @@ mixin template ProcessingOptions() {
     string[] actions;
     @(NamedArgument("common").Description("End v4 dispatch declaration; begin common v3 stages"))
     bool common;
+    // #473: bound as `string`, not `size_t`/`ulong` -- a numeric type here
+    // would let argparse's own automatic std.conv-based binding run first
+    // and throw a raw, un-"scrubbed:"-prefixed Phobos exception on a
+    // negative or overflowing value, before scrubbed's own validation (in
+    // `cli.d`, reached via `process()` below) ever sees it. The raw text
+    // is sanitized by `sanitizedNumericToken` just before forwarding.
     @(NamedArgument.Description("Worker thread count"))
-    size_t threads;
+    string threads;
     @(NamedArgument("max-queued-docs").Description("Maximum queued documents"))
-    size_t maxQueuedDocs = 64;
+    string maxQueuedDocs = "64";
     @(NamedArgument("max-input-bytes").Description("Maximum reserved input bytes"))
-    ulong maxInputBytes = 256UL * 1024 * 1024;
+    string maxInputBytes = "268435456";
     @(NamedArgument("max-open-inputs").Description("Maximum worker-held input descriptors"))
-    size_t maxOpenInputs;
+    string maxOpenInputs;
     @(NamedArgument("list-filters").Description("List registered filters and exit"))
     bool listFilters;
     @(NamedArgument.Description("Validate without processing"))
@@ -78,12 +84,15 @@ mixin template ProcessingOptions() {
     string datasetNamespace;
     @(NamedArgument("source-key").Description("Stable JSONL source key"))
     string sourceKey;
+    // #473: same rationale as `threads`/`maxQueuedDocs`/etc. above -- kept
+    // as `string` so a negative/overflowing value reaches scrubbed's own
+    // sanitization instead of Phobos's automatic conversion.
     @(NamedArgument("max-jsonl-line-bytes").Description("Maximum JSONL input record bytes"))
-    size_t maxJsonlLineBytes;
+    string maxJsonlLineBytes;
     @(NamedArgument("max-jsonl-output-bytes").Description("Maximum JSONL output record bytes including LF"))
-    size_t maxJsonlOutputBytes;
+    string maxJsonlOutputBytes;
     @(NamedArgument("max-jsonl-sidecar-bytes").Description("Maximum aggregate terminal side-output JSONL bytes"))
-    ulong maxJsonlSidecarBytes;
+    string maxJsonlSidecarBytes;
 }
 
 @(Command("run", "clean").Description("Run the bounded filter pipeline."))
@@ -112,8 +121,10 @@ struct Extract {
     string format;
     @(NamedArgument("charset").Description("Declared UTF-8/UTF-16LE/UTF-16BE charset"))
     string charset;
+    // #473: `string`, not `ulong` -- see `ProcessingOptions.threads` above
+    // for why; sanitized by `sanitizedNumericValue` before use below.
     @(NamedArgument("max-html-bytes").Description("Raw and decoded HTML byte limit (1..8388608; default 1048576)"))
-    ulong maxHtmlBytes;
+    string maxHtmlBytes;
     @(NamedArgument("config").Description("Canonical JSON v3 job for the selected HTML stage"))
     string config;
 }
@@ -250,6 +261,49 @@ private bool present(const string[] args, string name) {
     return false;
 }
 
+// #473: every numeric CLI flag argparse used to bind directly to `ulong`/
+// `size_t` (`--threads`, `--max-input-bytes`, `--max-queued-docs`,
+// `--max-open-inputs`, `extract --max-html-bytes`, the
+// `--max-jsonl-*-bytes` family) validated a clean, already-in-domain
+// invalid value (e.g. `0`) with scrubbed's own message and exit 2, but a
+// negative sign or an out-of-range magnitude made argparse's own
+// std.conv-based conversion (`Convert!T` in argparse's parsefunc.d) throw
+// *before* any of scrubbed's own validation ever ran, surfacing a raw,
+// un-"scrubbed:"-prefixed Phobos parser error instead. `cli.d`'s own
+// downstream `std.getopt` binding for these same fields has the identical
+// exposure (confirmed empirically: it throws `std.conv.ConvException`,
+// still reasonably worded but not in scrubbed's own per-flag style).
+//
+// Every one of these flags is bound in the structs above as a raw
+// `string` instead, so argparse never attempts the conversion at all --
+// it only captures the literal text. `sanitizedNumericValue`/
+// `sanitizedNumericToken` then parse that text themselves, in a `try`
+// scrubbed already controls. On a valid, in-range value the original text
+// passes through unchanged (canonicalized to its parsed decimal form).
+// On a negative sign, a non-numeric value, or a magnitude that overflows
+// `ulong`, they resolve to the sentinel `0` instead of throwing -- and `0`
+// is exactly the value every one of these flags' own pre-existing
+// validators downstream (in `cli.d`'s `runApp`, and the `--max-html-bytes
+// == 0` check just below in this file) already rejects with its own
+// established `scrubbed: ...`-prefixed message and exit 2. This reuses
+// that existing validation and wording verbatim instead of inventing new
+// messages, and needs no change to `cli.d` at all: a negative/overflowing
+// value degrades to the exact same "explicit 0" experience the acceptance
+// criteria ask for.
+private ulong sanitizedNumericValue(string raw) {
+    if (!raw.length) return 0;
+    try return raw.to!ulong;
+    catch (Exception) return 0;
+}
+
+/// Same sentinel-on-invalid behavior as `sanitizedNumericValue`, but
+/// returns the safe-to-forward decimal string form for building a
+/// `forwarded` argv for `runApp` (which re-parses it with `std.getopt`).
+private string sanitizedNumericToken(string raw) {
+    if (!raw.length) return raw;
+    return sanitizedNumericValue(raw).to!string;
+}
+
 private bool compositionFlag(string value) {
     foreach (name; ["--stage", "--stage-option", "--filter", "--filter-option",
             "--dispatch-option", "--route", "--route-option", "--action", "--common"])
@@ -271,16 +325,16 @@ private int process(T)(ref T options, const string[] original) {
     string[] forwarded = ["scrubbed", "--input", options.input,
         "--output", options.output];
     if (present(original, "--max-queued-docs") || !present(original, "--jsonl-fields"))
-        forwarded ~= ["--max-queued-docs", options.maxQueuedDocs.to!string];
+        forwarded ~= ["--max-queued-docs", sanitizedNumericToken(options.maxQueuedDocs)];
     if (present(original, "--max-input-bytes") || !present(original, "--jsonl-fields"))
-        forwarded ~= ["--max-input-bytes", options.maxInputBytes.to!string];
+        forwarded ~= ["--max-input-bytes", sanitizedNumericToken(options.maxInputBytes)];
     if (present(original, "--threads"))
-        forwarded ~= ["--threads", options.threads.to!string];
+        forwarded ~= ["--threads", sanitizedNumericToken(options.threads)];
     if (present(original, "--filters")) forwarded ~= ["--filters", options.filters];
     if (options.config.length) forwarded ~= "--config=" ~ options.config;
     forwardComposition(forwarded, original);
     if (present(original, "--max-open-inputs"))
-        forwarded ~= ["--max-open-inputs", options.maxOpenInputs.to!string];
+        forwarded ~= ["--max-open-inputs", sanitizedNumericToken(options.maxOpenInputs)];
     if (options.listFilters) forwarded ~= "--list-filters";
     if (options.validate) forwarded ~= "--validate";
     if (options.dryRun) forwarded ~= "--dry-run";
@@ -300,12 +354,12 @@ private int process(T)(ref T options, const string[] original) {
     if (present(original, "--source-key"))
         forwarded ~= "--source-key=" ~ options.sourceKey;
     if (present(original, "--max-jsonl-line-bytes"))
-        forwarded ~= ["--max-jsonl-line-bytes", options.maxJsonlLineBytes.to!string];
+        forwarded ~= ["--max-jsonl-line-bytes", sanitizedNumericToken(options.maxJsonlLineBytes)];
     if (present(original, "--max-jsonl-output-bytes"))
-        forwarded ~= ["--max-jsonl-output-bytes", options.maxJsonlOutputBytes.to!string];
+        forwarded ~= ["--max-jsonl-output-bytes", sanitizedNumericToken(options.maxJsonlOutputBytes)];
     if (present(original, "--max-jsonl-sidecar-bytes"))
         forwarded ~= ["--max-jsonl-sidecar-bytes",
-            options.maxJsonlSidecarBytes.to!string];
+            sanitizedNumericToken(options.maxJsonlSidecarBytes)];
     return runApp(forwarded);
 }
 
@@ -678,7 +732,11 @@ int runCommands(string[] argv) {
                     "--format=tree-json|markdown|main-content-markdown|csv|xml|xml-tei");
                 return 2;
             }
-            if (present(original, "--max-html-bytes") && cmd.maxHtmlBytes == 0) {
+            // #473: a negative/overflowing --max-html-bytes sanitizes to
+            // the same `0` sentinel an explicit `--max-html-bytes 0`
+            // already produces, so it hits this exact pre-existing check.
+            const maxHtmlBytes = sanitizedNumericValue(cmd.maxHtmlBytes);
+            if (present(original, "--max-html-bytes") && maxHtmlBytes == 0) {
                 stderr.writeln("scrubbed: --max-html-bytes must be between 1 and 8388608");
                 return 2;
             }
@@ -692,7 +750,7 @@ int runCommands(string[] argv) {
                 return 2;
             }
             return runExtract(cmd.input, cmd.output, cmd.charset, cmd.format,
-                cmd.maxHtmlBytes, cmd.config);
+                maxHtmlBytes, cmd.config);
         } else static if (is(typeof(cmd) == Completion)) {
             stderr.writeln("scrubbed: use completion init or completion complete");
             return 2;
@@ -738,6 +796,25 @@ version (unittest) {
         auto exitCode = runCommands(argv);
         stdout.flush();
         stdout = saved;
+        return tuple(exitCode, exists(capturePath) ? readText(capturePath) : "");
+    }
+
+    /// Same as `runCommandsCapturingStdout`, but captures `stderr` instead
+    /// -- every one of scrubbed's own diagnostics (including every
+    /// `scrubbed: ...` message this file and `cli.d` print) goes there,
+    /// not to stdout.
+    private auto runCommandsCapturingStderr(string[] argv) {
+        auto capturePath = buildPath(tempDir,
+            "scrubbed-runcommands-stderr-capture-" ~ randomUUID.toString ~ ".txt");
+        auto saved = stderr;
+        scope(exit) {
+            stderr = saved;
+            tryRemove(capturePath);
+        }
+        stderr = File(capturePath, "w");
+        auto exitCode = runCommands(argv);
+        stderr.flush();
+        stderr = saved;
         return tuple(exitCode, exists(capturePath) ? readText(capturePath) : "");
     }
 }
@@ -873,4 +950,172 @@ unittest {
     // The ticket's "ideally also --input" ask: both trailing-slashed,
     // matching the literal README/docs Quick Start invocation verbatim.
     runCase("both-slash", true, true);
+}
+
+// Issue #473: negative and overflowing values for the numeric CLI flags
+// argparse used to bind directly to `ulong`/`size_t` must reach scrubbed's
+// own validation (and its own established message/exit-2 style), not a raw
+// Phobos parser exception. First, the shared sanitization mechanism itself,
+// in isolation, for both failure shapes on both integral widths it is used
+// for.
+unittest {
+    // Valid input passes through (canonicalized to its parsed decimal form).
+    assert(sanitizedNumericValue("42") == 42);
+    assert(sanitizedNumericToken("42") == "42");
+    assert(sanitizedNumericToken("007") == "7");
+    // Absent (empty) stays absent -- callers only forward when the flag was
+    // actually present on the command line, so this is never actually
+    // reached as a "0" sentinel by a real invocation.
+    assert(sanitizedNumericValue("") == 0);
+    assert(sanitizedNumericToken("") == "");
+
+    // Negative: the ticket's exact repro shape ("-1", "-5").
+    assert(sanitizedNumericValue("-1") == 0);
+    assert(sanitizedNumericToken("-1") == "0");
+    assert(sanitizedNumericValue("-5") == 0);
+
+    // Overflow: past ulong.max, and past size_t.max on a 32-bit target --
+    // both are the ticket's second repro shape.
+    assert(sanitizedNumericValue("99999999999999999999") == 0);
+    assert(sanitizedNumericToken("99999999999999999999") == "0");
+
+    // Garbage (neither a negative sign nor a magnitude, just not an
+    // integer at all) degrades the same way -- it hit the identical raw
+    // argparse `Convert!T` exception before this fix, for the same root
+    // cause.
+    assert(sanitizedNumericValue("abc") == 0);
+}
+
+// #473: `run --threads -1` and `run --threads <overflow>` -- the ticket's
+// own headline repro -- must resolve to scrubbed's existing, already-tested
+// "--threads must be positive" validator (`cli.d`, `runApp`) instead of
+// argparse's raw `std.conv` exception. Exercised through `runCommands`
+// (the actual argparse boundary the bug lives at), not `runApp` directly,
+// so this proves the sanitization is actually wired into the CLI dispatch
+// path and not just correct in isolation.
+//
+// `runApp`'s own validators still throw a plain `Exception` (unchanged by
+// this fix -- `app.d`'s `main` is what adds the "scrubbed: " prefix before
+// printing to the real process stderr, and that wrapping is untouched),
+// so this asserts on `.msg` exactly like `cli.d`'s own existing
+// "--threads must be at most" regression test does (see the #472 test
+// above it in cli.d), rather than re-deriving `app.d`'s prefixing here.
+unittest {
+    import std.exception : collectException;
+
+    auto root = buildPath(tempDir, "scrubbed-473-threads-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdirRecurse(root);
+    auto input = buildPath(root, "in.txt");
+    write(input, "hello");
+    auto output = buildPath(root, "out.txt");
+
+    auto negative = collectException!Exception(runCommands(["scrubbed",
+        "run", "--input", input, "--output", output, "--threads", "-1"]));
+    assert(negative !is null,
+        "--threads -1 must reach scrubbed's own validator, not silently succeed");
+    assert(negative.msg == "--threads must be positive",
+        "--threads -1 must produce the exact existing 0-value message, got: " ~
+        negative.msg);
+    assert(!negative.msg.canFind("Unexpected") && !negative.msg.canFind("convert"),
+        "--threads -1 must not leak argparse's raw std.conv wording, got: " ~
+        negative.msg);
+
+    auto overflow = collectException!Exception(runCommands(["scrubbed",
+        "run", "--input", input, "--output", output, "--threads",
+        "99999999999999999999"]));
+    assert(overflow !is null,
+        "an overflowing --threads must reach scrubbed's own validator, not silently succeed");
+    assert(overflow.msg == "--threads must be positive",
+        "an overflowing --threads must produce the exact existing 0-value message, got: " ~
+        overflow.msg);
+    assert(!overflow.msg.canFind("Overflow") && !overflow.msg.canFind("convert"),
+        "an overflowing --threads must not leak argparse's raw std.conv wording, got: " ~
+        overflow.msg);
+
+    // #472 regression guard: a merely-oversized (but perfectly convertible)
+    // value must still hit the *upper-bound* check, completely unaffected
+    // by this fix -- confirms the sanitization only intercepts genuinely
+    // malformed (negative/overflowing) text and passes any in-range-for-
+    // the-type value through unchanged.
+    auto oversized = collectException!Exception(runCommands(["scrubbed",
+        "run", "--input", input, "--output", output, "--threads",
+        "999999999"]));
+    assert(oversized !is null);
+    assert(oversized.msg.canFind("--threads must be at most "),
+        "#472's upper-bound check must still fire after #473's fix, got: " ~
+        oversized.msg);
+
+    // The clean (in-range) case is completely unaffected.
+    assert(runCommands(["scrubbed", "run", "--input", input, "--output",
+        output, "--threads", "1"]) == 0);
+}
+
+// #473: `extract --max-html-bytes` is the representative flag whose
+// validator lives directly in this file (`stderr.writeln` + `return 2`,
+// no throw -- see the `Extract` branch of `runCommands` above), so this is
+// exercised end-to-end through `runCommandsCapturingStderr`, asserting on
+// the literal captured "scrubbed: ..." text and exit code exactly as a
+// real invocation would print them -- the highest-fidelity check of the
+// acceptance criteria's exact wording ("a `scrubbed: ...`-prefixed error
+// and exit 2, not a raw Phobos exception").
+unittest {
+    auto negative = runCommandsCapturingStderr(["scrubbed", "extract",
+        "--input", "in.html", "--output", "out.json", "--format", "tree-json",
+        "--max-html-bytes", "-5"]);
+    assert(negative[0] == 2, "negative --max-html-bytes must exit 2");
+    assert(negative[1].canFind("scrubbed: --max-html-bytes must be between 1 and 8388608"),
+        "negative --max-html-bytes must produce the exact existing 0-value " ~
+        "message, got: " ~ negative[1]);
+
+    auto overflow = runCommandsCapturingStderr(["scrubbed", "extract",
+        "--input", "in.html", "--output", "out.json", "--format", "tree-json",
+        "--max-html-bytes", "99999999999999999999"]);
+    assert(overflow[0] == 2, "overflowing --max-html-bytes must exit 2");
+    assert(overflow[1].canFind("scrubbed: --max-html-bytes must be between 1 and 8388608"),
+        "overflowing --max-html-bytes must produce the exact existing " ~
+        "0-value message, got: " ~ overflow[1]);
+
+    // The existing 0-value and in-range behavior is completely unaffected.
+    auto zero = runCommandsCapturingStderr(["scrubbed", "extract", "--input",
+        "in.html", "--output", "out.json", "--format", "tree-json",
+        "--max-html-bytes", "0"]);
+    assert(zero[0] == 2);
+    assert(zero[1].canFind("scrubbed: --max-html-bytes must be between 1 and 8388608"));
+}
+
+// #473: cheap additional coverage across the rest of the flag family,
+// confirming the shared mechanism (not just --threads/--max-html-bytes)
+// reaches scrubbed's own validators for both failure shapes.
+unittest {
+    import std.exception : collectException;
+
+    auto root = buildPath(tempDir, "scrubbed-473-family-" ~
+        randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdirRecurse(root);
+    auto input = buildPath(root, "in.txt");
+    write(input, "hello");
+    auto output = buildPath(root, "out.txt");
+
+    foreach (flag; ["--max-input-bytes", "--max-queued-docs", "--max-open-inputs"]) {
+        auto negative = collectException!Exception(runCommands(["scrubbed",
+            "run", "--input", input, "--output", output, "--threads", "1",
+            flag, "-3"]));
+        assert(negative !is null,
+            flag ~ " -3 must reach scrubbed's own validator, not silently succeed");
+        assert(negative.msg == "input limits must be positive",
+            flag ~ " -3 must produce the exact existing 0-value message, got: " ~
+            negative.msg);
+
+        auto overflow = collectException!Exception(runCommands(["scrubbed",
+            "run", "--input", input, "--output", output, "--threads", "1",
+            flag, "99999999999999999999"]));
+        assert(overflow !is null,
+            flag ~ " overflow must reach scrubbed's own validator, not silently succeed");
+        assert(overflow.msg == "input limits must be positive",
+            flag ~ " overflow must produce the exact existing 0-value message, got: " ~
+            overflow.msg);
+    }
 }

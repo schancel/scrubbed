@@ -51,6 +51,24 @@ See [docs/cli-commands.md](docs/cli-commands.md) for the full command and
 flag reference (JSON config, JSONL streaming, `--dry-run`/`--explain`,
 error journaling and resumable manifests, shell completion, and more).
 
+## Windows: via WSL2, not a native port
+
+There's no native Windows `.exe` build, and none is planned as a drop-in
+port -- POSIX-specific subsystems run throughout (`dlopen` for zlib, a
+`sigaction`-based `SIGINT` handler, `mmap`-based zero-copy reads), none
+of which map directly to Windows APIs.
+
+WSL2 is a different story: it runs a genuine Linux kernel, not a
+syscall-translation shim. The *existing* Linux x86_64 build and `.deb`
+package (build, a real multi-file `clean-web-document` corpus run, and a
+clean-machine `.deb` install) ran correctly end to end against a real
+Linux kernel running the same way WSL2 does -- a real kernel inside a
+lightweight VM, not native Windows hardware itself. That's strong
+supporting evidence, not a genuine-WSL2-verified claim: the evaluation
+couldn't reach an actual WSL2/Windows host. See
+[docs/wsl2-evaluation.md](docs/wsl2-evaluation.md) for the exact commands
+and output, including what's still unverified (a real `/mnt/c` mount).
+
 ## Verified against the tools it replaces
 
 - **Encoding repair vs. ftfy** — on its Latin-1/Windows-1252 scope,

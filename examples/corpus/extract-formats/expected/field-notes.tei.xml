@@ -1,0 +1,69 @@
+<TEI xmlns="http://www.tei-c.org/ns/1.0">
+  <teiHeader>
+    <fileDesc>
+      <titleStmt>
+        <title type="main">Delta Survey Field Notes</title>
+      </titleStmt>
+      <publicationStmt>
+        <p/>
+      </publicationStmt>
+      <sourceDesc>
+        <p/>
+      </sourceDesc>
+    </fileDesc>
+  </teiHeader>
+  <text>
+    <body>
+      <div type="entry">
+        <ab rend="h1" type="header">Delta Survey Field Notes</ab>
+        <p>The seven-person survey team spent three weeks mapping the tidal delta
+with <ref target="https://example.com/permits">a full research permit</ref> in
+hand, recording every transect in careful detail. Progress stayed
+<hi rend="bold">steady</hi> even when the weather turned, and the crew stayed
+<hi rend="italic">focused</hi> on finishing the western channel before the spring tides
+returned.</p>
+        <ab rend="h2" type="header">Instruments and method</ab>
+        <p>Two sonar rigs and a hand-held current meter formed the core kit for the
+season, backed by a paper logbook that every team member signed at the end
+of each shift so nothing was lost between rotations.</p>
+        <p>
+<graphic url="https://example.com/images/survey-team.jpg"/>
+</p>
+        <ab rend="h2" type="header">Observations</ab>
+        <list rend="ul">
+          <item>Salinity rose sharply above the second channel bend, consistent with
+the dry-season baseline the team expected going in.</item>
+          <item>Sediment cores at station four showed three distinct depositional
+layers, more than any other station sampled this season.</item>
+        </list>
+        <quote>
+          <p>The western channel behaves nothing like the model
+predicted, the lead hydrologist wrote in the shared logbook on the
+twelfth day of the survey.</p>
+        </quote>
+        <ab rend="h2" type="header">Sample readings</ab>
+        <list rend="table">
+          <item><hi rend="italic">Selected transect depth readings</hi></item>
+          <item><hi rend="bold">Transect</hi> | <hi rend="bold">Depth (m)</hi> | <hi rend="bold">Salinity (ppt)</hi></item>
+          <item>1 | 2.1 | 18</item>
+          <item>2 | 1.8 | 22</item>
+          <item>4 | 2.6 | 15</item>
+        </list>
+        <ab rend="h2" type="header">Data export snippet</ab>
+        <p><hi rend="code">station,depth_m,salinity_ppt
+1,2.1,18
+2,1.8,22
+4,2.6,15</hi></p>
+        <p>Full instrument logs and the complete depth-by-depth dataset are
+archived with the department, which calls it the "reference dataset" for
+anyone who wants to reproduce the transect-by-transect salinity curve
+described above in full.</p>
+      </div>
+      <div type="comments">
+        <p>Comments</p>
+        <p>Great writeup -- did the sonar rig need recalibration after the storm on day nine?</p>
+        <p>Station four's layering matches what our own team saw further upstream last spring.</p>
+      </div>
+    </body>
+  </text>
+</TEI>

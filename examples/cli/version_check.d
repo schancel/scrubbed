@@ -3,11 +3,9 @@
 /// (or dmd) and pass the release `scrubbed` executable path, following the
 /// same real-subprocess convention as `examples/cli/check.d`'s own module
 /// comment ("compile with ldc2 -O, then pass scrubbed"). Kept as its own
-/// small file rather than folded into `check.d`: that file's "root help
-/// golden" already hardcodes a byte-for-byte `--help` transcript that
-/// predates `clean-web-document`/`crawl`/`errors-*` and does not match the
-/// binary's current `--help` output -- a pre-existing staleness unrelated
-/// to #498 and out of scope here. This file only asserts on `--version`.
+/// small file rather than folded into `check.d` so the focused version
+/// semantics remain independently executable. `check.d` separately pins
+/// the current byte-for-byte root help transcript.
 module cli_version_check;
 
 import std.algorithm.searching : canFind, startsWith;

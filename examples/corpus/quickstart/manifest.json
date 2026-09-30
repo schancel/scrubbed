@@ -75,7 +75,7 @@
       "mediaType": "text/markdown; charset=utf-8",
       "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "399da01905275bb76e1c23aebd1191a81c5da885fa0a1d26354a2f22c55b5b5d",
+      "sha256": "96405c16b2310a19eab8f0c995e6360f709f326d72011df914cc6e7c6babb3a8",
       "intendedPipeline": "html-markdown",
       "expectedOutcome": "Exact expected mechanical Markdown bytes, including visible page chrome."
     },

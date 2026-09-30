@@ -33,7 +33,7 @@
       "mediaType": "text/markdown; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "2a062283d09eb99d62cab848c2569b4a6701660b8fd92e42f78a0346d41f130e",
+      "sha256": "bad6c8e8155325c7049d97c6e4344a286523fc07343e46c63d157ee5b07ced2d",
       "intendedPipeline": "extract --format markdown",
       "expectedOutcome": "The whole page rendered as Markdown -- nav chrome, the article, the comment section, and the footer all present, in document order; every structural element (heading/link/bold/italic/image/list/quote/table/code) round-trips as real Markdown syntax."
     },
@@ -42,7 +42,7 @@
       "mediaType": "text/markdown; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "43861256202c0d1a9ee25a08f7677ddec4be2cf09f5fc2a5897099eed0f1dbbb",
+      "sha256": "5e1a767ddec0a61c2d8351023e9b40d9c33ac0c6916ee82eee8f353cc23cdd49",
       "intendedPipeline": "extract --format main-content-markdown",
       "expectedOutcome": "Only the selected <article> subtree rendered as Markdown -- nav/header/footer chrome and the comment section (a sibling of the selected node, not part of its subtree) are both excluded; the same structural elements round-trip as in the whole-page form."
     },
@@ -51,7 +51,7 @@
       "mediaType": "text/tab-separated-values; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "8ed02820dea0ef49acde085f292cf10f20b0d6e91649b6fe06c41477918144bd",
+      "sha256": "e5b30ce8bd8e93b677f82ce659b26ede3343232bc110112323f84c6555f3de7d",
       "intendedPipeline": "extract --format csv",
       "expectedOutcome": "One tab-delimited row, 11 columns (url,id,fingerprint,hostname,title,image,date,text,comments,license,pagetype), title/text/comments populated and the rest 'null'; the text column's embedded double quote is RFC 4180-quoted with the quote doubled, a real CSV-quoting round-trip."
     },
@@ -60,7 +60,7 @@
       "mediaType": "application/xml; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "3747c3ed37b7d4e777857d6eb70f8c47267a870bc8251c7352a2db1cc903ea76",
+      "sha256": "4e980198d263aff26028c925c131d0e4e627490f3a817732689b0f5ce26cf058",
       "intendedPipeline": "extract --format xml",
       "expectedOutcome": "Well-formed generic XML: <main> holds the selected article (heading/paragraph/link/bold/italic/image/list/quote/table with real <table>/<row>/<cell> nesting/code), and a sibling <comments> holds the detected comment section's flattened text."
     },
@@ -69,7 +69,7 @@
       "mediaType": "application/tei+xml; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "0622f330cee735e36dc31ed52ff9f0590718656fade0e7538c32f5256eacf99b",
+      "sha256": "6fbcb5978778b9be1755a6655fe4507a7b46d5cb32afe225f084aef70015cda8",
       "intendedPipeline": "extract --format xml-tei",
       "expectedOutcome": "TEI P5-shaped XML, DTD-valid against pinned trafilatura==2.2.0's own bundled tei_corpus.dtd: the table degrades to <list rend=\"table\"> (the DTD has no table/row/cell declaration -- see extract_formats.d's own doc comment), every other element keeps real structure, and <div type=\"comments\"> holds the detected comment section."
     },
@@ -78,7 +78,7 @@
       "mediaType": "text/plain; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "f54687764f01e4528682cf6a7e888914e3eeafa04f74faa9359c1a3bcdd5aeee",
+      "sha256": "e39d7cfb9f8f936e0972f2ce5f2567f236c76a20297246e8aa748607bd2aeaa1",
       "intendedPipeline": "run --stage html-main-content include-comments=true",
       "expectedOutcome": "Plain flattened main-content text (html-main-content, not one of extract's six formats -- see README). Byte-identical to comments-off.txt: include-comments only gates whether the comment section is scanned/recorded in the sidecar, never the primary content."
     },
@@ -87,7 +87,7 @@
       "mediaType": "text/plain; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "f54687764f01e4528682cf6a7e888914e3eeafa04f74faa9359c1a3bcdd5aeee",
+      "sha256": "e39d7cfb9f8f936e0972f2ce5f2567f236c76a20297246e8aa748607bd2aeaa1",
       "intendedPipeline": "run --stage html-main-content include-comments=false",
       "expectedOutcome": "Byte-identical to comments-on.txt (see above)."
     },

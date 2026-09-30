@@ -2,30 +2,17 @@
 <document>
   <main>
     <heading level="1">Delta Survey Field Notes</heading>
-    <paragraph>The seven-person survey team spent three weeks mapping the tidal delta
-with <link href="https://example.com/permits">a full research permit</link> in
-hand, recording every transect in careful detail. Progress stayed
-<bold>steady</bold> even when the weather turned, and the crew stayed
-<italic>focused</italic> on finishing the western channel before the spring tides
-returned.</paragraph>
+    <paragraph>The seven-person survey team spent three weeks mapping the tidal delta with <link href="https://example.com/permits">a full research permit</link> in hand, recording every transect in careful detail. Progress stayed <bold>steady</bold> even when the weather turned, and the crew stayed <italic>focused</italic> on finishing the western channel before the spring tides returned.</paragraph>
     <heading level="2">Instruments and method</heading>
-    <paragraph>Two sonar rigs and a hand-held current meter formed the core kit for the
-season, backed by a paper logbook that every team member signed at the end
-of each shift so nothing was lost between rotations.</paragraph>
-    <paragraph>
-<image src="https://example.com/images/survey-team.jpg" alt="The survey team wading through the delta at low tide"/>
-</paragraph>
+    <paragraph>Two sonar rigs and a hand-held current meter formed the core kit for the season, backed by a paper logbook that every team member signed at the end of each shift so nothing was lost between rotations.</paragraph>
+    <paragraph><image src="https://example.com/images/survey-team.jpg" alt="The survey team wading through the delta at low tide"/></paragraph>
     <heading level="2">Observations</heading>
     <list ordered="false">
-      <item>Salinity rose sharply above the second channel bend, consistent with
-the dry-season baseline the team expected going in.</item>
-      <item>Sediment cores at station four showed three distinct depositional
-layers, more than any other station sampled this season.</item>
+      <item>Salinity rose sharply above the second channel bend, consistent with the dry-season baseline the team expected going in.</item>
+      <item>Sediment cores at station four showed three distinct depositional layers, more than any other station sampled this season.</item>
     </list>
     <quote>
-      <paragraph>The western channel behaves nothing like the model
-predicted, the lead hydrologist wrote in the shared logbook on the
-twelfth day of the survey.</paragraph>
+      <paragraph>The western channel behaves nothing like the model predicted, the lead hydrologist wrote in the shared logbook on the twelfth day of the survey.</paragraph>
     </quote>
     <heading level="2">Sample readings</heading>
     <table>
@@ -56,10 +43,7 @@ twelfth day of the survey.</paragraph>
 1,2.1,18
 2,1.8,22
 4,2.6,15</code>
-    <paragraph>Full instrument logs and the complete depth-by-depth dataset are
-archived with the department, which calls it the "reference dataset" for
-anyone who wants to reproduce the transect-by-transect salinity curve
-described above in full.</paragraph>
+    <paragraph>Full instrument logs and the complete depth-by-depth dataset are archived with the department, which calls it the "reference dataset" for anyone who wants to reproduce the transect-by-transect salinity curve described above in full.</paragraph>
   </main>
   <comments>
     <paragraph>Comments</paragraph>

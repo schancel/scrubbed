@@ -2,9 +2,10 @@
 
 A single native binary that cleans web/corpus text for training and
 evaluation pipelines. `clean-web-document` bundles encoding repair, HTML
-main-content extraction, and PII scanning into one pass per document;
-dedup and language ID run as separate stages on the same pipeline, not
-that same pass yet. No interpreter, no `pip install` -- though not a
+main-content extraction, and PII scanning into one pass per document.
+Language ID and near-duplicate decisions are separate stages; exact-byte
+dedup is available through the document-shard overlay API. No interpreter,
+no `pip install` -- though not a
 fully static binary either: it dynamically links the system's libcurl,
 and `dlopen`s libz at runtime for the code paths that need it (WARC gzip
 members, DOCX's DEFLATE entries). Fast to run.
@@ -50,6 +51,23 @@ dub build --build=release
 See [docs/cli-commands.md](docs/cli-commands.md) for the full command and
 flag reference (JSON config, JSONL streaming, `--dry-run`/`--explain`,
 error journaling and resumable manifests, shell completion, and more).
+
+## Examples
+
+Every gallery example runs against the release binary in CI:
+
+- [Quickstart](examples/pipelines/quickstart/)
+- [`clean-web-document`](examples/pipelines/clean-web-document/)
+- [Extraction formats](examples/pipelines/extract-formats/)
+- [Custom composition and language ID](examples/pipelines/custom-composition/)
+- [Near-duplicate decisions](examples/pipelines/near-dedup/)
+- [PII policies](examples/pipelines/pii-policy/)
+- [Metadata routing](examples/pipelines/route-metadata/)
+- [Local crawling](examples/pipelines/crawl/)
+
+See [the task-example guide](docs/task-examples.md) for the checked fixture
+shape. There are no S3, Parquet, native-Windows, or distributed-execution
+examples because those are not shipped CLI capabilities.
 
 ## Installing a prebuilt binary
 

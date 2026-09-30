@@ -91,8 +91,10 @@ private void validateManifest(string repository, JSONValue manifest) {
         recipes[0]["policy"].str == "keep-first" &&
         !recipes[0]["explicitPolicy"].boolean &&
         recipes[1]["id"].str == "keep-first" &&
+        recipes[1]["policy"].str == "keep-first" &&
         recipes[1]["explicitPolicy"].boolean &&
         recipes[2]["id"].str == "keep-longest" &&
+        recipes[2]["policy"].str == "keep-longest" &&
         recipes[2]["explicitPolicy"].boolean,
         "recipe declarations");
 }
@@ -115,6 +117,11 @@ private void negativeMutants(string repository, string manifestText) {
         validateManifest(repository, parseJSON(manifestText.replace(
             `"physicallyDeletesDocuments": false`,
             `"physicallyDeletesDocuments": true`)));
+    });
+    expectRejected("recipe policy drift", {
+        validateManifest(repository, parseJSON(manifestText.replace(
+            `"id": "keep-longest", "policy": "keep-longest"`,
+            `"id": "keep-longest", "policy": "keep-first"`)));
     });
 }
 
@@ -189,7 +196,7 @@ private Result runPolicy(string repository, string executable, string inputRoot,
     return Result(removedName, representativeName, bytes);
 }
 
-private void runRecipes(string repository, string executable) {
+private void runRecipes(string repository, string executable, JSONValue manifest) {
     auto scratch = buildPath(tempDir, "scrubbed-near-dedup-" ~ randomUUID.toString);
     mkdirRecurse(scratch);
     scope(exit) if (exists(scratch)) rmdirRecurse(scratch);
@@ -200,12 +207,16 @@ private void runRecipes(string repository, string executable) {
         copy(buildPath(repository, "examples/corpus/near-dedup/inputs", name),
             buildPath(inputRoot, name));
 
+    auto recipes = manifest["recipes"].array;
     auto defaultResult = runPolicy(repository, executable, inputRoot, scratch,
-        "default", "keep-first", false);
+        recipes[0]["id"].str, recipes[0]["policy"].str,
+        recipes[0]["explicitPolicy"].boolean);
     auto first = runPolicy(repository, executable, inputRoot, scratch,
-        "keep-first", "keep-first", true);
+        recipes[1]["id"].str, recipes[1]["policy"].str,
+        recipes[1]["explicitPolicy"].boolean);
     auto longest = runPolicy(repository, executable, inputRoot, scratch,
-        "keep-longest", "keep-longest", true);
+        recipes[2]["id"].str, recipes[2]["policy"].str,
+        recipes[2]["explicitPolicy"].boolean);
 
     need(defaultResult.decisionBytes == first.decisionBytes,
         "default is not keep-first");
@@ -227,9 +238,10 @@ int main(string[] args) {
     auto manifestPath = buildPath(repository,
         "examples/corpus/near-dedup/manifest.json");
     auto manifestText = readText(manifestPath);
-    validateManifest(repository, parseJSON(manifestText));
+    auto manifest = parseJSON(manifestText);
+    validateManifest(repository, manifest);
     negativeMutants(repository, manifestText);
-    runRecipes(repository, executable);
+    runRecipes(repository, executable, manifest);
     import std.stdio : writeln;
     writeln("near-dedup check: manifest, mutants, default/keep-first/" ~
         "keep-longest policies, decisions, and unchanged outputs pass");

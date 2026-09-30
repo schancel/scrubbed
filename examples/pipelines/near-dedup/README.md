@@ -4,7 +4,9 @@ This example compares two similar documents and one unrelated control with the
 real corpus-level stage shipped by `scrubbed run`.
 
 ```sh
-scrubbed run --input inputs/ --output output/ --sidecar-output sidecars/ \
+scratch=$(mktemp -d)
+./scrubbed run --input examples/corpus/near-dedup/inputs/ \
+  --output "$scratch/output" --sidecar-output "$scratch/sidecars" \
   --stage sig=similarity-signature-annotate \
   --stage publish=document-metadata-publish \
   --stage prune=prune-near-duplicates \

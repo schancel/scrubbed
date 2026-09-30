@@ -51,6 +51,33 @@ See [docs/cli-commands.md](docs/cli-commands.md) for the full command and
 flag reference (JSON config, JSONL streaming, `--dry-run`/`--explain`,
 error journaling and resumable manifests, shell completion, and more).
 
+## Installing a prebuilt binary
+
+Packaging -- `.tar.gz` archives (macOS arm64, Linux x86_64/aarch64), a
+`.deb`, a Homebrew tap, an `.rpm`, and a one-line install script -- is
+built, CI-proven, and published automatically by
+[`.github/workflows/release.yml`](.github/workflows/release.yml) on every
+`v*` tag. No versioned release has been cut yet, so there's nothing at the
+URLs below until the first tag ships; today, build from source with the
+`Quick start` steps above. Once a release exists:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh
+```
+
+This detects your platform (macOS arm64, Linux x86_64/aarch64), downloads
+the matching release tarball, verifies its SHA-256 against the release's
+published `SHA256SUMS`, and installs the binary plus bash/zsh/fish
+completions to `/usr/local` (falling back to `$HOME/.local` if that isn't
+writable and no `sudo` is available). See
+[`packaging/install.sh`](packaging/install.sh)'s own header comment for
+the environment-variable overrides (`SCRUBBED_VERSION` to pin a version,
+`SCRUBBED_INSTALL_BASE_URL`, `SCRUBBED_INSTALL_PREFIX`,
+`SCRUBBED_INSTALL_NO_SUDO`), and
+[`packaging/debian/README.md`](packaging/debian/README.md) /
+[`packaging/homebrew/README.md`](packaging/homebrew/README.md) for the
+`.deb` and Homebrew paths instead.
+
 ## Windows: via WSL2, not a native port
 
 There's no native Windows `.exe` build, and none is planned as a drop-in

@@ -291,6 +291,15 @@ unittest {
     // (`structuredDataMarkdown`), so the fix belongs in `html_main_content.d`
     // alone, but the guarantee is reconfirmed here at this module's own
     // boundary, matching this unittest block's own "reconfirmed here" idiom.
+    //
+    // Deliberately uses "evilPayloadMarker" rather than the ticket's own
+    // "evil()" here: `structuredDataMarkdown`'s Markdown-source escaping
+    // (the same `clean()` reuse asserted on `longParagraph`'s own literal
+    // `.` above) rewrites "evil()" to "evil\(\)", so a literal
+    // `canFind("evil()")` check can never find it either way and would
+    // pass even with the fix absent -- an alphanumeric-only marker has no
+    // Markdown-special characters to escape, so this assertion actually
+    // exercises the fix.
     HtmlTree scriptInStructuredData;
     scriptInStructuredData.nodes = [
         HtmlNode(HtmlNodeKind.element, size_t.max, "nav", null, null),
@@ -299,7 +308,7 @@ unittest {
             [HtmlAttribute("type", "application/ld+json")]),
         HtmlNode(HtmlNodeKind.text, 2, null,
             `{"@type":"Article","articleBody":"<div><p class=\"x\">Unclosed tags and ` ~
-            `<b>bold <i>italic text here with <script>evil()<\/script> embedded and a ` ~
+            `<b>bold <i>italic text here with <script>evilPayloadMarker<\/script> embedded and a ` ~
             `stray angle bracket and an unterminated tag with a very long real sentence ` ~
             `of readable prose padded out so that after every piece of embedded markup ` ~
             `is stripped away there is still comfortably more than two hundred bytes of ` ~
@@ -308,7 +317,7 @@ unittest {
     ];
     auto scriptResult = extractMainContentMarkdown(scriptInStructuredData);
     assert(scriptResult.status == MainContentStatus.selectedStructuredData);
-    assert(!scriptResult.markdown.canFind("evil()"),
+    assert(!scriptResult.markdown.canFind("evilPayloadMarker"),
         "hidden <script> text embedded inside a JSON-LD string value leaked into Markdown");
     assert(scriptResult.markdown.canFind("readable prose padded out"),
         "the real surrounding prose must still survive the fix");

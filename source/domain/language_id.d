@@ -5474,22 +5474,26 @@ static immutable string[] languageProfilePa = [
 // Detection.
 // ---------------------------------------------------------------------------
 
-private size_t rankOf(const(string)[] ngrams, string ngram) pure nothrow {
-    foreach (i, candidate; ngrams) if (candidate == ngram) return i;
-    return size_t.max;
-}
-
-private size_t distanceTo(const(string)[] docNgrams, const(string)[] profileNgrams) pure nothrow {
-    size_t total;
-    auto penaltyForMiss = profileNgrams.length;
-    foreach (i, ngram; docNgrams) {
-        auto rank = rankOf(profileNgrams, ngram);
-        total += rank == size_t.max ? penaltyForMiss : (rank > i ? rank - i : i - rank);
-    }
-    return total;
-}
-
 struct LanguageScore { SupportedLanguage language; size_t distance; }
+
+private LanguageScore[17] scoreNgrams(const(string)[] docNgrams) {
+    size_t[17] distances;
+    foreach (documentRank, ngram; docNgrams) {
+        auto cachedRanks = ngram in profileRankIndex;
+        foreach (language; 0 .. distances.length) {
+            auto profileRank = cachedRanks is null ? ushort.max : (*cachedRanks)[language];
+            distances[language] += profileRank == ushort.max ? profileLengths[language] :
+                (profileRank > documentRank ? profileRank - documentRank :
+                    documentRank - profileRank);
+        }
+    }
+    LanguageScore[17] scored;
+    foreach (language; 0 .. scored.length)
+        scored[language] = LanguageScore(cast(SupportedLanguage) language,
+            distances[language]);
+    sort!((a, b) => a.distance < b.distance)(scored[]);
+    return scored;
+}
 
 /// Raw Cavnar & Trenkle out-of-place distance from `text`'s own top
 /// `profileCap` ranked n-grams to each of the seventeen supported language
@@ -5509,27 +5513,7 @@ LanguageScore[17] scoreLanguages(string text) {
     countNgramsInto(counts, words);
     string[] docNgrams;
     foreach (entry; rankedFromCounts(counts, profileCap)) docNgrams ~= entry.ngram;
-    LanguageScore[17] scored = [
-        LanguageScore(SupportedLanguage.en, distanceTo(docNgrams, languageProfileEn)),
-        LanguageScore(SupportedLanguage.es, distanceTo(docNgrams, languageProfileEs)),
-        LanguageScore(SupportedLanguage.fr, distanceTo(docNgrams, languageProfileFr)),
-        LanguageScore(SupportedLanguage.de, distanceTo(docNgrams, languageProfileDe)),
-        LanguageScore(SupportedLanguage.pt, distanceTo(docNgrams, languageProfilePt)),
-        LanguageScore(SupportedLanguage.it, distanceTo(docNgrams, languageProfileIt)),
-        LanguageScore(SupportedLanguage.nl, distanceTo(docNgrams, languageProfileNl)),
-        LanguageScore(SupportedLanguage.tr, distanceTo(docNgrams, languageProfileTr)),
-        LanguageScore(SupportedLanguage.vi, distanceTo(docNgrams, languageProfileVi)),
-        LanguageScore(SupportedLanguage.pl, distanceTo(docNgrams, languageProfilePl)),
-        LanguageScore(SupportedLanguage.id, distanceTo(docNgrams, languageProfileId)),
-        LanguageScore(SupportedLanguage.hi, distanceTo(docNgrams, languageProfileHi)),
-        LanguageScore(SupportedLanguage.bn, distanceTo(docNgrams, languageProfileBn)),
-        LanguageScore(SupportedLanguage.ta, distanceTo(docNgrams, languageProfileTa)),
-        LanguageScore(SupportedLanguage.te, distanceTo(docNgrams, languageProfileTe)),
-        LanguageScore(SupportedLanguage.gu, distanceTo(docNgrams, languageProfileGu)),
-        LanguageScore(SupportedLanguage.pa, distanceTo(docNgrams, languageProfilePa)),
-    ];
-    sort!((a, b) => a.distance < b.distance)(scored[]);
-    return scored;
+    return scoreNgrams(docNgrams);
 }
 
 private LanguageDetectionResult abstain(LanguageAbstentionReason reason) pure nothrow @nogc {
@@ -5693,8 +5677,12 @@ LanguageDetectionResult detectLanguage(const(ubyte)[] text) {
     foreach (count; counts.byValue) totalOccurrences += count;
     if (totalOccurrences < minNgramCount) return abstain(LanguageAbstentionReason.tooShort);
 
-    auto docNgramCount = rankedFromCounts(counts, profileCap).length;
-    auto scored = scoreLanguages(canonical);
+    auto ranked = rankedFromCounts(counts, profileCap);
+    auto docNgramCount = ranked.length;
+    string[] docNgrams;
+    docNgrams.reserve(ranked.length);
+    foreach (entry; ranked) docNgrams ~= entry.ngram;
+    auto scored = scoreNgrams(docNgrams);
 
     double worstCase = cast(double) docNgramCount * cast(double) profileCap;
     double rawConfidence = worstCase > 0.0 ? 1.0 - (cast(double) scored[0].distance / worstCase) : 0.0;
@@ -5723,7 +5711,7 @@ LanguageDetectionResult detectLanguage(const(ubyte)[] text) {
 // Identity, wire encode/decode.
 // ---------------------------------------------------------------------------
 
-ubyte[32] currentProfileTableIdentity() {
+private ubyte[32] computeProfileTableIdentity() {
     auto bytes = appender!(ubyte[]);
     bytes.put(cast(const(ubyte)[]) "scrubbed:language-id:profiles:v1\0");
     foreach (table; [languageProfileEn, languageProfileEs, languageProfileFr, languageProfileDe,
@@ -5735,6 +5723,42 @@ ubyte[32] currentProfileTableIdentity() {
         foreach (ngram; table) appendField(bytes, ngram);
     }
     return sha256Of(bytes.data);
+}
+
+// The embedded profile tables cannot change during a process lifetime.
+// Hashing all 5,100 entries for every document used to dominate the stage's
+// fixed overhead, so compute the same identity once at module startup.
+private __gshared ubyte[32] profileTableIdentity;
+private __gshared const(ushort[17])[string] profileRankIndex;
+private __gshared size_t[17] profileLengths;
+
+shared static this() {
+    profileTableIdentity = computeProfileTableIdentity();
+    ushort[17][string] ranks;
+    foreach (language, table; [languageProfileEn, languageProfileEs, languageProfileFr,
+            languageProfileDe, languageProfilePt, languageProfileIt, languageProfileNl,
+            languageProfileTr, languageProfileVi, languageProfilePl, languageProfileId,
+            languageProfileHi, languageProfileBn, languageProfileTa, languageProfileTe,
+            languageProfileGu, languageProfilePa]) {
+        profileLengths[language] = table.length;
+        foreach (rank, ngram; table) {
+            auto cached = ngram in ranks;
+            if (cached is null) {
+                ushort[17] missing;
+                missing[] = ushort.max;
+                ranks[ngram] = missing;
+                cached = ngram in ranks;
+            }
+            (*cached)[language] = cast(ushort) rank;
+        }
+    }
+    // No alias to the mutable builder escapes this constructor. All worker
+    // threads only read the resulting index after module initialization.
+    profileRankIndex = ranks;
+}
+
+ubyte[32] currentProfileTableIdentity() {
+    return profileTableIdentity;
 }
 
 /// Build a bound identity+result record for `text` against `documentId`.

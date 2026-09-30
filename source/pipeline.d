@@ -609,7 +609,17 @@ private string materializeFusedStreaming(string text,
     bool changed;
     char[4] encoded;
     foreach (scalar; fusedStreamingRange(text, configured)) {
-        auto bytes = cast(string)encoded[0 .. encode(encoded, scalar)];
+        // The overwhelmingly common corpus case is ASCII. Avoid the generic
+        // UTF-8 encoder's scalar classification and branching when the exact
+        // one-byte encoding is already known.
+        size_t encodedLength;
+        if (scalar <= 0x7F) {
+            encoded[0] = cast(char) scalar;
+            encodedLength = 1;
+        } else {
+            encodedLength = encode(encoded, scalar);
+        }
+        auto bytes = cast(string)encoded[0 .. encodedLength];
         if (!changed && bytes.length <= text.length - unchangedBytes &&
                 bytes == text[unchangedBytes .. unchangedBytes + bytes.length]) {
             unchangedBytes += bytes.length;

@@ -58,6 +58,9 @@ struct TokenEntropyResult {
 }
 
 private bool isEntropyTokenChar(dchar c) pure @safe {
+    if (c <= 0x7F)
+        return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' ||
+            c >= '0' && c <= '9' || c == '_';
     return isAlpha(c) || isNumber(c) || c == '_';
 }
 
@@ -65,40 +68,46 @@ private bool isEntropyTokenChar(dchar c) pure @safe {
 /// module doc's tokenization rule. Each token is rebuilt codepoint-by-
 /// codepoint through `toLower`, so a token's byte length can differ from its
 /// source run's byte length (casefolding is not always length-preserving).
-private string[] tokenizeForEntropy(const(char)[] text) pure @safe {
-    string[] tokens;
+private struct EntropyTokenCounts {
+    size_t[string] counts;
+    size_t total;
+}
+
+private EntropyTokenCounts countEntropyTokens(const(char)[] text) pure @safe {
+    EntropyTokenCounts result;
     char[] current;
     size_t currentCodepoints;
 
     void flush() {
-        if (currentCodepoints >= minEntropyTokenLength) tokens ~= current.idup;
+        if (currentCodepoints >= minEntropyTokenLength) {
+            auto token = current.idup;
+            if (auto count = token in result.counts) ++(*count);
+            else result.counts[token] = 1;
+            ++result.total;
+        }
         current = null;
         currentCodepoints = 0;
     }
 
     foreach (dchar c; text) {
         if (isEntropyTokenChar(c)) {
-            current ~= toLower(c);
+            current ~= (c <= 0x7F ?
+                (c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c) : toLower(c));
             ++currentCodepoints;
         } else {
             flush();
         }
     }
     flush();
-    return tokens;
+    return result;
 }
 
 /// Order-0 Shannon entropy in bits over `tokens`' empirical frequency
 /// distribution. `tokens` must be nonempty (the caller handles the
 /// `noTokens` abstention before calling this).
-private double shannonEntropyBits(const(string[]) tokens) pure @safe {
-    size_t[string] counts;
-    foreach (token; tokens) {
-        auto existing = token in counts;
-        if (existing) ++(*existing);
-        else counts[token] = 1;
-    }
-    immutable double total = cast(double) tokens.length;
+private double shannonEntropyBits(const(size_t[string]) counts,
+        size_t tokenCount) pure @safe {
+    immutable double total = cast(double) tokenCount;
     double entropy = 0.0;
     foreach (count; counts.byValue) {
         immutable double p = cast(double) count / total;
@@ -115,13 +124,12 @@ TokenEntropyResult tokenEntropy(const(ubyte)[] bytes) pure @trusted {
     try validate(text);
     catch (UTFException) return TokenEntropyResult(EntropyStatus.invalidUtf8);
 
-    auto tokens = tokenizeForEntropy(text);
-    if (tokens.length == 0) return TokenEntropyResult(EntropyStatus.noTokens);
+    auto tokens = countEntropyTokens(text);
+    if (tokens.total == 0) return TokenEntropyResult(EntropyStatus.noTokens);
 
-    bool[string] distinct;
-    foreach (token; tokens) distinct[token] = true;
-    return TokenEntropyResult(EntropyStatus.computed, shannonEntropyBits(tokens),
-        tokens.length, distinct.length);
+    return TokenEntropyResult(EntropyStatus.computed,
+        shannonEntropyBits(tokens.counts, tokens.total), tokens.total,
+        tokens.counts.length);
 }
 
 unittest {
@@ -187,4 +195,11 @@ unittest {
     assert(natural.status == EntropyStatus.computed);
     assert(natural.tokenCount == 12);
     assert(natural.entropy > 2.8 && natural.entropy < 3.3);
+
+    // The ASCII classifier fast path is exactly the Unicode predicate for
+    // every ASCII scalar, not merely for the common letters and digits.
+    foreach (value; 0 .. 0x80) {
+        auto c = cast(dchar) value;
+        assert(isEntropyTokenChar(c) == (isAlpha(c) || isNumber(c) || c == '_'));
+    }
 }

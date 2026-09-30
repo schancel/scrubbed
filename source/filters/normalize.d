@@ -65,7 +65,14 @@ string normalizeLineEndingsFilter(string text) {
 
 private size_t stripControlPush(ref StreamingState, dchar input,
         dchar[maxStreamingExpansion]* output) pure {
-    if (isControl(input) && input != '\n' && input != '\t' && input != '\r')
+    // Avoid std.uni's category-table lookup for ordinary ASCII text. Every
+    // ASCII control is either C0 (U+0000..U+001F) or DEL (U+007F); the three
+    // whitespace controls below remain deliberately admitted.
+    const strip = input <= 0x7F
+        ? ((input < 0x20 && input != '\n' && input != '\t' && input != '\r') ||
+            input == 0x7F)
+        : isControl(input);
+    if (strip)
         return 0;
     (*output)[0] = input;
     return 1;
@@ -114,4 +121,15 @@ unittest {
     // Demonstrate composition of two unnamed lazy range types with one final
     // allocation at the registry boundary.
     assert("a\r\n\0b".normalizeLineEndings.stripControlChars.to!string == "a\nb");
+
+    // The streaming ASCII fast path must remain exactly equivalent to the
+    // Unicode category predicate used by the generic implementation.
+    foreach (value; 0 .. 0x80) {
+        const scalar = cast(dchar) value;
+        const expectedStrip = isControl(scalar) && scalar != '\n' &&
+            scalar != '\t' && scalar != '\r';
+        dchar[maxStreamingExpansion] output;
+        StreamingState state;
+        assert((stripControlPush(state, scalar, &output) == 0) == expectedStrip);
+    }
 }

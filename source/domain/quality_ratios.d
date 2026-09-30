@@ -171,8 +171,24 @@ struct QualityRatiosResult {
 
 private size_t codepointLength(const(char)[] s) pure @safe {
     size_t n = 0;
-    foreach (dchar c; s) ++n;
+    // All callers operate on text already validated by
+    // computeQualityRatios. Every UTF-8 scalar has exactly one leading byte,
+    // so counting non-continuation bytes avoids decoding the same text again.
+    foreach (c; s)
+        if ((cast(ubyte) c & 0xC0) != 0x80) ++n;
     return n;
+}
+
+private bool isQualityWhite(dchar c) pure @safe {
+    if (c <= 0x7F)
+        return c == ' ' || (c >= '\t' && c <= '\r');
+    return isWhite(c);
+}
+
+private bool isQualityAlpha(dchar c) pure @safe {
+    if (c <= 0x7F)
+        return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z';
+    return isAlpha(c);
 }
 
 private size_t countChar(const(char)[] text, char target) pure @safe {
@@ -227,12 +243,12 @@ private WordStats collectWordStats(const(char)[] text) pure @safe {
     }
 
     foreach (dchar c; text) {
-        if (isWhite(c)) {
+        if (isQualityWhite(c)) {
             flush();
         } else {
             current ~= c;
             ++currentChars;
-            if (isAlpha(c)) currentHasAlpha = true;
+            if (isQualityAlpha(c)) currentHasAlpha = true;
         }
     }
     flush();
@@ -465,6 +481,12 @@ unittest {
     assert(empty.duplicateParagraphCharFraction.isNull);
     foreach (v; empty.topNGramCharFraction) assert(v.isNull);
     foreach (v; empty.duplicateNGramCharFraction) assert(v.isNull);
+
+    foreach (value; 0 .. 0x80) {
+        auto c = cast(dchar) value;
+        assert(isQualityWhite(c) == isWhite(c));
+        assert(isQualityAlpha(c) == isAlpha(c));
+    }
 
     // Invalid UTF-8: every field abstains except the always-real rawBytes.
     auto invalid = computeQualityRatios([0xff, 0xfe]);

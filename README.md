@@ -53,13 +53,13 @@ error journaling and resumable manifests, shell completion, and more).
 
 ## Installing a prebuilt binary
 
-Packaging -- `.tar.gz` archives (macOS arm64, Linux x86_64/aarch64), a
-`.deb`, a Homebrew tap, an `.rpm`, and a one-line install script -- is
-built, CI-proven, and published automatically by
-[`.github/workflows/release.yml`](.github/workflows/release.yml) on every
-`v*` tag. No versioned release has been cut yet, so there's nothing at the
-URLs below until the first tag ships; today, build from source with the
-`Quick start` steps above. Once a release exists:
+[`.github/workflows/release.yml`](.github/workflows/release.yml) builds
+and publishes `.tar.gz` release archives (macOS arm64, Linux
+x86_64/aarch64) plus a `SHA256SUMS` manifest automatically on every `v*`
+tag. No versioned release has been cut yet, so there's nothing at the URL
+below until the first tag ships; today, build from source with the `Quick
+start` steps above. Once a release exists, install with the one-line
+installer:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh
@@ -69,14 +69,24 @@ This detects your platform (macOS arm64, Linux x86_64/aarch64), downloads
 the matching release tarball, verifies its SHA-256 against the release's
 published `SHA256SUMS`, and installs the binary plus bash/zsh/fish
 completions to `/usr/local` (falling back to `$HOME/.local` if that isn't
-writable and no `sudo` is available). See
-[`packaging/install.sh`](packaging/install.sh)'s own header comment for
-the environment-variable overrides (`SCRUBBED_VERSION` to pin a version,
-`SCRUBBED_INSTALL_BASE_URL`, `SCRUBBED_INSTALL_PREFIX`,
-`SCRUBBED_INSTALL_NO_SUDO`), and
-[`packaging/debian/README.md`](packaging/debian/README.md) /
+writable and no `sudo` is available). It's proven end to end -- real
+download, real checksum verification (including the rejection path), real
+install, real `--version` run -- against a local fixture server in
+[`.github/workflows/install-script-check.yml`](.github/workflows/install-script-check.yml).
+See [`packaging/install.sh`](packaging/install.sh)'s own header comment
+for the environment-variable overrides (`SCRUBBED_VERSION` to pin a
+version, `SCRUBBED_INSTALL_BASE_URL`, `SCRUBBED_INSTALL_PREFIX`,
+`SCRUBBED_INSTALL_NO_SUDO`).
+
+A `.deb`, a Homebrew tap, and an `.rpm` are also built from that same
+release tree, each with its own build script and a real clean-machine
+install test, but none is wired into an automated publish step yet (the
+Homebrew tap in particular has no live tap repository) -- see
+[`packaging/debian/README.md`](packaging/debian/README.md) and
 [`packaging/homebrew/README.md`](packaging/homebrew/README.md) for the
-`.deb` and Homebrew paths instead.
+current state of each, and [`packaging/rpm/build.sh`](packaging/rpm/build.sh)
+/ [`packaging/rpm/scrubbed.spec`](packaging/rpm/scrubbed.spec) for the
+`.rpm` (no README there yet).
 
 ## Windows: via WSL2, not a native port
 

@@ -1213,6 +1213,82 @@ unittest {
         "tables=false has degraded every row to a plain bullet line");
 }
 
+// Issue #494 gap 1: `renderTable`'s header-row detection
+// (`hasHeader = rows.length && rowHasHeaderCell[0]`) is scoped to whether
+// the structurally-first `<tr>` specifically contains a real `<th>`, not
+// "does any row anywhere contain a `<th>`". Every existing fixture's first
+// row already has a real `<th>`, so a mutant that widens the guard to
+// `hasHeader = rows.length > 0` (header row detected unconditionally,
+// ignoring `<th>` presence entirely) passes the full suite unchanged. This
+// fixture's first row is all `<td>` (no header) and its SECOND row has a
+// real `<th>`, so it proves two things a `<th>`-in-row-0 fixture cannot:
+// (1) no `|---|` delimiter row is emitted at all (false-positive direction),
+// and (2) the later real `<th>` row still renders as an ordinary data row,
+// not specially -- because header detection only ever looks at row 0.
+//
+// Mutation-tested per this ticket: temporarily changing the guard to
+// `hasHeader = rows.length > 0` makes this test fail (a `|---|` line
+// appears after row 0, which no assertion below allows); reverting to the
+// shipped guard makes it pass again.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string html = "<table><tr><td>a1</td><td>b1</td></tr>" ~
+        "<tr><th>a2</th><td>b2</td></tr></table>";
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto markdown = renderMarkdown(tree, MarkdownRenderOptions(tables: true));
+    assert(markdown ==
+        "| a1 | b1 | \n" ~
+        "| a2 | b2 |\n",
+        "a table whose first row is all `<td>` must never emit a `|---|` " ~
+        "delimiter row -- header detection looks only at row 0 -- and a " ~
+        "real `<th>` appearing in a LATER row must still render as an " ~
+        "ordinary data row, not trigger header treatment: " ~ markdown);
+    assert(!markdown.canFind("|---|"),
+        "no delimiter row may appear when the first row contains no real " ~
+        "`<th>` cell, regardless of `<th>` cells appearing later");
+}
+
+// Issue #494 gap 2: `renderTable`'s doc comment states ragged rows
+// (differing column counts) are padded out to the widest row's column
+// count, but the #478 fixture is accidentally uniform-width throughout, so
+// that claim has zero test coverage. This fixture is genuinely ragged (1,
+// then 3, then 2 columns) AND deliberately makes the widest row a later
+// DATA row rather than row 0, so the test also proves `maxCols` is tracked
+// across every row, not assumed from the first row's width. No `<th>`
+// appears anywhere, so no delimiter row complicates the padding proof.
+//
+// Mutation-tested per this ticket: temporarily changing the render loop's
+// `foreach (col; 0 .. maxCols)` to `foreach (col; 0 .. row.length)` (each
+// row renders only its own actual cells, no padding to the table's widest
+// row) makes this test fail (the short rows come out narrower, with no
+// trailing empty cells); reverting to the shipped `maxCols` loop makes it
+// pass again.
+unittest {
+    import effects.html_tree : parseHtml;
+
+    string html = "<table><tr><td>a</td></tr>" ~
+        "<tr><td>b</td><td>c</td><td>d</td></tr>" ~
+        "<tr><td>e</td><td>f</td></tr></table>";
+    auto outcome = parseHtml(cast(const(ubyte)[]) html);
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto markdown = renderMarkdown(tree, MarkdownRenderOptions(tables: true));
+    assert(markdown ==
+        "| a |  |  | \n" ~
+        "| b | c | d | \n" ~
+        "| e | f |  |\n",
+        "every row must pad out to the WIDEST row's column count (3, from " ~
+        "the second, non-first data row) -- the 1-column first row and the " ~
+        "2-column third row must each gain trailing empty cells rather " ~
+        "than rendering at their own narrower width: " ~ markdown);
+}
+
 // Issue #478 real fixture 2/4 -- lists (nested, ordered/unordered). Verbatim
 // excerpt (the real "Durations" section's designator list, real <i> emphasis
 // kept as-is) from the same Wikipedia "ISO 8601" article as the table

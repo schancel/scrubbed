@@ -1,11 +1,13 @@
 /// Bounded mechanical Markdown rendering of the D-owned selected HTML tree.
 module effects.html_markdown;
 
-import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
+import effects.html_tree : HtmlNodeKind, HtmlTree;
+import effects.html_tree_walk : attribute, endOf, headingLevel, hiddenTag,
+    safeTarget, singleLine, white;
 import std.conv : to;
 import std.exception : assumeUnique;
-import std.uni : isControl, isFormat, isSpace, isWhite;
-import std.utf : UTFException, encode;
+import std.uni : isControl, isFormat, isWhite;
+import std.utf : encode;
 
 enum size_t maxMarkdownBytes = 4 * 1024 * 1024;
 private enum string maxListIndent = "                     "; // 19 digits plus ". "
@@ -117,10 +119,6 @@ unittest {
     assertThrown!HtmlMarkdownOutputLimit(oneOver.putDecimal(100));
 }
 
-private bool white(char c) pure {
-    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f';
-}
-
 // Issue #516 follow-up: a text node consisting entirely of pretty-printed
 // indentation/formatting whitespace (e.g. the "\n" between `<ol>` and its
 // first `<li>`, or between successive `<li>`s) is structural noise, not
@@ -229,93 +227,6 @@ unittest {
     assert(clean("first\r\nsecond", true) == "first\n\nsecond");
 }
 
-private string singleLine(string input) pure {
-    Writer writer;
-    bool pending;
-    size_t runStart;
-    foreach (i, c; input) {
-        if (white(c)) {
-            if (!pending) writer.put(input[runStart .. i]);
-            pending = true;
-        } else if (pending) {
-            if (writer.bytes.length) writer.put(" ");
-            pending = false;
-            runStart = i;
-        }
-    }
-    if (!pending) writer.put(input[runStart .. $]);
-    return writer.finish();
-}
-
-unittest {
-    assert(singleLine("") is null);
-    assert(singleLine(" \t\r\n\f") is null);
-    assert(singleLine("  alpha \t beta\r\n gamma  ") == "alpha beta gamma");
-    assert(singleLine("é\t界") == "é 界");
-}
-
-private string attribute(const ref HtmlNode node, string name) pure {
-    foreach (ref const attr; node.attributes)
-        if (attr.name == name) return attr.value;
-    return null;
-}
-
-private bool asciiEqualIgnoreCase(string value, string expected) pure nothrow @nogc {
-    if (value.length != expected.length) return false;
-    foreach (i, c; value) {
-        ubyte folded = cast(ubyte) c;
-        if (folded >= 'A' && folded <= 'Z') folded += 'a' - 'A';
-        if (folded != cast(ubyte) expected[i]) return false;
-    }
-    return true;
-}
-
-private bool safeScheme(string scheme) pure nothrow @nogc {
-    switch (scheme.length) {
-        case 4: return asciiEqualIgnoreCase(scheme, "http");
-        case 5: return asciiEqualIgnoreCase(scheme, "https");
-        case 6: return asciiEqualIgnoreCase(scheme, "mailto");
-        default: return false;
-    }
-}
-
-private bool safeTarget(string target) pure {
-    if (!target.length || target.length > 4096 || target.length >= 2 &&
-        (target[0 .. 2] == "//" || target[0 .. 2] == "\\\\")) return false;
-    if (target[0] == '\\') return false;
-    try {
-        foreach (dchar c; target)
-            if (isControl(c) || isFormat(c) || isSpace(c) ||
-                c == '<' || c == '>' || c == '\\') return false;
-    } catch (UTFException) return false;
-    size_t colon;
-    while (colon < target.length && target[colon] != ':' &&
-        target[colon] != '/' && target[colon] != '?' && target[colon] != '#') ++colon;
-    if (colon < target.length && target[colon] == ':')
-        return safeScheme(target[0 .. colon]);
-    return true;
-}
-
-unittest {
-    void checkSchemeCaseVariants(string spelling) {
-        foreach (mask; 0 .. 1 << spelling.length) {
-            auto variant = spelling.dup;
-            foreach (i, ref c; variant)
-                if (mask & (1 << i)) c -= 'a' - 'A';
-            auto target = variant ~ ":x";
-            assert(safeTarget(cast(string) target));
-        }
-    }
-
-    checkSchemeCaseVariants("http");
-    checkSchemeCaseVariants("https");
-    checkSchemeCaseVariants("mailto");
-    assert(!safeTarget("httq:x"));
-    assert(!safeTarget("httpss:x"));
-    assert(!safeTarget("http1:x"));
-    assert(!safeTarget("h\u00e9tp:x"));
-}
-
 private string markdownTarget(string target) pure {
     Writer writer;
     size_t runStart;
@@ -335,21 +246,6 @@ unittest {
     assert(markdownTarget("&a&&b&") == "&amp;a&amp;&amp;b&amp;");
 }
 
-private size_t endOf(const ref HtmlTree tree, size_t index) pure {
-    size_t end = index + 1;
-    while (end < tree.nodes.length) {
-        size_t parent = tree.nodes[end].parentIndex;
-        bool descendant;
-        while (parent != size_t.max && parent < end) {
-            if (parent == index) { descendant = true; break; }
-            parent = tree.nodes[parent].parentIndex;
-        }
-        if (!descendant) break;
-        ++end;
-    }
-    return end;
-}
-
 private string nodeText(const ref HtmlTree tree, size_t index) pure {
     Writer writer;
     foreach (i; index + 1 .. endOf(tree, index)) {
@@ -361,8 +257,7 @@ private string nodeText(const ref HtmlTree tree, size_t index) pure {
              parent != index && parent != size_t.max && parent < i;
              parent = tree.nodes[parent].parentIndex) {
             auto name = tree.nodes[parent].name;
-            if (name == "script" || name == "style" || name == "template" ||
-                name == "head") { hidden = true; break; }
+            if (hiddenTag(name)) { hidden = true; break; }
         }
         if (!hidden) writer.put(breakNode ? "\n" : tree.nodes[i].text);
     }
@@ -462,8 +357,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         return;
     }
     string name = node.name;
-    if (name == "script" || name == "style" || name == "template" ||
-        name == "head") return;
+    if (hiddenTag(name)) return;
     if (name == "br") { writer.put("  \n"); return; }
     if (name == "img") {
         auto alt = clean(attribute(node, "alt"));
@@ -634,8 +528,8 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         writer.block();
         return;
     }
-    bool heading = name.length == 2 && name[0] == 'h' &&
-        name[1] >= '1' && name[1] <= '6';
+    int headingDepth;
+    bool heading = headingLevel(name, headingDepth);
     // "pre" and "blockquote" only ever reach here when their own dedicated,
     // real-syntax branch above was skipped because `options.code`/
     // `options.quotes` is false (that branch always `return`s before this
@@ -646,7 +540,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         name == "table" || name == "pre" || name == "blockquote";
     if (block) writer.block();
     if (heading) {
-        foreach (_; 0 .. name[1] - '0') writer.put("#");
+        foreach (_; 0 .. headingDepth) writer.put("#");
         writer.put(" ");
     }
     if (options.formatting &&

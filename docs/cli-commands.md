@@ -31,8 +31,9 @@ Equivalent v3 tokens and JSON compile once to the same job. Selected-field
 JSONL and durable manifest/error-journal routes use the same compiled job.
 
 `extract` (alias `x`) exports a bounded selected HTML parse tree, whole-page
-Markdown, or boilerplate-stripped main-content Markdown. It requires
-`--input`, `--output`, and `--format=tree-json|markdown|main-content-markdown`;
+Markdown, boilerplate-stripped main-content Markdown, CSV, generic XML, or
+TEI-conformant XML. It requires `--input`, `--output`, and
+`--format=tree-json|markdown|main-content-markdown|csv|xml|xml-tei`;
 `main-content-markdown` runs the same main-content selection as
 `html-main-content`/`clean-web-document` and renders only the winning
 subtree as Markdown, instead of `markdown`'s whole-page conversion or
@@ -41,15 +42,56 @@ limits and provenance behavior are documented in the HTML parser and
 Markdown guides. Its single selected HTML stage is likewise compiled from
 canonical v3 configuration.
 
+`csv`/`xml`/`xml-tei` (issue #481) run the same main-content selection as
+`main-content-markdown`, then serialize the selected subtree directly from
+the parsed HTML tree -- never through the Markdown renderer's rendered text
+-- into three new schemas:
+
+- `csv`: one tab-delimited metadata/content row per document, column order
+  matching pinned trafilatura==2.2.0's own real `--output-format csv`
+  schema exactly (`url, id, fingerprint, hostname, title, image, date, text,
+  comments, license, pagetype`; `"null"` for a field this local, URL-less
+  extraction path cannot populate). `text`/`comments` are the same flat,
+  already-tested plain text `html-main-content` itself produces. Written to
+  `<input>.csv`.
+- `xml`: well-formed, self-describing generic XML (`<document><main>...`)
+  with real structural elements -- `<heading level="1".."6">`, `<paragraph>`,
+  `<list ordered="true|false">`/`<item>`, `<quote>`, `<code>`, `<table>`/
+  `<row>`/`<cell header="true">` (including a real nested `<table>` inside a
+  `<cell>`), `<link href="...">`, `<image src="..." alt="..."/>`, `<bold>`/
+  `<italic>` -- and an optional sibling `<comments>`. Written to
+  `<input>.xml`.
+- `xml-tei`: TEI P5-conformant XML (`<TEI><teiHeader>...<text><body><div
+  type="entry">...`), validated against a real TEI schema/validator (see
+  below). A page's headings become `<ab rend="hN" type="header">` (TEI's
+  `<div>` permits only one `<head>`, as the div's own first child -- never
+  repeated mid-content); a table degrades to `<list rend="table"><item>`
+  (one item per row, `<hi rend="bold">` for a header cell) and a `<pre>`/
+  `<code>` block degrades to `<p><hi rend="code">`, because this pinned
+  version's own bundled TEI DTD does not declare `<table>`/`<row>`/`<cell>`
+  or `<code>` at all -- confirmed by running pinned trafilatura==2.2.0's own
+  `--output-format xmltei`/`--validate-tei` against a real table- and
+  code-bearing page and observing its own real output fail its own real
+  validator. Written to `<input>.tei.xml`.
+
+None of the three new formats depends on `html_markdown.d`'s rendered
+Markdown text at all, so issue #493 (nested tables corrupting an outer
+cell's Markdown with stray unescaped GFM delimiter syntax) does not reach
+them: a nested `<table>` inside a `<cell>` is ordinary, unambiguous XML
+nesting by construction, not a flattened string.
+
 **HTML-consuming stages are not interchangeable with each other's output
 (issue #447).** `html-main-content`, `html-main-content-markdown`,
-`html-markdown`, and `html-tree-json` all parse `--stage` input as HTML,
-but each *replaces* it with something that is no longer HTML: flattened
-plain text, rendered Markdown, or a serialized JSON tree, respectively.
-`html-metadata` and `html-metadata-annotate` also parse their input as
-HTML but leave `.content` untouched (they only write a side output or
-`.metadata`), so they're safe to chain ahead of any of the four stages
-above. Composing two of the four *shape-changing* stages back to back --
+`html-markdown`, `html-tree-json`, `html-csv`, `html-xml`, and
+`html-xml-tei` all parse `--stage` input as HTML, but each *replaces* it
+with something that is no longer HTML: flattened plain text, rendered
+Markdown, a serialized JSON tree, or -- the three issue #481 additions
+behind `extract --format=csv|xml|xml-tei` -- a CSV row, generic XML, or
+TEI-conformant XML, respectively. `html-metadata` and
+`html-metadata-annotate` also parse their input as HTML but leave
+`.content` untouched (they only write a side output or `.metadata`), so
+they're safe to chain ahead of any of the shape-changing stages above.
+Composing two of the shape-changing stages back to back --
 directly, or with only pass-through stages in between -- means the second
 one's HTML parser would receive the first one's plain text/Markdown/JSON
 instead of HTML. Every parser here is lenient (any bytes parse as *some*
@@ -69,7 +111,7 @@ stages) after each other's own transformed output, only after a
 raw-HTML-producing stage or the original input
 ```
 
-Chain one of the four shape-changing stages only after a stage that
+Chain one of the shape-changing stages only after a stage that
 declares itself HTML-preserving (`html-metadata-annotate`, as
 `clean-web-document`'s own fixed chain does) or after the original raw
 HTML input -- never after another shape-changing stage's own output.

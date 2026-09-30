@@ -48,6 +48,22 @@
 ///    `prunedDestination` gets no pruned output at all: pruning is strictly
 ///    additive and opt-in per shard, on top of the unchanged annotation
 ///    overlay this module always writes.
+///
+/// **Post-#480 review fix: only a document's own whole-document signature
+/// ever becomes a clustering candidate.** `similarity_buckets.d` persists a
+/// band membership for both a document's whole-document signature and each
+/// of its per-4096-byte *segment* signatures; every persisted member is
+/// still tamper/staleness-verified against its recomputed band hash below,
+/// but a segment-level member is never turned into a `CandidateRow` --
+/// only `member.segment == false` rows are. A segment captures only a
+/// fragment of a document's content (e.g. shared boilerplate), and
+/// treating a segment-vs-whole-document match as equivalent to a genuine
+/// whole-document match let one shared boilerplate segment cluster -- and,
+/// with pruning enabled, physically delete -- an otherwise entirely unique
+/// large document, even though the two documents' own whole-document
+/// jaccard estimate was well below threshold. See this module's own
+/// regression test (search "segment-conflation") for the exact reproduced
+/// shape.
 module effects.near_dedup_overlay;
 
 import core.stdc.errno : errno, ENOENT;
@@ -215,6 +231,24 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
                     enforce(signature.bands[member.bandIndex] == member.bandKeyValue,
                         "near dedup overlay: recomputed band key mismatch " ~
                         "(tampered or stale bucket overlay)");
+                    // Issue #480 review round 1 (confirmed, fixed): every
+                    // persisted member is still verified above (tamper/
+                    // staleness detection stays symmetric across document-
+                    // and segment-level members alike), but only a
+                    // document's own whole-document signature may ever
+                    // become a clustering candidate below. A segment
+                    // captures only a fragment of a document's content
+                    // (e.g. shared boilerplate); treating a segment-vs-
+                    // whole-document match as equivalent to a genuine
+                    // whole-document match let one shared boilerplate
+                    // segment cluster -- and, once pruning is enabled,
+                    // physically delete -- an otherwise entirely unique
+                    // large document, even though the two documents' own
+                    // whole-document jaccard estimate was well below
+                    // threshold. See this module's own regression test
+                    // (search "segment-conflation") for the exact
+                    // reproduced shape.
+                    if (member.segment) continue;
                     batch ~= CandidateRow(member.bandIndex, member.bandKeyValue,
                         member.overflowed, index, signature, document.content.length);
                     if (batch.length == runRecords) flushRun(batch, runs, &fresh);
@@ -271,6 +305,17 @@ void writeNearDedupOverlays(const(NearDedupShard)[] inputs, PublishFault fault =
         if (existing is null || output.representativeId < *existing)
             representativeOf[output.documentId] = output.representativeId;
     }
+    // Issue #480 review round 1 (secondary concern, resolved): a document's
+    // chosen representative here may itself be a key in this same map --
+    // i.e. itself a non-representative entry from some other bucket --
+    // since a document's own signature can explode into up to
+    // `similarityBands` independent band rows and land in more than one
+    // bucket-cluster at once (the same structural fact the comment above
+    // already names). Left unresolved, a published `representative_id`
+    // could name a document that pruning has itself physically removed.
+    // `resolveRepresentativeChains` rewrites every entry to its true,
+    // never-itself-a-key root before anything is published.
+    representativeOf = resolveRepresentativeChains(representativeOf);
     OutputLink[] finalLinks;
     finalLinks.reserve(representativeOf.length);
     foreach (documentId, representativeId; representativeOf)
@@ -339,6 +384,105 @@ private SimilaritySignature segmentSignature(SimilaritySignatures signatures, si
     enforce(ordinal < signatures.segments.length,
         "near dedup overlay: segment ordinal out of range");
     return signatures.segments[ordinal];
+}
+
+/// Issue #480 review round 1: rewrites every `documentId -> representativeId`
+/// entry to its true root -- a value that is never itself a key in this same
+/// map -- by following each chain to its end. Pure and total over any input
+/// shaped like Phase C's own `representativeOf` map.
+///
+/// **Termination, not just correctness.** This never checks for a cycle
+/// directly; instead it relies on (and bounds-checks) a structural
+/// invariant every shipped `PruningPolicy` already satisfies: representative
+/// selection within one bucket always ranks documents by some fixed,
+/// document-intrinsic key (`keepFirst`: the document's own canonical ID;
+/// `keepLongest`: content length, ID tie-break) that never depends on which
+/// other documents happen to share that bucket. Because that ranking is the
+/// same total order everywhere, "X beats Y" is consistent across every
+/// bucket X and Y ever co-occur in, so the induced loser-to-winner graph is
+/// necessarily acyclic -- a cycle would require some document to both
+/// outrank and be outranked by another under one fixed order, which a total
+/// order forbids. The bounded loop below still enforces this rather than
+/// trusting it blindly: a future `PruningPolicy` whose ranking is
+/// bucket-dependent (and could therefore cycle) fails closed here with a
+/// clear message instead of looping forever.
+private string[string] resolveRepresentativeChains(const(string[string]) representativeOf) {
+    auto resolved = representativeOf.dup;
+    foreach (documentId; resolved.keys) {
+        auto root = resolved[documentId];
+        size_t hops;
+        while (auto next = root in resolved) {
+            root = *next;
+            ++hops;
+            enforce(hops <= resolved.length,
+                "near dedup overlay: representative chain did not terminate -- a " ~
+                "PruningPolicy's per-document ranking must be a fixed, document-intrinsic " ~
+                "total order, never bucket-dependent");
+        }
+        resolved[documentId] = root;
+    }
+    return resolved;
+}
+
+unittest {
+    // Issue #480 review round 1 (secondary concern): a two-hop chain
+    // resolves to its true root, and the intermediate document (itself
+    // both a loser and a winner) is rewritten too, not left dangling.
+    string[string] input = ["b": "a", "c": "b"]; // c -> b -> a (a is the true root)
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved.length == 2);
+    assert(resolved["b"] == "a");
+    assert(resolved["c"] == "a", "an intermediate link must resolve straight to the true root");
+}
+
+unittest {
+    // A longer, three-hop chain resolves fully, and a document that never
+    // appears as anyone's representative (i.e. is only ever a key, never
+    // a value someone else's key points at across the whole map here)
+    // still resolves correctly.
+    string[string] input = ["d": "c", "c": "b", "b": "a"]; // d -> c -> b -> a
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved.length == 3);
+    assert(resolved["b"] == "a");
+    assert(resolved["c"] == "a");
+    assert(resolved["d"] == "a");
+}
+
+unittest {
+    // Already-resolved input (every value already a true root, i.e. no
+    // value also appears as a key) is returned unchanged -- idempotent,
+    // and the common case (most batches never have a cross-bucket
+    // conflict at all) costs nothing extra.
+    string[string] input = ["b": "a", "d": "c", "f": "e"];
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved == input);
+}
+
+unittest {
+    // Two independent chains sharing no documents resolve independently;
+    // one chain's resolution must never leak into the other's.
+    string[string] input = ["b": "a", "e": "d", "d": "c"];
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved["b"] == "a");
+    assert(resolved["d"] == "c");
+    assert(resolved["e"] == "c");
+}
+
+unittest {
+    // A diamond: two different documents (b, c) both lose to the same
+    // intermediate (d), which itself loses to the true root (a). Both
+    // must resolve to a, not to d.
+    string[string] input = ["b": "d", "c": "d", "d": "a"];
+    auto resolved = resolveRepresentativeChains(input);
+    assert(resolved["b"] == "a");
+    assert(resolved["c"] == "a");
+    assert(resolved["d"] == "a");
+}
+
+unittest {
+    // Empty input resolves to empty output.
+    string[string] empty;
+    assert(resolveRepresentativeChains(empty).length == 0);
 }
 
 private AnnotationRecord annotation(OutputLink link, ubyte[32] contentDigest) {
@@ -717,6 +861,24 @@ version (unittest) {
         mkdirRecurse(root);
         return root;
     }
+
+    /// Issue #480 review round 1: general invariant check reused by pruning
+    /// tests below -- no `representative_id` an annotation overlay names
+    /// may ever be absent from the corresponding `prunedDestination`'s
+    /// surviving document set (see `resolveRepresentativeChains`'s own doc
+    /// comment for the structural reasoning this exists to double-check
+    /// end to end, against the actually-published artifacts, not this
+    /// module's internal state).
+    private void assertNoRepresentativeDangles(string annotationOverlayPath, string prunedShardPath) {
+        bool[string] surviving;
+        foreach (document; readAllDocuments(prunedShardPath)) surviving[document.id.text] = true;
+        foreach (record; readAllAnnotations(annotationOverlayPath)) {
+            auto representativeIdText = cast(string) record.fields[2].value;
+            assert((representativeIdText in surviving) !is null,
+                "representative_id " ~ representativeIdText ~ " named by document " ~
+                record.documentId ~ " must survive pruning, never be dangling");
+        }
+    }
 }
 
 unittest {
@@ -970,6 +1132,97 @@ unittest {
 }
 
 unittest {
+    // Issue #480 review round 1 (confirmed, reproduced blocker): a document
+    // that is NOT a whole-document near-duplicate of anything must never be
+    // pruned just because one of its *segments* closely matches a small,
+    // unrelated standalone document. `similaritySignatures` splits content
+    // over 4096 bytes into independent per-segment signatures, and every
+    // surviving band -- document-level or segment-level alike -- used to
+    // feed the same clustering/representative-selection decision with zero
+    // regard for how much of the matched document the shared content
+    // actually represents. This fixture is exactly that shape: a
+    // 7096-byte document made of 4096 bytes of genuinely unique prose
+    // followed by a 3000-byte trailing segment that is byte-identical to a
+    // small standalone document. The two documents' own *whole-document*
+    // jaccard estimate is well below threshold (this is deliberately NOT a
+    // document-level near-duplicate pair) -- only the large document's
+    // second *segment* matches the small document at all.
+    auto root = scratchRoot("segment-conflation");
+    scope(exit) rmdirRecurse(root);
+
+    string uniqueContent;
+    while (uniqueContent.length < 4096)
+        uniqueContent ~= "genuinely unique large document prose about distant mountain ranges. ";
+    uniqueContent = uniqueContent[0 .. 4096];
+
+    string boilerplate;
+    while (boilerplate.length < 3000)
+        boilerplate ~= "standard site footer boilerplate shared verbatim across many pages. ";
+    boilerplate = boilerplate[0 .. 3000];
+
+    auto largeContent = uniqueContent ~ boilerplate;
+    assert(largeContent.length == 7096);
+
+    // `DocumentId.from` hashes the source locator, so which of the two IDs
+    // sorts first is not directly controllable by content; search a small,
+    // fixed, deterministic sequence of record-key salts for one where the
+    // small document's ID sorts *before* the large document's -- exactly
+    // the ordering the reviewer's own live repro hit, and the one
+    // PruningPolicy.keepFirst is least safe under (it would otherwise pick
+    // the large, mostly-unique document as representative and this
+    // fixture would prove nothing about the bug).
+    string largeKey, smallKey;
+    foreach (salt; 0 .. 64) {
+        auto candidateLarge = "large-mostly-unique-" ~ salt.to!string;
+        auto candidateSmall = "small-boilerplate-only-" ~ salt.to!string;
+        auto largeId = testDocument("s", candidateLarge, "x").id;
+        auto smallId = testDocument("s", candidateSmall, "x").id;
+        if (smallId.text < largeId.text) {
+            largeKey = candidateLarge;
+            smallKey = candidateSmall;
+            break;
+        }
+    }
+    assert(largeKey.length != 0,
+        "fixture bug: could not find a salt where the small document's ID sorts before " ~
+        "the large document's within 64 tries");
+
+    auto largeDoc = testDocument("s", largeKey, largeContent);
+    auto smallDoc = testDocument("s", smallKey, boilerplate);
+
+    // Fixture self-check, using the real pipeline's own signature/estimate
+    // functions (not a hand-computed guess): confirms this really is the
+    // "segment matches, whole document does not" shape before trusting any
+    // conclusion drawn from it.
+    auto largeSig = similaritySignatures(largeDoc.id, largeDoc.content);
+    auto smallSig = similaritySignatures(smallDoc.id, smallDoc.content);
+    import domain.near_dedup_decision : jaccardEstimate;
+    assert(jaccardEstimate(largeSig.document, smallSig.document) < nearDuplicateThreshold,
+        "fixture bug: the two whole documents must NOT be near-duplicates of each other");
+    assert(largeSig.segments.length >= 2,
+        "fixture bug: the large document must split into at least two segments");
+    assert(jaccardEstimate(largeSig.segments[1], smallSig.document) >= nearDuplicateThreshold,
+        "fixture bug: the large document's second segment must closely match the small document");
+
+    auto documents = [largeDoc, smallDoc];
+    auto destination = buildPath(root, "near-dedup.overlay");
+    auto prunedShardPath = buildPath(root, "near-dedup-pruned.shard");
+    auto shard = buildFixtureShard(root, "segment-conflation", documents, destination);
+    shard.prunedDestination = prunedShardPath;
+
+    writeNearDedupOverlays([shard]); // default PruningPolicy.keepFirst
+    assertNoRepresentativeDangles(destination, prunedShardPath);
+
+    auto prunedDocuments = readAllDocuments(prunedShardPath);
+    bool[string] survivingIds;
+    foreach (document; prunedDocuments) survivingIds[document.id.text] = true;
+    assert((largeDoc.id.text in survivingIds) !is null,
+        "a document that is not a whole-document near-duplicate of anything must never be " ~
+        "pruned just because one of its segments matches an unrelated small document " ~
+        "(segment-level candidates must never drive a pruning decision)");
+}
+
+unittest {
     // Issue #480: PruningPolicy.keepLongest, exercised end to end through
     // this module's real external-memory pipeline (not the pure decision
     // function directly). Two documents share enough 5-byte shingles to
@@ -1051,6 +1304,7 @@ unittest {
     shard.prunedDestination = prunedShardPath;
 
     writeNearDedupOverlays([shard]);
+    assertNoRepresentativeDangles(destination, prunedShardPath);
 
     auto aId = testDocument("s", "a", "x").id;
     auto bId = testDocument("s", "b", "x").id;

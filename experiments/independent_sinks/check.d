@@ -207,6 +207,17 @@ private void checkNestedHazard(string root, string hazard) {
         "nested hazard changed output or manifest before publication");
 }
 
+/// Issue #467: `checkedRoot` now checks and resolves only the exact given
+/// root, not any ancestor above it (the same fix issue #458 already applied
+/// to `metadata_route_cli.d`'s own `checkedAncestors`/`checkedRoot`), so a
+/// root reached only through a benign ancestor symlink the caller doesn't
+/// control -- and never pre-resolves via `realpath` before calling in --
+/// must now construct and publish successfully, exactly like a caller that
+/// does pre-resolve. Before #467, this false-refused: `rootAlias`'s own
+/// component (`link`) sitting above `content`/`metadata` was itself a
+/// symlink, so the old full-ancestor walk rejected both sinks before the
+/// provider ever ran, even though `outside/content` and `outside/metadata`
+/// are genuine, non-aliasing directories.
 private void checkRootAncestorSymlink(string root) {
     auto safe = buildPath(root, "safe");
     auto outside = buildPath(root, "outside");
@@ -214,33 +225,22 @@ private void checkRootAncestorSymlink(string root) {
     mkdir(outside);
     auto rootAlias = buildPath(safe, "link");
     symlink(outside, rootAlias);
-    auto contentRoot = buildPath(outside, "content");
-    auto metadataRoot = buildPath(outside, "metadata");
-    mkdir(contentRoot);
-    mkdir(metadataRoot);
-    auto contentFile = buildPath(contentRoot, "prior");
-    auto metadataFile = buildPath(metadataRoot, "prior");
-    write(contentFile, "content-prior");
-    write(metadataFile, "metadata-prior");
-    auto contentInode = inode(contentFile);
-    auto metadataInode = inode(metadataFile);
-    auto db = buildPath(root, "manifest.db");
-    scope manifest = new LocalManifest(db);
-    bool providerCalled;
-    expectFailure({ new IndependentLocalSinks(manifest,
-        buildPath(rootAlias, "content"), buildPath(rootAlias, "metadata"),
-        key(contentSinkKey).inputSha256, key(contentSinkKey).configSha256,
-        key(metadataSinkKey).configSha256,
-        (StageEvent event) {
-            providerCalled = true;
-            return IndependentPayloads(event.payload.content, event.payload.content);
-        }); });
-    require(!providerCalled && manifest.lookup(key(contentSinkKey)).isNull &&
-        manifest.lookup(key(metadataSinkKey)).isNull &&
-        inode(contentFile) == contentInode && inode(metadataFile) == metadataInode &&
-        cast(const(ubyte)[]) read(contentFile) == cast(const(ubyte)[]) "content-prior" &&
-        cast(const(ubyte)[]) read(metadataFile) == cast(const(ubyte)[]) "metadata-prior",
-        "symlinked root ancestor reached provider, manifest, or outside outputs");
+    Paths p;
+    p.db = buildPath(root, "manifest.db");
+    // Unresolved: reached only through `rootAlias`, never directly through
+    // `outside` -- the shape a caller that skips pre-resolution would hand in.
+    p.contentRoot = buildPath(rootAlias, "content");
+    p.metadataRoot = buildPath(rootAlias, "metadata");
+    p.contentFile = buildPath(outside, "content", "record");
+    p.metadataFile = buildPath(outside, "metadata", "record");
+    mkdir(buildPath(outside, "content"));
+    mkdir(buildPath(outside, "metadata"));
+    run(p, false);
+    scope manifest = new LocalManifest(p.db);
+    require(manifest.lookup(key(contentSinkKey)).get.state == SinkState.committed &&
+        manifest.lookup(key(metadataSinkKey)).get.state == SinkState.committed &&
+        exists(p.contentFile) && exists(p.metadataFile),
+        "root reached only through a benign ancestor symlink must publish both sinks (issue #467)");
 }
 
 private void checkCrash(string root, string crashSink) {

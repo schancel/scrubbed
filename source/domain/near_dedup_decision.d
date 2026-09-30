@@ -49,6 +49,11 @@ enum double nearDuplicateThreshold = 0.8;
 /// The signature is caller-supplied, never computed here -- the same
 /// idiom `similarity_buckets.d` already established for bucket membership
 /// itself.
+///
+/// `contentLength` (issue #480) is likewise caller-supplied and is only
+/// ever consulted when `PruningPolicy.keepLongest` is in effect; it
+/// defaults to 0 and is otherwise ignored, so every pre-#480 caller that
+/// never sets it keeps its exact prior behavior.
 struct NearDedupCandidate {
     bool segment;
     size_t segmentOrdinal;
@@ -56,7 +61,26 @@ struct NearDedupCandidate {
     ulong bandKeyValue;
     bool overflowed;
     SimilaritySignature signature;
+    size_t contentLength;
 }
+
+/// Issue #480: which duplicate in a detected near-dup cluster survives as
+/// the representative. This is the "which one gets kept" half of
+/// trafilatura's `--deduplicate` parity slice; the separate "physically
+/// remove the others" half lives in `effects.near_dedup_overlay`'s optional
+/// pruned-shard output, gated independently by whether a caller names a
+/// `prunedDestination` -- this enum only ever affects representative
+/// *selection*, never whether removal happens at all.
+///
+/// `keepFirst` is the pre-#480 behavior byte-for-byte (lexicographically
+/// smallest canonical `DocumentId.text` wins, matching
+/// `effects.exact_dedup_overlay`'s own representative rule) and remains the
+/// default: every caller that does not pass a policy keeps its exact prior
+/// output. `keepLongest` picks the member with the greatest caller-supplied
+/// `NearDedupCandidate.contentLength` (ties broken by the same
+/// lexicographically-smallest-ID rule, for determinism independent of
+/// `members`' input order).
+enum PruningPolicy : ubyte { keepFirst, keepLongest }
 
 /// One non-representative document's near-duplicate link to its cluster's
 /// representative. Mirrors `domain.exact_dedup.ExactDuplicateLink`'s
@@ -95,10 +119,17 @@ struct NearDuplicateLink {
 ///
 /// Output is one `NearDuplicateLink` per non-representative document,
 /// sorted by `documentId.text` for deterministic, restart/worker-order-
-/// invariant output regardless of `members`' input order.
-NearDuplicateLink[] nearDuplicateLinksInBucket(const(NearDedupCandidate)[] members) {
+/// invariant output regardless of `members`' input order. `policy`
+/// (issue #480, default `PruningPolicy.keepFirst`) controls only which
+/// cluster member is chosen as the representative; every other rule above
+/// (connected-component grouping, the >=2 threshold, the hasKeys ==
+/// false exclusion, the first-signature-per-document dedup) is unchanged
+/// by `policy`.
+NearDuplicateLink[] nearDuplicateLinksInBucket(const(NearDedupCandidate)[] members,
+        PruningPolicy policy = PruningPolicy.keepFirst) {
     DocumentId[] ids;
     SimilaritySignature[] signatures;
+    size_t[] contentLengths;
     size_t[string] indexOf;
     foreach (member; members) {
         auto id = member.signature.documentId;
@@ -107,6 +138,7 @@ NearDuplicateLink[] nearDuplicateLinksInBucket(const(NearDedupCandidate)[] membe
         indexOf[id.text] = ids.length;
         ids ~= id;
         signatures ~= member.signature;
+        contentLengths ~= member.contentLength;
     }
 
     auto parent = new size_t[ids.length];
@@ -133,17 +165,32 @@ NearDuplicateLink[] nearDuplicateLinksInBucket(const(NearDedupCandidate)[] membe
         }
     }
 
-    DocumentId[][size_t] groups;
-    foreach (i; 0 .. ids.length) groups[find(i)] ~= ids[i];
+    size_t[][size_t] groups; // root -> indices into ids[]/contentLengths[]
+    foreach (i; 0 .. ids.length) groups[find(i)] ~= i;
 
     NearDuplicateLink[] links;
-    foreach (root, groupIds; groups) {
-        if (groupIds.length < 2) continue;
-        auto representative = groupIds[0];
-        foreach (id; groupIds[1 .. $])
-            if (id.text < representative.text) representative = id;
-        foreach (id; groupIds)
-            if (id != representative) links ~= NearDuplicateLink(id, representative);
+    foreach (root, indices; groups) {
+        if (indices.length < 2) continue;
+        DocumentId representative = ids[indices[0]];
+        final switch (policy) {
+        case PruningPolicy.keepFirst:
+            foreach (i; indices[1 .. $])
+                if (ids[i].text < representative.text) representative = ids[i];
+            break;
+        case PruningPolicy.keepLongest:
+            auto bestLength = contentLengths[indices[0]];
+            foreach (i; indices[1 .. $]) {
+                auto length = contentLengths[i];
+                if (length > bestLength ||
+                        (length == bestLength && ids[i].text < representative.text)) {
+                    bestLength = length;
+                    representative = ids[i];
+                }
+            }
+            break;
+        }
+        foreach (i; indices)
+            if (ids[i] != representative) links ~= NearDuplicateLink(ids[i], representative);
     }
     links.sort!((a, b) => a.documentId.text < b.documentId.text);
     return links;
@@ -167,8 +214,8 @@ version (unittest) {
         return signature;
     }
 
-    private NearDedupCandidate testMember(SimilaritySignature signature) {
-        return NearDedupCandidate(false, 0, 0, 0, false, signature);
+    private NearDedupCandidate testMember(SimilaritySignature signature, size_t contentLength = 0) {
+        return NearDedupCandidate(false, 0, 0, 0, false, signature, contentLength);
     }
 }
 
@@ -325,4 +372,115 @@ unittest {
     auto links = nearDuplicateLinksInBucket(
         [testMember(solo), testMember(solo), testMember(solo)]);
     assert(links.length == 0);
+}
+
+unittest {
+    // Issue #480: omitting `policy` (every pre-#480 call site) reproduces
+    // `PruningPolicy.keepFirst` exactly -- the lexicographically-smallest-ID
+    // rule, completely independent of `contentLength` (left at its default
+    // 0 for every member here). This is the "no regression when pruning is
+    // off" proof for the pure decision layer: identical output whether or
+    // not the new parameter is named at all.
+    ulong[similarityLanes] lanes;
+    foreach (i; 0 .. similarityLanes) lanes[i] = i;
+    auto x = testSignature("policy-default-x", lanes);
+    auto y = testSignature("policy-default-y", lanes);
+    auto expectedRepresentative = x.documentId.text < y.documentId.text ?
+        x.documentId : y.documentId;
+
+    auto implicitDefault = nearDuplicateLinksInBucket([testMember(x), testMember(y)]);
+    auto explicitKeepFirst = nearDuplicateLinksInBucket(
+        [testMember(x), testMember(y)], PruningPolicy.keepFirst);
+    assert(implicitDefault.length == 1 && explicitKeepFirst.length == 1);
+    assert(implicitDefault[0] == explicitKeepFirst[0]);
+    assert(implicitDefault[0].representativeId == expectedRepresentative);
+}
+
+unittest {
+    // Issue #480: PruningPolicy.keepLongest picks the member with the
+    // greatest caller-supplied contentLength as representative, even when
+    // its ID is lexicographically *larger* than its cluster-mate's --
+    // proving the policy genuinely overrides keepFirst's ID-only rule
+    // rather than merely tie-breaking it.
+    // `DocumentId.from` is a content-addressed hash of the source locator,
+    // not the literal record key, so which of these two IDs sorts first is
+    // determined empirically rather than assumed from the key spelling --
+    // then the *lexicographically-later* one is deliberately given the
+    // greater contentLength, so a passing keepLongest result can only be
+    // explained by the policy actually overriding keepFirst's ID-only rule.
+    ulong[similarityLanes] lanes;
+    foreach (i; 0 .. similarityLanes) lanes[i] = i;
+    auto candidateOne = testSignature("policy-override-one", lanes);
+    auto candidateTwo = testSignature("policy-override-two", lanes);
+    auto firstById = candidateOne.documentId.text < candidateTwo.documentId.text ?
+        candidateOne : candidateTwo;
+    auto laterById = firstById == candidateOne ? candidateTwo : candidateOne;
+    auto shortDoc = firstById;  // lexicographically first, deliberately shorter
+    auto longDoc = laterById;   // lexicographically later, deliberately longer
+
+    auto keepFirstLinks = nearDuplicateLinksInBucket(
+        [testMember(shortDoc, 10), testMember(longDoc, 500)], PruningPolicy.keepFirst);
+    assert(keepFirstLinks.length == 1);
+    assert(keepFirstLinks[0].representativeId == shortDoc.documentId,
+        "keepFirst must ignore contentLength entirely");
+
+    auto keepLongestLinks = nearDuplicateLinksInBucket(
+        [testMember(shortDoc, 10), testMember(longDoc, 500)], PruningPolicy.keepLongest);
+    assert(keepLongestLinks.length == 1);
+    assert(keepLongestLinks[0].representativeId == longDoc.documentId,
+        "keepLongest must select the greater contentLength regardless of ID order");
+    assert(keepLongestLinks[0].documentId == shortDoc.documentId);
+}
+
+unittest {
+    // Issue #480: PruningPolicy.keepLongest ties on contentLength fall back
+    // to the same lexicographically-smallest-ID rule as keepFirst, for
+    // deterministic, order-invariant output.
+    ulong[similarityLanes] lanes;
+    foreach (i; 0 .. similarityLanes) lanes[i] = i;
+    auto a = testSignature("tie-a", lanes);
+    auto b = testSignature("tie-b", lanes);
+    auto expectedRepresentative = a.documentId.text < b.documentId.text ?
+        a.documentId : b.documentId;
+
+    auto forward = nearDuplicateLinksInBucket(
+        [testMember(a, 100), testMember(b, 100)], PruningPolicy.keepLongest);
+    auto reversed = nearDuplicateLinksInBucket(
+        [testMember(b, 100), testMember(a, 100)], PruningPolicy.keepLongest);
+    assert(forward.length == 1 && reversed.length == 1);
+    assert(forward[0].representativeId == expectedRepresentative);
+    assert(reversed[0].representativeId == expectedRepresentative);
+}
+
+unittest {
+    // Issue #480: keepLongest extended to a three-member transitive cluster
+    // (mirroring the existing chain fixture's topology) -- the single
+    // longest member wins as representative even though it is neither the
+    // first- nor last-sorted ID, and connected-component grouping is
+    // unaffected by policy.
+    ulong[similarityLanes] aLanes;
+    foreach (i; 0 .. similarityLanes) aLanes[i] = i;
+    ulong[similarityLanes] bLanes;
+    foreach (i; 0 .. 56) bLanes[i] = i;
+    foreach (i; 56 .. similarityLanes) bLanes[i] = 1000 + i;
+    ulong[similarityLanes] cLanes;
+    foreach (i; 0 .. 48) cLanes[i] = i;
+    foreach (i; 48 .. 56) cLanes[i] = 2000 + i;
+    foreach (i; 56 .. similarityLanes) cLanes[i] = 1000 + i;
+
+    auto a = testSignature("mid-a", aLanes);
+    auto b = testSignature("mid-b-longest", bLanes);
+    auto c = testSignature("mid-c", cLanes);
+    assert(jaccardEstimate(a, b) >= nearDuplicateThreshold);
+    assert(jaccardEstimate(b, c) >= nearDuplicateThreshold);
+    assert(jaccardEstimate(a, c) < nearDuplicateThreshold);
+
+    auto links = nearDuplicateLinksInBucket(
+        [testMember(a, 50), testMember(b, 999), testMember(c, 50)],
+        PruningPolicy.keepLongest);
+    assert(links.length == 2);
+    foreach (link; links) {
+        assert(link.representativeId == b.documentId);
+        assert(link.documentId != b.documentId);
+    }
 }

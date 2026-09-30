@@ -1722,8 +1722,14 @@ version (Posix) unittest {
         PruneOptions.init));
     assert(observed.length == 0,
         "a changed representative must fail before emitting any decision");
-    foreach (entry; dirEntries(nested, SpanMode.shallow, false))
-        assert(!entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1));
+    size_t remainingFiles;
+    foreach (entry; dirEntries(nested, SpanMode.shallow, false)) {
+        assert(entry.isFile &&
+            entry.name.endsWith(documentMetadataPublishSuffixV1),
+            "failed publication must remove its temporary artifact");
+        ++remainingFiles;
+    }
+    assert(remainingFiles == 2);
 }
 
 // Reachability: the stage is genuinely self-registering, and a run through

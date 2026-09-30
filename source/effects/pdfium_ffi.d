@@ -112,6 +112,39 @@ private alias FPDFText_ClosePage_t = extern (C) void function(void*);
 private alias FPDFText_CountChars_t = extern (C) int function(void*);
 private alias FPDFText_GetText_t = extern (C) int function(void*, int, int, ushort*);
 
+version (unittest) {
+    private enum FakePdfiumFailureV1 {
+        loadPage, loadTextPage, countChars, blankPage, getText
+    }
+    private FakePdfiumFailureV1 fakePdfiumFailureV1;
+    private extern (C) void* fakeLoadMemDocumentV1(
+            const(void)*, int, const(char)*) {
+        return cast(void*) 1;
+    }
+    private extern (C) void fakeCloseHandleV1(void*) {}
+    private extern (C) int fakePageCountV1(void*) { return 1; }
+    private extern (C) void* fakeLoadPageV1(void*, int) {
+        return fakePdfiumFailureV1 == FakePdfiumFailureV1.loadPage
+            ? null : cast(void*) 2;
+    }
+    private extern (C) void* fakeLoadTextPageV1(void*) {
+        return fakePdfiumFailureV1 == FakePdfiumFailureV1.loadTextPage
+            ? null : cast(void*) 3;
+    }
+    private extern (C) int fakeCountCharsV1(void*) {
+        final switch (fakePdfiumFailureV1) {
+        case FakePdfiumFailureV1.countChars: return -1;
+        case FakePdfiumFailureV1.blankPage: return 0;
+        case FakePdfiumFailureV1.loadPage:
+        case FakePdfiumFailureV1.loadTextPage:
+        case FakePdfiumFailureV1.getText: return 1;
+        }
+    }
+    private extern (C) int fakeGetTextV1(void*, int, int, ushort*) {
+        return 0;
+    }
+}
+
 /// `FPDF_GetLastError()` codes this module distinguishes, from the real
 /// `public/fpdfview.h` (`#define FPDF_ERR_* ...`). Only the two outcomes
 /// this module's typed result distinguishes are named; every other nonzero
@@ -314,20 +347,24 @@ PdfExtractResultV1 extractPdfTextV1(PdfiumLibrary lib, const(ubyte)[] pdfBytes,
     foreach (index; 0 .. pageCount) {
         auto page = lib.fLoadPage(doc, index);
         if (page is null) {
-            pages ~= "";
-            continue;
+            result.outcome = PdfExtractOutcomeV1.malformed;
+            return result;
         }
         scope (exit) lib.fClosePage(page);
 
         auto textPage = lib.fTextLoadPage(page);
         if (textPage is null) {
-            pages ~= "";
-            continue;
+            result.outcome = PdfExtractOutcomeV1.malformed;
+            return result;
         }
         scope (exit) lib.fTextClosePage(textPage);
 
         immutable charCount = lib.fTextCountChars(textPage);
-        if (charCount <= 0) {
+        if (charCount < 0) {
+            result.outcome = PdfExtractOutcomeV1.malformed;
+            return result;
+        }
+        if (charCount == 0) {
             pages ~= "";
             continue;
         }
@@ -338,6 +375,10 @@ PdfExtractResultV1 extractPdfTextV1(PdfiumLibrary lib, const(ubyte)[] pdfBytes,
 
         auto buffer = new ushort[](charCount + 1);
         immutable written = lib.fTextGetText(textPage, 0, charCount, buffer.ptr);
+        if (written <= 0) {
+            result.outcome = PdfExtractOutcomeV1.malformed;
+            return result;
+        }
         // FPDFText_GetText's return includes the trailing UCS-2 terminator;
         // drop it before decoding.
         immutable usable = written > 0 ? written - 1 : 0;
@@ -347,6 +388,35 @@ PdfExtractResultV1 extractPdfTextV1(PdfiumLibrary lib, const(ubyte)[] pdfBytes,
     result.outcome = PdfExtractOutcomeV1.ok;
     result.pages = pages;
     return result;
+}
+
+version (unittest) unittest {
+    auto fakeLibrary() {
+        auto lib = new PdfiumLibrary();
+        lib.fLoadMemDocument = &fakeLoadMemDocumentV1;
+        lib.fCloseDocument = &fakeCloseHandleV1;
+        lib.fGetPageCount = &fakePageCountV1;
+        lib.fLoadPage = &fakeLoadPageV1;
+        lib.fClosePage = &fakeCloseHandleV1;
+        lib.fTextLoadPage = &fakeLoadTextPageV1;
+        lib.fTextClosePage = &fakeCloseHandleV1;
+        lib.fTextCountChars = &fakeCountCharsV1;
+        lib.fTextGetText = &fakeGetTextV1;
+        return lib;
+    }
+
+    foreach (failure; [FakePdfiumFailureV1.loadPage,
+            FakePdfiumFailureV1.loadTextPage,
+            FakePdfiumFailureV1.countChars,
+            FakePdfiumFailureV1.getText]) {
+        fakePdfiumFailureV1 = failure;
+        assert(extractPdfTextV1(fakeLibrary(), [cast(ubyte) '%'], 1, 16).outcome ==
+            PdfExtractOutcomeV1.malformed);
+    }
+    fakePdfiumFailureV1 = FakePdfiumFailureV1.blankPage;
+    auto blank = extractPdfTextV1(fakeLibrary(), [cast(ubyte) '%'], 1, 16);
+    assert(blank.outcome == PdfExtractOutcomeV1.ok);
+    assert(blank.pages == [""]);
 }
 
 /// Decodes a UCS-2/UTF-16 code-unit buffer (PDFium's `FPDFText_GetText`
@@ -437,10 +507,13 @@ unittest {
 final class LockedPdfiumLibraryV1 {
     private PdfiumLibrary lib;
     private Mutex mutex;
+    private immutable(char)[] libraryPath;
+    private bool closed;
 
-    this(PdfiumLibrary lib) {
+    this(PdfiumLibrary lib, string libraryPath) {
         this.lib = lib;
         this.mutex = new Mutex();
+        this.libraryPath = libraryPath.idup;
     }
 
     /// Serialized real extraction call. Never throws for ordinary
@@ -450,7 +523,16 @@ final class LockedPdfiumLibraryV1 {
     PdfExtractResultV1 extract(const(ubyte)[] pdfBytes, size_t maxPages,
             size_t maxBytesPerPage) {
         synchronized (mutex) {
+            import std.exception : enforce;
+
+            enforce(!closed, "PDFium library is closed");
             return extractPdfTextV1(lib, pdfBytes, maxPages, maxBytesPerPage);
+        }
+    }
+
+    private bool isOpenFor(string path) {
+        synchronized (mutex) {
+            return !closed && libraryPath == path;
         }
     }
 
@@ -463,7 +545,9 @@ final class LockedPdfiumLibraryV1 {
     /// a future test harness) that need explicit, deterministic teardown.
     void close() {
         synchronized (mutex) {
+            if (closed) return;
             lib.close();
+            closed = true;
         }
     }
 }
@@ -471,43 +555,61 @@ final class LockedPdfiumLibraryV1 {
 /// See `extraction.pdf_pdfium_route`'s own doc comment, "The injection"
 /// section, for why this is a module-global slot rather than a closure.
 /// Unlike that module's own mirroring slot (`installedPdfBytesExtractV1`,
-/// which is written and read exactly once, both on the CLI's main thread,
-/// before any worker thread exists -- safe as ordinary, thread-local
-/// storage), this slot is genuinely different: it is written once, on the
-/// main thread, but then *read* on every single `pdfBytesExtractV1` call --
-/// which happens once per PDF document, on whichever `--threads` worker
-/// thread actually processes that document
+/// which is written and read exactly once on each caller thread -- safe as
+/// ordinary, thread-local storage), this slot is genuinely different: it is
+/// installed process-wide and then *read* on every single
+/// `pdfBytesExtractV1` call -- which happens once per PDF document, on
+/// whichever `--threads` worker thread actually processes that document
 /// (`composition.dispatch_executor.d`'s own concurrent-dispatch test proves
 /// this is real, not hypothetical). Ordinary D module storage is
 /// thread-local, so an ordinary variable here would leave every worker
 /// thread other than the one that happened to call `installPdfiumLibraryV1`
 /// looking at its own, never-written, `null` copy -- a real bug, not a
 /// theoretical one, caught during this slice's own implementation. Marked
-/// `__gshared` so every thread reads the one real, main-thread-installed
-/// value. Safe as a write-once(-on-the-main-thread)-then-read-many pattern:
-/// the write happens-before any worker thread is spawned (`core.thread
-/// .Thread.start`'s own creation is itself a synchronization point), and
-/// the pointer itself is never reassigned afterward -- only the
-/// `LockedPdfiumLibraryV1` it refers to is ever mutated post-install, and
-/// that mutation is exactly what its own internal `Mutex` protects.
+/// `__gshared` so every thread reads the one real value. The process-global
+/// install mutex makes concurrent first installation single-writer and
+/// makes same-path reinstallation a read-only success; the pointer is never
+/// reassigned after the first successful install. Every caller completes
+/// installation before spawning its workers (`core.thread.Thread.start` is
+/// itself a synchronization point), and the wrapper's own mutex protects
+/// extraction and explicit close.
+private __gshared Mutex pdfiumInstallMutexV1;
 private __gshared LockedPdfiumLibraryV1 activePdfiumLibraryV1;
+
+shared static this() {
+    pdfiumInstallMutexV1 = new Mutex();
+}
 
 /// `dlopen()`s/`dlsym()`s the operator-supplied PDFium library at
 /// `libraryPath` (via `PdfiumLibrary.open`, unchanged), wraps it with a
 /// serializing `Mutex` (`LockedPdfiumLibraryV1`), and installs it as this
 /// module's single active library -- the one `pdfBytesExtractV1` (below)
-/// calls into. Must be called at most once per process, on the CLI's own
-/// main thread, before any document is dispatched to the `pdf-pdfium`
-/// route (`cli.d`'s own `resolvePdfBytesExtractV1` is the one real caller).
+/// calls into. Installation is process-global and idempotent for the same
+/// path. A later attempt to install a different path fails closed rather
+/// than replacing the active wrapper and creating a second PDFium lock
+/// domain.
 /// Returns `true` on success, `false` on any dlopen/dlsym/init failure --
 /// content-free, matching `PdfiumLibrary.open`'s own discipline; the caller
 /// (`cli.d`) turns a `false` return into `pdfiumLoadFailureMessage` before
 /// any document is processed.
 bool installPdfiumLibraryV1(string libraryPath) {
-    auto lib = PdfiumLibrary.open(libraryPath);
-    if (lib is null) return false;
-    activePdfiumLibraryV1 = new LockedPdfiumLibraryV1(lib);
-    return true;
+    synchronized (pdfiumInstallMutexV1) {
+        if (activePdfiumLibraryV1 !is null)
+            return activePdfiumLibraryV1.isOpenFor(libraryPath);
+        auto lib = PdfiumLibrary.open(libraryPath);
+        if (lib is null) return false;
+        activePdfiumLibraryV1 = new LockedPdfiumLibraryV1(lib, libraryPath);
+        return true;
+    }
+}
+
+unittest {
+    import std.exception : assertThrown;
+
+    auto unopened = new PdfiumLibrary();
+    auto locked = new LockedPdfiumLibraryV1(unopened, "/test/pdfium");
+    locked.close();
+    assertThrown!Exception(locked.extract([], 1, 1));
 }
 
 /// The real implementation behind `extraction.port.PdfBytesExtractV1`,

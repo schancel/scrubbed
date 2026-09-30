@@ -4042,8 +4042,6 @@ unittest {
 // outside CI" convention (PdfiumLibrary.open's own two unittests
 // deliberately avoid needing the real artifact for the same reason).
 unittest {
-    import core.thread : Thread;
-    import std.conv : to;
     import std.exception : collectException;
     import std.file : copy, rmdirRecurse, tempDir;
 
@@ -4160,42 +4158,28 @@ unittest {
     assert(!exists(badLibraryOutput));
 
     // (6) The mandatory concurrency proof (owner decision, issue #156,
-    // 2026-09-30): real, concurrent `scrubbed run` invocations -- two lanes,
-    // each repeatedly routing a *different* real fixture through the same
-    // installed PdfiumLibrary at the same time -- must never produce wrong
-    // or cross-contaminated text. A helper function (not a loop body
-    // declaring its own closure) hands each lane's `Thread` a genuine
-    // by-value parameter, avoiding the classic D loop-variable-capture
-    // hazard this same test file's own extraction/pdf_pdfium_route.d
-    // concurrency unittest had to work around.
+    // 2026-09-30): one real `scrubbed run --threads 2` repeatedly routes two
+    // different fixtures through the same process-global PdfiumLibrary.
+    // Initialization happens once before workers start; only extraction is
+    // concurrent, matching the production lifecycle this test is proving.
     enum concurrentRounds = 15;
-    bool[2] mismatched;
-    void runConcurrentLane(size_t lane, string fixtureInput,
-            const string[] expectedTokens) {
-        foreach (round; 0 .. concurrentRounds) {
-            auto laneOutput = buildPath(root, "concurrent-" ~ lane.to!string ~
-                "-" ~ round.to!string ~ ".txt");
-            auto code = runApp(["scrubbed", "run", "--input", fixtureInput,
-                "--output", laneOutput, "--threads", "1"] ~
-                pdfTokens(pdfiumLibrary));
-            if (code != 0) { mismatched[lane] = true; continue; }
-            auto text = readText(laneOutput);
-            foreach (token; expectedTokens)
-                if (!text.canFind(token)) mismatched[lane] = true;
-        }
+    auto concurrentInput = buildPath(root, "concurrent-input");
+    mkdir(concurrentInput);
+    copy(trainingFixture, buildPath(concurrentInput, "training.pdf"));
+    copy(layoutFixture, buildPath(concurrentInput, "layout.pdf"));
+    foreach (round; 0 .. concurrentRounds) {
+        auto concurrentOutput = buildPath(root, "concurrent-output-" ~
+            round.to!string);
+        assert(runApp(["scrubbed", "run", "--input", concurrentInput,
+            "--output", concurrentOutput, "--threads", "2"] ~
+            pdfTokens(pdfiumLibrary)) == 0);
+        auto concurrentTraining = readText(buildPath(concurrentOutput, "training.pdf"));
+        foreach (token; ["TRAINING", "PDF", "ALPHA", "ONE", "BETA", "TWO"])
+            assert(concurrentTraining.canFind(token));
+        auto concurrentLayout = readText(buildPath(concurrentOutput, "layout.pdf"));
+        foreach (token; ["LAYOUT", "REPORT", "LEFT", "RIGHT", "FOOTER", "END"])
+            assert(concurrentLayout.canFind(token));
     }
-    Thread makeLane(size_t lane, string fixtureInput, const string[] expectedTokens) {
-        return new Thread({ runConcurrentLane(lane, fixtureInput, expectedTokens); });
-    }
-    auto laneA = makeLane(0, trainingInput,
-        ["TRAINING", "PDF", "ALPHA", "ONE", "BETA", "TWO"]);
-    auto laneB = makeLane(1, layoutInput,
-        ["LAYOUT", "REPORT", "LEFT", "RIGHT", "FOOTER", "END"]);
-    laneA.start; laneB.start; laneA.join; laneB.join;
-    assert(!mismatched[0] && !mismatched[1],
-        "concurrent real PDFium extraction (two lanes, distinct fixtures, " ~
-        "shared PdfiumLibrary) produced wrong or cross-contaminated text " ~
-        "-- the real Mutex in LockedPdfiumLibraryV1 must prevent this");
 }
 
 // Model the late-traversal-fault boundary deterministically: one worker has

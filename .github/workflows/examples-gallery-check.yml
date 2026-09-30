@@ -43,7 +43,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake libcurl4-openssl-dev python3
+            build-essential cmake libcurl4-openssl-dev python3 zsh
 
       - name: Build release binary
         run: dub build --compiler=ldc2 --build=release

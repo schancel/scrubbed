@@ -4,7 +4,7 @@ module effects.html_markdown;
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
 import std.conv : to;
 import std.exception : assumeUnique;
-import std.uni : isControl, isFormat, isSpace;
+import std.uni : isControl, isFormat, isSpace, isWhite;
 import std.utf : UTFException, encode;
 
 enum size_t maxMarkdownBytes = 4 * 1024 * 1024;
@@ -128,11 +128,21 @@ string clean(string input, bool code = false) pure {
             writer.put(cast(string)encoded[0 .. encode(encoded, c)]);
             continue;
         }
-        if (isControl(c) || isFormat(c)) continue;
-        if (isSpace(c) || c == 0x2028 || c == 0x2029) {
+        // isWhite is checked before isControl: `\n`, `\t`, `\r`, `\f`, `\v`
+        // are Unicode Cc (control) characters that are ALSO White_Space, so
+        // an isControl-first check would drop them outright (issue #516)
+        // instead of collapsing them into the same single space as an
+        // ordinary run of ' '/NBSP. isWhite already covers 0x2028/0x2029
+        // (previously special-cased here because isSpace alone does not),
+        // so that OR-clause is now redundant and removed. A control
+        // character that is not whitespace (NUL, ESC, other C0/C1 controls)
+        // falls through to the isControl check below and is still dropped
+        // exactly as before.
+        if (isWhite(c)) {
             pending = true;
             continue;
         }
+        if (isControl(c) || isFormat(c)) continue;
         if (pending) writer.put(" ");
         pending = false;
         switch (c) {
@@ -150,6 +160,41 @@ string clean(string input, bool code = false) pure {
     }
     if (pending) writer.put(" ");
     return writer.finish();
+}
+
+// Issue #516 regression: `isControl` was checked before `isSpace` in
+// `clean()`'s non-code path, and `\n`/`\t`/`\r` are Unicode Cc (control)
+// characters, so they hit the isControl branch first and were dropped
+// outright instead of collapsing into a single space -- silently gluing
+// adjacent words together in the Markdown output. Fail before the fix
+// (isControl checked first): `clean("first\nsecond")` produced
+// "firstsecond". Pass after (isWhite checked first, replacing the narrower
+// isSpace which does not cover these control-whitespace characters): words
+// stay space-separated, using the same `pending`-flag run-collapsing an
+// ordinary space run already got.
+unittest {
+    assert(clean("first\nsecond") == "first second",
+        "a bare newline between words must collapse to a space, not glue them (#516)");
+    assert(clean("third\tfourth") == "third fourth",
+        "a bare tab between words must collapse to a space, not glue them (#516)");
+    assert(clean("fifth\r\nsixth") == "fifth sixth",
+        "a CRLF pair between words must collapse to a single space, not glue them (#516)");
+    assert(clean("seventh\n\t\reighth") == "seventh eighth",
+        "a run of mixed whitespace-classified control characters must still " ~
+        "collapse to a single space (#516)");
+
+    // A genuinely non-whitespace control character (NUL) must still be
+    // dropped outright, not converted to a space -- this must not regress.
+    assert(clean("ninth\0tenth") == "ninthtenth",
+        "a non-whitespace control character (NUL) must still be dropped " ~
+        "outright, not converted to a space (#516)");
+
+    // The `code` path is a distinct, unaffected branch: it deliberately
+    // preserves `\n`/`\t` literally (canonicalizing `\r` to `\n`) rather
+    // than collapsing them, exactly as before this fix.
+    assert(clean("first\nsecond", true) == "first\nsecond");
+    assert(clean("first\tsecond", true) == "first\tsecond");
+    assert(clean("first\r\nsecond", true) == "first\n\nsecond");
 }
 
 private string singleLine(string input) pure {
@@ -809,6 +854,28 @@ unittest {
     import std.algorithm.searching : canFind;
     assert(!scoped.canFind("Home"));
     assert(!scoped.canFind("Copyright"));
+}
+
+// Issue #516, through the real DOM-selection path (the actual lexbor
+// parser, not a hand-built tree) -- the ticket's own reproduction,
+// verbatim: bare newline/tab text nodes interleaved with inline
+// `<b>`/`<i>` elements must render as space-separated words, not glued
+// together, in the Markdown output too (mirrors html_main_content.d's own
+// #516 real-DOM regression test).
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    auto outcome = parseHtml(cast(const(ubyte)[])
+        "<p>alpha\n<b>beta</b>\n<i>gamma</i> one\ntwo\tthree</p>");
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto rendered = renderMarkdown(tree);
+    assert(rendered.canFind("alpha **beta** *gamma* one two three"),
+        "the ticket's own real-DOM repro must not glue words together (#516)");
+    assert(!rendered.canFind("alpha**beta***gamma*"),
+        "the ticket's own real-DOM repro must not glue words together (#516)");
 }
 
 // Issue #477 regression: before `MarkdownRenderOptions` existed, neither

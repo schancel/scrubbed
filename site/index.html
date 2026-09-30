@@ -85,7 +85,7 @@
     <p>Corpus cleaning often means chaining several tools and repeatedly reading and writing the same documents. scrubbed combines encoding repair, main-content extraction, and PII scanning in one pipeline, with language ID and dedup available as additional stages.</p>
 
     <h2 id="fit">Where this fits in a training pipeline</h2>
-    <p>scrubbed collects pages and cleans them into text or JSONL for your existing tokenizer, shard writer, and training stack.</p>
+    <p>scrubbed collects pages, cleans files to text, and transforms selected fields in existing JSONL streams.</p>
     <div class="pipeline-steps">
         <div class="step here">Collect<br><span style="font-size:0.78rem;font-weight:normal;">scrubbed crawl</span></div>
         <div class="arrow">&rarr;</div>
@@ -144,7 +144,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Repairs encoding damage, extracts the article, captures metadata, scans for common PII, and writes an audit sidecar.</p>
 
     <h2 id="verified">Verified against the tools it replaces</h2>
-    <p class="note">Reproduce the <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">comparators</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">extraction benchmark</a>, or <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake benchmark</a>.</p>
+    <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
     <div class="stats">
         <div class="stat-card">
             <span class="big">39/39 + 48/48</span>
@@ -169,7 +169,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <div class="stat-card">
             <span class="big">~25x</span>
             <span class="label">vs. ftfy alone, whole-process wall time</span>
-            <p>Whole-process wall time on a 5.9 MB mojibake workload.</p>
+            <p>One 5.9 MB file made by repeating a sentence 131,072 times; not a general corpus benchmark.</p>
         </div>
     </div>
 

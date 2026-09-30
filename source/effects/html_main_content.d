@@ -459,26 +459,88 @@ private string decodeStructuredDataEntities(string text) pure {
     return copied ? cast(string) result : text;
 }
 
+// Case-insensitive "does `raw[start ..]` begin with the tag name `name`,
+// followed by a non-name character (or end of string)" check -- so `name ==
+// "script"` matches "<script>"/"<SCRIPT "/"<Script/>" but not "<scripted>".
+// `nothrow @nogc`: only byte comparisons, no allocation.
+private bool tagNameAt(string raw, size_t start, string name) pure nothrow @nogc {
+    if (start + name.length > raw.length) return false;
+    foreach (k, expected; name) {
+        char actual = raw[start + k];
+        if (actual >= 'A' && actual <= 'Z') actual = cast(char) (actual + 32);
+        if (actual != expected) return false;
+    }
+    size_t after = start + name.length;
+    if (after >= raw.length) return true;
+    char next = raw[after];
+    return !((next >= 'a' && next <= 'z') || (next >= 'A' && next <= 'Z') ||
+        (next >= '0' && next <= '9') || next == '-' || next == '_');
+}
+
+// Issue #484: mirrors `hiddenTag`'s DOM-path exclusion of `<script>`/
+// `<style>` *descendants*, not just their own tags, for this JSON-LD
+// fallback's naive tag-stripper -- without this, a `<script>`/`<style>`
+// element embedded inside a recovered JSON-LD string value has its tags
+// removed by the ordinary per-tag stripping below but its non-visible text
+// content left behind as if it were real prose (exactly the leak this
+// ticket reports). Given `raw[i] == '<'`, returns the number of bytes
+// spanned by a `<script>`/`<style>` *opening* tag found there through its
+// matching closing tag's final `>` (0 when `raw[i]` is not such an opening
+// tag, in which case the caller's ordinary single-tag stripping still
+// applies). An opening tag with no matching close consumes to end-of-string,
+// matching a real HTML tokenizer's raw-text-element handling (an
+// unterminated `<script>`/`<style>` swallows the rest of the document
+// rather than leaking as visible text) -- same "abstain toward hiding, not
+// leaking" bias as `hiddenTag`'s own use.
+private size_t hiddenElementSpanLength(string raw, size_t i) pure nothrow @nogc {
+    size_t j = i + 1;
+    if (j >= raw.length || raw[j] == '/') return 0; // a closing tag, not opening
+    string tag;
+    if (tagNameAt(raw, j, "script")) tag = "script";
+    else if (tagNameAt(raw, j, "style")) tag = "style";
+    else return 0;
+
+    size_t k = j + tag.length;
+    while (k < raw.length && raw[k] != '>') ++k;
+    if (k >= raw.length) return raw.length - i; // unterminated opening tag
+    ++k; // past the opening tag's '>'
+
+    while (k < raw.length) {
+        if (raw[k] == '<' && k + 1 < raw.length && raw[k + 1] == '/' &&
+                tagNameAt(raw, k + 2, tag)) {
+            size_t closeEnd = k + 2 + tag.length;
+            while (closeEnd < raw.length && raw[closeEnd] != '>') ++closeEnd;
+            if (closeEnd < raw.length) ++closeEnd; // include the closing tag's '>'
+            return closeEnd - i;
+        }
+        ++k;
+    }
+    return raw.length - i; // no closing tag found: consume to end-of-string
+}
+
 // Strips literal HTML tags a schema.org JSON text/articleBody value may
 // carry -- the exact www-homify-de.html HowTo `step[].itemListElement.text`
 // shape ("<p>...</p>"). A removed tag becomes a single space (never a
 // direct word concatenation), then decodes any character references left
 // over (`_render_text`'s own two-step "unescape, then strip markup" shape,
 // just in the opposite order -- decoding after stripping means a decoded
-// `&lt;`/`&gt;` can never be mistaken for a real tag boundary).
+// `&lt;`/`&gt;` can never be mistaken for a real tag boundary). Issue #484:
+// a `<script>`/`<style>` element's own text content is dropped along with
+// its tags (`hiddenElementSpanLength`), not merely un-tagged into visible
+// text, matching the DOM-selection path's `hiddenTag` exclusion.
 private string plainTextFromStructuredData(string raw) pure {
     char[] stripped;
     stripped.reserve(raw.length);
-    bool inTag;
-    foreach (c; raw) {
-        if (c == '<') {
-            inTag = true;
-            if (stripped.length && stripped[$ - 1] != ' ') stripped ~= ' ';
-            continue;
-        }
-        if (c == '>') { inTag = false; continue; }
-        if (inTag) continue;
-        stripped ~= c;
+    size_t i;
+    while (i < raw.length) {
+        char c = raw[i];
+        if (c != '<') { stripped ~= c; ++i; continue; }
+        if (stripped.length && stripped[$ - 1] != ' ') stripped ~= ' ';
+        auto hiddenSpan = hiddenElementSpanLength(raw, i);
+        if (hiddenSpan > 0) { i += hiddenSpan; continue; }
+        ++i;
+        while (i < raw.length && raw[i] != '>') ++i;
+        if (i < raw.length) ++i; // past '>'
     }
     return decodeStructuredDataEntities(cast(string) stripped);
 }
@@ -1453,6 +1515,51 @@ unittest {
     auto ordinaryScriptResult = extractMainContent(ordinaryScript);
     assert(ordinaryScriptResult.status == MainContentStatus.abstainedBelowThreshold,
         "a script with no ld+json type attribute must not be scanned");
+
+    // Issue #484: a `<script>` element embedded *inside* a recovered JSON-LD
+    // string value (e.g. `articleBody`) must have its non-visible text
+    // content dropped along with its tags, exactly like `hiddenTag` already
+    // does for the ordinary DOM-selection path (the "hidden script text
+    // leaked" unittest above) -- not merely have the `<script>`/`</script>`
+    // tags stripped while "evil()" itself leaks through as visible prose.
+    // Ticket's own reproduction fixture, reduced to a unittest fixture.
+    HtmlTree scriptInStructuredData;
+    scriptInStructuredData.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "nav", null, null),
+        HtmlNode(HtmlNodeKind.text, 0, null, "Home About Contact"),
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 2, null,
+            `{"@type":"Article","articleBody":"<div><p class=\"x\">Unclosed tags and ` ~
+            `<b>bold <i>italic text here with <script>evil()<\/script> embedded and a ` ~
+            `stray angle bracket and an unterminated tag with a very long real sentence ` ~
+            `of readable prose padded out so that after every piece of embedded markup ` ~
+            `is stripped away there is still comfortably more than two hundred bytes of ` ~
+            `genuine paragraph text left over for the extraction floor to accept without ` ~
+            `any trouble at all here now for sure."}`),
+    ];
+    auto scriptInStructuredDataResult = extractMainContent(scriptInStructuredData);
+    assert(scriptInStructuredDataResult.status == MainContentStatus.selectedStructuredData,
+        "the genuine prose padding must still clear the selection floor");
+    assert(!scriptInStructuredDataResult.text.canFind("evil()"),
+        "hidden <script> text embedded inside a JSON-LD string value leaked");
+    assert(scriptInStructuredDataResult.text.canFind("readable prose padded out"),
+        "the real surrounding prose must still survive the fix");
+
+    // `<style>` gets the identical exclusion, not just `<script>`.
+    HtmlTree styleInStructuredData;
+    styleInStructuredData.nodes = [
+        HtmlNode(HtmlNodeKind.element, size_t.max, "script", null,
+            [HtmlAttribute("type", "application/ld+json")]),
+        HtmlNode(HtmlNodeKind.text, 0, null,
+            `{"@type":"Article","articleBody":"<style>.x{color:red}<\/style>` ~
+            longParagraph ~ `"}`),
+    ];
+    auto styleInStructuredDataResult = extractMainContent(styleInStructuredData);
+    assert(styleInStructuredDataResult.status == MainContentStatus.selectedStructuredData);
+    assert(!styleInStructuredDataResult.text.canFind("color:red"),
+        "hidden <style> text embedded inside a JSON-LD string value leaked");
+    assert(styleInStructuredDataResult.text.canFind("Article body sentence."));
 }
 
 // Issue #475: comment-section identification/extraction, distinct from

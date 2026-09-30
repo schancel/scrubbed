@@ -139,7 +139,6 @@ private void validateManifest(string repository, JSONValue manifest,
         "crawl performs no main-content extraction, no PII detection, is not " ~
         "training-ready, and this example is local-only by construction");
 
-    string[] declaredHtml;
     foreach (artifact; manifest["artifacts"].array) {
         auto path = artifact["path"].str;
         need((path.startsWith("examples/corpus/crawl/inputs/") ||
@@ -152,10 +151,8 @@ private void validateManifest(string repository, JSONValue manifest,
         need(artifact["license"].str == "MIT", "missing artifact license: " ~ path);
         need(digest(buildPath(repository, path)) == artifact["sha256"].str,
             "artifact hash drift: " ~ path);
-        if (path.startsWith("examples/corpus/crawl/inputs/site/")) {
+        if (path.startsWith("examples/corpus/crawl/inputs/site/"))
             sitePages ~= FixturePage(path, artifact["sha256"].str);
-            declaredHtml ~= path;
-        }
     }
     need(sitePages.length >= 3 && sitePages.length <= 5,
         "fixture site must be a small 3-5 page graph");
@@ -443,11 +440,6 @@ private struct Captured {
 private Captured run(string[] command) {
     auto result = execute(command);
     return Captured(result.status, result.output);
-}
-
-private struct CrawlRunResult {
-    string corpusDir;
-    string origin;
 }
 
 private JSONValue[] readManifestLines(string path) {

@@ -138,12 +138,12 @@ converged onto for its own large per-document payload (see
 changes: it already picks the `document-metadata:v2` wire automatically
 whenever a structured section is present.
 
-The published payload carries both lanes and bands together (computed once,
-by the one call that produced them) so that `prune-near-duplicates` never
-has to touch `domain.similarity_signature.d`'s own private band-hash
-arithmetic to recompute a band value from stored lanes -- avoiding any risk
-of that reproduced arithmetic drifting from the real algorithm, at the cost
-of a little extra payload size (still well under 1 KiB).
+The published payload carries the canonical lanes, `hasKeys`, content length,
+and frozen algorithm-version tag. Band hashes are derived from groups of four
+lanes, so phase 2 recomputes them with its version-local adapter instead of
+persisting a second authority. A compatibility test pins that adapter against
+the canonical domain output for real signatures; a future algorithm version
+must update both sides explicitly.
 
 ### 2. `prune-near-duplicates` (corpus-level, phase 2)
 

@@ -53,7 +53,7 @@ module effects.similarity_signature_annotate_stage;
 
 import domain.document : DocumentId;
 import domain.similarity_signature : SimilaritySignature, SimilaritySignatures,
-    maxSimilarityInputBytes, signatureVersion, similarityBands, similarityLanes,
+    maxSimilarityInputBytes, signatureVersion, similarityLanes,
     similaritySignatures;
 import stages.contract : PassMode, ResourceDeclaration, StageDecision,
     StageDeclaration, StageDocument;
@@ -69,16 +69,11 @@ enum similaritySignatureSectionIdV1 = "similarity-signature-v1";
 // Wire payload for the `similarity-signature-v1` structured section: a
 // small, fixed-shape binary encoding of one document-level
 // `SimilaritySignature` -- `hasKeys`, `contentLength`, the frozen algorithm
-// version tag, all 64 lanes, and all 16 bands. Deliberately self-contained
-// (not a reuse of any existing wire format): roughly 675 bytes, comfortably
-// inside `document-metadata:v2`'s 2 MiB per-section cap.
-//
-// Bands are persisted alongside lanes -- rather than recomputed from lanes
-// by a reader, as issue #564's design comment originally sketched -- purely
-// so this module never has to touch `domain.similarity_signature.d`'s own
-// private band-hash logic. That module is explicitly zero-changes-expected
-// scope for this slice; the extra ~128 bytes this costs per document is a
-// complete non-issue against the 2 MiB budget.
+// version tag, and all 64 lanes. Deliberately self-contained (not a reuse of
+// any existing wire format): roughly 547 bytes, comfortably inside
+// `document-metadata:v2`'s 2 MiB per-section cap. The 16 band hashes are
+// derived values, so phase 2 recomputes them from these canonical lanes;
+// persisting both would create two authorities for the same signature.
 // ---------------------------------------------------------------------------
 
 private void putU64(ref ubyte[] output, ulong value) pure {
@@ -107,7 +102,6 @@ ubyte[] encodeSimilaritySignaturePayload(SimilaritySignature signature,
     output ~= cast(ubyte) (signatureVersion.length & 0xff);
     output ~= cast(ubyte[]) signatureVersion;
     foreach (lane; signature.lanes) putU64(output, lane);
-    foreach (band; signature.bands) putU64(output, band);
     return output;
 }
 
@@ -116,7 +110,6 @@ struct DecodedSimilaritySignaturePayload {
     bool hasKeys;
     size_t contentLength;
     ulong[similarityLanes] lanes;
-    ulong[similarityBands] bands;
 }
 
 /// Decodes a payload this module itself encoded. Fails closed on
@@ -145,7 +138,6 @@ DecodedSimilaritySignaturePayload decodeSimilaritySignaturePayload(
         "similarity signature payload: algorithm version mismatch (expected " ~
         signatureVersion ~ ", got " ~ algorithmVersion ~ ")");
     foreach (ref lane; result.lanes) lane = getU64(payload, at);
-    foreach (ref band; result.bands) band = getU64(payload, at);
     enforce(at == payload.length, bad ~ ": trailing data");
     return result;
 }
@@ -156,13 +148,17 @@ unittest {
     SimilaritySignature signature;
     signature.hasKeys = true;
     foreach (i; 0 .. similarityLanes) signature.lanes[i] = i * 7 + 1;
-    foreach (i; 0 .. similarityBands) signature.bands[i] = i * 13 + 2;
     auto payload = encodeSimilaritySignaturePayload(signature, 12345);
+    assert(payload.length == 1 + 8 + 2 + signatureVersion.length +
+        similarityLanes * ulong.sizeof);
     auto decoded = decodeSimilaritySignaturePayload(payload);
     assert(decoded.hasKeys);
     assert(decoded.contentLength == 12345);
     assert(decoded.lanes == signature.lanes);
-    assert(decoded.bands == signature.bands);
+    auto forgedDerivedFields = signature;
+    foreach (ref band; forgedDerivedFields.bands) band = ulong.max;
+    assert(encodeSimilaritySignaturePayload(forgedDerivedFields, 12345) == payload,
+        "derived band hashes must not be serialized as a second authority");
 
     SimilaritySignature abstained;
     abstained.hasKeys = false;
@@ -287,7 +283,6 @@ unittest {
     assert(decoded.contentLength == text.length);
     auto direct = similaritySignatures(fixtureDocument().id, text);
     assert(decoded.lanes == direct.document.lanes);
-    assert(decoded.bands == direct.document.bands);
 }
 
 // Content too short for a real shingle (under 5 bytes) still gets annotated
@@ -386,6 +381,5 @@ unittest {
     auto direct = similaritySignatures(document.id, text);
     assert(decoded.hasKeys == direct.document.hasKeys);
     assert(decoded.lanes == direct.document.lanes);
-    assert(decoded.bands == direct.document.bands);
     assert(decoded.contentLength == text.length);
 }

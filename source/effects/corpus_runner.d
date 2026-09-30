@@ -538,19 +538,37 @@ private struct DecodedCandidate {
     DocumentId documentId;
     bool hasKeys;
     ulong[similarityLanes] lanes;
-    ulong[similarityBands] bands;
     size_t contentLength;
+}
+
+/// Frozen `byte-shingle-minhash:v1` band derivation. The persisted payload
+/// stores only canonical lanes; keeping this version-local adapter beside
+/// the phase-2 reader honors the approved zero-change boundary around
+/// `domain.similarity_signature` without creating a second wire authority.
+private ulong[similarityBands] bandValuesFromLanesV1(
+        const ulong[similarityLanes] lanes) pure {
+    ulong[similarityBands] result;
+    foreach (band; 0 .. similarityBands) {
+        ulong hash = (0xcbf29ce484222325UL ^ cast(ubyte) band) *
+            0x100000001b3UL;
+        foreach (lane; band * 4 .. band * 4 + 4) {
+            ulong value = lanes[lane];
+            foreach (_; 0 .. 8) {
+                hash = (hash ^ cast(ubyte) value) * 0x100000001b3UL;
+                value >>= 8;
+            }
+        }
+        result[band] = hash;
+    }
+    return result;
 }
 
 /// Decodes one sidecar file into a candidate, or returns `false` if this
 /// sidecar carries no `similarity-signature-v1` structured section (a v1
 /// document-metadata sidecar, or a v2 sidecar some other composition
 /// produced) -- such a document is simply not a pruning candidate, not an
-/// error. `bands` comes straight from the sidecar's own persisted payload
-/// (`effects.similarity_signature_annotate_stage` writes both lanes and
-/// bands together, computed once, by the same call that produced them) --
-/// this module never recomputes a band value itself, so there is no
-/// algorithm-drift risk to check for.
+/// error. Bands are derived from the persisted canonical lanes using the
+/// payload's already-validated `byte-shingle-minhash:v1` algorithm version.
 private bool tryDecodeCandidate(string path, out DecodedCandidate result) {
     auto bytes = readBoundedSidecar(path);
     auto wire = cast(string) bytes;
@@ -566,7 +584,6 @@ private bool tryDecodeCandidate(string path, out DecodedCandidate result) {
         result.documentId = id;
         result.hasKeys = payload.hasKeys;
         result.lanes = payload.lanes;
-        result.bands = payload.bands;
         result.contentLength = payload.contentLength;
         return true;
     }
@@ -660,8 +677,9 @@ private void runPruneNearDuplicates(string sidecarRoot, scope CorpusStageSink si
         // (hasKeys == false) is excluded here -- never a spurious bucket
         // candidate, matching similarity_buckets.d's own explode().
         if (!decoded.hasKeys) continue;
+        auto bands = bandValuesFromLanesV1(decoded.lanes);
         foreach (bandIndex; 0 .. similarityBands) {
-            batch ~= BandCandidate(idText, bandIndex, decoded.bands[bandIndex], decoded.lanes,
+            batch ~= BandCandidate(idText, bandIndex, bands[bandIndex], decoded.lanes,
                 decoded.contentLength);
             trackBatch(batch.length);
             if (batch.length == runRecords) flushRun(batch, accumulator);
@@ -880,6 +898,23 @@ version (unittest) {
         CorpusStageDecision[] observed;
         runPruneNearDuplicates(root, (CorpusStageDecision decision) { observed ~= decision; }, options);
         return observed;
+    }
+}
+
+// The phase-2 v1 adapter is byte-for-byte compatible with the canonical
+// domain implementation for real signatures, while the wire retains only
+// the lanes from which these values are derived.
+unittest {
+    auto texts = [
+        "A deterministic band derivation compatibility fixture.",
+        "Another fixture with unrelated words and punctuation!",
+        "UPPER\tcase and whitespace normalization fixture"
+    ];
+    foreach (i, text; texts) {
+        auto signature = similaritySignatures(fixtureId("bands-" ~ i.to!string),
+            cast(const(ubyte)[]) text).document;
+        assert(signature.hasKeys);
+        assert(bandValuesFromLanesV1(signature.lanes) == signature.bands);
     }
 }
 

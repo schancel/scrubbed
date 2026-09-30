@@ -246,13 +246,15 @@ for any value reachable before this slice.
 `effects.similarity_signature_annotate_stage` is the second real producer to
 converge onto `.withStructuredSection`, after `pii-four-class`'s
 `pii-audit-v1`. It publishes a document-level `domain.similarity_signature
-.SimilaritySignature` -- `hasKeys`, the 64-lane MinHash array, all 16 bands,
-and the document's raw content length -- under section id
+.SimilaritySignature` -- `hasKeys`, the canonical 64-lane MinHash array, the
+algorithm-version tag, and the document's raw content length -- under section id
 `similarity-signature-v1`, sourced from the same reasoning that moved
 `pii-four-class` here: the 64-lane array alone is 512 bytes, exactly
 `maxExtensionValueBytes`'s scalar cap, with zero room left for any other
-field. The encoded payload is roughly 675 bytes, comfortably inside the 2
-MiB per-section cap. See `docs/corpus-stages.md` for the corpus-level
+field. Derived band hashes are recomputed from the lanes by the versioned
+phase-2 reader rather than persisted as a second authority. The encoded
+payload is roughly 547 bytes, comfortably inside the 2 MiB per-section cap.
+See `docs/corpus-stages.md` for the corpus-level
 `prune-near-duplicates` stage that reads this section back out of a
 published sidecar.
 

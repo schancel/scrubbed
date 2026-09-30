@@ -154,12 +154,54 @@ private struct BoundedRunOutcome {
 // continuing to poll. Same EINTR-retry shape used for raw `read`/`write` in
 // effects.document_shards, effects.mix_export, effects.error_export, and
 // elsewhere in this codebase.
-private int waitpidRetry(int child, int* status, int options) {
+//
+// `syscall` defaults to the real `waitpid` and is only ever overridden by
+// the unittests below, which inject a fake that returns -1/EINTR a
+// controlled number of times -- this codebase has no precedent for real
+// signal-delivery tests (see #469), so this dependency-injection seam
+// covers the retry logic deterministically instead, without forking a real
+// child or sending a real signal.
+private int waitpidRetry(int child, int* status, int options,
+        typeof(&waitpid) syscall = &waitpid) {
     for (;;) {
-        auto waited = waitpid(child, status, options);
+        auto waited = syscall(child, status, options);
         if (waited < 0 && errno == EINTR) continue;
         return waited;
     }
+}
+
+version (unittest) {
+    private int pdfExecveFakeCallsRemaining;
+
+    private extern(C) int pdfExecveFakeWaitpidEintrThenOk(int child, int* status, int options) nothrow @nogc {
+        if (pdfExecveFakeCallsRemaining > 0) {
+            pdfExecveFakeCallsRemaining--;
+            errno = EINTR;
+            return -1;
+        }
+        return child;
+    }
+
+    private extern(C) int pdfExecveFakeWaitpidAlwaysOk(int child, int* status, int options) nothrow @nogc {
+        return child;
+    }
+}
+
+unittest {
+    // Happy path: no EINTR, returns the real syscall's result untouched.
+    int status;
+    assert(waitpidRetry(4242, &status, 0, &pdfExecveFakeWaitpidAlwaysOk) == 4242);
+}
+
+unittest {
+    // Retry path: the injected fake returns -1/EINTR exactly twice before
+    // succeeding; waitpidRetry must retry through both and return the real
+    // child pid on the third attempt, not surface the EINTR failure (which
+    // would otherwise leave the child unreaped, per the comment above).
+    int status;
+    pdfExecveFakeCallsRemaining = 2;
+    assert(waitpidRetry(4242, &status, 0, &pdfExecveFakeWaitpidEintrThenOk) == 4242);
+    assert(pdfExecveFakeCallsRemaining == 0);
 }
 
 /// Forks `argv[0]` as its own process-group leader, applies the run_limited.d

@@ -159,12 +159,57 @@ private bool pathIsSymlink(string path) {
 // effects.document_shards, effects.mix_export, effects.local_manifest,
 // effects.http_fetch, effects.metadata_route_cli, effects.warc_file, and
 // source/cli.d.
-private ptrdiff_t preadRetry(int fd, void* buffer, size_t count, long offset) {
+//
+// `syscall` defaults to the real `pread` and is only ever overridden by the
+// unittests below, which inject a fake that returns -1/EINTR a controlled
+// number of times to exercise the retry loop deterministically -- this
+// codebase has no precedent for real signal-delivery tests (see #469), so
+// this dependency-injection seam is how the retry logic itself gets covered
+// instead.
+private ptrdiff_t preadRetry(int fd, void* buffer, size_t count, long offset,
+        typeof(&pread) syscall = &pread) {
     for (;;) {
-        auto amount = pread(fd, buffer, count, offset);
+        auto amount = syscall(fd, buffer, count, offset);
         if (amount < 0 && errno == EINTR) continue;
         return amount;
     }
+}
+
+version (unittest) {
+    // Module-level (not function-static) so each test explicitly resets it
+    // first, rather than relying on unittest execution order.
+    private int preadFakeCallsRemaining;
+
+    private extern(C) ptrdiff_t fakeEintrThenOk(int fd, void* buffer, size_t count, long offset) nothrow @nogc {
+        if (preadFakeCallsRemaining > 0) {
+            preadFakeCallsRemaining--;
+            errno = EINTR;
+            return -1;
+        }
+        return cast(ptrdiff_t) count;
+    }
+
+    private extern(C) ptrdiff_t fakeAlwaysOk(int fd, void* buffer, size_t count, long offset) nothrow @nogc {
+        return cast(ptrdiff_t) count;
+    }
+}
+
+unittest {
+    // Happy path: no EINTR, returns the real syscall's result untouched.
+    ubyte[8] buffer;
+    auto result = preadRetry(3, buffer.ptr, buffer.length, 0, &fakeAlwaysOk);
+    assert(result == buffer.length);
+}
+
+unittest {
+    // Retry path: the injected fake returns -1/EINTR exactly twice before
+    // succeeding; preadRetry must retry through both and return the real
+    // result on the third attempt, not surface the EINTR failure.
+    preadFakeCallsRemaining = 2;
+    ubyte[8] buffer;
+    auto result = preadRetry(3, buffer.ptr, buffer.length, 0, &fakeEintrThenOk);
+    assert(result == buffer.length);
+    assert(preadFakeCallsRemaining == 0);
 }
 
 private bool needsInodeAliasScan(string path) {

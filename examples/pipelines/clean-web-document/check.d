@@ -369,24 +369,90 @@ private string decodedPayloadText(string sidecarPath, string sectionId) {
     return cast(string) decoded.idup;
 }
 
+/// Parses the decoded `pii-audit` payload text's `unions` array and asserts
+/// that at least one *union* object both has `outcome:"reported"` and has a
+/// `contributors` entry whose `category` and `confidence` match the given
+/// values -- i.e. that the three fields genuinely co-occur inside one
+/// structural finding, not merely somewhere in the same document.
+///
+/// This replaces three independent substring (`canFind`) checks against the
+/// raw audit text, which could theoretically all hit (each against a
+/// *different* union/contributor) without any single finding actually
+/// satisfying "category X, confidence Y, reported". See issue #534.
+private bool auditHasCoOccurringFinding(string auditText, string category, string confidence) {
+    auto audit = parseJSON(auditText);
+    foreach (finding; audit["unions"].array) {
+        if (finding["outcome"].str != "reported") continue;
+        foreach (contributor; finding["contributors"].array)
+            if (contributor["category"].str == category &&
+                contributor["confidence"].str == confidence)
+                return true;
+    }
+    return false;
+}
+
 /// Asserts the embedded PII audit's `unions` array actually contains at
-/// least one finding of the given category with the given confidence --
-/// direct proof against the real generated sidecar (not the pinned golden)
-/// that the PII fixture is not accidentally a no-op.
+/// least one finding of the given category with the given confidence,
+/// reported as a single structural co-occurrence (see
+/// `auditHasCoOccurringFinding`) -- direct proof against the real generated
+/// sidecar (not the pinned golden) that the PII fixture is not accidentally
+/// a no-op.
 private void assertRealPiiFinding(string sidecarPath, string category, string confidence) {
     auto audit = decodedPayloadText(sidecarPath, "pii-audit");
-    need(!audit.canFind(`"unions":[]`), "PII audit union list is empty: " ~ sidecarPath);
-    need(audit.canFind(`"category":"` ~ category ~ `"`) &&
-        audit.canFind(`"confidence":"` ~ confidence ~ `"`) &&
-        audit.canFind(`"outcome":"reported"`),
+    need(auditHasCoOccurringFinding(audit, category, confidence),
         "PII audit did not flag the expected " ~ category ~ "/" ~ confidence ~
-        " finding: " ~ sidecarPath);
+        " finding co-occurring with outcome \"reported\" in a single union: " ~
+        sidecarPath);
 }
 
 private void assertEmptyPiiFindings(string sidecarPath) {
     auto audit = decodedPayloadText(sidecarPath, "pii-audit");
-    need(audit.canFind(`"unions":[]`),
+    need(parseJSON(audit)["unions"].array.length == 0,
         "PII audit expected to be empty but found a union: " ~ sidecarPath);
+}
+
+/// Regression test (issue #534): an adversarial payload built from an
+/// independent review of #503 has two separate `unions` entries -- one
+/// `category:"phone"/confidence:"high"/outcome:"ignored"`, another
+/// `category:"email"/confidence:"ambiguous"/outcome:"reported"` -- where no
+/// single union satisfies "phone" + "ambiguous" + "reported" together. The
+/// old three-independent-`canFind` check returned `true` (a false positive)
+/// on this input; `auditHasCoOccurringFinding`, which actually parses the
+/// structure, must correctly return `false`.
+private void auditCoOccurrenceRegressionTest() {
+    enum adversarial = `{"schema":"scrubbed-pii-audit-v1","unions":[` ~
+        `{"start":0,"end":1,"outcome":"ignored","contributors":[` ~
+        `{"start":0,"end":1,"category":"phone","rule":"phone.national.ambiguous.v1",` ~
+        `"locale":"US","confidence":"high"}]},` ~
+        `{"start":2,"end":3,"outcome":"reported","contributors":[` ~
+        `{"start":2,"end":3,"category":"email","rule":"email.ascii-domain.v1",` ~
+        `"locale":"US","confidence":"ambiguous"}]}]}`;
+
+    // Prove the old substring-only approach really was a false positive on
+    // this input: all three fragments independently appear in the text.
+    need(adversarial.canFind(`"category":"phone"`) &&
+        adversarial.canFind(`"confidence":"ambiguous"`) &&
+        adversarial.canFind(`"outcome":"reported"`),
+        "regression fixture no longer reproduces the old substring false positive");
+
+    // The tightened, structure-aware check must reject it: no single union
+    // has phone + ambiguous + reported together.
+    need(!auditHasCoOccurringFinding(adversarial, "phone", "ambiguous"),
+        "tightened PII co-occurrence check failed to catch the adversarial " ~
+        "two-union payload (issue #534 regression)");
+
+    // Sanity: the check must still accept the one real co-occurring finding
+    // actually present in that same fixture (email/ambiguous/reported, all
+    // three fields inside the *same* union) --
+    need(auditHasCoOccurringFinding(adversarial, "email", "ambiguous"),
+        "tightened check wrongly rejected a genuine co-occurring finding (email/ambiguous)");
+
+    // ...and must still reject phone/high, since that union's outcome is
+    // "ignored", not "reported" -- category/confidence matching alone is not
+    // enough, `outcome:"reported"` must co-occur in the same union too.
+    need(!auditHasCoOccurringFinding(adversarial, "phone", "high"),
+        "tightened check wrongly accepted a finding whose union outcome " ~
+        "was not \"reported\" (phone/high)");
 }
 
 private string sidecarPathFor(string output, bool isDir) {
@@ -545,6 +611,7 @@ int main(string[] args) {
     auto manifest = parseJSON(manifestText);
     validateManifest(repository, manifest);
     negativeMutants(repository, manifestText);
+    auditCoOccurrenceRegressionTest();
     runPositiveRecipes(repository, executable, manifest);
     runNegativeSidecarFixture(repository, executable);
     import std.stdio : writeln;

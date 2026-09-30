@@ -960,56 +960,97 @@ private ptrdiff_t indexOfAsciiCI(string haystack, string needle, size_t from) {
     return -1;
 }
 
-// True when the byte immediately before a `lang=` match at `matchIndex`
-// cannot be part of a longer attribute name -- i.e. `matchIndex` is the
-// start of the tag, or the preceding byte is whitespace or `:` (accepting
-// the XHTML `xml:lang` spelling). Any other preceding byte (a letter,
-// digit, `-`, `_`, `.`, ...) means this `lang=` is the tail of some other
-// attribute name entirely, such as `data-lang=`, and must be skipped.
-private bool isLangAttributeBoundary(string tag, size_t matchIndex) {
-    if (matchIndex == 0) return true;
-    auto before = tag[matchIndex - 1];
-    return before == ' ' || before == '\t' || before == '\n' || before == '\r' ||
-        before == ':';
+// True for the ASCII whitespace bytes legal between/around HTML attributes.
+private bool isAsciiTagSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
 }
 
-// Extracts the actual `lang="xx"`/`lang='xx'` (or `xml:lang=...`) attribute's
-// two-letter prefix from the opening `<html ...>` tag only (a plain
-// substring scan, not a full HTML parse -- this only selects which of
-// jusText's inbuilt stoplists to use, it is never treated as document
-// content or scored). Case-insensitive (`<HTML LANG="DE">` is real, legal
-// HTML) and scoped to the `<html>` tag specifically, skipping any `lang=`
-// match that is actually the tail of a longer attribute name (`data-lang=`,
-// `xlang=`, ...) rather than the `lang`/`xml:lang` attribute itself, so an
-// unrelated attribute can never influence the choice. Returns "" when no
-// `<html>` tag or no genuine `lang` attribute is present (e.g. this
-// corpus's own fixture 02, a bare `<html>` with no lang attribute at all).
+// Case-insensitive ASCII exact-match compare (both sides plain bytes, no
+// `toLower`-allocation needed for the short attribute-name tokens this is
+// used on).
+private bool asciiEqualsCI(string a, string b) {
+    if (a.length != b.length) return false;
+    foreach (i; 0 .. a.length) {
+        auto c = a[i];
+        auto lower = (c >= 'A' && c <= 'Z') ? cast(char)(c + 32) : c;
+        if (lower != b[i]) return false;
+    }
+    return true;
+}
+
+// Extracts the actual `lang="xx"`/`lang='xx'`/`lang=xx` (or `xml:lang=...`)
+// attribute's two-letter prefix from the opening `<html ...>` tag only, via
+// a small forward-walking attribute tokenizer (not a full HTML parse --
+// this only selects which of jusText's inbuilt stoplists to use, it is
+// never treated as document content or scored). Case-insensitive
+// (`<HTML LANG="DE">` is real, legal HTML) and tolerant of the full range
+// of legal HTML5 attribute syntax: whitespace around `=` (`lang = "de"`)
+// and unquoted values terminated by whitespace or the tag's close
+// (`lang=de`). Because every attribute's value -- quoted or not -- is fully
+// consumed as the tag is walked left to right, a `lang="xx"`-shaped
+// substring that merely appears *inside* an earlier, still-open attribute's
+// own quoted value (e.g. `data-x='see lang="de" example' lang="fr"`) can
+// never be mistaken for the real attribute: only a name token seen at a
+// genuine attribute-boundary position -- never inside another attribute's
+// value -- can match. Likewise a `lang=` that is the tail of a longer
+// attribute name (`data-lang=`) is never mistaken for the real `lang`
+// attribute, since the name token is compared as a whole, not as a
+// substring. Returns "" when no `<html>` tag or no genuine `lang`
+// attribute is present (e.g. this corpus's own fixture 02, a bare `<html>`
+// with no lang attribute at all).
 private string htmlLangPrefix(string html) {
     auto tagStart = indexOfAsciiCI(html, "<html", 0);
     if (tagStart < 0) return "";
     auto tagEnd = html.indexOf(">", tagStart);
     if (tagEnd < 0) return "";
     auto tag = html[tagStart .. tagEnd];
-    size_t searchFrom = 0;
-    while (true) {
-        auto langIndex = indexOfAsciiCI(tag, "lang=", searchFrom);
-        if (langIndex < 0) return "";
-        if (!isLangAttributeBoundary(tag, cast(size_t) langIndex)) {
-            searchFrom = cast(size_t) langIndex + 5;
+
+    size_t i = 5; // skip the leading "<html" tag-name token itself
+    while (i < tag.length) {
+        while (i < tag.length && isAsciiTagSpace(tag[i])) i++;
+        if (i >= tag.length) break;
+
+        auto nameStart = i;
+        while (i < tag.length && !isAsciiTagSpace(tag[i]) && tag[i] != '=')
+            i++;
+        auto name = tag[nameStart .. i];
+        if (name.length == 0) break; // stray "=" with no attribute name
+
+        while (i < tag.length && isAsciiTagSpace(tag[i])) i++;
+
+        bool isLang = asciiEqualsCI(name, "lang") || asciiEqualsCI(name, "xml:lang");
+
+        if (i >= tag.length || tag[i] != '=') {
+            // Boolean attribute (no value at all), e.g. a bare `lang` with
+            // no `=` -- nothing to consume, and no value to return even if
+            // the name matches, so just move on to the next attribute.
             continue;
         }
-        auto valueStart = cast(size_t) langIndex + 5;
-        if (valueStart >= tag.length) return "";
-        auto quote = tag[valueStart];
-        if (quote != '"' && quote != '\'') {
-            searchFrom = valueStart;
-            continue;
+        i++; // consume "="
+        while (i < tag.length && isAsciiTagSpace(tag[i])) i++;
+
+        string value;
+        if (i < tag.length && (tag[i] == '"' || tag[i] == '\'')) {
+            auto quote = tag[i];
+            auto valueStart = i + 1;
+            auto valueEnd = tag.indexOf(quote, valueStart);
+            if (valueEnd < 0) {
+                value = tag[valueStart .. $];
+                i = tag.length;
+            } else {
+                value = tag[valueStart .. valueEnd];
+                i = cast(size_t) valueEnd + 1;
+            }
+        } else {
+            auto valueStart = i;
+            while (i < tag.length && !isAsciiTagSpace(tag[i])) i++;
+            value = tag[valueStart .. i];
         }
-        auto valueEnd = tag.indexOf(quote, valueStart + 1);
-        if (valueEnd <= cast(ptrdiff_t) valueStart) return "";
-        auto value = tag[valueStart + 1 .. valueEnd];
-        return value.length >= 2 ? value[0 .. 2].toLower : "";
+
+        if (isLang)
+            return value.length >= 2 ? value[0 .. 2].toLower : "";
     }
+    return "";
 }
 
 private string justextStoplistFor(string html) {
@@ -1994,6 +2035,24 @@ private void selfTest() {
         "uppercase <HTML LANG=...> must be detected case-insensitively");
     require(htmlLangPrefix(`<Html Lang='En'>`) == "en",
         "mixed-case <Html Lang=...> must be detected case-insensitively");
+    // Independent-review fix (PR #585, third bug class): whitespace around
+    // `=` and unquoted attribute values are both legal HTML5 syntax the
+    // original literal "lang=" + immediate-quote scan silently missed,
+    // falling through to "no lang attribute" (repro cases A and B).
+    require(htmlLangPrefix(`<html lang = "de">`) == "de",
+        "whitespace around = in the lang attribute must still be detected (repro A)");
+    require(htmlLangPrefix(`<html lang=de>`) == "de",
+        "an unquoted lang attribute value must still be detected (repro B)");
+    require(htmlLangPrefix(`<html lang =de>`) == "de",
+        "whitespace before = combined with an unquoted value must still be detected");
+    require(htmlLangPrefix(`<html lang= "de">`) == "de",
+        "whitespace after = combined with a quoted value must still be detected");
+    // Independent-review fix (PR #585, third bug class): a `lang="xx"`-shaped
+    // substring inside an *earlier* attribute's own quoted value must never
+    // be mistaken for the real, later `lang` attribute (repro case C).
+    require(htmlLangPrefix(`<html data-x='see lang="de" example' lang="fr">`) == "fr",
+        "a lang=-shaped substring inside an earlier attribute's quoted value " ~
+        "must not override the real lang attribute (repro C)");
     require(justextStoplistFor(`<html lang="de-DE">`) == "German",
         "German stoplist selection regression");
     require(justextStoplistFor(`<html lang='en'>`) == "English",

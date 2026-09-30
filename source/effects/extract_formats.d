@@ -191,8 +191,15 @@ private string documentTitle(const ref HtmlTree tree) pure {
 /// Inline content inside a block: escaped text, `<link href="...">`,
 /// `<image src="..." alt="..."/>`, `<bold>`/`<italic>`, and a literal
 /// newline for `<br>`.
-string renderXml(const ref HtmlTree tree) pure {
-    auto selection = extractMainContent(tree);
+/// `includeComments` (issue #543, default `true`): threaded straight to
+/// `extractMainContent` -- same "comments on by default, an explicit
+/// `false` opts out" shape `html_main_content_stage.d`'s own
+/// `include-comments` option already establishes for `html-main-content`.
+/// `false` suppresses comment-section detection entirely (`extractMainContent`'s
+/// own semantics: `.commentsExtracted` stays `false`), so the `<comments>`
+/// element below is omitted, not merely emitted empty.
+string renderXml(const ref HtmlTree tree, bool includeComments = true) pure {
+    auto selection = extractMainContent(tree, includeComments);
     Writer w;
     w.put("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<document>\n");
     w.put("  <main>\n");
@@ -552,8 +559,11 @@ private void renderXmlInlineNode(const ref HtmlTree tree, size_t index, ref Writ
 /// allow (`rend`/`rendition`/`role`/`target`/`type`) are ever emitted here,
 /// for the same reason: this is what a real run against the pinned tool
 /// proved acceptable, not an assumption.
-string renderXmlTei(const ref HtmlTree tree) pure {
-    auto selection = extractMainContent(tree);
+/// `includeComments` (issue #543, default `true`): same threading and
+/// semantics as `renderXml`'s own doc comment above -- see it for the
+/// "suppressed detection, not merely omitted output" distinction.
+string renderXmlTei(const ref HtmlTree tree, bool includeComments = true) pure {
+    auto selection = extractMainContent(tree, includeComments);
     Writer w;
     w.put("<TEI xmlns=\"http://www.tei-c.org/ns/1.0\">\n");
     w.put("  <teiHeader>\n");
@@ -901,8 +911,12 @@ private void renderTeiInlineNode(const ref HtmlTree tree, size_t index, ref Writ
 /// and the chosen design still round-trips every real character a table
 /// contributes -- just as one already-tested flat-text field, not as a
 /// second, harder-to-get-right serialization this ticket does not require.
-string csvRow(const ref HtmlTree tree) pure {
-    auto selection = extractMainContent(tree);
+/// `includeComments` (issue #543, default `true`): same threading and
+/// semantics as `renderXml`'s own doc comment -- suppresses the comments
+/// column entirely (`selection.commentsExtracted` stays `false`) rather
+/// than emitting it empty.
+string csvRow(const ref HtmlTree tree, bool includeComments = true) pure {
+    auto selection = extractMainContent(tree, includeComments);
     string title = documentTitle(tree);
     string[] fields = [
         null, // url: not available from a local-file `extract` invocation

@@ -33,10 +33,21 @@ import std.exception : enforce;
 private class HtmlExtractFormatConfiguration : StageConfiguration {
     string charset;
     size_t byteLimit;
-    this(string charset, size_t byteLimit) immutable {
+    bool includeComments;
+    this(string charset, size_t byteLimit, bool includeComments) immutable {
         this.charset = charset;
         this.byteLimit = byteLimit;
+        this.includeComments = includeComments;
     }
+}
+
+// Same `key in options` / default-value idiom `html_main_content_stage.d`'s
+// own `booleanOption` already establishes for the identical "an optional
+// hyphenated boolean stage option" need; restated here rather than shared
+// because it is three lines and that module's copy is private to it.
+private bool booleanOption(const ref StageOptions options, string key, bool defaultValue) {
+    auto selected = key in options;
+    return selected is null ? defaultValue : selected.asBoolean;
 }
 
 private string failureReason(const ref HtmlFailure failure) pure {
@@ -54,8 +65,13 @@ private ConfiguredStageTransform factoryFor(alias apply)(const ref StageOptions 
     auto configuredLimit = "max-html-bytes" in options;
     auto byteLimit = configuredLimit is null ? defaultExtractHtmlBytes :
         checkedHtmlByteLimit(configuredLimit.asInteger());
+    // Issue #543: default `true`, matching `html-main-content`'s own
+    // `include-comments` default and trafilatura's own "comments on by
+    // default" shape -- `include-comments=false` is this stage's
+    // `--no-comments`-equivalent opt-out.
+    auto includeComments = booleanOption(options, "include-comments", true);
     return ConfiguredStageTransform(&apply,
-        new immutable HtmlExtractFormatConfiguration(charset, byteLimit));
+        new immutable HtmlExtractFormatConfiguration(charset, byteLimit, includeComments));
 }
 
 private void registerExtractFormatStage(string name,
@@ -64,7 +80,8 @@ private void registerExtractFormatStage(string name,
     auto registration = StageRegistration(StageDeclaration(name,
         PassMode.singlePass, ResourceDeclaration(1, 32 * 1024 * 1024)),
         [OptionDeclaration("charset", OptionType.text),
-         OptionDeclaration("max-html-bytes", OptionType.integer)], null, null, makeFactory);
+         OptionDeclaration("max-html-bytes", OptionType.integer),
+         OptionDeclaration("include-comments", OptionType.boolean)], null, null, makeFactory);
     registration.requiresRawHtmlInput = true;
     registration.producesHtmlShape = HtmlOutputShape.nonHtml;
     registerStage(registration);
@@ -80,7 +97,7 @@ private StageDecision applyCsv(StageDocument input,
         configured.byteLimit);
     if (!outcome.isParsed) return StageDecision.quarantine(failureReason(outcome.failure));
     string rendered;
-    try rendered = csvRow(outcome.tree);
+    try rendered = csvRow(outcome.tree, configured.includeComments);
     catch (HtmlMainContentOutputLimit) return StageDecision.quarantine("outputLimit");
     catch (ExtractFormatOutputLimit) return StageDecision.quarantine("outputLimit");
     input.content = new Content([ContentPiece.own(cast(const(ubyte)[]) rendered)]);
@@ -97,7 +114,7 @@ private StageDecision applyXml(StageDocument input,
         configured.byteLimit);
     if (!outcome.isParsed) return StageDecision.quarantine(failureReason(outcome.failure));
     string rendered;
-    try rendered = renderXml(outcome.tree);
+    try rendered = renderXml(outcome.tree, configured.includeComments);
     catch (HtmlMainContentOutputLimit) return StageDecision.quarantine("outputLimit");
     catch (ExtractFormatOutputLimit) return StageDecision.quarantine("outputLimit");
     input.content = new Content([ContentPiece.own(cast(const(ubyte)[]) rendered)]);
@@ -114,7 +131,7 @@ private StageDecision applyXmlTei(StageDocument input,
         configured.byteLimit);
     if (!outcome.isParsed) return StageDecision.quarantine(failureReason(outcome.failure));
     string rendered;
-    try rendered = renderXmlTei(outcome.tree);
+    try rendered = renderXmlTei(outcome.tree, configured.includeComments);
     catch (HtmlMainContentOutputLimit) return StageDecision.quarantine("outputLimit");
     catch (ExtractFormatOutputLimit) return StageDecision.quarantine("outputLimit");
     input.content = new Content([ContentPiece.own(cast(const(ubyte)[]) rendered)]);
@@ -158,6 +175,63 @@ unittest {
             implementation ~ " must carry the real selected content");
         enforce(!bytes.canFind("Home") && !bytes.canFind("Contact"),
             implementation ~ " must not leak boilerplate nav text");
+    }
+}
+
+// Issue #543: `include-comments` is now a real, respected stage option on
+// all three of these stages, not silently defaulted to `true` with no way
+// to opt out through `extract` -- reachable end to end through a compiled
+// job, not just at the pure-function level `extract_formats.d`'s own
+// unittests already cover. Default (option omitted) and explicit `true`
+// must both still surface the identified comment section's text (backward
+// compatible with every pre-#543 invocation); `include-comments=false`
+// must omit it from the emitted output entirely.
+unittest {
+    import composition.compiler : compileJob;
+    import composition.executor : runCompiledStage;
+    import domain.document : Document, OutputName, SourceLocator;
+    import job.json : parseJobJson;
+    import stages.contract : EventKind;
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+    string html = "<article><p>" ~ longParagraph ~ "</p></article>" ~
+        `<div class="comments"><p>ReaderCommentMarker a reader's own remark.</p></div>`;
+
+    string run(string implementation, string optionsJson) {
+        auto spec = parseJobJson(`{"version":3,"stages":[{"id":"extract",` ~
+            `"implementation":"` ~ implementation ~ `","options":` ~ optionsJson ~ `,"filters":[]}]}`);
+        auto plan = compileJob(spec);
+        enforce(plan.stages.length == 1);
+        auto document = Document(SourceLocator("local-html:v1", "/tmp", "a.html"),
+            OutputName("a.html.out"));
+        auto input = StageDocument(document, new Content([ContentPiece.own(cast(const(ubyte)[]) html)]));
+        auto result = runCompiledStage([input], plan.stages[0]);
+        enforce(result.events.length == 1 && result.events[0].kind == EventKind.emitted,
+            implementation ~ " must emit on real content");
+        string bytes;
+        foreach (piece; result.events[0].payload.content.pieces())
+            foreach (i; 0 .. piece.size) bytes ~= cast(char) piece.at(i);
+        return bytes;
+    }
+
+    foreach (implementation; ["html-csv", "html-xml", "html-xml-tei"]) {
+        auto omitted = run(implementation, "{}");
+        enforce(omitted.canFind("ReaderCommentMarker"),
+            implementation ~ ": default (option omitted) must still include comment text (#543 non-regression)");
+
+        auto explicitTrue = run(implementation, `{"include-comments":true}`);
+        enforce(explicitTrue.canFind("ReaderCommentMarker"),
+            implementation ~ ": include-comments=true must include comment text");
+
+        auto explicitFalse = run(implementation, `{"include-comments":false}`);
+        enforce(!explicitFalse.canFind("ReaderCommentMarker"),
+            implementation ~ ": include-comments=false must omit comment text (#543)");
+        // Real content must still be present -- the flag only suppresses
+        // the identified comment section, never the selected main content.
+        enforce(explicitFalse.canFind("Article body sentence"),
+            implementation ~ ": include-comments=false must not affect main-content selection");
     }
 }
 

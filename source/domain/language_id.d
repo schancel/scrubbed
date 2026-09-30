@@ -205,7 +205,7 @@ private ScriptCounts scriptCountsOf(string text) {
     size_t at;
     while (at < text.length) {
         dchar c = decode(text, at); // text is already UTF-8 validated by the caller
-        if (isAlpha(c)) {
+        if (isLanguageLetter(c)) {
             ++counts.letters;
             if (!isLatinLetter(c) && !isBrahmicLetter(c)) ++counts.nonLatinLetters;
         }
@@ -243,6 +243,12 @@ private bool isWordInternalJoiner(dchar c) pure nothrow @nogc {
     }
 }
 
+private bool isLanguageLetter(dchar c) pure nothrow @nogc {
+    if (c <= 0x7F)
+        return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z';
+    return isAlpha(c);
+}
+
 /// Maximal runs of Unicode letters (plus the word-internal virama/nukta
 /// joiners above), lowercased, with all other characters (whitespace,
 /// digits, punctuation) treated as separators and dropped. Case-folding via
@@ -254,7 +260,9 @@ private dchar[][] wordsOf(string text) {
     size_t at;
     while (at < text.length) {
         dchar c = decode(text, at);
-        if (isAlpha(c) || isWordInternalJoiner(c)) current ~= toLower(c);
+        if (isLanguageLetter(c) || isWordInternalJoiner(c))
+            current ~= (c <= 0x7F ?
+                (c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c) : toLower(c));
         else if (current.length) { words ~= current; current = null; }
     }
     if (current.length) words ~= current;
@@ -264,15 +272,40 @@ private dchar[][] wordsOf(string text) {
 /// Pads each word with one leading/trailing space and slides an n=1..4
 /// window across the padded codepoints, so n-grams capture word-boundary
 /// context exactly as Cavnar & Trenkle's original algorithm does.
-private void countNgramsInto(ref size_t[string] counts, const(dchar[])[] words) {
+private struct NgramKey {
+    dchar[ngramMaxOrder] scalars;
+    ubyte length;
+
+    size_t toHash() const pure nothrow @safe @nogc {
+        size_t hash = cast(size_t) 0xcbf29ce484222325UL;
+        foreach (i; 0 .. length)
+            hash = (hash ^ cast(size_t) scalars[i]) *
+                cast(size_t) 0x100000001b3UL;
+        return hash ^ length;
+    }
+
+    bool opEquals(ref const NgramKey other) const pure nothrow @safe @nogc {
+        return length == other.length && scalars[0 .. length] ==
+            other.scalars[0 .. other.length];
+    }
+}
+
+private void countNgramsInto(ref size_t[NgramKey] counts,
+        const(dchar[])[] words) {
     foreach (word; words) {
-        dchar[] padded = [cast(dchar) ' '] ~ word.dup ~ [cast(dchar) ' '];
+        const paddedLength = word.length + 2;
         foreach (n; ngramMinOrder .. ngramMaxOrder + 1) {
-            if (padded.length < n) continue;
-            foreach (start; 0 .. padded.length - n + 1) {
-                auto ngram = to!string(padded[start .. start + n]);
-                if (auto existing = ngram in counts) ++(*existing);
-                else counts[ngram] = 1;
+            if (paddedLength < n) continue;
+            foreach (start; 0 .. paddedLength - n + 1) {
+                NgramKey key;
+                key.length = cast(ubyte) n;
+                foreach (offset; 0 .. n) {
+                    const position = start + offset;
+                    key.scalars[offset] = position == 0 || position == word.length + 1 ?
+                        cast(dchar) ' ' : word[position - 1];
+                }
+                if (auto existing = key in counts) ++(*existing);
+                else counts[key] = 1;
             }
         }
     }
@@ -283,9 +316,11 @@ private struct NgramCount { string ngram; size_t count; }
 /// Deterministic total order: count descending, then n-gram ascending
 /// (UTF-8 byte order) breaks ties without depending on hash-table iteration
 /// order, which D does not guarantee to be stable across runs/versions.
-private NgramCount[] rankedFromCounts(const(size_t[string]) counts, size_t cap) {
+private NgramCount[] rankedFromCounts(const(size_t[NgramKey]) counts, size_t cap) {
     NgramCount[] all;
-    foreach (ngram, count; counts) all ~= NgramCount(ngram, count);
+    all.reserve(counts.length);
+    foreach (key, count; counts)
+        all ~= NgramCount(to!string(key.scalars[0 .. key.length]), count);
     sort!((a, b) => a.count != b.count ? a.count > b.count : a.ngram < b.ngram)(all);
     return all.length > cap ? all[0 .. cap] : all;
 }
@@ -300,7 +335,7 @@ private NgramCount[] rankedFromCounts(const(size_t[string]) counts, size_t cap) 
 string[] rankedNgramProfile(string corpusText) {
     validate(corpusText); // throws UTFException on malformed input
     auto words = wordsOf(corpusText);
-    size_t[string] counts;
+    size_t[NgramKey] counts;
     countNgramsInto(counts, words);
     string[] result;
     foreach (entry; rankedFromCounts(counts, profileCap)) result ~= entry.ngram;
@@ -318,7 +353,7 @@ string[] rankedNgramProfile(string corpusText) {
 size_t totalNgramCount(string text) {
     validate(text);
     auto words = wordsOf(text);
-    size_t[string] counts;
+    size_t[NgramKey] counts;
     countNgramsInto(counts, words);
     size_t total;
     foreach (count; counts.byValue) total += count;
@@ -5509,7 +5544,7 @@ private LanguageScore[17] scoreNgrams(const(string)[] docNgrams) {
 LanguageScore[17] scoreLanguages(string text) {
     validate(text);
     auto words = wordsOf(text);
-    size_t[string] counts;
+    size_t[NgramKey] counts;
     countNgramsInto(counts, words);
     string[] docNgrams;
     foreach (entry; rankedFromCounts(counts, profileCap)) docNgrams ~= entry.ngram;
@@ -5671,7 +5706,7 @@ LanguageDetectionResult detectLanguage(const(ubyte)[] text) {
     }
 
     auto words = wordsOf(canonical);
-    size_t[string] counts;
+    size_t[NgramKey] counts;
     countNgramsInto(counts, words);
     size_t totalOccurrences;
     foreach (count; counts.byValue) totalOccurrences += count;

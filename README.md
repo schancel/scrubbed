@@ -194,11 +194,21 @@ capability, WARC compression, packaging) live under [docs/](docs/).
 
 ## Support
 
-If scrubbed is useful to you, you can support ongoing development via
-[GitHub Sponsors](https://github.com/sponsors/schancel), [PayPal](https://paypal.me/intentionallyblank),
-[Patreon](https://www.patreon.com/givelotus), or by following along at the
-[newsletter](https://shablag.substack.com). Entirely optional -- the project
-stays MIT-licensed and open either way.
+scrubbed is free, MIT-licensed, and built in the open -- and also genuinely
+costs real time, expertise, and money to build and maintain: compute for
+development and benchmarking, and the hours that went into the pipeline,
+the test suite, and the docs you're reading. If it's useful to you or your
+team, saved you time, or just makes your data pipeline suck less, consider
+chipping in:
+
+- [GitHub Sponsors](https://github.com/sponsors/schancel)
+- [PayPal](https://paypal.me/intentionallyblank)
+- [Patreon](https://www.patreon.com/givelotus)
+- [Newsletter](https://shablag.substack.com) -- free, if you'd rather just follow along
+
+Every bit helps and is genuinely appreciated -- thank you to anyone who
+does. None of it is required: the project stays MIT-licensed and fully
+open either way, no paywalled features, no nagging.
 
 ## License
 

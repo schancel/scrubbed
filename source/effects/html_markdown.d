@@ -4,7 +4,7 @@ module effects.html_markdown;
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
 import std.conv : to;
 import std.exception : assumeUnique;
-import std.uni : isControl, isFormat, isSpace;
+import std.uni : isControl, isFormat, isSpace, isWhite;
 import std.utf : UTFException, encode;
 
 enum size_t maxMarkdownBytes = 4 * 1024 * 1024;
@@ -50,6 +50,24 @@ private struct Writer {
     void trim() pure {
         while (bytes.length && (bytes[$ - 1] == ' ' || bytes[$ - 1] == '\n'))
             bytes.length--;
+    }
+
+    // Mirror of `trim()` at the other end. Issue #516 follow-up: a list
+    // item's own content buffer can pick up a leading collapsed space from
+    // pretty-printed indentation between `<li>` and its first real child
+    // (e.g. `<li>\n  Text</li>`) -- `trim()` alone never catches this,
+    // since it only ever strips the END of `bytes`. Left uncaught, that
+    // leading space lands between the list marker ("- "/"N. ") and the
+    // item's real text, widening the marker+space prefix by one column
+    // without widening the continuation-line indent (`maxListIndent`'s own
+    // `prefixLength` slice below) to match, which is exactly what makes a
+    // CommonMark parser misread the item as an indented code block instead
+    // of list content.
+    void trimLeading() pure {
+        size_t start;
+        while (start < bytes.length && (bytes[start] == ' ' || bytes[start] == '\n'))
+            ++start;
+        if (start) bytes = bytes[start .. $];
     }
 
     void block() pure {
@@ -103,6 +121,20 @@ private bool white(char c) pure {
     return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\f';
 }
 
+// Issue #516 follow-up: a text node consisting entirely of pretty-printed
+// indentation/formatting whitespace (e.g. the "\n" between `<ol>` and its
+// first `<li>`, or between successive `<li>`s) is structural noise, not
+// inter-word content -- unlike an ordinary text node's whitespace RUN
+// WITHIN real content (which `clean()` correctly collapses to a single
+// space), a text node that is *nothing but* whitespace between block-level
+// list siblings must contribute nothing at all. Byte-indexed ASCII check,
+// matching `singleLine()`'s own existing convention for this exact
+// question elsewhere in this file.
+private bool isWhitespaceOnlyText(string text) pure {
+    foreach (c; text) if (!white(c)) return false;
+    return true;
+}
+
 // Exported (not just module-private) so `html_main_content_markdown.d` can
 // apply this exact same literal-character escaping (backslash-escaping
 // Markdown-significant punctuation, `&`/`<`/`>` entity-escaping, whitespace
@@ -128,11 +160,21 @@ string clean(string input, bool code = false) pure {
             writer.put(cast(string)encoded[0 .. encode(encoded, c)]);
             continue;
         }
-        if (isControl(c) || isFormat(c)) continue;
-        if (isSpace(c) || c == 0x2028 || c == 0x2029) {
+        // isWhite is checked before isControl: `\n`, `\t`, `\r`, `\f`, `\v`
+        // are Unicode Cc (control) characters that are ALSO White_Space, so
+        // an isControl-first check would drop them outright (issue #516)
+        // instead of collapsing them into the same single space as an
+        // ordinary run of ' '/NBSP. isWhite already covers 0x2028/0x2029
+        // (previously special-cased here because isSpace alone does not),
+        // so that OR-clause is now redundant and removed. A control
+        // character that is not whitespace (NUL, ESC, other C0/C1 controls)
+        // falls through to the isControl check below and is still dropped
+        // exactly as before.
+        if (isWhite(c)) {
             pending = true;
             continue;
         }
+        if (isControl(c) || isFormat(c)) continue;
         if (pending) writer.put(" ");
         pending = false;
         switch (c) {
@@ -150,6 +192,41 @@ string clean(string input, bool code = false) pure {
     }
     if (pending) writer.put(" ");
     return writer.finish();
+}
+
+// Issue #516 regression: `isControl` was checked before `isSpace` in
+// `clean()`'s non-code path, and `\n`/`\t`/`\r` are Unicode Cc (control)
+// characters, so they hit the isControl branch first and were dropped
+// outright instead of collapsing into a single space -- silently gluing
+// adjacent words together in the Markdown output. Fail before the fix
+// (isControl checked first): `clean("first\nsecond")` produced
+// "firstsecond". Pass after (isWhite checked first, replacing the narrower
+// isSpace which does not cover these control-whitespace characters): words
+// stay space-separated, using the same `pending`-flag run-collapsing an
+// ordinary space run already got.
+unittest {
+    assert(clean("first\nsecond") == "first second",
+        "a bare newline between words must collapse to a space, not glue them (#516)");
+    assert(clean("third\tfourth") == "third fourth",
+        "a bare tab between words must collapse to a space, not glue them (#516)");
+    assert(clean("fifth\r\nsixth") == "fifth sixth",
+        "a CRLF pair between words must collapse to a single space, not glue them (#516)");
+    assert(clean("seventh\n\t\reighth") == "seventh eighth",
+        "a run of mixed whitespace-classified control characters must still " ~
+        "collapse to a single space (#516)");
+
+    // A genuinely non-whitespace control character (NUL) must still be
+    // dropped outright, not converted to a space -- this must not regress.
+    assert(clean("ninth\0tenth") == "ninthtenth",
+        "a non-whitespace control character (NUL) must still be dropped " ~
+        "outright, not converted to a space (#516)");
+
+    // The `code` path is a distinct, unaffected branch: it deliberately
+    // preserves `\n`/`\t` literally (canonicalizing `\r` to `\n`) rather
+    // than collapsing them, exactly as before this fix.
+    assert(clean("first\nsecond", true) == "first\nsecond");
+    assert(clean("first\tsecond", true) == "first\tsecond");
+    assert(clean("first\r\nsecond", true) == "first\n\nsecond");
 }
 
 private string singleLine(string input) pure {
@@ -445,6 +522,20 @@ private void renderNode(const ref HtmlTree tree, size_t index,
              child = endOf(tree, child)) {
             if (tree.nodes[child].parentIndex != index) continue;
             if (tree.nodes[child].name != "li") {
+                // A text node that is nothing but pretty-printed
+                // indentation between `<ol>`/`<li>` boundaries (the
+                // routine "<ol>\n<li>...</li>\n<li>...</li>\n</ol>" shape)
+                // is structural noise, not real inter-word content: it
+                // must contribute nothing here, not a collapsed single
+                // space written directly into the list's own markdown
+                // stream (issue #516 follow-up -- before #516's own fix,
+                // `clean()` happened to drop this same whitespace outright
+                // via its isControl-first bug, which is what hid this
+                // latent bug for newline-formatted lists specifically; a
+                // literal space-only text node already triggered it before
+                // #516 too).
+                if (tree.nodes[child].kind == HtmlNodeKind.text &&
+                    isWhitespaceOnlyText(tree.nodes[child].text)) continue;
                 renderNode(tree, child, writer, depth + 1, options, inCell); continue;
             }
             if (!first) writer.put("\n");
@@ -452,6 +543,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
             Writer item;
             renderChildren(tree, child, item, depth + 1, options, inCell);
             item.trim();
+            item.trimLeading();
             size_t prefixLength = 2;
             if (name == "ul") writer.put("- ");
             else {
@@ -811,6 +903,28 @@ unittest {
     assert(!scoped.canFind("Copyright"));
 }
 
+// Issue #516, through the real DOM-selection path (the actual lexbor
+// parser, not a hand-built tree) -- the ticket's own reproduction,
+// verbatim: bare newline/tab text nodes interleaved with inline
+// `<b>`/`<i>` elements must render as space-separated words, not glued
+// together, in the Markdown output too (mirrors html_main_content.d's own
+// #516 real-DOM regression test).
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    auto outcome = parseHtml(cast(const(ubyte)[])
+        "<p>alpha\n<b>beta</b>\n<i>gamma</i> one\ntwo\tthree</p>");
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto rendered = renderMarkdown(tree);
+    assert(rendered.canFind("alpha **beta** *gamma* one two three"),
+        "the ticket's own real-DOM repro must not glue words together (#516)");
+    assert(!rendered.canFind("alpha**beta***gamma*"),
+        "the ticket's own real-DOM repro must not glue words together (#516)");
+}
+
 // Issue #477 regression: before `MarkdownRenderOptions` existed, neither
 // `renderMarkdown` nor `renderMarkdownFrom` took a second argument at all --
 // a call passing one (as every test below does) is a compile error on base
@@ -1030,6 +1144,53 @@ unittest {
     assert(omitted.canFind("> a real quotation"), "quotes default true");
     assert(omitted.canFind("```"), "code default true");
     assert(omitted.canFind("|---|"), "tables default true");
+}
+
+// Issue #516 follow-up: a whitespace-only text node between `<ol>`/`<li>`
+// boundaries (the routine "<ol>\n<li>...</li>\n<li>...</li>\n</ol>" shape a
+// real HTML pretty-printer produces) must not inject a stray space into the
+// list's own markdown stream -- neither before the first item's marker nor
+// as leading whitespace inside an item's own content, both of which shift
+// content off the marker's own column width and make a CommonMark parser
+// misread the item as an indented code block instead of list content
+// (confirmed on real corpus pages during this ticket's own review). This is
+// the newline-formatted-list repro shape specifically, distinct from the
+// synthetic hand-typed `<ul><li>one</li><li>two</li></ul>` fixture already
+// covered two tests above (which has no whitespace-only sibling text nodes
+// to trigger this at all).
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind, startsWith;
+    import std.string : splitLines;
+
+    auto outcome = parseHtml(cast(const(ubyte)[])
+        "<ol>\n<li>\nFirst item text here.\n</li>\n<li>\nSecond item text here.\n</li>\n</ol>");
+    assert(outcome.isParsed);
+    auto tree = outcome.tree;
+
+    auto rendered = renderMarkdown(tree);
+    // Every non-blank line here is a list item's own first line: it must
+    // start with its numbered marker at column 0 -- never a leading space
+    // before it (the "<ol>\n<li>" whitespace-only sibling text node's own
+    // regression) and never a doubled space after it (the `<li>\n  text`
+    // leading-whitespace-inside-the-item regression).
+    size_t markerLines;
+    foreach (line; rendered.splitLines()) {
+        if (!line.length) continue;
+        assert(!line.startsWith(" "),
+            "list item line must not start with a stray leading space: \"" ~ line ~ "\"");
+        if (line.startsWith("1. ") || line.startsWith("2. ")) {
+            ++markerLines;
+            assert(!line.startsWith("1.  ") && !line.startsWith("2.  "),
+                "list marker must be followed by exactly one space, not two: \"" ~ line ~ "\"");
+        }
+    }
+    assert(markerLines == 2, "both list items must render with their own intact numbered marker");
+    // `clean()` backslash-escapes a literal trailing `.` (ordinary Markdown
+    // escaping, unrelated to this fixture) -- checked up to the word before
+    // it, not byte-for-byte through the escape.
+    assert(rendered.canFind("1. First item text here"));
+    assert(rendered.canFind("2. Second item text here"));
 }
 
 // Issue #478 real fixture 1/4 -- tables (trafilatura-parity `--no-tables`

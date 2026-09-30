@@ -741,8 +741,16 @@ private struct CollapsingWriter {
         size_t at;
         while (at < chunk.length) {
             dchar ch = decode!(UseReplacementDchar.yes)(chunk, at);
-            if (isControl(ch) || isFormat(ch)) continue;
+            // isWhite is checked before isControl: `\n`, `\t`, `\r`, `\f`,
+            // `\v` are Unicode Cc (control) characters that are ALSO
+            // White_Space, so an isControl-first check would drop them
+            // outright (issue #516) instead of collapsing them into the
+            // same single space as an ordinary run of ' '/'\t'. A control
+            // character that is not whitespace (NUL, ESC, other C0/C1
+            // controls) falls through to the isControl check below and is
+            // still dropped exactly as before.
             if (isWhite(ch)) { if (any) pendingSpace = true; continue; }
+            if (isControl(ch) || isFormat(ch)) continue;
             if (pendingParagraphBreak) {
                 writer.put("\n\n");
                 pendingParagraphBreak = false;
@@ -756,6 +764,47 @@ private struct CollapsingWriter {
             any = true;
         }
     }
+}
+
+// Issue #516 regression, at the primitive itself: `isControl` was checked
+// before `isWhite`/`isSpace` in `feed`, and `\n`/`\t`/`\r` are Unicode Cc
+// (control) characters that are ALSO White_Space, so they hit the
+// isControl branch first and were dropped outright instead of collapsing
+// into a single space -- silently gluing adjacent words together. Fail
+// before the fix (isControl checked first): this exact assert fails with
+// `cw.writer.bytes == "firstsecondthirdfourth"`. Pass after (isWhite
+// checked first): words stay space-separated, participating in the same
+// `pendingSpace` run-collapsing logic as an ordinary space/tab run.
+unittest {
+    CollapsingWriter cw;
+    cw.feed("first");
+    cw.feed("\n");
+    cw.feed("second");
+    cw.feed("\t");
+    cw.feed("third");
+    cw.feed("\r\n");
+    cw.feed("fourth");
+    assert(cw.writer.bytes == "first second third fourth",
+        "newline/tab/CRLF between feed() calls must collapse to a single " ~
+        "space, not glue words (#516)");
+
+    // Same, all within a single feed() call (a single text node containing
+    // pretty-printed/hand-wrapped whitespace, the routine real-world shape
+    // the ticket describes).
+    CollapsingWriter cwOneChunk;
+    cwOneChunk.feed("fifth\nsixth\tseventh\r\neighth");
+    assert(cwOneChunk.writer.bytes == "fifth sixth seventh eighth",
+        "whitespace-classified control characters within one chunk must " ~
+        "still collapse to single spaces, not glue words (#516)");
+
+    // A genuinely non-whitespace control character (NUL) must still be
+    // dropped outright, not converted to a space -- this must not regress
+    // per the ticket's third acceptance criterion.
+    CollapsingWriter cwNul;
+    cwNul.feed("ninth\0tenth");
+    assert(cwNul.writer.bytes == "ninthtenth",
+        "a non-whitespace control character (NUL) must still be dropped " ~
+        "outright, not converted to a space (#516)");
 }
 
 // Issue #27 Case 2 (for-me-online.de-pubertaet.html): a
@@ -1560,6 +1609,32 @@ unittest {
     assert(!styleInStructuredDataResult.text.canFind("color:red"),
         "hidden <style> text embedded inside a JSON-LD string value leaked");
     assert(styleInStructuredDataResult.text.canFind("Article body sentence."));
+}
+
+// Issue #516, through the real DOM-selection path (the actual lexbor
+// parser, not a hand-built tree) -- the ticket's own second reproduction,
+// verbatim: inline elements (`<b>`/`<i>`) interleaved with bare-whitespace
+// text nodes must not glue the surrounding words together either. Inline
+// elements don't change the nearest block-level ancestor, so this exercises
+// `CollapsingWriter.feed`'s own whitespace collapsing directly, independent
+// of the paragraph-break ("\n\n") machinery Issue #335 Slice 1 covers.
+unittest {
+    import effects.html_tree : parseHtml;
+    import std.algorithm.searching : canFind;
+
+    string longParagraph;
+    foreach (_; 0 .. 25) longParagraph ~= "Article body sentence. ";
+
+    string realHtml = "<article><p>" ~ longParagraph ~
+        "alpha\n<b>beta</b>\n<i>gamma</i> one\ntwo\tthree</p></article>";
+    auto outcome = parseHtml(cast(const(ubyte)[]) realHtml);
+    assert(outcome.isParsed);
+    auto realResult = extractMainContent(outcome.tree);
+    assert(realResult.status == MainContentStatus.selected);
+    assert(realResult.text.canFind("alpha beta gamma one two three"),
+        "the ticket's own real-DOM repro must not glue words together (#516)");
+    assert(!realResult.text.canFind("alphabetagamma"),
+        "the ticket's own real-DOM repro must not glue words together (#516)");
 }
 
 // Issue #485: a literal, unescaped `</script>` inside a JSON-LD string value.

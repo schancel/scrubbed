@@ -264,20 +264,100 @@ int runCrawl(const string[] args) {
     }
     try {
         return executeCrawl(o);
-    } catch (Exception) {
-        stderr.writeln("scrubbed: crawl-refused");
+    } catch (Exception error) {
+        stderr.writeln("scrubbed: ", error.msg);
         return 2;
     }
 }
 
 version (unittest) {
-    import std.file : remove, tempDir, write;
+    import std.file : remove, rmdirRecurse, tempDir, write;
+    import std.stdio : File;
+    import std.typecons : tuple;
     import std.uuid : randomUUID;
 
     private string freshTempFile(string label) {
         return buildPath(tempDir(), "scrubbed-crawl-cli-test-" ~ label ~ "-" ~
             randomUUID.toString ~ ".txt");
     }
+
+    private string freshTempDir(string label) {
+        return buildPath(tempDir(), "scrubbed-crawl-cli-test-" ~ label ~ "-" ~
+            randomUUID.toString);
+    }
+
+    /// Runs `runCrawl(args)` with the real `stderr` redirected to a temp
+    /// file, and returns (exit code, captured stderr text) so a test can
+    /// assert on the message that would actually reach a real CLI user --
+    /// not just that the underlying exception's `.msg` happens to be
+    /// right -- exactly like `cli_commands.d`'s own
+    /// `runCommandsCapturingStderr` helper does for the rest of the CLI.
+    private auto runCrawlCapturingStderr(string[] args) {
+        auto capturePath = freshTempFile("stderr-capture");
+        auto saved = stderr;
+        scope(exit) {
+            stderr = saved;
+            if (exists(capturePath)) remove(capturePath);
+        }
+        stderr = File(capturePath, "w");
+        auto exitCode = runCrawl(args);
+        stderr.flush();
+        stderr = saved;
+        return tuple(exitCode, exists(capturePath) ? readText(capturePath) : "");
+    }
+}
+
+// Issue #546: `runCrawl()` used to catch every validation exception
+// generically and print only "scrubbed: crawl-refused" to stderr,
+// discarding the real, specific `error.msg` -- for *every* crawl
+// validation path, not just one. These two regressions prove the fix
+// end-to-end (through the real `runCrawl()` entry point and its real
+// `stderr` output, not just by inspecting a caught exception's `.msg` in
+// isolation) across two independent validation paths, so the fix isn't
+// narrowly special-cased to a single message.
+
+unittest {
+    // The #521/#544 --concurrency upper-bound path (the one that motivated
+    // this ticket): must surface the specific "--concurrency must be at
+    // most N (M cores detected)" message, not the generic token, while
+    // still exiting 2 and never spawning a thread pool (that safety
+    // property is `CrawlOrchestrator`'s constructor guard, unaffected by
+    // this fix).
+    auto corpusDir = freshTempDir("oversized-concurrency");
+    scope(exit) if (exists(corpusDir)) rmdirRecurse(corpusDir);
+
+    auto result = runCrawlCapturingStderr(["--seed", "http://127.0.0.1:1/x",
+        "--concurrency", "999999999", "--corpus-dir", corpusDir, "--in-memory"]);
+    assert(result[0] == 2, "an oversized --concurrency must still exit 2");
+    assert(result[1].canFind("--concurrency must be at most "),
+        "the specific --concurrency upper-bound message must reach the " ~
+        "real stderr output, got: " ~ result[1]);
+    assert(!result[1].canFind("crawl-refused"),
+        "the generic 'crawl-refused' token must not shadow the specific " ~
+        "message, got: " ~ result[1]);
+}
+
+unittest {
+    // A second, independently pre-existing crawl validation path (a seeds
+    // file that resolves to zero URLs, once comments/blanks are skipped)
+    // must also surface its own specific message end-to-end -- proving
+    // this fix covers crawl validation uniformly, not just the
+    // --concurrency case above.
+    auto corpusDir = freshTempDir("no-seeds-resolved");
+    scope(exit) if (exists(corpusDir)) rmdirRecurse(corpusDir);
+    auto seedsPath = freshTempFile("empty-seeds");
+    write(seedsPath, "# nothing but comments\n\n   \n");
+    scope(exit) remove(seedsPath);
+
+    auto result = runCrawlCapturingStderr(["--seeds", seedsPath,
+        "--corpus-dir", corpusDir, "--in-memory"]);
+    assert(result[0] == 2, "zero resolved seed URLs must still exit 2");
+    assert(result[1].canFind("crawl: no seed URLs resolved"),
+        "the specific no-seed-URLs message must reach the real stderr " ~
+        "output, got: " ~ result[1]);
+    assert(!result[1].canFind("crawl-refused"),
+        "the generic 'crawl-refused' token must not shadow the specific " ~
+        "message, got: " ~ result[1]);
 }
 
 unittest {

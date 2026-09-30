@@ -96,15 +96,19 @@ struct Repair {
     mixin ProcessingOptions;
 }
 
-@(Command("extract", "x").Description("Export a bounded selected HTML parse tree, whole-page Markdown, or boilerplate-stripped main-content Markdown."))
+@(Command("extract", "x").Description("Export a bounded selected HTML parse tree, whole-page Markdown, boilerplate-stripped main-content Markdown, CSV, generic XML, or TEI-conformant XML."))
 struct Extract {
     @(NamedArgument("input", "i").Description("Input path")) string input;
     @(NamedArgument("output", "o").Description("Output path")) string output;
     @(NamedArgument("format", "f").Description(
         "Extraction format: tree-json (default), markdown (whole page), " ~
-        "or main-content-markdown (boilerplate/nav/ad/footer stripped " ~
+        "main-content-markdown (boilerplate/nav/ad/footer stripped " ~
         "first, same selection as html-main-content/clean-web-document, " ~
-        "then rendered as Markdown instead of plain text)"))
+        "then rendered as Markdown instead of plain text), csv (one " ~
+        "metadata/content row, columns matching trafilatura's own " ~
+        "--output-format csv), xml (generic structured XML of the " ~
+        "selected main content), or xml-tei (TEI P5-conformant XML of " ~
+        "the selected main content)"))
     string format;
     @(NamedArgument("charset").Description("Declared UTF-8/UTF-16LE/UTF-16BE charset"))
     string charset;
@@ -667,10 +671,11 @@ int runCommands(string[] argv) {
     return commands.command.matchCmd!((cmd) {
         static if (is(typeof(cmd) == Extract)) {
             if ((cmd.format != "tree-json" && cmd.format != "markdown" &&
-                    cmd.format != "main-content-markdown") ||
+                    cmd.format != "main-content-markdown" && cmd.format != "csv" &&
+                    cmd.format != "xml" && cmd.format != "xml-tei") ||
                 !cmd.input.length || !cmd.output.length) {
                 stderr.writeln("scrubbed: extract requires --input, --output and " ~
-                    "--format=tree-json|markdown|main-content-markdown");
+                    "--format=tree-json|markdown|main-content-markdown|csv|xml|xml-tei");
                 return 2;
             }
             if (present(original, "--max-html-bytes") && cmd.maxHtmlBytes == 0) {

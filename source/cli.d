@@ -39,6 +39,7 @@ import effects.html_tree : checkedHtmlByteLimit, defaultExtractHtmlBytes;
 import effects.html_tree_json_stage;
 import effects.html_markdown_stage;
 import effects.html_main_content_markdown_stage;
+import effects.extract_formats_stage;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, StageEvent, TerminalSideOutput;
 import stages.pii_four_class;
@@ -478,7 +479,10 @@ int runExtract(string requestedInput, string requestedOutput,
     auto sourceRoot = isTree ? input : dirName(input);
     auto outputRoot = isTree ? output : dirName(output);
     auto expectedStage = format == "markdown" ? "html-markdown" :
-        format == "main-content-markdown" ? "html-main-content-markdown" : "html-tree-json";
+        format == "main-content-markdown" ? "html-main-content-markdown" :
+        format == "csv" ? "html-csv" :
+        format == "xml" ? "html-xml" :
+        format == "xml-tei" ? "html-xml-tei" : "html-tree-json";
     JobSpec spec;
     if (configPath.length) {
         spec = parseJobJson(readText(configPath));
@@ -505,8 +509,10 @@ int runExtract(string requestedInput, string requestedOutput,
                 throw new Exception("extract input changed to non-regular file: " ~ file);
             auto recordKey = relativePath(file, sourceRoot);
             auto name = recordKey ~
-                ((format == "markdown" || format == "main-content-markdown") ?
-                    ".md" : ".tree.json");
+                ((format == "markdown" || format == "main-content-markdown") ? ".md" :
+                 format == "csv" ? ".csv" :
+                 format == "xml" ? ".xml" :
+                 format == "xml-tei" ? ".tei.xml" : ".tree.json");
             auto destination = isTree ? buildPath(output, name) : output;
             preflightDestination(destination, outputRoot);
             stat_t inputStat, outputStat;

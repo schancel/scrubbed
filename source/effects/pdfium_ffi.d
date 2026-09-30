@@ -22,23 +22,39 @@
 ///     no more trust in it than "resolves the exact symbols this module
 ///     calls, or is rejected outright" (see `PdfiumLibrary.open` below).
 ///
-/// **Flag-name decision, recorded here so it is not re-litigated later**
-/// (owner decision, issue #156, 2026-09-27): any future stage/CLI wiring
-/// slice that exposes this module's library-path requirement to an operator
-/// MUST name that flag `--pdfium-library` exactly (an explicit, required,
-/// discoverable flag -- never an environment variable, never a bare
-/// positional argument, matching this codebase's existing "every option is
-/// an explicit flag, nothing implicit/ambient" convention, e.g.
-/// `clean-web-document`'s sealed flag list and `--sidecar-output`).
-/// `experiments/pdfium_extract/check.d` already follows this convention at
-/// the checker level.
+/// **Flag-name decision (issue #156, 2026-09-27), corrected by the PDF-wiring
+/// slice (issue #156, 2026-09-30 owner decision).** The original decision
+/// recorded here required a dedicated `--pdfium-library` CLI flag for any
+/// future wiring slice. That decision predated the DOCX/OOXML wiring slice
+/// (#583) establishing `ExtractorOptionDeclarationV1`/`--route-option` as
+/// this codebase's real per-extractor-option delivery mechanism -- the PDF
+/// wiring slice's own accepted contract corrected this explicitly: the
+/// option *key* (`pdfium-library`) is preserved, but it is delivered via
+/// `--route-option pdfium-library=text:<path>` (see
+/// `extraction.pdf_pdfium_route.pdfiumLibraryOptionV1`), not a dedicated
+/// flag. `experiments/pdfium_extract/check.d` still uses its own
+/// standalone `--pdfium-library` flag -- that checker is not the CLI, has
+/// no `--route-option` concept, and is unaffected by this correction.
 ///
-/// This slice has **no stage/CLI/dispatch wiring**: nothing in `source/`
-/// other than this module's own future callers imports it yet. PDFium's own
-/// C API (`public/fpdfview.h`) documents itself as not thread-safe ("None of
-/// the PDFium APIs are thread-safe. They expect to be called from a single
-/// thread"); this module does no locking of its own and inherits that
-/// constraint onto its caller.
+/// **Wiring status (issue #156, PDF-wiring slice).** This module is now
+/// reachable from `scrubbed run` via the `pdf-pdfium` v4 dispatch route
+/// (`extraction.pdf_pdfium_route`, registered in
+/// `extraction.registry.coreExtractorRegistryV1`). PDFium's own C API
+/// (`public/fpdfview.h`) documents itself as not thread-safe ("None of the
+/// PDFium APIs are thread-safe. They expect to be called from a single
+/// thread"); `PdfiumLibrary`/`extractPdfTextV1` below still do no locking of
+/// their own and still inherit that constraint onto their direct caller --
+/// but `scrubbed run` genuinely calls into one shared, process-lifetime
+/// `PdfiumLibrary` from multiple `--threads` worker threads concurrently, so
+/// no *direct* caller of this module's own primitives may be multi-threaded
+/// without its own serialization. `LockedPdfiumLibraryV1` below is that
+/// serialization: it wraps exactly one `PdfiumLibrary` and one
+/// `core.sync.mutex.Mutex`, and is the only PDFium entry point
+/// `extraction.pdf_pdfium_route`'s injected `PdfBytesExtractV1` ever calls
+/// into -- see that module's own doc comment, "Concurrency" section, for
+/// the full disclosed reasoning (including why this is a real fix, not the
+/// gap `effects.llama_metadata_annotate_stage.d`'s comparable shared handle
+/// left unaddressed).
 ///
 /// Portability (issue #353): excluded from the Linux build via `dub.json`'s
 /// `excludedSourceFiles-linux`, unlike `effects.curl_ffi`/`effects.zlib_ffi`/
@@ -56,7 +72,10 @@
 module effects.pdfium_ffi;
 
 import core.stdc.config : c_ulong;
+import core.sync.mutex : Mutex;
 import core.sys.posix.dlfcn : dlclose, dlopen, dlsym, RTLD_LOCAL, RTLD_NOW;
+import extraction.port : PdfBytesExtractOutcomeV1, PdfBytesExtractResultV1,
+    PdfBytesExtractV1;
 import std.string : toStringz;
 import std.utf : toUTF8;
 
@@ -391,3 +410,136 @@ unittest {
     auto wrongLibrary = PdfiumLibrary.open("/usr/lib/libSystem.B.dylib");
     assert(wrongLibrary is null);
 }
+
+// ---------------------------------------------------------------------------
+// Concurrency-safety wrapper and the module-level PDF-wiring boundary (issue
+// #156's PDF-wiring slice). See this module's own header doc, "Wiring
+// status" section, and `extraction.pdf_pdfium_route`'s own doc comment,
+// "Concurrency" section, for the full disclosed reasoning.
+// ---------------------------------------------------------------------------
+
+/// Serializes every call into a shared `PdfiumLibrary`: PDFium's own C API
+/// documents itself as single-thread-only (see this module's header doc),
+/// but `scrubbed run`'s real production execution model genuinely calls
+/// into a shared, process-lifetime `PdfiumLibrary` from multiple
+/// `--threads` worker threads concurrently
+/// (`composition.dispatch_executor.d`'s own two-thread concurrent-dispatch
+/// unittest already proves this happens for every registered extractor).
+/// This is the mandatory, non-deferrable concurrency-safety resolution
+/// issue #156's owner decision (2026-09-30) requires -- a real
+/// `core.sync.mutex.Mutex` around every call, not a documentation-only
+/// disclosure. Real concurrent-call proof lives in `cli.d`'s own manually
+/// run (not `dub test`-gated, since it needs a real operator-supplied
+/// library -- see below) end-to-end test, per this module's established
+/// "real-artifact proof lives outside dub test" convention
+/// (`PdfiumLibrary.open`'s own two unittests above deliberately avoid
+/// needing the real artifact for the same reason).
+final class LockedPdfiumLibraryV1 {
+    private PdfiumLibrary lib;
+    private Mutex mutex;
+
+    this(PdfiumLibrary lib) {
+        this.lib = lib;
+        this.mutex = new Mutex();
+    }
+
+    /// Serialized real extraction call. Never throws for ordinary
+    /// malformed/encrypted/over-limit input -- `extractPdfTextV1` itself
+    /// already fails closed with a typed outcome for all of those; this
+    /// method adds no new failure mode of its own beyond mutual exclusion.
+    PdfExtractResultV1 extract(const(ubyte)[] pdfBytes, size_t maxPages,
+            size_t maxBytesPerPage) {
+        synchronized (mutex) {
+            return extractPdfTextV1(lib, pdfBytes, maxPages, maxBytesPerPage);
+        }
+    }
+
+    /// Calls `PdfiumLibrary.close()` under the same mutex, so a call
+    /// racing a concurrent `extract` either completes first or observes a
+    /// closed library cleanly rather than tearing one down mid-call. Not
+    /// called by this module's own `installPdfiumLibraryV1` (the installed
+    /// library is process-lifetime, matching `PdfiumLibrary`'s own
+    /// GC-finalized-at-process-exit discipline); provided for callers (e.g.
+    /// a future test harness) that need explicit, deterministic teardown.
+    void close() {
+        synchronized (mutex) {
+            lib.close();
+        }
+    }
+}
+
+/// See `extraction.pdf_pdfium_route`'s own doc comment, "The injection"
+/// section, for why this is a module-global slot rather than a closure.
+/// Unlike that module's own mirroring slot (`installedPdfBytesExtractV1`,
+/// which is written and read exactly once, both on the CLI's main thread,
+/// before any worker thread exists -- safe as ordinary, thread-local
+/// storage), this slot is genuinely different: it is written once, on the
+/// main thread, but then *read* on every single `pdfBytesExtractV1` call --
+/// which happens once per PDF document, on whichever `--threads` worker
+/// thread actually processes that document
+/// (`composition.dispatch_executor.d`'s own concurrent-dispatch test proves
+/// this is real, not hypothetical). Ordinary D module storage is
+/// thread-local, so an ordinary variable here would leave every worker
+/// thread other than the one that happened to call `installPdfiumLibraryV1`
+/// looking at its own, never-written, `null` copy -- a real bug, not a
+/// theoretical one, caught during this slice's own implementation. Marked
+/// `__gshared` so every thread reads the one real, main-thread-installed
+/// value. Safe as a write-once(-on-the-main-thread)-then-read-many pattern:
+/// the write happens-before any worker thread is spawned (`core.thread
+/// .Thread.start`'s own creation is itself a synchronization point), and
+/// the pointer itself is never reassigned afterward -- only the
+/// `LockedPdfiumLibraryV1` it refers to is ever mutated post-install, and
+/// that mutation is exactly what its own internal `Mutex` protects.
+private __gshared LockedPdfiumLibraryV1 activePdfiumLibraryV1;
+
+/// `dlopen()`s/`dlsym()`s the operator-supplied PDFium library at
+/// `libraryPath` (via `PdfiumLibrary.open`, unchanged), wraps it with a
+/// serializing `Mutex` (`LockedPdfiumLibraryV1`), and installs it as this
+/// module's single active library -- the one `pdfBytesExtractV1` (below)
+/// calls into. Must be called at most once per process, on the CLI's own
+/// main thread, before any document is dispatched to the `pdf-pdfium`
+/// route (`cli.d`'s own `resolvePdfBytesExtractV1` is the one real caller).
+/// Returns `true` on success, `false` on any dlopen/dlsym/init failure --
+/// content-free, matching `PdfiumLibrary.open`'s own discipline; the caller
+/// (`cli.d`) turns a `false` return into `pdfiumLoadFailureMessage` before
+/// any document is processed.
+bool installPdfiumLibraryV1(string libraryPath) {
+    auto lib = PdfiumLibrary.open(libraryPath);
+    if (lib is null) return false;
+    activePdfiumLibraryV1 = new LockedPdfiumLibraryV1(lib);
+    return true;
+}
+
+/// The real implementation behind `extraction.port.PdfBytesExtractV1`,
+/// translating `effects.pdfium_ffi`'s own `PdfExtractResultV1`/
+/// `PdfExtractOutcomeV1` into `extraction.port`'s byte-stable mirror
+/// (`extraction/` may not import `effects/`, so the two enums cannot be the
+/// same type -- see `extraction.port.PdfBytesExtractOutcomeV1`'s own doc).
+private PdfBytesExtractResultV1 pdfBytesExtractImpl(const(ubyte)[] pdfBytes,
+        size_t maxPages, size_t maxBytesPerPage) {
+    import std.exception : enforce;
+
+    enforce(activePdfiumLibraryV1 !is null,
+        "pdfBytesExtractV1 called before installPdfiumLibraryV1");
+    auto raw = activePdfiumLibraryV1.extract(pdfBytes, maxPages, maxBytesPerPage);
+    PdfBytesExtractResultV1 result;
+    final switch (raw.outcome) {
+    case PdfExtractOutcomeV1.ok: result.outcome = PdfBytesExtractOutcomeV1.ok; break;
+    case PdfExtractOutcomeV1.malformed: result.outcome = PdfBytesExtractOutcomeV1.malformed; break;
+    case PdfExtractOutcomeV1.encrypted: result.outcome = PdfBytesExtractOutcomeV1.encrypted; break;
+    case PdfExtractOutcomeV1.pageLimitExceeded: result.outcome = PdfBytesExtractOutcomeV1.pageLimitExceeded; break;
+    case PdfExtractOutcomeV1.textLimitExceeded: result.outcome = PdfBytesExtractOutcomeV1.textLimitExceeded; break;
+    }
+    result.pages = raw.pages;
+    return result;
+}
+
+/// The single documented `pure`-cast boundary (see this module's header
+/// doc, "Wiring status" section, and `extraction.pdf_pdfium_route`'s own
+/// doc comment, "Concurrency" section, for the full reasoning): honest in
+/// the same sense `effects.zlib_ffi.zipInflateV1`'s cast is -- the
+/// function's result is a deterministic function of its arguments once
+/// mutual exclusion into the shared `PdfiumLibrary` is guaranteed, and
+/// `LockedPdfiumLibraryV1`'s `Mutex` is exactly what makes that guarantee
+/// real rather than assumed.
+immutable PdfBytesExtractV1 pdfBytesExtractV1 = cast(PdfBytesExtractV1) &pdfBytesExtractImpl;

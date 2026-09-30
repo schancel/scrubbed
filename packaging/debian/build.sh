@@ -70,8 +70,18 @@ echo "build.sh: building experiments/package_core/check.d checker"
 ldc2 -O3 -release "$repo/experiments/package_core/check.d" -of="$work/check"
 
 pkgtree="$work/pkgtree"
-echo "build.sh: assembling + self-verifying release package tree (completions baked for /usr/bin/scrubbed)"
-"$work/check" create "$repo" "$binary" "$pkgtree" /usr/bin/scrubbed
+echo "build.sh: assembling + self-verifying release package tree"
+# check.d's `create` *executes* its 4th argument (`completionsBinary`) to
+# capture `scrubbed completion init`'s own thisExePath()-baked output, so
+# it must be a real, already-executable file on THIS build host -- unlike
+# release.yml (which runs on a disposable CI runner and can `sudo install`
+# the binary to /usr/local/bin first), build.sh stays unprivileged and
+# doesn't stage anything into the real build host's filesystem. So this
+# omits that argument (falls back to check.d's own documented default:
+# completions generated against $binary itself) and instead rewrites the
+# baked-in build-time path to the real Debian install path below, the same
+# way zsh-completion.in's @SCRUBBED_BIN@ placeholder already is.
+"$work/check" create "$repo" "$binary" "$pkgtree"
 "$work/check" verify "$repo" "$pkgtree" "$raw_version"
 
 root="$work/debroot"
@@ -85,9 +95,27 @@ mkdir -p "$root/DEBIAN" \
          "$docdir"
 
 install -m 0755 "$pkgtree/scrubbed" "$root/usr/bin/scrubbed"
-install -m 0644 "$pkgtree/completions/scrubbed.bash" \
+if command -v strip >/dev/null 2>&1; then
+    strip --strip-unneeded "$root/usr/bin/scrubbed"
+else
+    echo "build.sh: NOTE: 'strip' not on PATH, shipping an unstripped binary" >&2
+fi
+
+# The completions check.d just generated have $binary's real build-time
+# path baked in (see the `create` call above); rewrite it to the real
+# Debian install path before shipping, exactly as any user who installed
+# this .deb would need `scrubbed completion init` to have been run against.
+rewrite_completion_path() {
+    local source="$1" destination="$2"
+    local content
+    content=$(cat "$source")
+    printf '%s' "${content//$binary//usr/bin/scrubbed}" >"$destination"
+}
+rewrite_completion_path "$pkgtree/completions/scrubbed.bash" \
     "$root/usr/share/bash-completion/completions/scrubbed"
-install -m 0644 "$pkgtree/completions/scrubbed.fish" \
+rewrite_completion_path "$pkgtree/completions/scrubbed.fish" \
+    "$root/usr/share/fish/vendor_completions.d/scrubbed.fish"
+chmod 0644 "$root/usr/share/bash-completion/completions/scrubbed" \
     "$root/usr/share/fish/vendor_completions.d/scrubbed.fish"
 # zsh: NOT the raw `scrubbed completion init --zsh` output (that assumes
 # `bashcompinit`, which a stock Debian/Ubuntu zsh setup doesn't load --

@@ -965,22 +965,22 @@ is useful, but it is not sufficient on its own.
       (`source/extraction/ooxml_route.d`) that locates `word/document.xml`,
       reads it via that accessor, walks it, and renders "good enough" plain
       text. This is reachable today through the existing generic `--route`/
-      `--action` v4 CLI tokens, no new flag. **Known residual gap, found
-      during this slice and not yet resolved:** `extraction.refinement`'s
-      live call into `inspectZipContainerV1` (via
-      `composition.dispatch_executor`) still never injects a real
-      `ZipInflateV1` decompressor, so a genuinely DEFLATE-compressed
-      real-world `.docx` cannot yet reach the `ooxml-word` route through
-      `scrubbed run` end to end -- only a synthetic STORE-compressed fixture
-      is proven through the live CLI dispatch path today. Real-file DEFLATE
-      decompression correctness is separately, directly proven byte-for-byte
-      against the real system decompressor at the `container.d`/`effects`
-      layer (bypassing dispatch). Wiring a real decompressor into
-      `refinement.d`'s live call is out of this slice's approved scope
-      (`composition.dispatch_executor`/`dispatch_compiler` changes were
-      explicitly prohibited pending owner review) and needs its own
-      follow-up decision. PDF wiring into a production extraction stage/CLI
-      path, and OCR/image adapters, remain open.
+      `--action` v4 CLI tokens, no new flag. A residual gap found during
+      this slice (`extraction.refinement`'s live call into
+      `inspectZipContainerV1`, via `composition.dispatch_executor`, never
+      injected a real `ZipInflateV1` decompressor, so a genuinely
+      DEFLATE-compressed real-world `.docx` could not reach the
+      `ooxml-word` route through `scrubbed run` end to end) is resolved by
+      #587: `refineMediaV1` and `composition.dispatch_compiler`'s
+      `compileDispatchJobV1`/`CompiledDispatchJobV1` now take/carry an
+      optional, default-`null` `ZipInflateV1`, threaded straight through
+      to `inspectZipContainerV1` with no new I/O in either pure layer, and
+      `source/cli.d`'s `selectedRuntimePlan` injects the real
+      `effects.zlib_ffi.zipInflateV1` there -- proven end to end against the
+      real repo fixture `docx-training.docx` routed through the live CLI
+      dispatch path (`source/cli.d`'s own `ooxml-word` dispatch tests).
+      PDF wiring into a production extraction stage/CLI path, and OCR/image
+      adapters, remain open.
 - [~] Package a clean-machine core. A D-only evidence harness verifies a
       macOS arm64 text-core bundle with closed file/notice inventory,
       checksums, clean-`PATH` help/text output, and negative controls

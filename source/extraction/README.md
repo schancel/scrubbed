@@ -75,18 +75,23 @@ family wired end to end (see `ooxml_route.d` above); headers/footers/
 footnotes, fields, track changes, embedded objects, and legacy `.doc` remain
 explicit non-goals.
 
-**Known residual gap:** the real (`effects`-layer-injected) `ZipInflateV1`
-decompressor is not yet wired into `refinement.d`'s live call into
-`inspectZipContainerV1` (reached from `composition.dispatch_executor` on
-every `scrubbed run`), so a genuinely DEFLATE-compressed real-world `.docx`
-cannot yet reach the `ooxml-word` route through the live CLI end to end --
-only a STORE-compressed fixture is proven through that path today (see
-`source/cli.d`'s own `ooxml-word` dispatch test). Real DEFLATE decompression
-correctness itself is proven separately, byte-for-byte against the real
-system decompressor and a real repo fixture docx, directly at the
-`container.d`/`effects.zlib_ffi` layer (bypassing dispatch). Wiring a real
-decompressor into the live dispatch path needs its own follow-up decision
-(see `TODO.md`).
+**Resolved (issue #587):** the real (`effects`-layer-injected) `ZipInflateV1`
+decompressor is now wired into `refinement.d`'s live call into
+`inspectZipContainerV1`, reached from `composition.dispatch_executor` on
+every `scrubbed run`. `refineMediaV1` and `composition.dispatch_compiler`'s
+`compileDispatchJobV1`/`CompiledDispatchJobV1` both gained an optional,
+default-`null` `ZipInflateV1` parameter/field that is threaded straight
+through, unchanged, to `inspectZipContainerV1` -- this subtree still
+performs no I/O and constructs no decompressor itself. `source/cli.d`'s
+`selectedRuntimePlan` (the real v4 compile path every `scrubbed run`
+invocation uses) injects the real `effects.zlib_ffi.zipInflateV1`, so a
+genuinely DEFLATE-compressed real-world `.docx` now reaches the
+`ooxml-word` route through the live CLI end to end -- proven directly
+against the real repo fixture `docx-training.docx` in `source/cli.d`'s own
+`ooxml-word` dispatch tests (one STORE-compressed, one genuinely
+DEFLATE-compressed). Real DEFLATE decompression correctness itself remains
+separately proven, byte-for-byte against the real system decompressor,
+directly at the `container.d`/`effects.zlib_ffi` layer.
 
 # Shipping extractor
 

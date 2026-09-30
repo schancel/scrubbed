@@ -2,9 +2,9 @@
 module extraction.refinement;
 
 import content.pieces : Content;
-import extraction.container : AdmittedZipV1, ZipInspectionLimitsV1,
-    ZipInspectionReasonV1, ZipInspectionResultV1, ZipInspectionStatusV1,
-    ZipPackageKindV1, inspectZipContainerV1;
+import extraction.container : AdmittedZipV1, ZipInflateV1,
+    ZipInspectionLimitsV1, ZipInspectionReasonV1, ZipInspectionResultV1,
+    ZipInspectionStatusV1, ZipPackageKindV1, inspectZipContainerV1;
 import extraction.contracts : DetectionOutcomeV1, DetectionResultV1,
     EvidenceKindV1, MediaEvidenceV1, maxDetectionEvidenceV1,
     maxDetectionWarningsV1;
@@ -32,15 +32,24 @@ struct RefinedMediaV1 {
 
 /// Flat and ambiguous inputs never enter container inspection. A strong ZIP
 /// signature is the sole authority that can grant the ZIP inspection path.
+/// `inflate` is the optional injected raw-DEFLATE decompressor (see
+/// `extraction.container`'s `ZipInflateV1`), forwarded unchanged to
+/// `inspectZipContainerV1`: a caller that passes `null` (the default) gets
+/// the same STORE-only admission behavior this module always had; a caller
+/// that passes a real decompressor (e.g. `effects.zlib_ffi.zipInflateV1`)
+/// lets genuinely DEFLATE-compressed entries be admitted instead of refused
+/// as `unsupportedFeature`. This module stays pure and I/O-free either way
+/// -- it never constructs a decompressor itself, only threads one through.
 RefinedMediaV1 refineMediaV1(Content source, DetectionResultV1 detected,
-        ZipInspectionLimitsV1 limits = ZipInspectionLimitsV1()) {
+        ZipInspectionLimitsV1 limits = ZipInspectionLimitsV1(),
+        ZipInflateV1 inflate = null) {
     enforce(source !is null, "media refinement needs source content");
     detected.validateResult;
     RefinedMediaV1 result;
     result.detectionValue = detected;
     if (detected.outcome != DetectionOutcomeV1.genericZip) return result;
 
-    auto inspected = inspectZipContainerV1(source, limits);
+    auto inspected = inspectZipContainerV1(source, limits, inflate);
     result.inspectedValue = true;
     result.containerValue = inspected;
     auto evidence = detected.evidence.dup;

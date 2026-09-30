@@ -31,6 +31,7 @@ import effects.mapped_file : openMappedFile;
 import effects.independent_sinks : IndependentSinkFailure;
 import effects.runner : EffectFailure, EffectPhase;
 import effects.side_output_sink : SideOutputSink;
+import effects.zlib_ffi : zipInflateV1;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
     SourceLocator;
@@ -959,14 +960,16 @@ private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
         auto canonical = canonicalDispatchJobJsonV1(spec);
         auto registry = coreExtractorRegistryV1();
         return RuntimePlanV1.dispatchV4(
-            compileDispatchJobV1(spec, &registry), canonical);
+            compileDispatchJobV1(spec, &registry, null, null, zipInflateV1),
+            canonical);
     }
     if (configExplicit && versionedConfig && selectedJobVersion(configContents) == 4) {
         auto spec = parseDispatchJobJsonV1(configContents);
         auto canonical = canonicalDispatchJobJsonV1(spec);
         auto registry = coreExtractorRegistryV1();
         return RuntimePlanV1.dispatchV4(
-            compileDispatchJobV1(spec, &registry), canonical);
+            compileDispatchJobV1(spec, &registry, null, null, zipInflateV1),
+            canonical);
     }
     auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
         configExplicit, configContents, versionedConfig);
@@ -3818,21 +3821,15 @@ unittest {
     // the actual compileDispatchJobV1/executor path this process runs
     // (runApp below), not a bypassed unit call to the extractor directly.
     //
-    // This fixture is deliberately STORE-compressed (method 0), not
-    // DEFLATE: it exists to prove route registration/selection/execution
-    // wiring, which is independent of compression method. A real Word/
-    // LibreOffice-produced DEFLATE-compressed docx's word/document.xml is
-    // separately, directly proven byte-for-byte against the real system
-    // decompressor in effects/zlib_ffi.d's own unittest (a real repo
-    // fixture, docx-training.docx) and in extraction/container.d's own
-    // DEFLATE-admission unit tests -- neither of those needs this process's
-    // dispatch surface, only the container/effects layer. As of this slice,
-    // extraction.refinement's live call into inspectZipContainerV1 (via
-    // composition.dispatch_executor) does not inject a real ZipInflateV1
-    // decompressor, so a genuinely DEFLATE-compressed docx cannot yet reach
-    // this same route through `scrubbed run` -- a real, separate gap this
-    // slice's contract did not cover and this test does not paper over
-    // (see this slice's PR description for the flagged follow-up).
+    // This fixture is deliberately STORE-compressed (method 0): it exists to
+    // prove route registration/selection/execution wiring, independent of
+    // compression method. The separate, genuinely DEFLATE-compressed
+    // real-world fixture case (issue #587's follow-up: `refineMediaV1`'s
+    // live call, reached from `composition.dispatch_executor` on every real
+    // `scrubbed run`, now does inject a real `ZipInflateV1` decompressor --
+    // `effects.zlib_ffi.zipInflateV1`, wired in by `selectedRuntimePlan`
+    // below) has its own end-to-end proof in the next unittest, against the
+    // real repo fixture `docx-training.docx`.
     ubyte[] buildStoreDocx(string documentXml) {
         string[] names = ["[Content_Types].xml", "_rels/.rels", "word/document.xml"];
         ubyte[][] datas = [cast(ubyte[]) "c".dup, cast(ubyte[]) "r".dup,
@@ -3915,6 +3912,56 @@ unittest {
     assert(runApp(["scrubbed", "run", "--input", input, "--output", output,
         "--threads", "1"] ~ ooxmlTokens) == 0);
     assert(readText(output) == "First paragraph.\n\nSecond paragraph.");
+}
+
+unittest {
+    import std.file : copy, rmdirRecurse, tempDir;
+
+    // Issue #587: the real, separate end-to-end proof the STORE-only test
+    // above explicitly flagged as missing. A genuine Word-produced .docx
+    // fixture -- every entry genuinely DEFLATE-compressed (method 8), not a
+    // hand-authored STORE archive -- routed through the actual `scrubbed
+    // run --route ooxml=ooxml-word ...` CLI dispatch surface (`runApp`
+    // below, the same process entry point every real invocation uses), not
+    // a unit call that bypasses dispatch. Before this issue's fix,
+    // `selectedRuntimePlan` compiled the dispatch job with no injected
+    // `ZipInflateV1`, so this exact fixture was refused at admission
+    // (`unsupportedFeature`) and never reached the `ooxml-word` route; this
+    // test fails closed (not silently skipped) if that regresses.
+    auto fixture = "experiments/document_adapters/fixtures/docx-training.docx";
+    if (!exists(fixture)) return; // run from a working directory without the fixture checked out
+
+    auto root = buildPath(tempDir, "scrubbed-ooxml-deflate-cli-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    mkdir(root);
+    auto input = buildPath(root, "input.docx");
+    copy(fixture, input);
+
+    string[] deflateOoxmlTokens = [
+        "--dispatch-option", "detector-prefix-bytes=4096",
+        "--dispatch-option", "detector-evidence-records=16",
+        "--dispatch-option", "detector-warnings=8",
+        "--dispatch-option", "container-max-physical-bytes=33554432",
+        "--dispatch-option", "container-max-expanded-bytes=134217728",
+        "--dispatch-option", "container-max-entries=2048",
+        "--dispatch-option", "container-max-depth=2",
+        "--dispatch-option", "container-max-ratio=100",
+        "--route", "ooxml=ooxml-word"
+    ];
+    foreach (outcome; ["unknown", "plain-text", "html", "pdf", "png",
+            "jpeg", "gif", "ambiguous", "malformed", "encrypted",
+            "unsupported", "generic-zip", "ooxml-word"]) {
+        auto selected = outcome == "ooxml-word" ? "route" : "reject";
+        auto target = selected == "route" ? "ooxml" : "policy";
+        deflateOoxmlTokens ~= ["--action", outcome ~ "=" ~ selected ~ ":" ~ target];
+    }
+    deflateOoxmlTokens ~= "--common";
+
+    auto output = buildPath(root, "output.txt");
+    assert(runApp(["scrubbed", "run", "--input", input, "--output", output,
+        "--threads", "1"] ~ deflateOoxmlTokens) == 0);
+    assert(readText(output) ==
+        "TRAINING DOCX\n\nGAMMA THREE\n\nDELTA FOUR");
 }
 
 // Model the late-traversal-fault boundary deterministically: one worker has

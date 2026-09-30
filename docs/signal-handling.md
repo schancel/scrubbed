@@ -3,9 +3,15 @@
 ## SIGINT: graceful shutdown
 
 `scrubbed` installs a `SIGINT` handler in `app.d`, before any command runs.
-The handler (`cli.requestInterrupt`) does exactly one thing -- set an atomic
-flag -- because a signal handler can run on any thread at any point and must
-stay async-signal-safe: no GC, no allocation, no locking, no throwing.
+The handler (`effects.interrupt.requestInterrupt`, re-exported by `cli.d` as
+`cli.requestInterrupt` so `app.d` -- which may import only `cli` among
+project modules -- can still reach it) does exactly one thing -- set an
+atomic flag -- because a signal handler can run on any thread at any point
+and must stay async-signal-safe: no GC, no allocation, no locking, no
+throwing. The flag itself lives in `effects.interrupt`, not `cli`, so that
+`route-metadata` (a plain `effects` module) can poll it without importing
+`cli`, which this project's module layering forbids for `effects` code (see
+`scripts/check_modules.d`).
 
 `cli.runApp`'s file walk (`submitPath`, the single call site used for both
 the single-file case and every file `walkCanonical` discovers) polls that
@@ -44,12 +50,38 @@ file finishes (or the next one starts). For the CLI's normal workload --
 many bounded-size documents -- this keeps the observable latency well under
 a second; it does not bound the latency for an unusually large single file.
 
-`extract` (a separate command with its own scheduler in `runApp`'s sibling
-function) does not yet poll this flag; SIGINT during `extract` currently
-falls through to whatever the process's default disposition happens to be
-(see the caveat below). This is a deliberate scope limit for #448, not an
-oversight -- the ticket's acceptance criteria target `clean-web-document`/
-`run`.
+`extract` (`cli.runExtract`, a separate command with its own scheduler) and
+`route-metadata` (`effects.metadata_route_cli.runMetadataRoute`) poll the
+same flag cooperatively too (#482). Both gaps were real bugs, not a
+documented scope limit: because `app.d` installs `requestInterrupt` as the
+process's SIGINT handler unconditionally, before any subcommand dispatch,
+installing it replaces the OS default SIGINT disposition for *every*
+command in the binary -- including these two, which never polled the flag
+it sets. SIGINT during `extract` or `route-metadata` did not "fall through
+to the OS default" as this document previously (incorrectly) claimed for
+`extract`; it was silently swallowed, and the process ran to completion
+exactly as if no signal had ever arrived. This was verified empirically,
+against the pre-fix binary, with real `kill -INT` sends: see "Measured
+evidence (#482)" below for the after-fix numbers, and issue #482 itself for
+the original before-fix repro (route-metadata: CPU climbing for 8+ seconds
+past the signal; extract: 6000 files fully completed 1 second after SIGINT).
+
+- `runExtract`'s own admission loop (the `dirEntries`/single-file walk that
+  calls `scheduler.submit`) polls `interruptRequested()` once per discovered
+  file, before admitting it -- the same granularity and the same
+  `scheduler.cancel(); scheduler.finish();` graceful-drain path `runApp`
+  uses, reached through the same `interrupted (SIGINT); canceling after
+  in-flight work drains` exception and exit code 2.
+- `runMetadataRoute`'s per-file loop polls `interruptRequested()` once per
+  file, before starting it. Each file this route processes is committed
+  independently and atomically (`IndependentLocalSinks`), so stopping
+  between files already drains exactly the in-flight document; there is
+  nothing further to wait on. Unlike `run`/`repair`/`extract`, this route's
+  diagnostics are deliberately fixed-token, with no dynamic content (no
+  source bytes, paths, or metadata) -- so a SIGINT stop reports the fixed
+  string `scrubbed: route-interrupted` on stderr and exits 2, rather than
+  the dynamic `interrupted (SIGINT); canceling after in-flight work drains`
+  message the other three commands use.
 
 ## SIGTERM: OS default (immediate termination)
 
@@ -176,3 +208,41 @@ in-flight work drains` on stderr and 552/4000 files written. The identical
 setup with `SIGTERM` in place of `SIGINT` exited at t=5.02s with no
 handler-driven message (raw signal death, unchanged from before this
 change).
+
+## Regression coverage and measured evidence (#482)
+
+`source/cli.d` has the same shape of deterministic in-process `unittest` for
+`runExtract` as the one described above for `runApp`: pre-set the interrupt
+flag before `runExtract` ever admits a file from a real multi-file
+directory, and assert the run throws with the "interrupted (SIGINT)"
+message and admits no files. `source/effects/metadata_route_cli.d` has the
+equivalent test for `runMetadataRoute`: pre-set the flag before it processes
+the one file in a real input directory, and assert it returns exit code 2
+and publishes neither the content nor the metadata sink. Both reset the flag
+on exit so it cannot leak into other tests in the same process. As with
+#448's own `runApp` test, a real-subprocess/real-`kill -INT` automated test
+was deliberately not attempted for either command, for the same
+`--DRT-testmode=run-main` recursion/preamble reasons given above; the timing
+proof below was gathered by hand against the built `release` binary instead.
+
+Measured against the plain `release` build (`dub build --build=release`),
+the same 4000-file, ~526 MB HTML corpus used for #448's own measurement
+above, `SIGINT` sent via `kill(2)` from a separate Python process (not a
+backgrounded shell job):
+
+- **`extract`** (single-threaded by construction -- its `BoundedInput` is
+  configured with a worker count of 1): natural completion took ~8.2s.
+  Sending `SIGINT` 2.0s in produced exit code 2 at t=2.01s -- effectively
+  immediate -- with `scrubbed: interrupted (SIGINT); canceling after
+  in-flight work drains` on stderr and 1115/4000 output files written.
+  Before this change, the identical setup ran to completion regardless of
+  the signal (matching issue #482's own report of 6000/6000 files
+  completing despite a SIGINT sent 1s in).
+- **`route-metadata`**: sending `SIGINT` 3.0s into the run produced exit
+  code 2 at t=3.02s with the fixed-token `scrubbed: route-interrupted` on
+  stderr, and 172/4000 files written to *both* the content and the metadata
+  sink (equal counts, confirming each file's independent sinks are still
+  published atomically together, never one without the other, even when a
+  signal lands between files). Before this change, the identical setup
+  showed no observable effect from SIGINT at all, matching issue #482's
+  report of CPU climbing for 8+ seconds past the signal.

@@ -1,0 +1,114 @@
+{
+  "schema": "scrubbed.pii-policy-corpus.v1",
+  "licenseFile": "examples/corpus/pii-policy/LICENSE.txt",
+  "claims": {
+    "deidentificationGuarantee": false,
+    "trainingReady": false
+  },
+  "fixtureProvenance": {
+    "kind": "wholly-new",
+    "note": "Authored from scratch for issue #507. Two #180-adjacent candidates were located and considered before authoring new content: (1) experiments/pii_pipeline/check.d's inline test-fixture bytes -- an inline literal string inside a D source file under experiments/ (an internal/test-only location), with no standalone file, license header, or manifest provenance of its own, so not fit to reuse as-is for the public examples/** gallery, which requires per-artifact provenance/license metadata; and (2) benchmarks/pii-pipeline.json's checked-in \"handoff\" object (landed in commit 15eeab5/PR #272, per issue #180's own closing comment describing it as the ready synthetic handoff packet for #62), which IS genuinely redistributable -- explicit \"license\": \"CC0-1.0\" and a \"provenance\" record (author, kind: authored-synthetic, network_data: false, private_data: false). That packet was not reused as-is because its coverage is narrower than this ticket's acceptance criteria: two categories only (email, ip; no phone, no card), and a single mask-policy golden only (no report or redact expected output/audit). Reusing it would still have required authoring at least a phone finding and report/redact goldens from scratch, so a coherent from-scratch three-category/three-policy corpus was authored instead. This corpus's category coverage (email, phone, IPv4) pattern-matches #180's own four-class coverage, but every byte (the local part, domain, phone number, and IP address) is newly authored and distinct from both #180-adjacent fixtures above."
+  },
+  "configurations": [
+    {
+      "path": "examples/pipelines/pii-policy/report.json",
+      "sha256": "38bce43e5c647a040b2fd5255b11d0c8592c8afb98f91c3f59966b117adadadb"
+    },
+    {
+      "path": "examples/pipelines/pii-policy/mask.json",
+      "sha256": "8ac8c27142edd39a64eeb8a60ee0caf8df8a8d1b1c0ef1e8b4b16d0ccb5fb897"
+    },
+    {
+      "path": "examples/pipelines/pii-policy/redact.json",
+      "sha256": "cec0bd0cd61c8baaf2333fb557166567f596d80c7e6f3481c0e771ba12acd2d1"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "examples/corpus/pii-policy/inputs/notice.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Authored for scrubbed issue #507 by Shammah Chancellor.",
+      "license": "MIT",
+      "sha256": "4467d4afb7d6177b75b3bd67797565637ed18d773308d867d54582903e086bdf",
+      "intendedPipeline": "pii-policy",
+      "expectedOutcome": "Synthetic notice containing one email (agent.demo@example.test), one NANP fictional-exchange phone number (+1-202-555-0198), and one RFC 5737 TEST-NET-3 IPv4 address (203.0.113.42); every value is obviously placeholder, not harvested."
+    },
+    {
+      "path": "examples/corpus/pii-policy/expected/report.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #507 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "4467d4afb7d6177b75b3bd67797565637ed18d773308d867d54582903e086bdf",
+      "intendedPipeline": "pii-policy",
+      "expectedOutcome": "report policy: byte-identical to the input; audit-only, no content rewrite."
+    },
+    {
+      "path": "examples/corpus/pii-policy/expected/mask.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #507 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "2b319839ec860b06072e4398471f7e5d7a652ad3f0770975024027cb480369d6",
+      "intendedPipeline": "pii-policy",
+      "expectedOutcome": "mask policy: every byte inside each of the three findings replaced with '*', byte length and offsets preserved exactly."
+    },
+    {
+      "path": "examples/corpus/pii-policy/expected/redact.txt",
+      "mediaType": "text/plain; charset=utf-8",
+      "provenance": "Generated from the authored issue #507 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "3e52fe2479880d2b56b704bb1feda2b918984049c01dca838cdbf7b5b2778c8d",
+      "intendedPipeline": "pii-policy",
+      "expectedOutcome": "redact policy (allow-redact opt-in): each of the three findings replaced with the literal marker [REDACTED]; output is shorter than the input."
+    },
+    {
+      "path": "examples/corpus/pii-policy/expected/report.pii-audit.json",
+      "mediaType": "application/json",
+      "provenance": "Generated from the authored issue #507 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "5e3e3fef21a6becbed4823bca0be018ed1da8400111d1f61eda3d7a39559452a",
+      "intendedPipeline": "pii-policy",
+      "expectedOutcome": "Decoded scrubbed-pii-audit-v1 payload from the pii-four-class structured section, with the run's own doc:v1:<sha256> document_id (deterministic per the local --input absolute path, not per content) replaced by the literal token <DOCUMENT_ID>; every other field -- schema, input/output revision hashes, analyzer/policy versions, normalized options, and the three ordered email/phone/ip unions and their contributors -- is fully content-deterministic and diffed exactly."
+    },
+    {
+      "path": "examples/corpus/pii-policy/expected/mask.pii-audit.json",
+      "mediaType": "application/json",
+      "provenance": "Generated from the authored issue #507 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "6544befa8278373f5156fd9206050abf3136aa1947428d408138badf5fd2754e",
+      "intendedPipeline": "pii-policy",
+      "expectedOutcome": "Same shape as report.pii-audit.json, with outcome \"masked\" and output_sha256 bound to mask.txt."
+    },
+    {
+      "path": "examples/corpus/pii-policy/expected/redact.pii-audit.json",
+      "mediaType": "application/json",
+      "provenance": "Generated from the authored issue #507 input by the shipping scrubbed binary for this checked-in golden corpus.",
+      "license": "MIT",
+      "sha256": "d2aa7a8bb0d861d3ede11821ba3fbcced5f3128e055e2e9a1e3ab7f19bd67cff",
+      "intendedPipeline": "pii-policy",
+      "expectedOutcome": "Same shape as report.pii-audit.json, with outcome \"redacted\", allow_redact true, and output_sha256 bound to redact.txt."
+    }
+  ],
+  "recipes": [
+    {
+      "id": "report",
+      "policy": "report",
+      "expectedExit": 0,
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${REPORT_CONFIG}"],
+      "cliArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--stage", "pii=pii-four-class", "--stage", "pub=document-metadata-publish"]
+    },
+    {
+      "id": "mask",
+      "policy": "mask",
+      "expectedExit": 0,
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${MASK_CONFIG}"],
+      "cliArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--stage", "pii=pii-four-class", "--stage-option", "policy=text:mask", "--stage", "pub=document-metadata-publish"]
+    },
+    {
+      "id": "redact",
+      "policy": "redact",
+      "expectedExit": 0,
+      "configArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--config", "${REDACT_CONFIG}"],
+      "cliArguments": ["run", "--input", "${INPUT}", "--output", "${OUTPUT}", "--sidecar-output", "${SIDECAR}", "--stage", "pii=pii-four-class", "--stage-option", "policy=text:redact", "--stage-option", "allow-redact=boolean:true", "--stage", "pub=document-metadata-publish"]
+    }
+  ]
+}

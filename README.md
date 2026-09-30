@@ -42,6 +42,9 @@ dub build --build=release
 ./scrubbed run --list-filters
 ./scrubbed run --input path/to/docs --output path/to/clean \
     --filters normalize-line-endings,strip-control
+
+# Print the version and exit:
+./scrubbed --version
 ```
 
 See [docs/cli-commands.md](docs/cli-commands.md) for the full command and

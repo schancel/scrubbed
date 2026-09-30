@@ -15,7 +15,17 @@ import std.conv : to;
 import std.file : FileException, exists, isDir, isSymlink, thisExePath;
 import std.path : buildNormalizedPath;
 import std.stdio : stderr, stdout, writeln;
-import std.string : indexOf, startsWith;
+import std.string : indexOf, startsWith, strip;
+
+// #498: single-owned version source. `VERSION` at the repo root is the one
+// place that owns the printed version string -- `dub.json` intentionally
+// has no `"version"` field (see #499 for real tag/release wiring, out of
+// scope here). `stringImportPaths: ["."]` in dub.json makes this
+// compile-time `import()` expression pull the file's contents in as a
+// string literal; `.strip` drops the trailing newline the checked-in file
+// ends with. Before a real git tag exists this is a fixed placeholder/dev
+// string, not a claim about what the shipped release version will be.
+private immutable string scrubbedVersion = import("VERSION").strip;
 
 mixin template ProcessingOptions() {
     @(NamedArgument("input", "i").Description("Input file or directory tree"))
@@ -235,6 +245,16 @@ struct RouteMetadata {
 
 @(Command("scrubbed").Description("Sanitize text through a bounded filter pipeline."))
 struct Commands {
+    // #498: documentation-only -- this field exists so argparse's own
+    // generated --help lists "--version" under "Optional arguments" next to
+    // "-h, --help", matching that flag's documentation style. The actual
+    // `scrubbed --version` (and `scrubbed version`) invocation is handled
+    // earlier in `runCommands`, in the same bare-flag dispatch spot that
+    // already special-cases `-h`/`--help`, before this struct is ever
+    // parsed -- this field is never read at runtime.
+    @(NamedArgument("version").Description("Print version and exit"))
+    bool versionFlag;
+
     SubCommand!(Run, Repair, Extract, Completion, ErrorsInit, ErrorsCopy,
         ErrorsExport, ErrorsVerify, RouteMetadata, CleanWebDocument, Crawl)
         command;
@@ -715,6 +735,21 @@ int runCommands(string[] argv) {
     // real help (the same generated text `--help` prints) and fail loudly,
     // rather than silently no-op (bare `scrubbed`) or surface argparse's own
     // terse "Unrecognized arguments" message (bare `scrubbed --input ...`).
+    // #498: real `--version`/`version` top-level handling, in the same
+    // bare-flag dispatch spot that already special-cases a genuine top-level
+    // `-h`/`--help` (see `isKnownVerbToken` above) -- covers both the bare-
+    // flag case (`scrubbed --version` with no other arguments) and staying
+    // out of the way of the `run,clean`-alias-style generic argparse
+    // dispatch just below for every other verb. Handled directly here
+    // rather than left to argparse's generic `SubCommand!` parse: unlike
+    // `-h`/`--help`, which argparse recognizes natively on any parser,
+    // `--version` is scrubbed's own flag with no built-in argparse support,
+    // so it must never fall through to the "unknown verb" branch just below
+    // (which would print full help text and exit 2).
+    if (argv.length > 1 && (argv[1] == "--version" || argv[1] == "version")) {
+        writeln("scrubbed ", scrubbedVersion);
+        return 0;
+    }
     if (argv.length < 2 || !isKnownVerbToken(argv[1])) {
         Commands help;
         cast(void) CLI!(parserConfig, Commands).parseArgs(help, ["--help"]);
@@ -863,6 +898,31 @@ unittest {
 
     auto shortHelp = runCommandsCapturingStdout(["scrubbed", "-h"]);
     assert(shortHelp[0] == 0, "-h must still exit 0");
+}
+
+// Issue #498: `scrubbed --version` (and `scrubbed version`) must print a
+// non-empty version string and exit 0, exactly like `--help`/`-h`, and must
+// never fall through to the general command-list usage text that a bare or
+// unknown verb prints.
+unittest {
+    auto flagVersion = runCommandsCapturingStdout(["scrubbed", "--version"]);
+    assert(flagVersion[0] == 0, "--version must exit 0");
+    assert(flagVersion[1].length > 0, "--version must print a non-empty string");
+    assert(flagVersion[1].startsWith("scrubbed "),
+        "--version output must name scrubbed: " ~ flagVersion[1]);
+    assert(!flagVersion[1].canFind("Available commands"),
+        "--version must not fall through to the general command-list usage text");
+
+    auto subcommandVersion = runCommandsCapturingStdout(["scrubbed", "version"]);
+    assert(subcommandVersion[0] == 0, "version subcommand must exit 0");
+    assert(subcommandVersion[1] == flagVersion[1],
+        "version subcommand output must match --version exactly");
+
+    // --version must also be discoverable from the generated --help text,
+    // the same way -h/--help documents itself.
+    auto help = runCommandsCapturingStdout(["scrubbed", "--help"]);
+    assert(help[1].canFind("--version"),
+        "--help output must document --version");
 }
 
 // Issue #474: `extract --help` must not claim `--format` has a default --

@@ -2,6 +2,7 @@
 module cli;
 
 import composition.compiler : CompiledJob, compileJob;
+import composition.corpus_compiler : CompiledCorpusStage, compileComposition;
 import composition.executor : runCompiledStage;
 import composition.job_executor : CompiledJobFailure;
 import composition.dispatch_compiler : compileDispatchJobV1;
@@ -50,6 +51,8 @@ version (OSX) {
 } else {
     private enum bool pdfiumSupportedPlatformV1 = false;
 }
+import effects.corpus_runner : pruneNearDuplicatesDecisionSuffixV1;
+import effects.document_metadata_publish_stage : documentMetadataPublishSuffixV1;
 import content.pieces : Content, ContentPiece;
 import domain.document : Document, DocumentId, DocumentViewOwner, OutputName,
     SourceLocator;
@@ -61,10 +64,11 @@ import effects.html_main_content_markdown_stage;
 import effects.extract_formats_stage;
 import stages.contract : EventKind, ResourceDeclaration, StageDeclaration,
     StageDocument, StageEvent, TerminalSideOutput;
+import stages.corpus_contract : CorpusDecisionKind, CorpusStageDecision;
 import stages.pii_four_class;
 import stages.text_transform;
 import job.cli_tokens : parseJobTokens;
-import job.json : canonicalJobJson, parseJobJson;
+import job.json : canonicalJobJson, jobIdentity, parseJobJson;
 import job.dispatch_cli_tokens : parseDispatchJobTokensV1;
 import job.dispatch_json : canonicalDispatchJobJsonV1,
     parseDispatchJobJsonV1;
@@ -98,7 +102,7 @@ import std.process : environment;
 import std.path : absolutePath, baseName, buildNormalizedPath, buildPath,
     dirName, dirSeparator, isAbsolute, pathSplitter, relativePath;
 import std.stdio : File, stderr, writefln, writeln;
-import std.string : indexOf, join, lastIndexOf;
+import std.string : endsWith, indexOf, join, lastIndexOf;
 import std.utf : UTFException, validate;
 import std.uuid : randomUUID;
 import crypto.sha256 : Sha256;
@@ -324,6 +328,21 @@ private void preflightSidecarRoots(string inputPath, string outputPath,
         preflightOutput(resolved, false);
         requireUnaliasedFileOrAbsent(sidecarPath, "sidecar destination");
         requireUnaliasedFileOrAbsent(outputPath, "primary destination");
+    }
+}
+
+private void requireFreshCorpusSidecarRoot(string root) {
+    if (!exists(root)) return;
+    foreach (entry; dirEntries(root, SpanMode.depth, false)) {
+        if (entry.isSymlink)
+            throw new OutputPolicyViolation(
+                "corpus sidecar root contains a symlink: " ~ entry.name);
+        if (!entry.isFile) continue;
+        if (entry.name.endsWith(documentMetadataPublishSuffixV1) ||
+                entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+            throw new OutputPolicyViolation(
+                "combined corpus run requires a fresh sidecar root; " ~
+                "found an earlier corpus artifact: " ~ entry.name);
     }
 }
 
@@ -1004,15 +1023,26 @@ private PdfBytesExtractV1 resolvePdfBytesExtractV1(const ref DispatchJobSpecV1 s
     return null;
 }
 
-private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
-        bool filtersExplicit, string filterList, bool configExplicit,
-        string configContents, bool versionedConfig) {
-    bool dispatchTokens;
+/// True exactly when `compositionTokens` itself names a dispatch v4
+/// composition (independent of any versioned `--config` file) -- the exact
+/// first-branch condition `selectedRuntimePlan` always checked, extracted
+/// so `selectedComposition` (issue #564) can share it rather than
+/// re-deriving it. The `--config` version-4 case is a second, independent
+/// condition (see both call sites below) -- deliberately not folded into
+/// this predicate, to keep this a byte-for-byte extraction of the original
+/// branch condition, not a behavior change.
+private bool isDispatchTokenComposition(string[] compositionTokens) {
     foreach (token; compositionTokens)
         if (token == "--dispatch-option" || token == "--route" ||
                 token == "--route-option" || token == "--action" ||
-                token == "--common") dispatchTokens = true;
-    if (dispatchTokens) {
+                token == "--common") return true;
+    return false;
+}
+
+private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
+        bool filtersExplicit, string filterList, bool configExplicit,
+        string configContents, bool versionedConfig) {
+    if (isDispatchTokenComposition(compositionTokens)) {
         auto spec = parseDispatchJobTokensV1(compositionTokens);
         auto canonical = canonicalDispatchJobJsonV1(spec);
         auto registry = coreExtractorRegistryV1(resolvePdfBytesExtractV1(spec));
@@ -1031,6 +1061,61 @@ private RuntimePlanV1 selectedRuntimePlan(string[] compositionTokens,
     auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
         configExplicit, configContents, versionedConfig);
     return RuntimePlanV1.linearV3(compileJob(spec), canonicalJobJson(spec));
+}
+
+/// Issue #564: the two-phase-composition-aware sibling of
+/// `selectedRuntimePlan`. For a dispatch v4 composition, behaves
+/// identically to `selectedRuntimePlan` with zero corpus stages (corpus-
+/// level stages are out of scope for dispatch v4 in this slice -- see
+/// `docs/corpus-stages.md`). For a plain v3 composition, splits the SAME
+/// token list into its per-document half (compiled exactly as
+/// `selectedRuntimePlan` already would, byte-for-byte -- `runtimePlan` here
+/// is built from `composition.perDocument()`, not a separate compile) and
+/// its corpus-level half, returning both.
+private struct SelectedComposition {
+    RuntimePlanV1 runtimePlan;
+    const(CompiledCorpusStage)[] corpusStages;
+}
+
+private SelectedComposition selectedComposition(string[] compositionTokens,
+        bool filtersExplicit, string filterList, bool configExplicit,
+        string configContents, bool versionedConfig) {
+    // Dispatch v4 is out of scope for corpus-level stages in this slice
+    // (see docs/corpus-stages.md) -- both of `selectedRuntimePlan`'s own
+    // dispatch-v4 conditions route here unchanged, with zero corpus stages.
+    if (isDispatchTokenComposition(compositionTokens) ||
+            (configExplicit && versionedConfig && selectedJobVersion(configContents) == 4))
+        return SelectedComposition(selectedRuntimePlan(compositionTokens, filtersExplicit,
+            filterList, configExplicit, configContents, versionedConfig), null);
+    auto spec = selectedJob(compositionTokens, filtersExplicit, filterList,
+        configExplicit, configContents, versionedConfig);
+    auto composition = compileComposition(spec);
+    auto perDocument = cast(CompiledJob) composition.perDocument();
+    if (composition.hasCorpusStages && perDocument.stages.length) {
+        bool publishesMetadata;
+        bool annotatesSignatures;
+        bool prunesNearDuplicates;
+        foreach (stage; spec.stages)
+            if (stage.implementation == "document-metadata-publish")
+                publishesMetadata = true;
+            else if (stage.implementation == "similarity-signature-annotate")
+                annotatesSignatures = true;
+            else if (stage.implementation == "prune-near-duplicates")
+                prunesNearDuplicates = true;
+        if (prunesNearDuplicates) {
+            enforce(annotatesSignatures,
+                "a combined prune-near-duplicates composition requires " ~
+                "similarity-signature-annotate in phase 1; otherwise phase 2 " ~
+                "would have no current signatures");
+            enforce(publishesMetadata,
+                "a combined prune-near-duplicates composition requires " ~
+                "document-metadata-publish in phase 1; otherwise phase 2 " ~
+                "would read stale sidecars");
+        }
+    }
+    auto fullIdentityJob = perDocument.withIdentity(composition.identity);
+    auto plan = RuntimePlanV1.linearV3(fullIdentityJob, canonicalJobJson(spec));
+    return SelectedComposition(plan, composition.corpusStages());
 }
 
 private final class PublicationOrder {
@@ -2066,13 +2151,40 @@ int runApp(string[] args) {
     if (coordinationPath.length && durableRoute)
         throw new Exception(
             "coordination metrics are unavailable with durable routes");
-    auto runtimePlan = selectedRuntimePlan(compositionTokens, filtersExplicit,
+    auto selected = selectedComposition(compositionTokens, filtersExplicit,
         filterList, configPath.length != 0, configContents, versionedConfig);
+    auto runtimePlan = selected.runtimePlan;
+    const corpusStages = selected.corpusStages;
     const producesSideOutput = runtimePlan.producesTerminalSideOutput;
-    if (producesSideOutput != sidecarExplicit)
-        throw new Exception(producesSideOutput ?
-            "side-output-producing plan requires --sidecar-output" :
-            "--sidecar-output requires a side-output-producing plan");
+    const hasPerDocumentPhase = !runtimePlan.isDispatch &&
+        runtimePlan.linear.stages.length != 0;
+    if (producesSideOutput && !sidecarExplicit)
+        throw new Exception(
+            "side-output-producing plan requires --sidecar-output");
+    if (sidecarExplicit && !producesSideOutput && !corpusStages.length)
+        throw new Exception(
+            "--sidecar-output requires a side-output-producing or corpus-level plan");
+    // Issue #564: a corpus-level stage reads already-published
+    // document-metadata sidecars, so it needs `--sidecar-output` even for a
+    // composition whose per-document half alone produces no terminal side
+    // output (e.g. a standalone `prune-near-duplicates` pass over a corpus
+    // an earlier `run` already published).
+    if (corpusStages.length && !sidecarExplicit)
+        throw new Exception(
+            "a corpus-level stage (e.g. prune-near-duplicates) requires --sidecar-output: " ~
+            "it reads already-published document-metadata sidecars");
+    if (corpusStages.length && dryRun)
+        throw new Exception(
+            "a corpus-level stage cannot run with --dry-run because its decision sidecars " ~
+            "are mandatory outputs");
+    // Issue #564: the interaction between a corpus-level phase-2 pass and
+    // `--manifest`/`--error-journal`'s own separate identity/ledger
+    // semantics has not been audited for this slice -- fail closed rather
+    // than silently allow an unverified combination.
+    if (corpusStages.length && durableRoute)
+        throw new Exception(
+            "a corpus-level stage is not supported together with --manifest or " ~
+            "--error-journal in this slice");
     auto canonicalSpec = runtimePlan.canonical;
     string chainLabel = runtimePlan.identity;
     if (!versionedConfig && !compositionExplicit) {
@@ -2102,9 +2214,18 @@ int runApp(string[] args) {
         if (pathIsWithin(outputPath, inputPath))
             throw new Exception("output directory must not be inside the input tree");
     }
+    // Issue #564: a corpus-level stage needs a real corpus (a directory of
+    // documents) to compare across -- a single-file run has nothing to
+    // group into buckets.
+    if (corpusStages.length && !inputIsDir)
+        throw new Exception(
+            "a corpus-level stage (e.g. prune-near-duplicates) requires directory input: " ~
+            "a single file has no corpus to compare against");
     if (sidecarExplicit) {
         preflightSidecarRoots(inputPath, outputPath, sidecarPath, inputIsDir);
         sidecarPath = resolveExistingPrefix(sidecarPath);
+        if (corpusStages.length && hasPerDocumentPhase)
+            requireFreshCorpusSidecarRoot(sidecarPath);
     }
     if (!errorTargeted) preflightOutput(outputPath, inputIsDir);
     if (manifestPath.length) {
@@ -2630,6 +2751,29 @@ int runApp(string[] args) {
         if (!explain && quarantineReasonCounts.length)
             writeln("quarantined reasons: ",
                 formatQuarantineReasonCounts(quarantineReasonCounts));
+    }
+    // Issue #564, phase 2: once phase 1 has fully drained every admitted
+    // file (gated on `failures == 0` -- a quarantined/rejected document
+    // still completed and is not itself a reason to withhold corpus-level
+    // pruning, but a genuine processing failure is), run each compiled
+    // corpus-level stage, in declared order, once, over the just-completed
+    // `sidecarPath` tree. Structurally a strictly later pass: nothing above
+    // this point in `runApp` (the whole per-document `BoundedInput`-driven
+    // streaming loop) is touched by this branch, and this branch never
+    // runs before that loop has returned. A stage's own mandatory
+    // per-pruned-document decision sidecar is written by the stage itself
+    // (see `effects.corpus_runner`); this loop only aggregates counts for
+    // the summary line below.
+    if (corpusStages.length && failures == 0) {
+        foreach (stage; corpusStages) {
+            size_t pruned;
+            stage.run()(sidecarPath, (CorpusStageDecision decision) {
+                if (decision.kind == CorpusDecisionKind.prune) ++pruned;
+            });
+            if (!errorJournalPath.length)
+                writeln(stage.id, " (", stage.implementationKey, "): ", pruned,
+                    " document", pruned == 1 ? "" : "s", " pruned.");
+        }
     }
     return failures == 0 && terminalDecisions == 0 ? 0 : 1;
 }
@@ -3160,6 +3304,209 @@ unittest {
         assertThrown(runApp(["scrubbed", "run", "--input", inputDir,
             "--output", buildPath(root, "tree-output"), "--threads", "1"]));
     }
+}
+
+// Issue #564: a real, in-process, end-to-end `run --stage ...` invocation
+// through `runApp` (the exact same entry point every other CLI regression
+// test in this module exercises) proves the whole two-phase composition
+// wired together: `similarity-signature-annotate` publishes real
+// signatures, `document-metadata-publish` writes real
+// `document-metadata:v2` sidecars, and `prune-near-duplicates` -- reached
+// through the exact same `--stage id=impl` syntax as every other stage --
+// finds and prunes a real near-duplicate pair. `--output` is proven fully
+// untouched (non-destructive by construction), and the mandatory decision
+// sidecar's contents are verified against known fixture values, not just
+// "a file exists".
+unittest {
+    import effects.corpus_runner : pruneNearDuplicatesDecisionSuffixV1;
+    import effects.document_metadata_publish_stage : documentMetadataPublishSuffixV1;
+    import std.exception : collectException;
+    import std.file : dirEntries, exists, rmdirRecurse, tempDir;
+    import std.json : parseJSON;
+    import std.path : baseName;
+
+    auto root = buildPath(tempDir, "scrubbed-cli-corpus-stage-" ~ randomUUID.toString);
+    scope(exit) if (exists(root)) rmdirRecurse(root);
+    auto inputDir = buildPath(root, "in");
+    mkdir(root);
+    mkdir(inputDir);
+
+    auto sharedText =
+        "This exact sentence is long enough to produce real MinHash shingles for CLI regression testing.\n";
+    write(buildPath(inputDir, "doc-one.txt"), sharedText);
+    write(buildPath(inputDir, "doc-two.txt"), sharedText); // byte-identical -> certain near-dup
+    write(buildPath(inputDir, "doc-three.txt"),
+        "An entirely unrelated sentence about something completely different from the other two.\n");
+
+    // A nonempty phase 1 cannot feed phase 2 unless it publishes the
+    // metadata phase 2 consumes. Reject before creating either output tree.
+    auto missingPublisherOutput = buildPath(root, "missing-publisher-out");
+    auto missingPublisherSidecar = buildPath(root, "missing-publisher-sidecar");
+    auto missingPublisher = collectException(runApp(["scrubbed", "run",
+        "--input", inputDir, "--output", missingPublisherOutput,
+        "--sidecar-output", missingPublisherSidecar, "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(missingPublisher !is null &&
+        missingPublisher.msg.canFind("requires document-metadata-publish"));
+    assert(!exists(missingPublisherOutput));
+    assert(!exists(missingPublisherSidecar));
+
+    auto missingAnnotatorOutput = buildPath(root, "missing-annotator-out");
+    auto missingAnnotatorSidecar = buildPath(root, "missing-annotator-sidecar");
+    auto missingAnnotator = collectException(runApp(["scrubbed", "run",
+        "--input", inputDir, "--output", missingAnnotatorOutput,
+        "--sidecar-output", missingAnnotatorSidecar, "--threads", "1",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(missingAnnotator !is null &&
+        missingAnnotator.msg.canFind("requires similarity-signature-annotate"));
+    assert(!exists(missingAnnotatorOutput));
+    assert(!exists(missingAnnotatorSidecar));
+
+    auto outputDir = buildPath(root, "out");
+    auto sidecarDir = buildPath(root, "sidecar");
+    auto code = runApp(["scrubbed", "run", "--input", inputDir, "--output", outputDir,
+        "--sidecar-output", sidecarDir, "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates"]);
+    assert(code == 0);
+
+    // Every document's own primary output is present and untouched --
+    // pruning never deletes or overwrites `--output`.
+    assert(readText(buildPath(outputDir, "doc-one.txt")) == sharedText);
+    assert(readText(buildPath(outputDir, "doc-two.txt")) == sharedText);
+    assert(exists(buildPath(outputDir, "doc-three.txt")));
+
+    // Every document got a real document-metadata:v2 sidecar.
+    foreach (name; ["doc-one.txt", "doc-two.txt", "doc-three.txt"])
+        assert(exists(buildPath(sidecarDir, name ~ documentMetadataPublishSuffixV1)));
+
+    // Exactly one of the two byte-identical documents has a mandatory
+    // decision sidecar (the other is its representative and has none) --
+    // named after that document's own sidecar stem, verbatim (see
+    // `effects.corpus_runner.writeDecisionSidecar`), so this check does not
+    // need to independently reconstruct either document's real `DocumentId`
+    // (an internal detail of how a directory walk builds a `SourceLocator`)
+    // to know which of doc-one/doc-two was pruned.
+    string[] decisionPaths;
+    foreach (entry; dirEntries(sidecarDir, "*" ~ pruneNearDuplicatesDecisionSuffixV1,
+            SpanMode.shallow))
+        decisionPaths ~= entry.name;
+    assert(decisionPaths.length == 1,
+        "exactly one decision sidecar expected, found " ~ decisionPaths.length.to!string);
+    auto droppedName = baseName(decisionPaths[0]);
+    assert(droppedName == "doc-one.txt" ~ pruneNearDuplicatesDecisionSuffixV1 ||
+        droppedName == "doc-two.txt" ~ pruneNearDuplicatesDecisionSuffixV1,
+        "the dropped document must be doc-one.txt or doc-two.txt: " ~ droppedName);
+    assert(!exists(buildPath(sidecarDir, "doc-three.txt" ~ pruneNearDuplicatesDecisionSuffixV1)),
+        "the unrelated third document must never get a decision sidecar");
+
+    auto decision = parseJSON(readText(decisionPaths[0]));
+    auto removedId = decision["removed_document_id"].str;
+    auto representativeId = decision["representative_id"].str;
+    // A canonical `DocumentId.text` is "doc:v1:" (7) + 64 hex chars (71
+    // total) or "child:v1:" (9) + 64 hex chars (73 total) -- format-check
+    // both fields without needing the exact hash value.
+    bool wellFormedId(string text) {
+        return (text.length == 71 && text[0 .. 7] == "doc:v1:") ||
+            (text.length == 73 && text[0 .. 9] == "child:v1:");
+    }
+    assert(wellFormedId(removedId), "malformed removed_document_id: " ~ removedId);
+    assert(wellFormedId(representativeId), "malformed representative_id: " ~ representativeId);
+    assert(removedId != representativeId);
+    assert(decision["bucket_identity"].str.length != 0);
+
+    // The ordinary CLI --stage-option path configures the corpus stage.
+    // A cap of one over this duplicate bucket suppresses every link.
+    auto cappedOutput = buildPath(root, "capped-out");
+    auto cappedSidecar = buildPath(root, "capped-sidecar");
+    assert(runApp(["scrubbed", "run", "--input", inputDir,
+        "--output", cappedOutput, "--sidecar-output", cappedSidecar,
+        "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates",
+        "--stage-option", "bucket-cap=integer:1"]) == 0);
+    size_t cappedDecisions;
+    foreach (entry; dirEntries(cappedSidecar, SpanMode.depth, false))
+        if (entry.isFile &&
+                entry.name.endsWith(pruneNearDuplicatesDecisionSuffixV1))
+            ++cappedDecisions;
+    assert(cappedDecisions == 0);
+
+    // Corpus-only replay over an earlier run's sidecars is reachable. It
+    // does not require a per-document side-output producer in this second
+    // composition.
+    auto replayOutput = buildPath(root, "replay-out");
+    assert(runApp(["scrubbed", "run", "--input", inputDir,
+        "--output", replayOutput, "--sidecar-output", sidecarDir,
+        "--threads", "2", "--stage", "prune=prune-near-duplicates"]) == 0);
+
+    // A corpus pass has mandatory decision outputs, so dry-run fails before
+    // any traversal or write rather than mutating the existing decision.
+    auto priorDecision = readText(decisionPaths[0]);
+    auto dryRunError = collectException(runApp(["scrubbed", "run", "--input",
+        inputDir, "--output", buildPath(root, "dry-run-out"),
+        "--sidecar-output", sidecarDir, "--threads", "1", "--dry-run",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(dryRunError !is null && dryRunError.msg.canFind("cannot run with --dry-run"));
+    assert(readText(decisionPaths[0]) == priorDecision);
+
+    // A combined phase-1/phase-2 run requires a fresh sidecar corpus so
+    // stale metadata from an earlier input generation cannot participate.
+    auto reusedError = collectException(runApp(["scrubbed", "run", "--input",
+        inputDir, "--output", buildPath(root, "reused-out"),
+        "--sidecar-output", sidecarDir, "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(reusedError !is null && reusedError.msg.canFind("fresh sidecar root"));
+
+    // Compilation rejects a corpus-level stage appearing before a
+    // per-document stage, with a clear ordering error.
+    auto badOrder = collectException(runApp(["scrubbed", "run", "--input", inputDir,
+        "--output", buildPath(root, "bad-order-out"), "--sidecar-output",
+        buildPath(root, "bad-order-sidecar"), "--threads", "1",
+        "--stage", "prune=prune-near-duplicates",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish"]));
+    assert(badOrder !is null);
+    assert(badOrder.msg.canFind("corpus-level"));
+
+    // A corpus-level stage requires directory input.
+    auto singleFile = buildPath(root, "single.txt");
+    write(singleFile, sharedText);
+    auto singleFileError = collectException(runApp(["scrubbed", "run", "--input",
+        singleFile, "--output", buildPath(root, "single-out"), "--sidecar-output",
+        buildPath(root, "single-sidecar"), "--threads", "1",
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates"]));
+    assert(singleFileError !is null);
+    assert(singleFileError.msg.canFind("directory input"));
+}
+
+// Runtime identity is the full two-phase composition identity, not the
+// stripped phase-1 identity. Corpus-only option changes therefore produce
+// different execution identities while canonical JSON agrees with it.
+unittest {
+    auto prefix = [
+        "--stage", "sig=similarity-signature-annotate",
+        "--stage", "publish=document-metadata-publish",
+        "--stage", "prune=prune-near-duplicates",
+        "--stage-option"
+    ];
+    auto first = selectedComposition(prefix ~ ["policy=text:keep-first"],
+        false, null, false, null, false);
+    auto longest = selectedComposition(prefix ~ ["policy=text:keep-longest"],
+        false, null, false, null, false);
+    assert(first.runtimePlan.identity != longest.runtimePlan.identity);
+    assert(first.runtimePlan.identity ==
+        jobIdentity(parseJobJson(first.runtimePlan.canonical)));
+    assert(longest.runtimePlan.identity ==
+        jobIdentity(parseJobJson(longest.runtimePlan.canonical)));
 }
 
 // #448 regression, part 1: a deterministic, in-process proof that

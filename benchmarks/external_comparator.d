@@ -940,30 +940,76 @@ private string justextStoplistForLangPrefix(string prefix) {
     }
 }
 
-// Extracts the first `lang="xx"`/`lang='xx'` attribute's two-letter prefix
-// from the opening `<html ...>` tag only (a plain substring scan, not a
-// full HTML parse -- this only selects which of jusText's inbuilt stoplists
-// to use, it is never treated as document content or scored, and it is
-// scoped to the `<html>` tag specifically so an unrelated `lang=` substring
-// elsewhere in the page can never influence the choice). Returns "" when no
-// `<html>` tag or no `lang` attribute is present (e.g. this corpus's own
-// fixture 02, a bare `<html>` with no lang attribute at all).
+// Case-insensitive ASCII substring search starting at byte offset `from`,
+// operating directly on the original bytes (never on a `toLower`-transformed
+// copy, so returned indices always stay aligned to the original string --
+// relevant because, unlike ASCII, some Unicode uppercase/lowercase mappings
+// change UTF-8 byte length). `needle` must already be lowercase ASCII.
+private ptrdiff_t indexOfAsciiCI(string haystack, string needle, size_t from) {
+    if (needle.length == 0 || from > haystack.length || haystack.length < needle.length)
+        return -1;
+    foreach (i; from .. haystack.length - needle.length + 1) {
+        bool match = true;
+        foreach (j; 0 .. needle.length) {
+            auto c = haystack[i + j];
+            auto lower = (c >= 'A' && c <= 'Z') ? cast(char)(c + 32) : c;
+            if (lower != needle[j]) { match = false; break; }
+        }
+        if (match) return cast(ptrdiff_t) i;
+    }
+    return -1;
+}
+
+// True when the byte immediately before a `lang=` match at `matchIndex`
+// cannot be part of a longer attribute name -- i.e. `matchIndex` is the
+// start of the tag, or the preceding byte is whitespace or `:` (accepting
+// the XHTML `xml:lang` spelling). Any other preceding byte (a letter,
+// digit, `-`, `_`, `.`, ...) means this `lang=` is the tail of some other
+// attribute name entirely, such as `data-lang=`, and must be skipped.
+private bool isLangAttributeBoundary(string tag, size_t matchIndex) {
+    if (matchIndex == 0) return true;
+    auto before = tag[matchIndex - 1];
+    return before == ' ' || before == '\t' || before == '\n' || before == '\r' ||
+        before == ':';
+}
+
+// Extracts the actual `lang="xx"`/`lang='xx'` (or `xml:lang=...`) attribute's
+// two-letter prefix from the opening `<html ...>` tag only (a plain
+// substring scan, not a full HTML parse -- this only selects which of
+// jusText's inbuilt stoplists to use, it is never treated as document
+// content or scored). Case-insensitive (`<HTML LANG="DE">` is real, legal
+// HTML) and scoped to the `<html>` tag specifically, skipping any `lang=`
+// match that is actually the tail of a longer attribute name (`data-lang=`,
+// `xlang=`, ...) rather than the `lang`/`xml:lang` attribute itself, so an
+// unrelated attribute can never influence the choice. Returns "" when no
+// `<html>` tag or no genuine `lang` attribute is present (e.g. this
+// corpus's own fixture 02, a bare `<html>` with no lang attribute at all).
 private string htmlLangPrefix(string html) {
-    auto tagStart = html.indexOf("<html");
+    auto tagStart = indexOfAsciiCI(html, "<html", 0);
     if (tagStart < 0) return "";
     auto tagEnd = html.indexOf(">", tagStart);
     if (tagEnd < 0) return "";
     auto tag = html[tagStart .. tagEnd];
-    auto langIndex = tag.indexOf("lang=");
-    if (langIndex < 0) return "";
-    auto valueStart = langIndex + 5;
-    if (valueStart >= tag.length) return "";
-    auto quote = tag[valueStart];
-    if (quote != '"' && quote != '\'') return "";
-    auto valueEnd = tag.indexOf(quote, valueStart + 1);
-    if (valueEnd <= valueStart) return "";
-    auto value = tag[valueStart + 1 .. valueEnd];
-    return value.length >= 2 ? value[0 .. 2].toLower : "";
+    size_t searchFrom = 0;
+    while (true) {
+        auto langIndex = indexOfAsciiCI(tag, "lang=", searchFrom);
+        if (langIndex < 0) return "";
+        if (!isLangAttributeBoundary(tag, cast(size_t) langIndex)) {
+            searchFrom = cast(size_t) langIndex + 5;
+            continue;
+        }
+        auto valueStart = cast(size_t) langIndex + 5;
+        if (valueStart >= tag.length) return "";
+        auto quote = tag[valueStart];
+        if (quote != '"' && quote != '\'') {
+            searchFrom = valueStart;
+            continue;
+        }
+        auto valueEnd = tag.indexOf(quote, valueStart + 1);
+        if (valueEnd <= cast(ptrdiff_t) valueStart) return "";
+        auto value = tag[valueStart + 1 .. valueEnd];
+        return value.length >= 2 ? value[0 .. 2].toLower : "";
+    }
 }
 
 private string justextStoplistFor(string html) {
@@ -1932,6 +1978,22 @@ private void selfTest() {
         "a lang= substring outside the <html> tag must never be detected");
     require(htmlLangPrefix(`<html>` ~ "\n" ~ `<meta lang="de">`) == "",
         "a lang= substring after the <html> tag's own close must not be detected");
+    // Code-review fix (PR #585): a `lang=` that is the tail of a longer
+    // attribute name (`data-lang=`) must never be mistaken for the real
+    // `lang` attribute, even when it appears earlier in the tag.
+    require(htmlLangPrefix(`<html data-lang="fr" lang="de">`) == "de",
+        "data-lang= must not be mistaken for the real lang attribute");
+    require(htmlLangPrefix(`<html data-lang="fr">`) == "",
+        "a tag with only data-lang= (no real lang attribute) must yield an empty prefix");
+    // xml:lang (real XHTML spelling) is still accepted via its `:` boundary.
+    require(htmlLangPrefix(`<html xml:lang="de">`) == "de",
+        "xml:lang= must be accepted as the lang attribute");
+    // Code-review fix (PR #585): both the <html> tag search and the lang=
+    // attribute search must be case-insensitive (legal, real HTML).
+    require(htmlLangPrefix(`<HTML LANG="DE">`) == "de",
+        "uppercase <HTML LANG=...> must be detected case-insensitively");
+    require(htmlLangPrefix(`<Html Lang='En'>`) == "en",
+        "mixed-case <Html Lang=...> must be detected case-insensitively");
     require(justextStoplistFor(`<html lang="de-DE">`) == "German",
         "German stoplist selection regression");
     require(justextStoplistFor(`<html lang='en'>`) == "English",

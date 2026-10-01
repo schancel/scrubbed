@@ -221,21 +221,15 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <style>.install-picker { display: none; }</style>
     </noscript>
     <div class="install-picker">
-      <p id="install-summary">Choose a platform and installation method. Homebrew is recommended on macOS; the native package is recommended on Debian and Ubuntu.</p>
+      <p id="install-summary">Choose your platform.</p>
       <p class="install-label">Platform</p>
       <div class="install-tabs" role="group" aria-label="Choose installation platform">
           <button type="button" data-platform="macos" aria-pressed="true">macOS</button>
           <button type="button" data-platform="linux" aria-pressed="false">Linux</button>
       </div>
-      <p class="install-label">Method</p>
-      <div class="install-tabs" role="group" aria-label="Choose installation method">
-          <button type="button" data-method="package" aria-pressed="true">Package manager</button>
-          <button type="button" data-method="archive" aria-pressed="false">Direct archive</button>
-          <button type="button" data-method="source" aria-pressed="false">Build from source</button>
-      </div>
       <pre id="install-command">brew install schancel/scrubbed/scrubbed</pre>
       <p id="install-note" class="note" aria-live="polite">Homebrew automatically adds the tap. Supports Apple Silicon with macOS 15 (Sequoia) or later.</p>
-      <p id="release-status" class="note">Release downloads are live. Published artifacts include workflow-signed provenance attestations.</p>
+      <p id="release-status" class="note">Need an archive or want to build from source? See <a href="https://github.com/schancel/scrubbed/releases/tag/v1.0.0">the release downloads</a> and <a href="https://github.com/schancel/scrubbed#quick-start">quick start</a>.</p>
     </div>
 
     <h2 id="usage">Usage</h2>
@@ -292,66 +286,32 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     (() => {
         const choices = {
             macos: {
-              package: {
                 command: "brew install schancel/scrubbed/scrubbed",
-                note: "Homebrew on Apple Silicon with macOS 15 (Sequoia) or later. The formula verifies the v1.0.0 release archive and installs shell completions."
-              },
-              archive: {
-                command: "version=1.0.0\narchive=\"scrubbed-${version}-macos-arm64.tar.gz\"\ndirectory=\"scrubbed-${version}-macos-arm64\"\ncurl -fLO \"https://github.com/schancel/scrubbed/releases/download/v${version}/${archive}\"\nmkdir -p \"${directory}\"\ntar -xzf \"${archive}\" -C \"${directory}\"\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"${directory}/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
-                note: "Apple Silicon with macOS 15+. Downloads into the current directory, extracts the complete package, and installs only the binary to ~/.local/bin. You control cleanup."
-              },
-              source: {
-                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\nprintf '1.0.0\\n' > VERSION &&\ndub build --build=release --compiler=ldc2 &&\ntest \"$(./scrubbed --version)\" = \"scrubbed 1.0.0\"",
-                note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
-              }
+                note: "Homebrew automatically adds the tap. Supports Apple Silicon with macOS 15 (Sequoia) or later."
             },
             linux: {
-              package: {
-                command: "arch=\"$(dpkg --print-architecture)\"\npackage=\"scrubbed_1.0.0-1_${arch}.deb\"\ncurl -fLO \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/${package}\" &&\nsudo apt install \"./${package}\"",
-                note: "Debian 12+ or Ubuntu 24.04+ on amd64/arm64. apt resolves runtime dependencies. Omit sudo in a root shell; the downloaded package remains in the current directory."
-              },
-              archive: {
-                command: "case \"$(uname -m)\" in\n  x86_64) target=linux-x86_64 ;;\n  aarch64|arm64) target=linux-aarch64 ;;\n  *) echo \"Unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\nesac\nversion=1.0.0\narchive=\"scrubbed-${version}-${target}.tar.gz\"\ndirectory=\"scrubbed-${version}-${target}\"\ncurl -fLO \"https://github.com/schancel/scrubbed/releases/download/v${version}/${archive}\"\nmkdir -p \"${directory}\"\ntar -xzf \"${archive}\" -C \"${directory}\"\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"${directory}/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
-                note: "Linux with glibc 2.36+ on x86_64/aarch64. Downloads into the current directory, extracts the complete package, and installs only the binary to ~/.local/bin. You control cleanup."
-              },
-              source: {
-                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\nprintf '1.0.0\\n' > VERSION &&\ndub build --build=release --compiler=ldc2 &&\ntest \"$(./scrubbed --version)\" = \"scrubbed 1.0.0\"",
-                note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
-              }
+                command: "curl -fLO \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed_1.0.0-1_$(dpkg --print-architecture).deb\"\nsudo apt install \"./scrubbed_1.0.0-1_$(dpkg --print-architecture).deb\"",
+                note: "Debian 12+ or Ubuntu 24.04+ on amd64/arm64. Omit sudo in a root shell."
             }
         };
         const platformButtons = [...document.querySelectorAll("[data-platform]")];
-        const methodButtons = [...document.querySelectorAll("[data-method]")];
         const command = document.getElementById("install-command");
         const note = document.getElementById("install-note");
         let selectedPlatform = "macos";
-        let selectedMethod = "package";
 
         function selectInstall() {
-            if (!choices[selectedPlatform]) return;
-            const choice = choices[selectedPlatform][selectedMethod];
+            const choice = choices[selectedPlatform];
             if (!choice) return;
             command.textContent = choice.command;
             note.textContent = choice.note;
             for (const button of platformButtons) {
                 button.setAttribute("aria-pressed", String(button.dataset.platform === selectedPlatform));
             }
-            for (const button of methodButtons) {
-                button.setAttribute("aria-pressed", String(button.dataset.method === selectedMethod));
-            }
         }
 
         for (const button of platformButtons) {
             button.addEventListener("click", () => {
                 selectedPlatform = button.dataset.platform;
-                if (!selectedMethod) selectedMethod = "package";
-                for (const methodButton of methodButtons) methodButton.disabled = false;
-                selectInstall();
-            });
-        }
-        for (const button of methodButtons) {
-            button.addEventListener("click", () => {
-                selectedMethod = button.dataset.method;
                 selectInstall();
             });
         }
@@ -369,12 +329,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             selectInstall();
         } else {
             selectedPlatform = "";
-            selectedMethod = "";
             for (const button of platformButtons) button.setAttribute("aria-pressed", "false");
-            for (const button of methodButtons) {
-                button.setAttribute("aria-pressed", "false");
-                button.disabled = true;
-            }
             command.textContent = "No native build is available for this device. Choose macOS or Linux to copy a command for a supported machine.";
             note.textContent = platform.includes("win")
                 ? "There is no native Windows build. Use WSL2, then choose Linux; WSL2 has not yet been verified on a Windows host."

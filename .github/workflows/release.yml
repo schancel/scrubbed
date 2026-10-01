@@ -29,9 +29,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -42,6 +40,8 @@ jobs:
     name: create draft release
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - name: Create draft release for ${{ github.ref_name }}
         env:
@@ -76,6 +76,8 @@ jobs:
             linux: true
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - name: Check out source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -164,6 +166,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: debian:12
     timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
       - name: Install checkout, build, and upload dependencies
         run: |
@@ -192,7 +196,7 @@ jobs:
         run: |
           dub build --compiler=ldc2 --build=release
           packaging/debian/build.sh "$PWD" "$PWD/scrubbed" /tmp/debian-package
-          debian_version=${version/-/\~}
+          debian_version=$(printf '%s' "$version" | sed 's/-/~/')
           expected="/tmp/debian-package/scrubbed_${debian_version}-1_${{ matrix.arch }}.deb"
           test -f "$expected"
           dpkg-deb --info "$expected"
@@ -209,6 +213,10 @@ jobs:
     needs: [build, debian-packages]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Download and verify the complete release asset set
         env:
@@ -219,7 +227,7 @@ jobs:
           gh release download "$TAG" --repo "${{ github.repository }}" --dir /tmp/scrubbed-assets
           cd /tmp/scrubbed-assets
           version="${TAG#v}"
-          debian_version=${version/-/\~}
+          debian_version=$(printf '%s' "$version" | sed 's/-/~/')
           expected=(
             "scrubbed-${version}-macos-arm64.tar.gz"
             "scrubbed-${version}-linux-x86_64.tar.gz"
@@ -258,6 +266,8 @@ jobs:
     needs: checksums
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - name: Un-draft the release now every target has succeeded
         env:
@@ -279,6 +289,8 @@ jobs:
     if: failure() && needs.create-release.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: write
     steps:
       - name: Delete the draft release this run created
         env:

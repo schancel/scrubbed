@@ -44,7 +44,7 @@ void main(string[] args) {
         "usage: check [--commonmark]");
     golden("<h1>Title</h1><p>A &amp; <strong>bold</strong> " ~
         "<em>word</em>.</p>",
-        "# Title\n\nA &amp; **bold** *word*\\.\n", "headings/emphasis/entities");
+        "# Title\n\nA &amp; **bold** *word*.\n", "headings/emphasis/entities");
     golden("<p><a href='https://example.test/a?q=1&amp;x=2'>Go</a> " ~
         "<img alt='A [cat]' src='/img/cat.png'></p>",
         "[Go](<https://example.test/a?q=1&amp;x=2>) ![A \\[cat\\]](</img/cat.png>)\n",
@@ -63,6 +63,10 @@ void main(string[] args) {
         "<img alt='safe alt' src='data:x'>" ~
         "<a href='JaVaScRiPt:x'>mixed</a></p>",
         "Click bad safe altmixed\n", "unsafe targets");
+    golden("<p>1<a>. Not a list</a></p>" ~
+        "<p>1<a href='javascript:alert(1)'>. Still not a list</a></p>",
+        "1\\. Not a list\n\n1\\. Still not a list\n",
+        "anchor fallback cannot create ordered-list syntax");
     golden("<p>&lt;script&gt;# x | y &amp; z</p>" ~
         "<script>not visible</script><style>also hidden</style>",
         "&lt;script&gt;\\# x \\| y &amp; z\n", "raw HTML and hidden text");
@@ -80,9 +84,9 @@ void main(string[] args) {
         "ABC\n", "empty code invents no padding");
     golden("<table><tr><th>A|B</th><th>C</th></tr><tr><td>x</td>" ~
         "<td>y&amp;z</td></tr></table>",
-        "- A\\|B | C\n\n- x | y&amp;z\n", "plain table rows");
+        "| A\\|B | C | \n|---|---|\n| x | y&amp;z |\n", "GFM table rows");
     golden("<table><tr><td><p>A</p><p>B</p></td><td>C</td></tr></table>",
-        "- A B | C\n", "nested table cell blocks stay in row");
+        "| A B | C |\n", "nested table cell blocks stay in row");
     golden("<p>Hi<div>there", "Hi\n\nthere\n", "malformed flow");
     golden("<p>x-[] # * _ &lt;b&gt;</p>",
         "x\\-\\[\\] \\# \\* \\_ &lt;b&gt;\n", "syntax escaping");
@@ -139,7 +143,7 @@ void main(string[] args) {
     synthetic.nodes = [HtmlNode(HtmlNodeKind.text, size_t.max, "", "A\0B")];
     need(renderMarkdown(synthetic) == "AB\n", "NUL escaped from owned tree");
     synthetic.nodes[0].text = "A\u0085B\u2028C";
-    need(renderMarkdown(synthetic) == "AB C\n",
+    need(renderMarkdown(synthetic) == "A B C\n",
         "Unicode controls escaped actual=" ~ renderMarkdown(synthetic));
     auto longText = new char[maxMarkdownBytes / 2 + 1];
     longText[] = '*';

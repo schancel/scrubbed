@@ -666,7 +666,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         while (right > left && content[right - 1] == ' ') --right;
         writer.putText(content[0 .. left]);
         if (safe) writer.put("[");
-        if (left < right) writer.put(content[left .. right]);
+        if (left < right) writer.putText(content[left .. right]);
         if (safe) {
             writer.put("](<");
             writer.put(markdownTarget(href));
@@ -927,6 +927,18 @@ unittest {
         "the ticket's own real-DOM repro must not glue words together (#516)");
     assert(!rendered.canFind("alpha**beta***gamma*"),
         "the ticket's own real-DOM repro must not glue words together (#516)");
+}
+
+unittest {
+    import effects.html_tree : parseHtml;
+
+    foreach (html; ["<p><span>1</span><span>. Not a list</span></p>",
+                     "<p>1<a>. Not a list</a></p>",
+                     "<p>1<a href='javascript:alert(1)'>. Not a list</a></p>"]) {
+        auto outcome = parseHtml(cast(const(ubyte)[]) html);
+        assert(outcome.isParsed);
+        assert(renderMarkdown(outcome.tree) == "1\\. Not a list\n");
+    }
 }
 
 // Issue #477 regression: before `MarkdownRenderOptions` existed, neither

@@ -46,16 +46,21 @@ int main(string[] args) {
     golden(executable, input, output,
         "<h1>Title</h1><p>A &amp; <strong>bold</strong> " ~
         "<em>word</em>.</p>",
-        "# Title\n\nA &amp; **bold** *word*\\.\n", "structure and explicit path");
+        "# Title\n\nA &amp; **bold** *word*.\n", "structure and explicit path");
     golden(executable, input, output,
         "<ul><li>One<li>Two</ul><ol start='3'><li>A<li>B</ol>" ~
         "<table><tr><td>x|y</td><td>z</td></tr></table>",
-        "- One\n- Two\n\n3. A\n4. B\n\n- x\\|y | z\n", "malformed lists and table");
+        "- One\n- Two\n\n3. A\n4. B\n\n| x\\|y | z |\n", "malformed lists and table");
     golden(executable, input, output,
         "<p><a href='javascript:alert(1)'>Click</a> " ~
         "<a href='https://example.test'>Safe</a> " ~
         "<img alt='alt' src='data:x'></p>",
         "Click [Safe](<https://example.test>) alt\n", "unsafe targets");
+    golden(executable, input, output,
+        "<p>1<a>. Not a list</a></p>" ~
+        "<p>1<a href='javascript:alert(1)'>. Still not a list</a></p>",
+        "1\\. Not a list\n\n1\\. Still not a list\n",
+        "anchor fallback cannot create ordered-list syntax");
     golden(executable, input, output,
         "<blockquote><p>A</p><p>B</p></blockquote><pre>a```b\n&lt;raw&gt;</pre>",
         "> A\n> \n> B\n\n````\na```b\n<raw>\n````\n",

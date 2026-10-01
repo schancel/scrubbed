@@ -17,8 +17,9 @@ its prior output and exit status is 1; path or write failures are fatal exit
   is emitted for nonempty output.
 - Whitespace in ordinary text collapses to single spaces; block elements are
   separated by one blank line.
-- Markdown punctuation and literal `<`, `>`, `&` in ordinary text are
-  escaped.
+- Markdown-significant punctuation and literal `<`, `>`, `&` in ordinary
+  text are escaped. Ordinary periods remain literal; periods after ASCII
+  digits stay escaped so text cannot become accidental ordered-list syntax.
 - Unicode control and format characters, including NUL and bidi overrides,
   are omitted from ordinary text, code, and alt text.
 - `script`, `style`, `template`, and the non-visible `head` subtree are

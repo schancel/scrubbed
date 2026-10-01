@@ -261,13 +261,13 @@ unittest {
 
     // The key #438 proof: `.markdown` is populated (previously empty,
     // silently quarantined by the stage layer) and carries the recovered
-    // text, with the same literal-character escaping (`.` -> `\.`) ordinary
+    // text, with the same literal-character escaping ordinary
     // `renderMarkdownFrom` output gets -- proving `clean()` reuse, not a
     // second hand-written escaper that could drift from it.
     assert(combined.markdown.length > 0,
         "recovered structured-data content must not be dropped on the floor");
     assert(combined.markdown.canFind("Article body sentence."),
-        "same literal-`.`-escaping as ordinary rendered Markdown text");
+        "same punctuation escaping as ordinary rendered Markdown text");
     assert(!combined.markdown.canFind("<p>") && !combined.markdown.canFind("</p>"),
         "embedded HTML markup inside the JSON string must still be stripped");
     assert(!combined.markdown.canFind("Home") && !combined.markdown.canFind("Contact"),

@@ -135,7 +135,7 @@
             <span class="demo-label">./scrubbed extract --format main-content-markdown</span>
             <pre># Field notes from the delta survey
 
-The survey team spent three weeks mapping the river delta's shifting sandbars, recording water depth every two hundred meters along six transects\. The main channel has migrated nearly forty meters east since the last survey\.</pre>
+The survey team spent three weeks mapping the river delta's shifting sandbars, recording water depth every two hundred meters along six transects. The main channel has migrated nearly forty meters east since the last survey.</pre>
         </div>
     </div>
 
@@ -145,7 +145,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Repairs encoding damage, extracts the article, captures metadata, scans for common PII, and writes an audit sidecar.</p>
 
     <h2 id="verified">Verified against the tools it replaces</h2>
-    <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
+    <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">matched pipeline and extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
     <div class="stats">
         <div class="stat-card">
             <span class="big">39/39 + 48/48</span>
@@ -165,7 +165,12 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <div class="stat-card">
             <span class="big">20/20 pages</span>
             <span class="label">vs. trafilatura, extraction</span>
-            <p>Directional word overlap against trafilatura output: 0.895 precision, 0.756 recall.</p>
+            <p>Directional word overlap against trafilatura output: 0.894 precision, 0.761 recall.</p>
+        </div>
+        <div class="stat-card">
+            <span class="big">~37x</span>
+            <span class="label">matched four-task pipeline vs. warm Python, CPU time</span>
+            <p>400 files; mojibake repair, extraction, language ID, and four-class PII on both sides. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">Methodology</a>.</p>
         </div>
         <div class="stat-card">
             <span class="big">~25x</span>

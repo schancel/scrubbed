@@ -13,8 +13,9 @@
 # own per-call speed once warm. This script measures the complementary
 # number: steady-state throughput once that one-time cost is amortized over
 # a corpus-scale run, in one warm Python process
-# (examples/pipeline-benchmark/throughput_driver.py), against the same real
-# scrubbed clean-web-document release binary.
+# (examples/pipeline-benchmark/throughput_driver.py), against one real
+# scrubbed composition that performs the same four task families:
+# mojibake repair, main-content extraction, language ID, and four-class PII.
 #
 # It does NOT fetch, vendor, or otherwise add any new third-party content.
 # It reuses the existing, already-accepted 20-page corpus at
@@ -183,23 +184,31 @@ tree_signature() {
 # ----    process) -- run twice, matching this repo's reproducibility- ----
 # ----    minded convention. ----
 run_scrubbed_throughput() {
-  local out_dir="$1"
-  rm -rf "$out_dir" "${out_dir}.pii-audit"
-  mkdir -p "$out_dir"
+  local sample_root="$1"
+  local primary_dir="$sample_root/primary"
+  local metadata_dir="$sample_root/metadata"
+  rm -rf "$sample_root"
+  mkdir -p "$primary_dir"
   set +e
   # shellcheck disable=SC2046  # time_wrapper's two-token output is meant to split
-  $(time_wrapper) "$scrubbed_bin" clean-web-document --input "$replicated_dir" --output "$out_dir" --threads 4 \
-    >"$out_dir.stdout.log" 2>"$out_dir.stderr.log"
+  $(time_wrapper) "$scrubbed_bin" run --input "$replicated_dir" --output "$primary_dir" \
+    --sidecar-output "$metadata_dir" --threads 4 \
+    --stage clean=text-transform --filter fix-mojibake \
+    --stage content=html-main-content \
+    --stage language=language-id-detect \
+    --stage pii=pii-four-class \
+    --stage publish=document-metadata-publish \
+    >"$sample_root.stdout.log" 2>"$sample_root.stderr.log"
   local status=$?
   set -e
   if [[ $status -ne 0 && $status -ne 1 ]]; then
-    echo "run_throughput.sh: scrubbed clean-web-document exited $status (neither clean nor a content-driven quarantine)" >&2
-    cat "$out_dir.stderr.log" >&2
+    echo "run_throughput.sh: scrubbed comparison pipeline exited $status (neither clean nor a content-driven quarantine)" >&2
+    cat "$sample_root.stderr.log" >&2
     exit 1
   fi
 }
 
-echo "run_throughput.sh: timing scrubbed clean-web-document over $replicated_count files (2 samples)..." >&2
+echo "run_throughput.sh: timing scrubbed's matched four-task pipeline over $replicated_count files (2 samples)..." >&2
 declare -a scrubbed_seconds scrubbed_cpu_seconds
 scrubbed_dirs=()
 for i in 0 1; do
@@ -308,7 +317,8 @@ Replicated corpus: $replicated_count files (${replicas}x replication of the
   same $corpus_count pages, unique filenames), $replicated_bytes bytes, at
   $replicated_dir.
 
---- scrubbed clean-web-document (single warm process; 2 samples) ---
+--- scrubbed matched four-task pipeline (single warm process; 2 samples) ---
+fix-mojibake -> html-main-content -> language-id-detect -> pii-four-class
 samples: ${scrubbed_seconds[0]}s, ${scrubbed_seconds[1]}s (mean wall ${mean_scrubbed}s, mean cpu ${mean_scrubbed_cpu}s)
 throughput: ${scrubbed_docs_per_sec} docs/s, ${scrubbed_kib_per_sec} KiB/s
 Reproduced byte-identical output across its own two timed samples.

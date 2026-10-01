@@ -3,6 +3,7 @@ module effects.html_metadata;
 
 import domain.document : DocumentId;
 import effects.html_tree : HtmlNode, HtmlNodeKind, HtmlTree;
+import effects.html_tree_walk : endOf;
 import std.array : join;
 import std.conv : to;
 import std.json : JSONOptions, JSONType, JSONValue, parseJSON;
@@ -105,26 +106,14 @@ private string attribute(const ref HtmlNode node, string name) pure {
     return null;
 }
 
-/// Concatenates every text-node descendant of `nodeIndex` (any depth),
-/// walking each text node's ancestor chain -- the same ancestor-walk idiom
-/// this file's own head-membership check uses, and the same shape
-/// `effects.topical_tags_extract_stage`'s own `descendantText` helper
-/// already established as this codebase's precedent for pulling an
-/// element's full visible text out of the flat pre-order tree (used there
-/// for `rel="tag"` `<a>` text; used here for `rel="author"` `<a>` text and
-/// hCard/hAtom name text, both of which may be wrapped in a nested `<a>` or
-/// `<span>` rather than sitting as a direct child).
+/// Concatenates every text-node descendant of `nodeIndex` (any depth).
+/// `endOf` bounds the scan to the node's contiguous subtree in the flat
+/// pre-order tree, preserving document order without visiting later nodes.
 private string descendantText(const ref HtmlTree tree, size_t nodeIndex) pure {
     string result;
-    foreach (node; tree.nodes) {
-        if (node.kind != HtmlNodeKind.text) continue;
-        bool isDescendant;
-        for (size_t parent = node.parentIndex; parent != size_t.max;
-                parent = tree.nodes[parent].parentIndex) {
-            if (parent == nodeIndex) { isDescendant = true; break; }
-        }
-        if (isDescendant) result ~= node.text;
-    }
+    const end = endOf(tree, nodeIndex);
+    foreach (node; tree.nodes[nodeIndex + 1 .. end])
+        if (node.kind == HtmlNodeKind.text) result ~= node.text;
     return result;
 }
 
@@ -133,19 +122,11 @@ private string descendantText(const ref HtmlTree tree, size_t nodeIndex) pure {
 /// already established.
 private string directChildText(const ref HtmlTree tree, size_t nodeIndex) pure {
     string result;
-    foreach (node; tree.nodes)
+    const end = endOf(tree, nodeIndex);
+    foreach (node; tree.nodes[nodeIndex + 1 .. end])
         if (node.parentIndex == nodeIndex && node.kind == HtmlNodeKind.text)
             result ~= node.text;
     return result;
-}
-
-/// True if `nodeIndex` is a proper descendant of `ancestorIndex` -- the same
-/// ancestor-walk idiom this file's own head-membership check uses.
-private bool isDescendantOf(const ref HtmlTree tree, size_t nodeIndex, size_t ancestorIndex) pure {
-    for (size_t parent = tree.nodes[nodeIndex].parentIndex; parent != size_t.max;
-            parent = tree.nodes[parent].parentIndex)
-        if (parent == ancestorIndex) return true;
-    return false;
 }
 
 private bool isAsciiWhitespace(char c) pure {
@@ -383,11 +364,9 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
         head = i;
         break;
     }
-    if (head != size_t.max) foreach (i, node; tree.nodes) {
-        bool inHead = i == head;
-        for (size_t parent = node.parentIndex; !inHead && parent != size_t.max;
-             parent = tree.nodes[parent].parentIndex) inHead = parent == head;
-        if (!inHead || node.kind != HtmlNodeKind.element) continue;
+    if (head != size_t.max) foreach (i, node; tree.nodes[head .. endOf(tree, head)]) {
+        i += head;
+        if (node.kind != HtmlNodeKind.element) continue;
         if (node.name == "title") {
             string title;
             foreach (child; tree.nodes) if (child.parentIndex == i && child.kind == HtmlNodeKind.text)
@@ -536,9 +515,10 @@ HtmlMetadata extractHtmlMetadata(const ref HtmlTree tree) pure {
         auto classValue = attribute(node, "class");
         if (classValue.length == 0 || !hasClassToken(classValue, "author")) continue;
         size_t fnNode = size_t.max;
-        foreach (j, candidate; tree.nodes) {
-            if (fnNode != size_t.max || j == i || candidate.kind != HtmlNodeKind.element) continue;
-            if (!isDescendantOf(tree, j, i)) continue;
+        const authorEnd = endOf(tree, i);
+        foreach (j, candidate; tree.nodes[i + 1 .. authorEnd]) {
+            j += i + 1;
+            if (fnNode != size_t.max || candidate.kind != HtmlNodeKind.element) continue;
             auto candidateClass = attribute(candidate, "class");
             if (candidateClass.length && hasClassToken(candidateClass, "fn")) fnNode = j;
         }

@@ -146,36 +146,36 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 
     <h2 id="verified">Verified against the tools it replaces</h2>
     <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">matched pipeline and extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
+    <h3>Overall matched pipeline</h3>
+    <div class="stats">
+        <div class="stat-card">
+            <span class="big">~37x</span>
+            <span class="label">scrubbed vs. warm ftfy → Trafilatura → langdetect → Presidio</span>
+            <p>CPU time over 400 files, with mojibake repair, extraction, language ID, and four-class PII on both sides. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">Methodology</a>.</p>
+        </div>
+    </div>
+
+    <h3>Individual stages</h3>
     <div class="stats">
         <div class="stat-card">
             <span class="big">39/39 + 48/48</span>
-            <span class="label">vs. ftfy, encoding repair</span>
-            <p>Exact match within scrubbed's Latin-1/Windows-1252 scope.</p>
+            <span class="label">fix-mojibake vs. ftfy</span>
+            <p>Exact repair and clean-input agreement within scrubbed's Latin-1/Windows-1252 scope. A separate 5.9 MB fixture ran about 25x faster by whole-process wall time.</p>
+        </div>
+        <div class="stat-card">
+            <span class="big">0.894 / 0.761</span>
+            <span class="label">html-main-content vs. Trafilatura</span>
+            <p>Directional word-overlap precision / recall across the same 20 real pages; neither tool is treated as ground truth.</p>
         </div>
         <div class="stat-card">
             <span class="big">11/11</span>
-            <span class="label">vs. langdetect, language ID</span>
-            <p>Classification agreement on 11 of 17 supported languages.</p>
+            <span class="label">language-id-detect vs. langdetect</span>
+            <p>Classification agreement on fixtures covering 11 of scrubbed's 17 supported languages.</p>
         </div>
         <div class="stat-card">
             <span class="big">21/21</span>
-            <span class="label">vs. Presidio, PII detection</span>
-            <p>Exact agreement for email, phone, card, and IPv4 detection.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">20/20 pages</span>
-            <span class="label">vs. trafilatura, extraction</span>
-            <p>Directional word overlap against trafilatura output: 0.894 precision, 0.761 recall.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">~37x</span>
-            <span class="label">matched four-task pipeline vs. warm Python, CPU time</span>
-            <p>400 files; mojibake repair, extraction, language ID, and four-class PII on both sides. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">Methodology</a>.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">~25x</span>
-            <span class="label">vs. ftfy alone, whole-process wall time</span>
-            <p>One 5.9 MB file made by repeating a sentence 131,072 times; not a general corpus benchmark.</p>
+            <span class="label">pii-four-class vs. Presidio</span>
+            <p>Exact fixture agreement for email, phone, card, and IPv4 detection.</p>
         </div>
     </div>
 

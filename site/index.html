@@ -86,7 +86,7 @@
     </header>
 
     <h2 id="why">Why</h2>
-    <p>Encoding damage, boilerplate, personal information (PII), and duplicate pages quietly degrade training data. Cleaning them often means chaining several tools and repeatedly reading and writing the same documents. scrubbed combines encoding repair, main-content extraction, and PII scanning in one pipeline, with language ID and near-duplicate decisions available as additional stages.</p>
+    <p>Encoding damage, boilerplate, personal information (PII), and duplicate pages quietly degrade training data. Cleaning them often means chaining several tools and repeatedly reading and writing the same documents. Those tools can also bring conflicting dependencies or require separate Python environments; deploying the stack may mean resolving version conflicts, maintaining multiple environments, and spending time building or pulling large container images before processing begins. scrubbed combines encoding repair, main-content extraction, and PII scanning in one native binary, with language ID and near-duplicate decisions available as additional stages.</p>
 
     <h2 id="fit">Where this fits in a training pipeline</h2>
     <p>scrubbed collects pages, cleans files to text, and transforms selected fields in existing JSONL streams.</p>

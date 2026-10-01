@@ -4,7 +4,7 @@ name: release
 # tag pushes, builds macOS arm64, Linux x86_64, and Linux aarch64 release
 # binaries (Windows out of scope -- no POSIX port contract, matches
 # dub.json's own preBuildCommands platform gate), and publishes a GitHub
-# Release with .tar.gz archives, Debian packages, the installer, a
+# Release with .tar.gz archives, Debian packages, a
 # SHA256SUMS manifest, build metadata, signed provenance attestations, the live
 # third_party/** license/notice closure (experiments/package_core/check.d),
 # and bash/zsh/fish completions. The macOS leg also runs
@@ -56,7 +56,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --draft "${prerelease_flag[@]}" \
             --title "$TAG" \
-            --notes "scrubbed $TAG from source commit $GITHUB_SHA -- macOS arm64 and Linux x86_64/aarch64 archives, Debian packages, installer, SHA-256 checksums, bundled license notices, shell completions, and signed GitHub artifact attestations. Every asset is built and published by this tag-triggered workflow."
+            --notes "scrubbed $TAG from source commit $GITHUB_SHA -- macOS arm64 and Linux x86_64/aarch64 archives, Debian packages, SHA-256 metadata, bundled license notices, shell completions, and signed GitHub artifact attestations. Every asset is built and published by this tag-triggered workflow."
 
   build:
     name: build ${{ matrix.target }}
@@ -204,34 +204,9 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: gh release upload "$TAG" /tmp/debian-package/*.deb --repo "${{ github.repository }}" --clobber
 
-  installer:
-    name: publish versioned installer
-    needs: create-release
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    steps:
-      - name: Check out tagged source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      - name: Validate and stage installer
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          version="${TAG#v}"
-          sh -n packaging/install.sh
-          cp packaging/install.sh "scrubbed-install-${version}.sh"
-          chmod 0755 "scrubbed-install-${version}.sh"
-          echo "installer=scrubbed-install-${version}.sh" >> "$GITHUB_ENV"
-
-      - name: Upload installer to draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" "$installer" --repo "${{ github.repository }}" --clobber
-
   checksums:
     name: publish checksums, build metadata, and attestations
-    needs: [build, debian-packages, installer]
+    needs: [build, debian-packages]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -251,7 +226,6 @@ jobs:
             "scrubbed-${version}-linux-aarch64.tar.gz"
             "scrubbed_${debian_version}-1_amd64.deb"
             "scrubbed_${debian_version}-1_arm64.deb"
-            "scrubbed-install-${version}.sh"
           )
           for asset in "${expected[@]}"; do test -f "$asset"; done
           actual_count=$(find . -maxdepth 1 -type f | wc -l)

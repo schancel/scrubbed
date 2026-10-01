@@ -73,51 +73,33 @@ examples because those are not shipped CLI capabilities.
 
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds
 and publishes `.tar.gz` release archives (macOS arm64, Linux
-x86_64/aarch64) plus a `SHA256SUMS` manifest automatically on every `v*`
-tag. To install the current release:
+x86_64/aarch64), Debian packages, and build provenance automatically on
+every `v*` tag.
 
-```sh
-set -eu
-installer="$(mktemp)"
-trap 'rm -f "$installer"' EXIT HUP INT TERM
-curl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o "$installer"
-expected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4
-if command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "$installer" | awk '{print $1}')"
-else
-    actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
-fi
-[ "$actual" = "$expected" ] || { echo "installer checksum mismatch" >&2; exit 1; }
-SCRUBBED_VERSION=1.0.0 sh "$installer"
-```
-
-This detects your platform (macOS 15+ arm64, Linux x86_64/aarch64 with
-glibc 2.36+), downloads
-the matching release tarball, verifies its SHA-256 against the release's
-published `SHA256SUMS`, and installs the binary plus bash/zsh/fish
-completions to `/usr/local` (falling back to `$HOME/.local` if that isn't
-writable and no `sudo` is available). It's proven end to end -- real
-download, real checksum verification (including the rejection path), real
-install, real `--version` run -- against a local fixture server in
-[`.github/workflows/install-script-check.yml`](.github/workflows/install-script-check.yml).
-See [`packaging/install.sh`](packaging/install.sh)'s own header comment
-for the environment-variable overrides (`SCRUBBED_VERSION` to pin a
-version, `SCRUBBED_INSTALL_BASE_URL`, `SCRUBBED_INSTALL_PREFIX`,
-`SCRUBBED_INSTALL_NO_SUDO`).
-
-On Apple Silicon running macOS 15 (Sequoia) or later, Homebrew is also
-supported:
+On Apple Silicon running macOS 15 (Sequoia) or later:
 
 ```sh
 brew install schancel/scrubbed/scrubbed
 ```
 
-Debian 12+/Ubuntu 24.04+ packages for amd64 and arm64 are attached to the
+Homebrew automatically adds the tap when the fully qualified formula is
+installed; a separate `brew tap` command is not needed.
+
+On Debian 12+ or Ubuntu 24.04+ (amd64 or arm64):
+
+```sh
+arch="$(dpkg --print-architecture)"
+curl -fLO "https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed_1.0.0-1_${arch}.deb" &&
+sudo apt install "./scrubbed_1.0.0-1_${arch}.deb"
+```
+
+Omit `sudo` in a root shell. Direct archives are available on the
 [v1.0.0 release](https://github.com/schancel/scrubbed/releases/tag/v1.0.0).
-The website's installation selector provides a checksum-verified `apt`
-command for the current architecture. RPM packaging remains tested build
-work, but is not published because the release binary's libcurl linkage
-still needs a clean Fedora-native build path.
+`SHA256SUMS` is published for mirrors and reproducibility, not presented as
+authentication when downloaded from the same release as the artifacts.
+Signed workflow attestations are the release provenance mechanism. RPM
+packaging remains tested build work, but is not published because the release
+binary's libcurl linkage still needs a clean Fedora-native build path.
 
 ## Windows: via WSL2, not a native port
 

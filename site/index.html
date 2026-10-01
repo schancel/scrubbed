@@ -235,13 +235,12 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
           <button type="button" data-method="source" aria-pressed="false">Build from source</button>
       </div>
       <pre id="install-command">set -eu
-macos_major="$(sw_vers -productVersion | cut -d. -f1)"
-if [ "$macos_major" -lt 15 ]; then
-    echo "scrubbed requires macOS 15 (Sequoia) or later" &gt;&amp;2; exit 1
-fi
 installer="$(mktemp)"
 trap 'rm -f "$installer"' EXIT HUP INT TERM
-curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer"
+curl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o "$installer"
+expected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4
+actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
+[ "$actual" = "$expected" ] || { echo "installer checksum mismatch" &gt;&amp;2; exit 1; }
 SCRUBBED_VERSION=1.0.0 sh "$installer"</pre>
       <p id="install-note" class="note" aria-live="polite">macOS 15 (Sequoia) or later on Apple Silicon. The installer selects the macos-arm64 release automatically.</p>
       <p id="release-status" class="note">Release downloads are live. The installer has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
@@ -302,15 +301,15 @@ SCRUBBED_VERSION=1.0.0 sh "$installer"</pre>
         const choices = {
             macos: {
               installer: {
-                command: "set -eu\nmacos_major=\"$(sw_vers -productVersion | cut -d. -f1)\"\nif [ \"$macos_major\" -lt 15 ]; then\n    echo \"scrubbed requires macOS 15 (Sequoia) or later\" >&2; exit 1\nfi\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\"\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
-                note: "macOS 15 (Sequoia) or later on Apple Silicon. The installer selects the macos-arm64 release automatically."
+                command: "set -eu\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o \"$installer\"\nexpected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4\nactual=\"$(shasum -a 256 \"$installer\" | awk '{print $1}')\"\n[ \"$actual\" = \"$expected\" ] || { echo \"installer checksum mismatch\" >&2; exit 1; }\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
+                note: "macOS 15 (Sequoia) or later on Apple Silicon. The installer verifies compatibility and selects the macos-arm64 release."
               },
               package: {
                 command: "brew install schancel/scrubbed/scrubbed",
                 note: "Homebrew on Apple Silicon with macOS 15 (Sequoia) or later. The formula verifies the v1.0.0 release archive and installs shell completions."
               },
               archive: {
-                command: "set -eu\nmacos_major=\"$(sw_vers -productVersion | cut -d. -f1)\"\nif [ \"$macos_major\" -lt 15 ]; then\n    echo \"scrubbed requires macOS 15 (Sequoia) or later\" >&2; exit 1\nfi\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-macos-arm64.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | shasum -a 256 -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                command: "set -eu\nmacos_major=\"$(sw_vers -productVersion | cut -d. -f1)\"\nif [ \"$macos_major\" -lt 15 ]; then\n    echo \"scrubbed requires macOS 15 (Sequoia) or later\" >&2; exit 1\nfi\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-macos-arm64.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$archive\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $archive\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | shasum -a 256 -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
                 note: "Downloads and verifies the macOS 15+ Apple Silicon archive, then installs the binary to ~/.local/bin. The archive also contains completions, licenses, and notices."
               },
               source: {
@@ -320,15 +319,15 @@ SCRUBBED_VERSION=1.0.0 sh "$installer"</pre>
             },
             linux: {
               installer: {
-                command: "set -eu\nglibc=\"$(getconf GNU_LIBC_VERSION 2>/dev/null || true)\"\ncase \"$glibc\" in\n  \"glibc 2.\"*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ \"$minor\" -ge 36 ] || { echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1; } ;;\n  \"glibc \"[3-9]*) ;;\n  *) echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1 ;;\nesac\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\"\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
-                note: "Linux with glibc 2.36+ on x86_64 or aarch64. The installer checks compatibility before selecting the matching release."
+                command: "set -eu\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o \"$installer\"\nexpected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4\nactual=\"$(sha256sum \"$installer\" | awk '{print $1}')\"\n[ \"$actual\" = \"$expected\" ] || { echo \"installer checksum mismatch\" >&2; exit 1; }\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
+                note: "Linux with glibc 2.36+ on x86_64 or aarch64. The installer verifies compatibility before selecting the matching release."
               },
               package: {
-                command: "set -eu\nsudo apt-get update\nsudo apt-get install -y curl ca-certificates\narch=\"$(dpkg --print-architecture)\"\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\npackage=\"scrubbed_1.0.0-1_$arch.deb\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\n(cd \"$workdir\" && grep \" $package$\" SHA256SUMS | sha256sum -c -)\nsudo apt-get install -y \"$workdir/$package\"",
+                command: "set -eu\nsudo apt-get update\nsudo apt-get install -y curl ca-certificates\narch=\"$(dpkg --print-architecture)\"\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\npackage=\"scrubbed_1.0.0-1_$arch.deb\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$package\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $package\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | sha256sum -c -)\nsudo apt-get install -y \"$workdir/$package\"",
                 note: "Debian 12+ or Ubuntu 24.04+ on amd64/arm64. Verifies the published package checksum, then lets apt resolve runtime dependencies."
               },
               archive: {
-                command: "set -eu\nglibc=\"$(getconf GNU_LIBC_VERSION 2>/dev/null || true)\"\ncase \"$glibc\" in\n  \"glibc 2.\"*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ \"$minor\" -ge 36 ] || { echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1; } ;;\n  \"glibc \"[3-9]*) ;;\n  *) echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1 ;;\nesac\ncase \"$(uname -m)\" in\n  x86_64) target=linux-x86_64 ;;\n  aarch64|arm64) target=linux-aarch64 ;;\n  *) echo \"Unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\nesac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-$target.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | sha256sum -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                command: "set -eu\nglibc=\"$(getconf GNU_LIBC_VERSION 2>/dev/null || true)\"\ncase \"$glibc\" in\n  \"glibc 2.\"*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ \"$minor\" -ge 36 ] || { echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1; } ;;\n  \"glibc \"[3-9]*) ;;\n  *) echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1 ;;\nesac\ncase \"$(uname -m)\" in\n  x86_64) target=linux-x86_64 ;;\n  aarch64|arm64) target=linux-aarch64 ;;\n  *) echo \"Unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\nesac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-$target.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$archive\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $archive\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | sha256sum -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
                 note: "Detects x86_64 or aarch64, requires glibc 2.36+, verifies and runs the archive, then installs it to ~/.local/bin. The archive also contains completions, licenses, and notices."
               },
               source: {

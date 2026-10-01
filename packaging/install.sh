@@ -1,22 +1,8 @@
 #!/bin/sh
 # scrubbed installer (issue #502, slice of #61).
 #
-#   set -eu
-#   installer="$(mktemp)"
-#   trap 'rm -f "$installer"' EXIT HUP INT TERM
-#   curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer"
-#   if [ "$(uname -s)" = Darwin ] && [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 15 ]; then
-#       echo "scrubbed requires macOS 15 (Sequoia) or later" >&2; exit 1
-#   fi
-#   if [ "$(uname -s)" = Linux ]; then
-#       glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
-#       case "$glibc" in
-#           "glibc 2."*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ "$minor" -ge 36 ] || { echo "scrubbed requires glibc 2.36 or later" >&2; exit 1; } ;;
-#           "glibc "[3-9]*) ;;
-#           *) echo "scrubbed requires glibc 2.36 or later" >&2; exit 1 ;;
-#       esac
-#   fi
-#   SCRUBBED_VERSION=1.0.0 sh "$installer"
+# Download the checksum-pinned release copy using the command in the
+# installation guide: https://github.com/schancel/scrubbed#installing-a-prebuilt-binary
 #
 # Detects platform/arch, downloads the matching release tarball built by
 # .github/workflows/release.yml (issue #499), verifies its SHA-256 against
@@ -179,7 +165,17 @@ fi
 sums_url="${base_url}/${download_dir}/SHA256SUMS"
 
 workdir=$(mktemp -d "${TMPDIR:-/tmp}/scrubbed-install.XXXXXX")
-cleanup() { rm -rf "$workdir"; }
+staged_bin=""
+cleanup() {
+    rm -rf "$workdir"
+    if [ -n "$staged_bin" ]; then
+        if [ -n "${use_sudo:-}" ]; then
+            sudo rm -f "$staged_bin" >/dev/null 2>&1 || true
+        else
+            rm -f "$staged_bin"
+        fi
+    fi
+}
 trap cleanup EXIT INT TERM
 
 sums_file="$workdir/SHA256SUMS"
@@ -232,15 +228,6 @@ tar -C "$extract_dir" -xzf "$archive_file"
 
 [ -f "$extract_dir/scrubbed" ] || die "extracted archive is missing the scrubbed binary (unexpected archive layout)"
 
-# Run the verified artifact before touching an existing installation. This
-# catches runtime-library or OS incompatibilities without overwriting a
-# previously working binary.
-packaged_version=$("$extract_dir/scrubbed" --version 2>/dev/null || true)
-if [ -z "$packaged_version" ]; then
-    die "downloaded binary did not run successfully on this host -- existing installation was not changed"
-fi
-info "verified runtime: $packaged_version"
-
 # --- 5. Choose install prefix ------------------------------------------------
 
 choose_prefix() {
@@ -281,38 +268,76 @@ run() {
     fi
 }
 
+verify_runtime() {
+    candidate="$1"
+    if ! verified_version=$("$candidate" --version 2>/dev/null); then
+        return 1
+    fi
+    [ -n "$verified_version" ]
+}
+
+install_license_files() {
+    if [ -f "$extract_dir/LICENSE" ]; then
+        run mkdir -p "$share_dir/licenses/scrubbed"
+        run install -m 0644 "$extract_dir/LICENSE" "$share_dir/licenses/scrubbed/LICENSE"
+        if [ -f "$extract_dir/THIRD_PARTY_NOTICES.md" ]; then
+            run install -m 0644 "$extract_dir/THIRD_PARTY_NOTICES.md" \
+                "$share_dir/licenses/scrubbed/THIRD_PARTY_NOTICES.md"
+        fi
+    fi
+}
+
 info "installing to $prefix"
 run mkdir -p "$bin_dir"
-run install -m 0755 "$extract_dir/scrubbed" "$bin_dir/scrubbed"
 
-if [ -d "$extract_dir/completions" ]; then
-    if [ -f "$extract_dir/completions/scrubbed.bash" ]; then
-        run mkdir -p "$share_dir/bash-completion/completions"
-        run install -m 0644 "$extract_dir/completions/scrubbed.bash" \
-            "$share_dir/bash-completion/completions/scrubbed"
+if [ -n "$use_sudo" ]; then
+    # Consume every remaining file from the user-owned extraction tree before
+    # executing downloaded code. The candidate binary is staged into the
+    # root-owned destination directory, verified there as the invoking user,
+    # and only then atomically replaces the installed binary.
+    install_license_files
+    staged_bin=$(sudo mktemp "$bin_dir/.scrubbed-install.XXXXXX")
+    sudo install -m 0755 "$extract_dir/scrubbed" "$staged_bin"
+    if ! verify_runtime "$staged_bin"; then
+        die "downloaded binary did not run successfully on this host -- existing binary was not changed"
     fi
-    if [ -f "$extract_dir/completions/scrubbed.zsh" ]; then
-        run mkdir -p "$share_dir/zsh/site-functions"
-        run install -m 0644 "$extract_dir/completions/scrubbed.zsh" \
-            "$share_dir/zsh/site-functions/_scrubbed"
+    info "verified runtime: $verified_version"
+    sudo mv -f "$staged_bin" "$bin_dir/scrubbed"
+    staged_bin=""
+else
+    if ! verify_runtime "$extract_dir/scrubbed"; then
+        die "downloaded binary did not run successfully on this host -- existing installation was not changed"
     fi
-    if [ -f "$extract_dir/completions/scrubbed.fish" ]; then
-        run mkdir -p "$share_dir/fish/vendor_completions.d"
-        run install -m 0644 "$extract_dir/completions/scrubbed.fish" \
-            "$share_dir/fish/vendor_completions.d/scrubbed.fish"
-    fi
+    info "verified runtime: $verified_version"
+    install -m 0755 "$extract_dir/scrubbed" "$bin_dir/scrubbed"
+    install_license_files
 fi
 
-if [ -f "$extract_dir/LICENSE" ]; then
-    run mkdir -p "$share_dir/licenses/scrubbed"
-    run install -m 0644 "$extract_dir/LICENSE" "$share_dir/licenses/scrubbed/LICENSE"
-    if [ -f "$extract_dir/THIRD_PARTY_NOTICES.md" ]; then
-        run install -m 0644 "$extract_dir/THIRD_PARTY_NOTICES.md" \
-            "$share_dir/licenses/scrubbed/THIRD_PARTY_NOTICES.md"
+# Completion initializers embed the path of the binary that generated them.
+# Regenerate after installation so custom and fallback prefixes do not retain
+# the release builder's /usr/local/bin/scrubbed path.
+for shell_name in bash zsh fish; do
+    if ! completion_text=$("$bin_dir/scrubbed" completion init "--$shell_name"); then
+        die "failed to generate $shell_name completions"
     fi
-fi
+    case "$shell_name" in
+        bash) completion_dir="$share_dir/bash-completion/completions"; completion_file="$completion_dir/scrubbed" ;;
+        zsh) completion_dir="$share_dir/zsh/site-functions"; completion_file="$completion_dir/_scrubbed" ;;
+        fish) completion_dir="$share_dir/fish/vendor_completions.d"; completion_file="$completion_dir/scrubbed.fish" ;;
+    esac
+    run mkdir -p "$completion_dir"
+    if [ -n "$use_sudo" ]; then
+        printf '%s\n' "$completion_text" | sudo tee "$completion_file" >/dev/null
+        sudo chmod 0644 "$completion_file"
+    else
+        printf '%s\n' "$completion_text" > "$completion_file"
+        chmod 0644 "$completion_file"
+    fi
+done
 
-installed_version=$("$bin_dir/scrubbed" --version 2>/dev/null || true)
+if ! installed_version=$("$bin_dir/scrubbed" --version 2>/dev/null); then
+    die "installed binary at $bin_dir/scrubbed did not run successfully (--version failed)"
+fi
 if [ -z "$installed_version" ]; then
     die "installed binary at $bin_dir/scrubbed did not run successfully (--version failed)"
 fi

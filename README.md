@@ -80,18 +80,14 @@ tag. To install the current release:
 set -eu
 installer="$(mktemp)"
 trap 'rm -f "$installer"' EXIT HUP INT TERM
-curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer"
-if [ "$(uname -s)" = Darwin ] && [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 15 ]; then
-    echo "scrubbed requires macOS 15 (Sequoia) or later" >&2; exit 1
+curl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o "$installer"
+expected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4
+if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$installer" | awk '{print $1}')"
+else
+    actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
 fi
-if [ "$(uname -s)" = Linux ]; then
-    glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
-    case "$glibc" in
-        "glibc 2."*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ "$minor" -ge 36 ] || { echo "scrubbed requires glibc 2.36 or later" >&2; exit 1; } ;;
-        "glibc "[3-9]*) ;;
-        *) echo "scrubbed requires glibc 2.36 or later" >&2; exit 1 ;;
-    esac
-fi
+[ "$actual" = "$expected" ] || { echo "installer checksum mismatch" >&2; exit 1; }
 SCRUBBED_VERSION=1.0.0 sh "$installer"
 ```
 

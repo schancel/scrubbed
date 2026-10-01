@@ -4,6 +4,6 @@ University archive banner
 
 # Field notebook
 
-François recorded **three** samples\.
+François recorded **three** samples.
 
 Library footer

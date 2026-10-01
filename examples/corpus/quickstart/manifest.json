@@ -75,7 +75,7 @@
       "mediaType": "text/markdown; charset=utf-8",
       "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "96405c16b2310a19eab8f0c995e6360f709f326d72011df914cc6e7c6babb3a8",
+      "sha256": "69335311359d0faac2535a3fc3f8190bd4d88857bca0f44195bcadcedecff5a2",
       "intendedPipeline": "html-markdown",
       "expectedOutcome": "Exact expected mechanical Markdown bytes, including visible page chrome."
     },
@@ -84,7 +84,7 @@
       "mediaType": "text/markdown; charset=utf-8",
       "provenance": "Generated from the authored issue #259 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "2049986a6b7f973dc759366e974695224e579d7762e84d0735f805f626c42c7e",
+      "sha256": "090fcf813af08145c51f268a337a3177c81616c3978be08c6efc9caff060b237",
       "intendedPipeline": "html-markdown",
       "expectedOutcome": "Exact expected mechanical Markdown bytes with an unsafe image destination omitted."
     },

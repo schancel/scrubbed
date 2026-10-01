@@ -58,6 +58,8 @@ private struct Writer {
     // continuation line); with the '\n' case added below it renders as
     // "...colder.  \nMax Lee...".
     void putText(string value) pure {
+        if (value.length && value[0] == '.' && bytes.length &&
+            bytes[$ - 1] >= '0' && bytes[$ - 1] <= '9') put("\\");
         if (value.length && bytes.length &&
             (bytes[$ - 1] == ' ' || bytes[$ - 1] == '\n') &&
             value[0] == ' ') put(value[1 .. $]);
@@ -126,6 +128,11 @@ unittest {
     writer.put("new");
     assert(finished == "complete");
 
+    Writer splitNumericPunctuation;
+    splitNumericPunctuation.putText("1");
+    splitNumericPunctuation.putText(". Not a list");
+    assert(splitNumericPunctuation.bytes == "1\\. Not a list");
+
     writer.bytes.length = 0;
     assert(writer.finish() is null);
     assert(writer.bytes is null);
@@ -174,6 +181,7 @@ private bool isWhitespaceOnlyText(string text) pure {
 string clean(string input, bool code = false) pure {
     Writer writer;
     bool pending;
+    bool previousWasDigit;
     foreach (dchar c; input) {
         if (code) {
             if (c == '\r') c = '\n';
@@ -197,16 +205,20 @@ string clean(string input, bool code = false) pure {
         // falls through to the isControl check below and is still dropped
         // exactly as before.
         if (isWhite(c)) {
+            previousWasDigit = false;
             pending = true;
             continue;
         }
         if (isControl(c) || isFormat(c)) continue;
         if (pending) writer.put(" ");
         pending = false;
+        const escapePeriod = c == '.' && previousWasDigit;
+        const currentIsDigit = c >= '0' && c <= '9';
+        previousWasDigit = currentIsDigit;
         switch (c) {
         case '\\': case '`': case '*': case '_': case '{': case '}':
         case '[': case ']': case '(': case ')': case '#': case '+':
-        case '-': case '.': case '!': case '|': case '~':
+        case '-': case '!': case '|': case '~':
             writer.put("\\"); break;
         case '&': writer.put("&amp;"); continue;
         case '<': writer.put("&lt;"); continue;
@@ -214,6 +226,7 @@ string clean(string input, bool code = false) pure {
         default: break;
         }
         char[4] encoded;
+        if (escapePeriod) writer.put("\\");
         writer.put(cast(string)encoded[0 .. encode(encoded, c)]);
     }
     if (pending) writer.put(" ");
@@ -240,6 +253,14 @@ unittest {
     assert(clean("seventh\n\t\reighth") == "seventh eighth",
         "a run of mixed whitespace-classified control characters must still " ~
         "collapse to a single space (#516)");
+    assert(clean("A sentence.") == "A sentence.",
+        "ordinary periods are literal Markdown, not escape sequences");
+    assert(clean("1. Not a list") == "1\\. Not a list",
+        "a leading ordered-list marker still needs escaping");
+    assert(clean("123456789. Still not a list") ==
+        "123456789\\. Still not a list");
+    assert(clean("1234567890. Numeric punctuation stays conservatively escaped") ==
+        "1234567890\\. Numeric punctuation stays conservatively escaped");
 
     // A genuinely non-whitespace control character (NUL) must still be
     // dropped outright, not converted to a space -- this must not regress.
@@ -645,7 +666,7 @@ private void renderNode(const ref HtmlTree tree, size_t index,
         while (right > left && content[right - 1] == ' ') --right;
         writer.putText(content[0 .. left]);
         if (safe) writer.put("[");
-        if (left < right) writer.put(content[left .. right]);
+        if (left < right) writer.putText(content[left .. right]);
         if (safe) {
             writer.put("](<");
             writer.put(markdownTarget(href));
@@ -855,11 +876,10 @@ unittest {
     auto whole = renderMarkdown(tree);
     auto fromRoot = renderMarkdownFrom(tree, rootIndex);
     assert(fromRoot == whole);
-    // `renderNode` escapes literal `.` as `\.` (its ordinary Markdown-source
-    // escaping, unrelated to this slice) -- the exact same escaping applies
-    // whether reached via `renderMarkdown` or `renderMarkdownFrom`.
+    // Punctuation rendering is identical whether reached via
+    // `renderMarkdown` or `renderMarkdownFrom`.
     assert(whole == "# Field notes from the delta survey\n\n" ~
-        "The survey team spent three weeks mapping the delta\\.\n");
+        "The survey team spent three weeks mapping the delta.\n");
 }
 
 unittest {
@@ -881,7 +901,7 @@ unittest {
     assert(articleIndex != size_t.max);
 
     auto scoped = renderMarkdownFrom(tree, articleIndex);
-    assert(scoped == "# Delta survey\n\nThree weeks of fieldwork\\.\n");
+    assert(scoped == "# Delta survey\n\nThree weeks of fieldwork.\n");
     import std.algorithm.searching : canFind;
     assert(!scoped.canFind("Home"));
     assert(!scoped.canFind("Copyright"));
@@ -907,6 +927,18 @@ unittest {
         "the ticket's own real-DOM repro must not glue words together (#516)");
     assert(!rendered.canFind("alpha**beta***gamma*"),
         "the ticket's own real-DOM repro must not glue words together (#516)");
+}
+
+unittest {
+    import effects.html_tree : parseHtml;
+
+    foreach (html; ["<p><span>1</span><span>. Not a list</span></p>",
+                     "<p>1<a>. Not a list</a></p>",
+                     "<p>1<a href='javascript:alert(1)'>. Not a list</a></p>"]) {
+        auto outcome = parseHtml(cast(const(ubyte)[]) html);
+        assert(outcome.isParsed);
+        assert(renderMarkdown(outcome.tree) == "1\\. Not a list\n");
+    }
 }
 
 // Issue #477 regression: before `MarkdownRenderOptions` existed, neither
@@ -979,7 +1011,7 @@ unittest {
         "achten wir auf beides: auf die problematische Form und die Bedingungen " ~
         "der Arbeit, die der körperlichen und geistigen Entwicklung entgegenstehen, " ~
         "aber eben auch auf die Möglichkeiten, die sich aus der Arbeitserfahrung " ~
-        "für Kinder ergeben\\.\n",
+        "für Kinder ergeben.\n",
         "formatting=true must preserve real ** emphasis around the page's own heading text");
 
     auto formattingOff = renderMarkdown(tree, MarkdownRenderOptions(false, true, true));
@@ -989,7 +1021,7 @@ unittest {
         "achten wir auf beides: auf die problematische Form und die Bedingungen " ~
         "der Arbeit, die der körperlichen und geistigen Entwicklung entgegenstehen, " ~
         "aber eben auch auf die Möglichkeiten, die sich aus der Arbeitserfahrung " ~
-        "für Kinder ergeben\\.\n",
+        "für Kinder ergeben.\n",
         "formatting=false must drop ** but keep the same heading structure and text");
 }
 
@@ -1024,8 +1056,8 @@ unittest {
         "(</assets/Uploads/burkina-appleseller.jpg>)]" ~
         "(</assets/Uploads/burkina-appleseller.jpg>)\n\n" ~
         "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
-        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
-        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Äpfelverkäuferin aus Burkina Faso. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen.\n\n" ~
         "Print\n",
         "links=true, images=true must render the real linked thumbnail as " ~
         "nested Markdown image-inside-link syntax");
@@ -1035,8 +1067,8 @@ unittest {
         "![Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade]" ~
         "(</assets/Uploads/burkina-appleseller.jpg>)\n\n" ~
         "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
-        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
-        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Äpfelverkäuferin aus Burkina Faso. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen.\n\n" ~
         "Print\n",
         "links=false must drop only the outer [...](...) wrapping -- the real " ~
         "image markup underneath is untouched, and the already-unsafe " ~
@@ -1048,8 +1080,8 @@ unittest {
         "[Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade]" ~
         "(</assets/Uploads/burkina-appleseller.jpg>)\n\n" ~
         "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
-        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
-        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Äpfelverkäuferin aus Burkina Faso. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen.\n\n" ~
         "Print\n",
         "images=false must fall back to the real alt text (the same fallback " ~
         "already used for an unsafe image target) while the outer real link " ~
@@ -1059,8 +1091,8 @@ unittest {
     assert(allOff ==
         "Äpfelverkäuferin in Burkina Faso \\- \\(c\\) Philip Meade\n\n" ~
         "Kinder identifizieren sich auch über ihre Arbeit, so wie bei diese " ~
-        "Äpfelverkäuferin aus Burkina Faso\\. Die Arbeit kann ihnen Möglichkeiten " ~
-        "zur gesellschaftlichen Teilhabe eröffnen\\.\n\n" ~
+        "Äpfelverkäuferin aus Burkina Faso. Die Arbeit kann ihnen Möglichkeiten " ~
+        "zur gesellschaftlichen Teilhabe eröffnen.\n\n" ~
         "Print\n",
         "all three off must reduce to plain real text with no Markdown link or " ~
         "image syntax anywhere");
@@ -1170,9 +1202,7 @@ unittest {
         }
     }
     assert(markerLines == 2, "both list items must render with their own intact numbered marker");
-    // `clean()` backslash-escapes a literal trailing `.` (ordinary Markdown
-    // escaping, unrelated to this fixture) -- checked up to the word before
-    // it, not byte-for-byte through the escape.
+    // Ordinary prose periods remain literal Markdown characters.
     assert(rendered.canFind("1. First item text here"));
     assert(rendered.canFind("2. Second item text here"));
 }
@@ -1233,7 +1263,7 @@ unittest {
         "## September 2026\n\n" ~
         "The ISO week calendar arranges each week from Monday through Sunday " ~
         "and numbers each week of the year, as shown in the following " ~
-        "excerpt of a September 2026 calendar table\\.\n\n" ~
+        "excerpt of a September 2026 calendar table.\n\n" ~
         "September 2026\n\n" ~
         "| Week | Mon | Tue | Wed | Thu | Fri | Sat | Sun | \n" ~
         "|---|---|---|---|---|---|---|---|\n" ~
@@ -1241,7 +1271,7 @@ unittest {
         "| W37 | 07 | 08 | 09 | 10 | 11 | 12 | 13 |\n\n" ~
         "Numbering each week from 01 through 52 or 53 lets applications " ~
         "sort dates lexicographically without ambiguity across year " ~
-        "boundaries in most practical cases\\.\n",
+        "boundaries in most practical cases.\n",
         "tables=true must render a real GFM-shaped pipe table, matching " ~
         "pinned trafilatura==2.2.0's own row/delimiter syntax (confirmed by " ~
         "running it), plus the real caption as its own preceding line");
@@ -1251,14 +1281,14 @@ unittest {
         "## September 2026\n\n" ~
         "The ISO week calendar arranges each week from Monday through Sunday " ~
         "and numbers each week of the year, as shown in the following " ~
-        "excerpt of a September 2026 calendar table\\.\n\n" ~
+        "excerpt of a September 2026 calendar table.\n\n" ~
         "September 2026\n\n" ~
         "- Week | Mon | Tue | Wed | Thu | Fri | Sat | Sun\n\n" ~
         "- W36 | 31 | 01 | 02 | 03 | 04 | 05 | 06\n\n" ~
         "- W37 | 07 | 08 | 09 | 10 | 11 | 12 | 13\n\n" ~
         "Numbering each week from 01 through 52 or 53 lets applications " ~
         "sort dates lexicographically without ambiguity across year " ~
-        "boundaries in most practical cases\\.\n",
+        "boundaries in most practical cases.\n",
         "tables=false must fall back to this renderer's own pre-#478 plain " ~
         "bullet-row form -- a graceful rendering degrade that still keeps " ~
         "every real cell's text, unlike pinned trafilatura==2.2.0's own " ~
@@ -1486,32 +1516,32 @@ unittest {
         "## Durations\n\n" ~
         "Durations define the amount of intervening time in a time interval " ~
         "and are represented by the format P\\[n\\]Y\\[n\\]M\\[n\\]DT\\[n\\]H\\[n\\]M\\[n\\]S " ~
-        "or P\\[n\\]W as shown on the aside\\. The capital letters are " ~
+        "or P\\[n\\]W as shown on the aside. The capital letters are " ~
         "designators for each of the date and time elements and are not " ~
-        "replaced\\.\n\n" ~
+        "replaced.\n\n" ~
         "- *P* is the duration designator \\(for *period*\\) placed at the " ~
-        "start of the duration representation\\.\n" ~
+        "start of the duration representation.\n" ~
         "  \n" ~
         "  - *Y* is the year designator that follows the value for the " ~
-        "number of calendar years\\.\n" ~
+        "number of calendar years.\n" ~
         "  - *M* is the month designator that follows the value for the " ~
-        "number of calendar months\\.\n" ~
+        "number of calendar months.\n" ~
         "  - *W* is the week designator that follows the value for the " ~
-        "number of weeks\\.\n" ~
+        "number of weeks.\n" ~
         "  - *D* is the day designator that follows the value for the " ~
-        "number of calendar days\\.\n" ~
+        "number of calendar days.\n" ~
         "- *T* is the time designator that precedes the time components " ~
-        "of the duration representation\\.\n" ~
+        "of the duration representation.\n" ~
         "  \n" ~
         "  - *H* is the hour designator that follows the value for the " ~
-        "number of hours\\.\n" ~
+        "number of hours.\n" ~
         "  - *M* is the minute designator that follows the value for the " ~
-        "number of minutes\\.\n" ~
+        "number of minutes.\n" ~
         "  - *S* is the second designator that follows the value for the " ~
-        "number of seconds\\.\n\n" ~
+        "number of seconds.\n\n" ~
         "For example, \"P3Y6M4DT12H30M5S\" represents a duration of three " ~
         "years, six months, four days, twelve hours, thirty minutes, and " ~
-        "five seconds\\.\n",
+        "five seconds.\n",
         "lists=true must render the real two-level nesting as indented " ~
         "Markdown sub-bullets under their real parent item, preserving the " ~
         "real inline <i> emphasis in every item's text");
@@ -1521,30 +1551,30 @@ unittest {
         "## Durations\n\n" ~
         "Durations define the amount of intervening time in a time interval " ~
         "and are represented by the format P\\[n\\]Y\\[n\\]M\\[n\\]DT\\[n\\]H\\[n\\]M\\[n\\]S " ~
-        "or P\\[n\\]W as shown on the aside\\. The capital letters are " ~
+        "or P\\[n\\]W as shown on the aside. The capital letters are " ~
         "designators for each of the date and time elements and are not " ~
-        "replaced\\.\n\n" ~
+        "replaced.\n\n" ~
         "*P* is the duration designator \\(for *period*\\) placed at the " ~
-        "start of the duration representation\\.\n\n" ~
+        "start of the duration representation.\n\n" ~
         "*Y* is the year designator that follows the value for the number " ~
-        "of calendar years\\.\n\n" ~
+        "of calendar years.\n\n" ~
         "*M* is the month designator that follows the value for the number " ~
-        "of calendar months\\.\n\n" ~
+        "of calendar months.\n\n" ~
         "*W* is the week designator that follows the value for the number " ~
-        "of weeks\\.\n\n" ~
+        "of weeks.\n\n" ~
         "*D* is the day designator that follows the value for the number " ~
-        "of calendar days\\.\n\n" ~
+        "of calendar days.\n\n" ~
         "*T* is the time designator that precedes the time components of " ~
-        "the duration representation\\.\n\n" ~
+        "the duration representation.\n\n" ~
         "*H* is the hour designator that follows the value for the number " ~
-        "of hours\\.\n\n" ~
+        "of hours.\n\n" ~
         "*M* is the minute designator that follows the value for the " ~
-        "number of minutes\\.\n\n" ~
+        "number of minutes.\n\n" ~
         "*S* is the second designator that follows the value for the " ~
-        "number of seconds\\.\n\n" ~
+        "number of seconds.\n\n" ~
         "For example, \"P3Y6M4DT12H30M5S\" represents a duration of three " ~
         "years, six months, four days, twelve hours, thirty minutes, and " ~
-        "five seconds\\.\n",
+        "five seconds.\n",
         "lists=false must flatten every (possibly nested) real item to its " ~
         "own plain paragraph with no bullet/number marker, keeping the " ~
         "real text and real inline emphasis");
@@ -1588,17 +1618,17 @@ unittest {
         "Ein letzte Woche in der Süddeutschen erschienener Artikel erklärt " ~
         "es so:\n\n" ~
         "> Im Fall des Münzwurfs kommt es zur Präzession, wenn die Münze " ~
-        "nicht genau mittig geschnippt wird\\. Dann eiert sie in der " ~
+        "nicht genau mittig geschnippt wird. Dann eiert sie in der " ~
         "Flugphase, und das führt dazu, dass sie etwas mehr Zeit in der " ~
         "ursprünglichen Ausrichtung verbringt und demzufolge häufiger so " ~
-        "landet, wie sie geschnipst wurde\\. Das Eiern der Münze ist mit " ~
+        "landet, wie sie geschnipst wurde. Das Eiern der Münze ist mit " ~
         "bloßem Auge kaum zu sehen – was von Zauberern und Trickbetrügern " ~
         "ausgenutzt wird, die eine Münze so schnipsen können, dass sie " ~
-        "sich überhaupt nicht um sich selbst dreht, sondern nur wackelt\\." ~
+        "sich überhaupt nicht um sich selbst dreht, sondern nur wackelt." ~
         "\n\n" ~
         "Das bestätigt experimentell eine Vorhersage aus der 2007 in SIAM " ~
         "Reviews erschienenen Arbeit “Dynamical bias in the coin toss” von " ~
-        "Persi Diaconis, Susan Holmes und Richard Montgomery\\.\n",
+        "Persi Diaconis, Susan Holmes und Richard Montgomery.\n",
         "quotes=true must render the real blockquote with a real `> ` " ~
         "marker on every wrapped line");
 
@@ -1608,17 +1638,17 @@ unittest {
         "Ein letzte Woche in der Süddeutschen erschienener Artikel erklärt " ~
         "es so:\n\n" ~
         "Im Fall des Münzwurfs kommt es zur Präzession, wenn die Münze " ~
-        "nicht genau mittig geschnippt wird\\. Dann eiert sie in der " ~
+        "nicht genau mittig geschnippt wird. Dann eiert sie in der " ~
         "Flugphase, und das führt dazu, dass sie etwas mehr Zeit in der " ~
         "ursprünglichen Ausrichtung verbringt und demzufolge häufiger so " ~
-        "landet, wie sie geschnipst wurde\\. Das Eiern der Münze ist mit " ~
+        "landet, wie sie geschnipst wurde. Das Eiern der Münze ist mit " ~
         "bloßem Auge kaum zu sehen – was von Zauberern und Trickbetrügern " ~
         "ausgenutzt wird, die eine Münze so schnipsen können, dass sie " ~
-        "sich überhaupt nicht um sich selbst dreht, sondern nur wackelt\\." ~
+        "sich überhaupt nicht um sich selbst dreht, sondern nur wackelt." ~
         "\n\n" ~
         "Das bestätigt experimentell eine Vorhersage aus der 2007 in SIAM " ~
         "Reviews erschienenen Arbeit “Dynamical bias in the coin toss” von " ~
-        "Persi Diaconis, Susan Holmes und Richard Montgomery\\.\n",
+        "Persi Diaconis, Susan Holmes und Richard Montgomery.\n",
         "quotes=false must render the real quoted text as a plain " ~
         "paragraph with no `> ` marker, keeping the real text");
 }
@@ -1669,8 +1699,8 @@ unittest {
     assert(codeOn ==
         "## Creating Virtual Environments\n\n" ~
         "The module used to create and manage virtual environments is " ~
-        "called `venv`\\. `venv` will install the Python version from " ~
-        "which the command was run\\.\n\n" ~
+        "called `venv`. `venv` will install the Python version from " ~
+        "which the command was run.\n\n" ~
         "To create a virtual environment, decide upon a directory where " ~
         "you want to place it, and run the venv module as a script with " ~
         "the directory path:\n\n" ~
@@ -1679,7 +1709,7 @@ unittest {
         "```\n\n" ~
         "This will create the `tutorial-env` directory if it doesn’t " ~
         "exist, and also create directories inside it containing a copy " ~
-        "of the Python interpreter and various supporting files\\.\n",
+        "of the Python interpreter and various supporting files.\n",
         "code=true must render the real inline <code> mentions with real " ~
         "backticks and the real <pre> as a real bare fenced block, matching " ~
         "pinned trafilatura==2.2.0's own no-language-hint fence syntax");
@@ -1688,15 +1718,15 @@ unittest {
     assert(codeOff ==
         "## Creating Virtual Environments\n\n" ~
         "The module used to create and manage virtual environments is " ~
-        "called venv\\. venv will install the Python version from which " ~
-        "the command was run\\.\n\n" ~
+        "called venv. venv will install the Python version from which " ~
+        "the command was run.\n\n" ~
         "To create a virtual environment, decide upon a directory where " ~
         "you want to place it, and run the venv module as a script with " ~
         "the directory path:\n\n" ~
         "python \\-m venv tutorial\\-env\n\n" ~
         "This will create the tutorial\\-env directory if it doesn’t " ~
         "exist, and also create directories inside it containing a copy " ~
-        "of the Python interpreter and various supporting files\\.\n",
+        "of the Python interpreter and various supporting files.\n",
         "code=false must render both the real inline mentions and the real " ~
         "pre block as ordinary prose text -- no backticks, no fence -- " ~
         "keeping the real text");

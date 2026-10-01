@@ -2,7 +2,7 @@
 # examples/pipeline-benchmark/run.sh
 #
 # Single runnable entry point for issue #315's whole-pipeline comparison:
-# the real `scrubbed clean-web-document` release binary vs. an equivalent,
+# a real release-built `scrubbed run` composition vs. an equivalent,
 # pinned Python chain (ftfy -> trafilatura -> langdetect -> Presidio, no
 # dedup step -- explicitly dropped from this slice) over the same small,
 # fixed, checked-in corpus at examples/pipeline-benchmark/corpus/.
@@ -123,10 +123,11 @@ fi
 
 # ---- 5. Whole-pipeline chain definitions ----
 
-# One full pass over the corpus with scrubbed's fixed clean-web-document/v1
-# preset (text-transform(fix-mojibake) -> html-metadata-annotate ->
-# html-main-content -> pii-four-class). `clean-web-document` exits 1
-# whenever any input is quarantined by html-main-content -- this real
+# One full pass over the corpus with a scrubbed composition matched to the
+# Python side's four task families: text-transform(fix-mojibake) ->
+# html-main-content -> language-id-detect -> pii-four-class ->
+# document-metadata-publish. The generic `run` command exits 1 whenever any
+# input is quarantined by html-main-content -- this real
 # corpus's content legitimately does that for some pages (see
 # docs/html-main-content.md) -- so 0 or 1 are both a clean invocation here,
 # matching benchmarks/external_comparator.d's own main-content case.
@@ -157,18 +158,26 @@ time_wrapper() {
 }
 
 run_scrubbed_pipeline() {
-  local out_dir="$1"
-  rm -rf "$out_dir" "${out_dir}.pii-audit"
-  mkdir -p "$out_dir"
+  local sample_root="$1"
+  local primary_dir="$sample_root/primary"
+  local metadata_dir="$sample_root/metadata"
+  rm -rf "$sample_root"
+  mkdir -p "$primary_dir"
   set +e
   # shellcheck disable=SC2046  # time_wrapper's two-token output is meant to split
-  $(time_wrapper) "$scrubbed_bin" clean-web-document --input "$corpus_dir" --output "$out_dir" --threads 4 \
-    >"$out_dir.stdout.log" 2>"$out_dir.stderr.log"
+  $(time_wrapper) "$scrubbed_bin" run --input "$corpus_dir" --output "$primary_dir" \
+    --sidecar-output "$metadata_dir" --threads 4 \
+    --stage clean=text-transform --filter fix-mojibake \
+    --stage content=html-main-content \
+    --stage language=language-id-detect \
+    --stage pii=pii-four-class \
+    --stage publish=document-metadata-publish \
+    >"$sample_root.stdout.log" 2>"$sample_root.stderr.log"
   local status=$?
   set -e
   if [[ $status -ne 0 && $status -ne 1 ]]; then
-    echo "run.sh: scrubbed clean-web-document exited $status (neither clean nor a content-driven quarantine)" >&2
-    cat "$out_dir.stderr.log" >&2
+    echo "run.sh: scrubbed comparison pipeline exited $status (neither clean nor a content-driven quarantine)" >&2
+    cat "$sample_root.stderr.log" >&2
     exit 1
   fi
 }
@@ -296,8 +305,8 @@ fi
 echo "run.sh: both tools reproduced byte-identical output across their own two timed samples." >&2
 
 # ---- 8. Non-timed correctness/agreement pass over the same corpus ----
-# clean-web-document's chain is fixed and exposes no intermediate output,
-# so per-stage agreement (mojibake-equivalent, main-content extraction,
+# The timed composition exposes no intermediate output, so per-stage
+# agreement (mojibake-equivalent, main-content extraction,
 # language-id, PII) is scored from separate, single-stage `scrubbed run`
 # invocations -- the same `--stage clean=...`/`--stage content=...`/
 # `--stage id=...` shapes benchmarks/external_comparator.d's own per-tool
@@ -459,7 +468,7 @@ Corpus: $corpus_count pages, $corpus_bytes bytes (examples/pipeline-benchmark/co
   pinned URLs that could not be fetched).
 
 --- Whole-pipeline timing (A/B/A/B interleaved) ---
-scrubbed clean-web-document samples: ${sample_seconds[0]}s, ${sample_seconds[2]}s (mean wall ${mean_scrubbed}s, mean cpu ${mean_scrubbed_cpu}s)
+scrubbed matched four-task pipeline samples: ${sample_seconds[0]}s, ${sample_seconds[2]}s (mean wall ${mean_scrubbed}s, mean cpu ${mean_scrubbed_cpu}s)
 python chain (ftfy->trafilatura->langdetect->presidio) samples: ${sample_seconds[1]}s, ${sample_seconds[3]}s (mean wall ${mean_python}s, mean cpu ${mean_python_cpu}s)
 Both tools reproduced byte-identical output across their own two samples.
 

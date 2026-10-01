@@ -1,8 +1,8 @@
-# Pipeline benchmark: scrubbed vs. an equivalent Python chain
+# Pipeline benchmark: scrubbed vs. a task-matched Python chain
 
-This example runs the real `scrubbed clean-web-document` command against a
+This example runs a real release-built `scrubbed run` composition against a
 small, fixed, checked-in corpus of real web pages, and compares it end to
-end against an equivalent, pinned Python chain: `ftfy` -> `trafilatura` ->
+end against a task-matched, pinned Python chain: `ftfy` -> `trafilatura` ->
 `langdetect` -> Presidio (no deduplication step -- see "Scope" below).
 
 It gives you a reproducible way to run both pipelines yourself over the same
@@ -87,10 +87,12 @@ venvs.
    [`benchmarks/external_comparator.d`](../../benchmarks/external_comparator.d)'s
    own interleaving methodology (this avoids cold-cache/ordering bias
    between the two tools):
-   - **scrubbed**: `scrubbed clean-web-document --input corpus/ --output OUT`
-     -- the shipped, fixed `clean-web-document/v1` preset:
-     `text-transform(fix-mojibake)` -> `html-metadata-annotate` ->
-     `html-main-content` -> `pii-four-class`.
+   - **scrubbed**: one `scrubbed run` process composed as
+     `text-transform(fix-mojibake)` -> `html-main-content` ->
+     `language-id-detect` -> `pii-four-class` ->
+     `document-metadata-publish`. These are the same four task families as
+     the Python side; metadata publication only writes the language/PII
+     results already produced by those stages.
    - **python chain**: for each page, `ftfy --preserve-entities -n none`
      piped into `trafilatura --output-format txt`, then that extracted text
      is classified by `langdetect` (via the existing pinned
@@ -128,7 +130,7 @@ venvs.
 
 ## Interpreting the output
 
-- **Timing**: `scrubbed clean-web-document` runs the whole corpus through a
+- **Timing**: the matched `scrubbed run` composition runs the whole corpus through a
   compiled, single-process, multi-threaded native binary; the Python chain
   spawns a fresh Python interpreter (twice -- once for `langdetect`, once for
   Presidio/spaCy) per page in a shell loop. Expect scrubbed to be
@@ -217,26 +219,21 @@ tool twice over the replicated corpus, and reports:
   difference for both sides so contamination is visible directly in the
   output, not just inferred.
 
-A live run on this corpus (20 pages replicated 20x to 400 files,
-Apple M4/macOS, real concurrent load on the host from other work) measured
-a steady-state speedup of about 190x by wall-clock but only about 146x by
-CPU time -- confirming the contamination this measurement exists to catch:
-wall-clock alone overstated the real speedup by roughly 30% here, because
-Python's much longer per-sample run (over four minutes) absorbed more
-scheduling delay from other host activity than scrubbed's own sub-second
-run did. This is the opposite direction from what you might guess (a
-longer-running process usually looks *more* stable, not less, under
-naive wall-clock timing) -- which is exactly why CPU time, not an
-assumption about which side load affects more, is the number to trust.
+A release-candidate run on this corpus (20 pages replicated 20x to 400
+files, Apple M4/macOS) measured a **37.04x steady-state CPU-time speedup**:
+scrubbed used a mean 1.6500 CPU-seconds and the warm Python loop used
+61.1191. The same run's wall ratio was only 16.55x because the host was
+under substantial filesystem/scheduling load (scrubbed wall time was
+184.7% above its CPU time), so CPU time is the citable result.
 `run.sh`'s own smaller, single-pass corpus (20 unreplicated pages) is
 *not* a reliable source for a citable ratio even with CPU-time
 measurement: scrubbed's own CPU time there is small enough (tens of
 milliseconds) that ordinary OS scheduling-quantum noise dominates the
 measurement regardless of methodology -- this script's real value is the
 per-file-subprocess vs. warm-process comparison it's built for, not a
-standalone headline number. (Run-to-run variance is real and expected
-here; this single verified run has not yet been cross-checked against a
-quiet, otherwise-idle machine.)
+standalone headline number. Run-to-run variance is real; the script prints
+both samples and its full methodology rather than hiding it behind the
+headline ratio.
 
 ## Corpus provenance and completeness
 

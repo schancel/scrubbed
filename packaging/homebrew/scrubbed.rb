@@ -1,27 +1,10 @@
 class Scrubbed < Formula
   desc "Native CLI for mojibake repair, HTML-to-Markdown extraction, and PII scanning"
   homepage "https://github.com/schancel/scrubbed"
-  # NOTE: issue #501 -- no `v*` tag has been cut in this repository yet
-  # (release.yml, issue #499, fires on tag push), so there is no live
-  # GitHub Release for this URL to resolve to today. `version`/`url` below
-  # assume the project's first tagged release is v1.0.0, matching this
-  # ticket's own milestone; `sha256` is the real checksum of a locally
-  # rebuilt artifact produced byte-for-byte via the same recipe
-  # release.yml uses (dub build --compiler=ldc2 --build=release, then
-  # experiments/package_core/check.d's create/verify, then `tar czf` --
-  # see build-local-artifact.sh in this directory). Builds are not proven
-  # bit-for-bit reproducible across hosts/runs (see
-  # docs/package-core-evaluation.md), so this sha256 will very likely need
-  # to be replaced with the real uploaded v1.0.0 asset's checksum the
-  # moment that tag is actually released -- a one-line, scripted change
-  # (see update-formula.sh in this directory), the same routine maintenance
-  # `brew bump-formula-pr` automates for homebrew-core formulae. Nothing
-  # about issue #501's own acceptance proof depends on this URL being live
-  # today; the proof substitutes a `file://` URL pointing at that same
-  # locally rebuilt tarball (see this directory's README.md).
+  # The formula consumes the same self-verified archive published by the
+  # release workflow and is published through schancel/homebrew-scrubbed.
   url "https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-1.0.0-macos-arm64.tar.gz"
-  version "1.0.0"
-  sha256 "f0492f5944301fc03cc86d69f3c50a010e5220d0e641bd2f66b3bfab2a3bf2be"
+  sha256 "e245a33b0c2e870bec4ad5cd1dbac4a202a1c36c7f5bdf3a849ad28d1070dd09"
   license "MIT"
 
   # Design call (issue #501, following #61's own point and matching what
@@ -40,6 +23,7 @@ class Scrubbed < Formula
   # this formula declares that requirement instead of silently trying to
   # run an incompatible binary on Intel.
   depends_on arch: :arm64
+  depends_on macos: :sequoia
 
   # Runtime linkage is minimal to none, verified the same way the `.deb`
   # slice checks Linux `ldd`/`dlopen`: `otool -L` on the packaged binary
@@ -61,8 +45,7 @@ class Scrubbed < Formula
     # Full third-party notice/license closure, same shape as the release
     # tarball (experiments/package_core/check.d) -- kept discoverable
     # alongside the installed binary rather than dropped.
-    doc.install "THIRD_PARTY_NOTICES.md"
-    doc.install "LICENSE"
+    doc.install "THIRD_PARTY_NOTICES.md", "LICENSE", "third_party"
 
     # The release tarball's own bundled completions/ directory bakes each
     # script's own resolved `thisExePath()` (source/cli_commands.d's

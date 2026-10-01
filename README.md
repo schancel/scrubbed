@@ -74,16 +74,25 @@ examples because those are not shipped CLI capabilities.
 [`.github/workflows/release.yml`](.github/workflows/release.yml) builds
 and publishes `.tar.gz` release archives (macOS arm64, Linux
 x86_64/aarch64) plus a `SHA256SUMS` manifest automatically on every `v*`
-tag. No versioned release has been cut yet, so there's nothing at the URL
-below until the first tag ships; today, build from source with the `Quick
-start` steps above. Once a release exists, install with the one-line
-installer:
+tag. To install the current release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh
+set -eu
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT HUP INT TERM
+curl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o "$installer"
+expected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4
+if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$installer" | awk '{print $1}')"
+else
+    actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
+fi
+[ "$actual" = "$expected" ] || { echo "installer checksum mismatch" >&2; exit 1; }
+SCRUBBED_VERSION=1.0.0 sh "$installer"
 ```
 
-This detects your platform (macOS arm64, Linux x86_64/aarch64), downloads
+This detects your platform (macOS 15+ arm64, Linux x86_64/aarch64 with
+glibc 2.36+), downloads
 the matching release tarball, verifies its SHA-256 against the release's
 published `SHA256SUMS`, and installs the binary plus bash/zsh/fish
 completions to `/usr/local` (falling back to `$HOME/.local` if that isn't
@@ -96,15 +105,19 @@ for the environment-variable overrides (`SCRUBBED_VERSION` to pin a
 version, `SCRUBBED_INSTALL_BASE_URL`, `SCRUBBED_INSTALL_PREFIX`,
 `SCRUBBED_INSTALL_NO_SUDO`).
 
-A `.deb`, a Homebrew tap, and an `.rpm` are also built from that same
-release tree, each with its own build script and a real clean-machine
-install test, but none is wired into an automated publish step yet (the
-Homebrew tap in particular has no live tap repository) -- see
-[`packaging/debian/README.md`](packaging/debian/README.md) and
-[`packaging/homebrew/README.md`](packaging/homebrew/README.md) for the
-current state of each, and [`packaging/rpm/build.sh`](packaging/rpm/build.sh)
-/ [`packaging/rpm/scrubbed.spec`](packaging/rpm/scrubbed.spec) for the
-`.rpm` (no README there yet).
+On Apple Silicon running macOS 15 (Sequoia) or later, Homebrew is also
+supported:
+
+```sh
+brew install schancel/scrubbed/scrubbed
+```
+
+Debian 12+/Ubuntu 24.04+ packages for amd64 and arm64 are attached to the
+[v1.0.0 release](https://github.com/schancel/scrubbed/releases/tag/v1.0.0).
+The website's installation selector provides a checksum-verified `apt`
+command for the current architecture. RPM packaging remains tested build
+work, but is not published because the release binary's libcurl linkage
+still needs a clean Fedora-native build path.
 
 ## Windows: via WSL2, not a native port
 

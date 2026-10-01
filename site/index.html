@@ -15,11 +15,14 @@
         .links { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.25rem; }
         .links a { display: inline-block; padding: 0.35rem 0.85rem; border: 1px solid #444; color: #1a1a1a; text-decoration: none; font-family: monospace; font-size: 0.8rem; }
         .links a:hover { border-color: #000; background: #f5f5f5; }
-        nav.jump { margin-top: 1rem; }
-        nav.jump ul { list-style: none; padding-left: 0; display: flex; flex-wrap: wrap; gap: 0 1rem; }
+        .header-links { gap: 1rem; margin-top: 0.75rem; }
+        .header-links a { padding: 0; border: 0; color: #444; text-decoration: underline; text-underline-offset: 0.18em; }
+        .header-links a:hover { background: transparent; color: #000; text-decoration-thickness: 2px; }
+        nav.jump { margin-top: 1.25rem; }
+        nav.jump ul { list-style: none; padding-left: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
         nav.jump li { margin-bottom: 0; }
-        nav.jump a { color: #444; text-decoration: underline; text-underline-offset: 0.18em; font-family: monospace; font-size: 0.78rem; }
-        nav.jump a:hover { color: #000; text-decoration-thickness: 2px; }
+        nav.jump a { display: block; padding: 0.35rem 0.65rem; border: 1px solid #444; color: #1a1a1a; text-decoration: none; font-family: monospace; font-size: 0.78rem; }
+        nav.jump a:hover { border-color: #000; background: #f5f5f5; }
         h2 { font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; color: #666; margin: 2.75rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; font-family: monospace; }
         ul { padding-left: 1.25rem; }
         li { margin-bottom: 0.6rem; }
@@ -38,6 +41,8 @@
         .stat-card .big { font-family: monospace; font-size: 1.7rem; font-weight: bold; display: block; }
         .stat-card .label { font-size: 0.8rem; color: #666; display: block; margin-top: 0.15rem; }
         .stat-card p { font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
+        .comparison-heading { margin: 1.5rem 0 0.6rem; font-family: monospace; font-size: 0.9rem; }
+        .stage-comparisons .stat-card { flex-basis: 260px; }
         .pipeline-steps { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.4rem; margin: 1rem 0; }
         .pipeline-steps .step { flex: 1 1 130px; border: 1px solid #ddd; padding: 0.75rem 0.6rem; text-align: center; font-size: 0.85rem; }
         .pipeline-steps .step.here { border-color: #1a1a1a; border-width: 2px; background: #f7f7f7; font-weight: bold; }
@@ -48,6 +53,13 @@
         .demo-pair .demo-label { font-family: monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 0.35rem; display: block; }
         .demo-pair pre { margin: 0; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; }
         .demo-pair .after pre { background: #0e2a17; }
+        .install-tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; }
+        .install-tabs button { border: 1px solid #444; background: #fff; color: #1a1a1a; padding: 0.4rem 0.8rem; font: 0.8rem monospace; cursor: pointer; }
+        .install-tabs button:hover { background: #f5f5f5; }
+        .install-tabs button[aria-pressed="true"] { background: #1a1a1a; color: #fff; }
+        .install-tabs button:disabled { cursor: not-allowed; opacity: 0.5; }
+        .install-tabs button:focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
+        .install-label { margin: 0.75rem 0 0.35rem; font: 0.72rem monospace; text-transform: uppercase; letter-spacing: 1px; color: #666; }
         .usage-group { margin: 1.5rem 0; }
         .usage-group h3 { margin-bottom: 0.45rem; font-family: monospace; font-size: 0.8rem; }
     </style>
@@ -57,10 +69,6 @@
     <header>
         <h1>scrubbed</h1>
         <p class="tagline">One native binary for turning raw web pages into clean training and evaluation data.</p>
-        <div class="links">
-            <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source on GitHub</a>
-            <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
-        </div>
         <nav class="jump" aria-label="Jump to section">
             <ul>
                 <li><a href="#why">The Why</a></li>
@@ -73,10 +81,15 @@
                 <li><a href="#examples">Examples</a></li>
                 <li><a href="#status">Status</a></li>
                 <li><a href="#feedback">Feedback</a></li>
+                <li><a href="#install">Install</a></li>
                 <li><a href="#usage">Usage</a></li>
                 <li><a href="#support">Support</a></li>
             </ul>
         </nav>
+        <div class="links header-links">
+            <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a>
+            <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
+        </div>
     </header>
 
     <h2 id="why">The Why</h2>
@@ -146,36 +159,36 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 
     <h2 id="verified">Verified against the tools it replaces</h2>
     <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">matched pipeline and extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
+    <h3 class="comparison-heading">Overall matched pipeline</h3>
     <div class="stats">
         <div class="stat-card">
+            <span class="big">~37x</span>
+            <span class="label">scrubbed vs. warm ftfy → Trafilatura → langdetect → Presidio</span>
+            <p>CPU time over 400 files, with mojibake repair, extraction, language ID, and four-class PII on both sides. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">Methodology</a>.</p>
+        </div>
+    </div>
+
+    <h3 class="comparison-heading">Individual stages</h3>
+    <div class="stats stage-comparisons">
+        <div class="stat-card">
             <span class="big">39/39 + 48/48</span>
-            <span class="label">vs. ftfy, encoding repair</span>
-            <p>Exact match within scrubbed's Latin-1/Windows-1252 scope.</p>
+            <span class="label">fix-mojibake vs. ftfy</span>
+            <p>Exact repair and clean-input agreement within scrubbed's Latin-1/Windows-1252 scope. A separate 5.9 MB fixture ran about 25x faster by whole-process wall time.</p>
+        </div>
+        <div class="stat-card">
+            <span class="big">0.894 / 0.761</span>
+            <span class="label">html-main-content vs. Trafilatura</span>
+            <p>Directional word-overlap precision / recall across the same 20 real pages; neither tool is treated as ground truth.</p>
         </div>
         <div class="stat-card">
             <span class="big">11/11</span>
-            <span class="label">vs. langdetect, language ID</span>
-            <p>Classification agreement on 11 of 17 supported languages.</p>
+            <span class="label">language-id-detect vs. langdetect</span>
+            <p>Classification agreement on fixtures covering 11 of scrubbed's 17 supported languages.</p>
         </div>
         <div class="stat-card">
             <span class="big">21/21</span>
-            <span class="label">vs. Presidio, PII detection</span>
-            <p>Exact agreement for email, phone, card, and IPv4 detection.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">20/20 pages</span>
-            <span class="label">vs. trafilatura, extraction</span>
-            <p>Directional word overlap against trafilatura output: 0.894 precision, 0.761 recall.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">~37x</span>
-            <span class="label">matched four-task pipeline vs. warm Python, CPU time</span>
-            <p>400 files; mojibake repair, extraction, language ID, and four-class PII on both sides. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">Methodology</a>.</p>
-        </div>
-        <div class="stat-card">
-            <span class="big">~25x</span>
-            <span class="label">vs. ftfy alone, whole-process wall time</span>
-            <p>One 5.9 MB file made by repeating a sentence 131,072 times; not a general corpus benchmark.</p>
+            <span class="label">pii-four-class vs. Presidio</span>
+            <p>Exact fixture agreement for email, phone, card, and IPv4 detection.</p>
         </div>
     </div>
 
@@ -196,13 +209,45 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p class="note">No S3, Parquet, native-Windows, or distributed-execution examples are advertised because those are not shipped CLI capabilities.</p>
 
     <h2 id="status">Status</h2>
-    <p>Ready for local, single-machine corpus runs. Multi-machine execution and proven multi-terabyte operation are not yet supported.</p>
+    <p>Ready for local, single-machine corpus runs. Multi-machine runs under orchestrators such as DataTrove, Ray, Spark, Slurm, or Kubernetes have not yet been tested because the project does not have access to a representative cluster. Multi-terabyte operation is therefore not yet a proven claim.</p>
+    <p><strong>Have real distributed infrastructure?</strong> We actively want operators to test scrubbed at scale. <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with your orchestrator, corpus size, hardware, throughput, and any failures.</p>
 
     <h2 id="feedback">Feedback wanted</h2>
     <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
+    <h2 id="install">Install</h2>
+    <noscript>
+        <p>JavaScript is only used to switch installation commands. See the <a href="https://github.com/schancel/scrubbed#installing-a-prebuilt-binary">installation guide</a> or download a verified package from the <a href="https://github.com/schancel/scrubbed/releases/tag/v1.0.0">v1.0.0 release</a>.</p>
+        <style>.install-picker { display: none; }</style>
+    </noscript>
+    <div class="install-picker">
+      <p id="install-summary">Choose a platform and installation method. The installer verifies the release checksum and includes shell completions.</p>
+      <p class="install-label">Platform</p>
+      <div class="install-tabs" role="group" aria-label="Choose installation platform">
+          <button type="button" data-platform="macos" aria-pressed="true">macOS</button>
+          <button type="button" data-platform="linux" aria-pressed="false">Linux</button>
+      </div>
+      <p class="install-label">Method</p>
+      <div class="install-tabs" role="group" aria-label="Choose installation method">
+          <button type="button" data-method="installer" aria-pressed="true">Installer</button>
+          <button type="button" data-method="package" aria-pressed="false">Package manager</button>
+          <button type="button" data-method="archive" aria-pressed="false">Direct archive</button>
+          <button type="button" data-method="source" aria-pressed="false">Build from source</button>
+      </div>
+      <pre id="install-command">set -eu
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT HUP INT TERM
+curl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o "$installer"
+expected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4
+actual="$(shasum -a 256 "$installer" | awk '{print $1}')"
+[ "$actual" = "$expected" ] || { echo "installer checksum mismatch" &gt;&amp;2; exit 1; }
+SCRUBBED_VERSION=1.0.0 sh "$installer"</pre>
+      <p id="install-note" class="note" aria-live="polite">macOS 15 (Sequoia) or later on Apple Silicon. The installer selects the macos-arm64 release automatically.</p>
+      <p id="release-status" class="note">Release downloads are live. The installer has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
+    </div>
+
     <h2 id="usage">Usage</h2>
-    <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. Until the first tagged release, build from source with <a href="https://dlang.org/download.html" target="_blank" rel="noopener">DUB</a> and <a href="https://github.com/ldc-developers/ldc" target="_blank" rel="noopener">LDC</a>. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
+    <p class="note"><strong>Supported:</strong> macOS 15+ on Apple Silicon and Linux with glibc 2.36+ on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
 
     <div class="usage-group">
         <h3>Build</h3>
@@ -244,7 +289,6 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <a href="https://github.com/sponsors/schancel" target="_blank" rel="noopener">GitHub Sponsors</a>
         <a href="https://paypal.me/intentionallyblank" target="_blank" rel="noopener">PayPal</a>
         <a href="https://www.patreon.com/givelotus" target="_blank" rel="noopener">Patreon</a>
-        <a href="https://shablag.substack.com" target="_blank" rel="noopener">Newsletter (free)</a>
     </div>
     <p class="note">Support is optional; the project remains fully open.</p>
 
@@ -252,5 +296,107 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <p><a href="https://github.com/schancel/scrubbed/blob/main/LICENSE" target="_blank" rel="noopener">MIT licensed</a> &middot; <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a> &middot; <a href="https://github.com/schancel/scrubbed/tree/main/benchmarks" target="_blank" rel="noopener">Verify the numbers yourself</a> &middot; <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">Open issues</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">#!blag</a></p>
     </footer>
 </main>
+<script>
+    (() => {
+        const choices = {
+            macos: {
+              installer: {
+                command: "set -eu\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o \"$installer\"\nexpected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4\nactual=\"$(shasum -a 256 \"$installer\" | awk '{print $1}')\"\n[ \"$actual\" = \"$expected\" ] || { echo \"installer checksum mismatch\" >&2; exit 1; }\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
+                note: "macOS 15 (Sequoia) or later on Apple Silicon. The installer verifies compatibility and selects the macos-arm64 release."
+              },
+              package: {
+                command: "brew install schancel/scrubbed/scrubbed",
+                note: "Homebrew on Apple Silicon with macOS 15 (Sequoia) or later. The formula verifies the v1.0.0 release archive and installs shell completions."
+              },
+              archive: {
+                command: "set -eu\nmacos_major=\"$(sw_vers -productVersion | cut -d. -f1)\"\nif [ \"$macos_major\" -lt 15 ]; then\n    echo \"scrubbed requires macOS 15 (Sequoia) or later\" >&2; exit 1\nfi\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-macos-arm64.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$archive\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $archive\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | shasum -a 256 -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                note: "Downloads and verifies the macOS 15+ Apple Silicon archive, then installs the binary to ~/.local/bin. The archive also contains completions, licenses, and notices."
+              },
+              source: {
+                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\nprintf '1.0.0\\n' > VERSION &&\ndub build --build=release --compiler=ldc2 &&\ntest \"$(./scrubbed --version)\" = \"scrubbed 1.0.0\"",
+                note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
+              }
+            },
+            linux: {
+              installer: {
+                command: "set -eu\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://github.com/schancel/scrubbed/releases/download/v1.0.0/scrubbed-install-1.0.0.sh -o \"$installer\"\nexpected=769f4a5eb971dd4ce10c45da4b4d296a6c120851f65d20ecee0dee3396b3fcc4\nactual=\"$(sha256sum \"$installer\" | awk '{print $1}')\"\n[ \"$actual\" = \"$expected\" ] || { echo \"installer checksum mismatch\" >&2; exit 1; }\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
+                note: "Linux with glibc 2.36+ on x86_64 or aarch64. The installer verifies compatibility before selecting the matching release."
+              },
+              package: {
+                command: "set -eu\nsudo apt-get update\nsudo apt-get install -y curl ca-certificates\narch=\"$(dpkg --print-architecture)\"\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\npackage=\"scrubbed_1.0.0-1_$arch.deb\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$package\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $package\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | sha256sum -c -)\nsudo apt-get install -y \"$workdir/$package\"",
+                note: "Debian 12+ or Ubuntu 24.04+ on amd64/arm64. Verifies the published package checksum, then lets apt resolve runtime dependencies."
+              },
+              archive: {
+                command: "set -eu\nglibc=\"$(getconf GNU_LIBC_VERSION 2>/dev/null || true)\"\ncase \"$glibc\" in\n  \"glibc 2.\"*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ \"$minor\" -ge 36 ] || { echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1; } ;;\n  \"glibc \"[3-9]*) ;;\n  *) echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1 ;;\nesac\ncase \"$(uname -m)\" in\n  x86_64) target=linux-x86_64 ;;\n  aarch64|arm64) target=linux-aarch64 ;;\n  *) echo \"Unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\nesac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-$target.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$archive\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $archive\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | sha256sum -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                note: "Detects x86_64 or aarch64, requires glibc 2.36+, verifies and runs the archive, then installs it to ~/.local/bin. The archive also contains completions, licenses, and notices."
+              },
+              source: {
+                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\nprintf '1.0.0\\n' > VERSION &&\ndub build --build=release --compiler=ldc2 &&\ntest \"$(./scrubbed --version)\" = \"scrubbed 1.0.0\"",
+                note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
+              }
+            }
+        };
+        const platformButtons = [...document.querySelectorAll("[data-platform]")];
+        const methodButtons = [...document.querySelectorAll("[data-method]")];
+        const command = document.getElementById("install-command");
+        const note = document.getElementById("install-note");
+        let selectedPlatform = "macos";
+        let selectedMethod = "installer";
+
+        function selectInstall() {
+            if (!choices[selectedPlatform]) return;
+            const choice = choices[selectedPlatform][selectedMethod];
+            if (!choice) return;
+            command.textContent = choice.command;
+            note.textContent = choice.note;
+            for (const button of platformButtons) {
+                button.setAttribute("aria-pressed", String(button.dataset.platform === selectedPlatform));
+            }
+            for (const button of methodButtons) {
+                button.setAttribute("aria-pressed", String(button.dataset.method === selectedMethod));
+            }
+        }
+
+        for (const button of platformButtons) {
+            button.addEventListener("click", () => {
+                selectedPlatform = button.dataset.platform;
+                if (!selectedMethod) selectedMethod = "installer";
+                for (const methodButton of methodButtons) methodButton.disabled = false;
+                selectInstall();
+            });
+        }
+        for (const button of methodButtons) {
+            button.addEventListener("click", () => {
+                selectedMethod = button.dataset.method;
+                selectInstall();
+            });
+        }
+
+        const platform = String(
+            (navigator.userAgentData && navigator.userAgentData.platform) ||
+            navigator.platform || navigator.userAgent || ""
+        ).toLowerCase();
+        const userAgent = String(navigator.userAgent || "").toLowerCase();
+        const mobile = /android|iphone|ipad|ipod/.test(userAgent) ||
+            (platform.includes("mac") && Number(navigator.maxTouchPoints || 0) > 1);
+        const supportedDesktop = !mobile && (platform.includes("mac") || platform.includes("linux"));
+        if (supportedDesktop) {
+            if (platform.includes("linux")) selectedPlatform = "linux";
+            selectInstall();
+        } else {
+            selectedPlatform = "";
+            selectedMethod = "";
+            for (const button of platformButtons) button.setAttribute("aria-pressed", "false");
+            for (const button of methodButtons) {
+                button.setAttribute("aria-pressed", "false");
+                button.disabled = true;
+            }
+            command.textContent = "No native build is available for this device. Choose macOS or Linux to copy a command for a supported machine.";
+            note.textContent = platform.includes("win")
+                ? "There is no native Windows build. Use WSL2, then choose Linux; WSL2 has not yet been verified on a Windows host."
+                : "Install on a supported macOS 15+ Apple Silicon or Linux x86_64/aarch64 machine.";
+        }
+    })();
+</script>
 </body>
 </html>

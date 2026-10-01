@@ -1,15 +1,17 @@
 #!/bin/sh
-# scrubbed one-line installer (issue #502, slice of #61).
+# scrubbed installer (issue #502, slice of #61).
 #
-#   curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh
+#   installer="$(mktemp)" &&
+#   curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer" &&
+#   SCRUBBED_VERSION=1.0.0 sh "$installer" &&
+#   rm -f "$installer"
 #
 # Detects platform/arch, downloads the matching release tarball built by
 # .github/workflows/release.yml (issue #499), verifies its SHA-256 against
 # the release's published SHA256SUMS, and installs the binary + bash/zsh/
 # fish completions to a sensible location.
 #
-# POSIX sh only (no bashisms) -- this is piped into whatever shell the
-# invoker's `sh` resolves to. Fails loudly (non-zero exit, message on
+# POSIX sh only (no bashisms). Fails loudly (non-zero exit, message on
 # stderr) on any unsupported platform or checksum mismatch; never installs
 # an unverified binary.
 #

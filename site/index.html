@@ -15,11 +15,14 @@
         .links { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.25rem; }
         .links a { display: inline-block; padding: 0.35rem 0.85rem; border: 1px solid #444; color: #1a1a1a; text-decoration: none; font-family: monospace; font-size: 0.8rem; }
         .links a:hover { border-color: #000; background: #f5f5f5; }
-        nav.jump { margin-top: 1rem; }
-        nav.jump ul { list-style: none; padding-left: 0; display: flex; flex-wrap: wrap; gap: 0 1rem; }
+        .header-links { gap: 1rem; margin-top: 0.75rem; }
+        .header-links a { padding: 0; border: 0; color: #444; text-decoration: underline; text-underline-offset: 0.18em; }
+        .header-links a:hover { background: transparent; color: #000; text-decoration-thickness: 2px; }
+        nav.jump { margin-top: 1.25rem; }
+        nav.jump ul { list-style: none; padding-left: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
         nav.jump li { margin-bottom: 0; }
-        nav.jump a { color: #444; text-decoration: underline; text-underline-offset: 0.18em; font-family: monospace; font-size: 0.78rem; }
-        nav.jump a:hover { color: #000; text-decoration-thickness: 2px; }
+        nav.jump a { display: block; padding: 0.35rem 0.65rem; border: 1px solid #444; color: #1a1a1a; text-decoration: none; font-family: monospace; font-size: 0.78rem; }
+        nav.jump a:hover { border-color: #000; background: #f5f5f5; }
         h2 { font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; color: #666; margin: 2.75rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; font-family: monospace; }
         ul { padding-left: 1.25rem; }
         li { margin-bottom: 0.6rem; }
@@ -56,6 +59,7 @@
         .install-tabs button[aria-pressed="true"] { background: #1a1a1a; color: #fff; }
         .install-tabs button:disabled { cursor: not-allowed; opacity: 0.5; }
         .install-tabs button:focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
+        .install-label { margin: 0.75rem 0 0.35rem; font: 0.72rem monospace; text-transform: uppercase; letter-spacing: 1px; color: #666; }
         .usage-group { margin: 1.5rem 0; }
         .usage-group h3 { margin-bottom: 0.45rem; font-family: monospace; font-size: 0.8rem; }
     </style>
@@ -65,10 +69,6 @@
     <header>
         <h1>scrubbed</h1>
         <p class="tagline">One native binary for turning raw web pages into clean training and evaluation data.</p>
-        <div class="links">
-            <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source on GitHub</a>
-            <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
-        </div>
         <nav class="jump" aria-label="Jump to section">
             <ul>
                 <li><a href="#why">The Why</a></li>
@@ -86,6 +86,10 @@
                 <li><a href="#support">Support</a></li>
             </ul>
         </nav>
+        <div class="links header-links">
+            <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a>
+            <a href="https://github.com/schancel/scrubbed#readme" target="_blank" rel="noopener">README</a>
+        </div>
     </header>
 
     <h2 id="why">The Why</h2>
@@ -212,17 +216,25 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
     <h2 id="install">Install</h2>
-    <p id="install-summary">Prebuilt installation will detect the exact architecture, verify the release checksum, and install the binary plus shell completions. Until v1.0.0 is published, build from source.</p>
+    <p id="install-summary">Choose a platform and installation method. The installer verifies the release checksum and includes shell completions.</p>
+    <p class="install-label">Platform</p>
     <div class="install-tabs" role="group" aria-label="Choose installation platform">
-        <button type="button" data-install="macos" aria-pressed="false" disabled>macOS</button>
-        <button type="button" data-install="linux" aria-pressed="false" disabled>Linux</button>
-        <button type="button" data-install="source" aria-pressed="true">Build from source</button>
+        <button type="button" data-platform="macos" aria-pressed="true">macOS</button>
+        <button type="button" data-platform="linux" aria-pressed="false">Linux</button>
     </div>
-    <pre id="install-command">git clone https://github.com/schancel/scrubbed.git &amp;&amp;
-cd scrubbed &amp;&amp;
-dub build --build=release --compiler=ldc2</pre>
-    <p id="install-note" class="note" aria-live="polite">macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers.</p>
-    <p id="release-status" class="note"><strong>Before v1.0.0:</strong> release downloads are not live yet, so the prebuilt options are disabled. The installer itself has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
+    <p class="install-label">Method</p>
+    <div class="install-tabs" role="group" aria-label="Choose installation method">
+        <button type="button" data-method="installer" aria-pressed="true">Installer</button>
+        <button type="button" data-method="package" aria-pressed="false">Package manager</button>
+        <button type="button" data-method="archive" aria-pressed="false">Direct archive</button>
+        <button type="button" data-method="source" aria-pressed="false">Build from source</button>
+    </div>
+    <pre id="install-command">installer="$(mktemp)" &amp;&amp;
+curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer" &amp;&amp;
+SCRUBBED_VERSION=1.0.0 sh "$installer" &amp;&amp;
+rm -f "$installer"</pre>
+    <p id="install-note" class="note" aria-live="polite">macOS on Apple Silicon. The installer selects the macos-arm64 release automatically.</p>
+    <p id="release-status" class="note">Release downloads are live. The installer has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
 
     <h2 id="usage">Usage</h2>
     <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
@@ -278,59 +290,85 @@ dub build --build=release --compiler=ldc2</pre>
     (() => {
         const choices = {
             macos: {
-                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh | sh",
+              installer: {
+                command: "installer=\"$(mktemp)\" &&\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\" &&\nSCRUBBED_VERSION=1.0.0 sh \"$installer\" &&\nrm -f \"$installer\"",
                 note: "macOS on Apple Silicon. The installer selects the macos-arm64 release automatically."
+              },
+              package: {
+                command: "brew install schancel/scrubbed/scrubbed",
+                note: "Homebrew on Apple Silicon with macOS 15 (Sequoia) or later. The formula verifies the v1.0.0 release archive and installs shell completions."
+              },
+              archive: {
+                command: "workdir=\"$(mktemp -d)\" &&\nversion=1.0.0 &&\narchive=\"scrubbed-$version-macos-arm64.tar.gz\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\" &&\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | shasum -a 256 -c -) &&\ntar -xzf \"$workdir/$archive\" -C \"$workdir\" &&\nmkdir -p \"$HOME/.local/bin\" &&\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                note: "Downloads and verifies the macOS Apple Silicon archive, then installs the binary to ~/.local/bin. The archive also contains completions, licenses, and notices."
+              },
+              source: {
+                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\ndub build --build=release --compiler=ldc2",
+                note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
+              }
             },
             linux: {
-                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh | sh",
+              installer: {
+                command: "installer=\"$(mktemp)\" &&\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\" &&\nSCRUBBED_VERSION=1.0.0 sh \"$installer\" &&\nrm -f \"$installer\"",
                 note: "Linux on x86_64 or aarch64. The installer selects the matching release automatically."
-            },
-            source: {
-                command: "git clone https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\ndub build --build=release --compiler=ldc2",
+              },
+              package: {
+                command: "sudo apt-get update &&\nsudo apt-get install -y curl ca-certificates &&\narch=\"$(dpkg --print-architecture)\" &&\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac &&\nworkdir=\"$(mktemp -d)\" &&\npackage=\"scrubbed_1.0.0-1_$arch.deb\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\" &&\n(cd \"$workdir\" && grep \" $package$\" SHA256SUMS | sha256sum -c -) &&\nsudo apt-get install -y \"$workdir/$package\"",
+                note: "Debian 12+ or Ubuntu 24.04+ on amd64/arm64. Verifies the published package checksum, then lets apt resolve runtime dependencies."
+              },
+              archive: {
+                command: "case \"$(uname -m)\" in\n  x86_64) target=linux-x86_64 ;;\n  aarch64|arm64) target=linux-aarch64 ;;\n  *) echo \"Unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\nesac &&\nworkdir=\"$(mktemp -d)\" &&\nversion=1.0.0 &&\narchive=\"scrubbed-$version-$target.tar.gz\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\" &&\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | sha256sum -c -) &&\ntar -xzf \"$workdir/$archive\" -C \"$workdir\" &&\nmkdir -p \"$HOME/.local/bin\" &&\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                note: "Detects x86_64 or aarch64, verifies the archive, then installs the binary to ~/.local/bin. The archive also contains completions, licenses, and notices."
+              },
+              source: {
+                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\ndub build --build=release --compiler=ldc2",
                 note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
+              }
             }
         };
-        const buttons = [...document.querySelectorAll("[data-install]")];
+        const platformButtons = [...document.querySelectorAll("[data-platform]")];
+        const methodButtons = [...document.querySelectorAll("[data-method]")];
         const command = document.getElementById("install-command");
         const note = document.getElementById("install-note");
-        const summary = document.getElementById("install-summary");
-        const releaseStatus = document.getElementById("release-status");
-        const releaseAvailable = false;
+        let selectedPlatform = "macos";
+        let selectedMethod = "installer";
 
-        function selectInstall(key) {
-            const choice = choices[key];
+        function selectInstall() {
+            const choice = choices[selectedPlatform][selectedMethod];
             if (!choice) return;
             command.textContent = choice.command;
             note.textContent = choice.note;
-            for (const button of buttons) {
-                button.setAttribute("aria-pressed", String(button.dataset.install === key));
+            for (const button of platformButtons) {
+                button.setAttribute("aria-pressed", String(button.dataset.platform === selectedPlatform));
+            }
+            for (const button of methodButtons) {
+                button.setAttribute("aria-pressed", String(button.dataset.method === selectedMethod));
             }
         }
 
-        for (const button of buttons) {
-            if (button.dataset.install !== "source") {
-                button.disabled = !releaseAvailable;
-            }
-            button.addEventListener("click", () => selectInstall(button.dataset.install));
+        for (const button of platformButtons) {
+            button.addEventListener("click", () => {
+                selectedPlatform = button.dataset.platform;
+                selectInstall();
+            });
+        }
+        for (const button of methodButtons) {
+            button.addEventListener("click", () => {
+                selectedMethod = button.dataset.method;
+                selectInstall();
+            });
         }
 
-        if (releaseAvailable) {
-            summary.textContent = "Choose a platform. The installer detects the exact architecture, verifies the release checksum, and installs the binary plus shell completions.";
-            releaseStatus.textContent = "Release downloads are live. The installer has passed end-to-end macOS and Linux checks, including checksum rejection.";
-            const platform = String(
-                (navigator.userAgentData && navigator.userAgentData.platform) ||
-                navigator.platform || navigator.userAgent || ""
-            ).toLowerCase();
-            const userAgent = String(navigator.userAgent || "").toLowerCase();
-            const mobile = /android|iphone|ipad|ipod/.test(userAgent) ||
-                (platform.includes("mac") && Number(navigator.maxTouchPoints || 0) > 1);
-            if (mobile) selectInstall("source");
-            else if (platform.includes("mac")) selectInstall("macos");
-            else if (platform.includes("linux")) selectInstall("linux");
-            else selectInstall("source");
-        } else {
-            selectInstall("source");
-        }
+        const platform = String(
+            (navigator.userAgentData && navigator.userAgentData.platform) ||
+            navigator.platform || navigator.userAgent || ""
+        ).toLowerCase();
+        const userAgent = String(navigator.userAgent || "").toLowerCase();
+        const mobile = /android|iphone|ipad|ipod/.test(userAgent) ||
+            (platform.includes("mac") && Number(navigator.maxTouchPoints || 0) > 1);
+        if (platform.includes("linux") && !mobile) selectedPlatform = "linux";
+        if (mobile || (!platform.includes("mac") && !platform.includes("linux"))) selectedMethod = "source";
+        selectInstall();
     })();
 </script>
 </body>

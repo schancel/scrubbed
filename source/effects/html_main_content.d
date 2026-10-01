@@ -365,24 +365,33 @@ private bool isAsciiAlnum(char c) pure nothrow @nogc {
 // checked against the pinned benchmark page `utopia-de.html`: "headline",
 // "loaded", "shadow", "download", "gradient" each contain "ad" only with an
 // alphanumeric neighbor and must not be excluded either.
-private bool containsKeywordWord(string haystack, string needle) pure nothrow @nogc {
-    if (needle.length == 0) return true;
-    if (needle.length > haystack.length) return false;
-    outer: for (size_t i; i + needle.length <= haystack.length; ++i) {
-        foreach (j, nc; needle) if (!asciiFoldEq(haystack[i + j], nc)) continue outer;
-        bool precededByAlnum = i > 0 && isAsciiAlnum(haystack[i - 1]);
-        bool followedByAlnum = i + needle.length < haystack.length &&
-            isAsciiAlnum(haystack[i + needle.length]);
-        if (!precededByAlnum && !followedByAlnum) return true;
+private void markKeywordWords(size_t N)(string haystack, immutable string[] keywords,
+        ref bool[N] matched) pure nothrow @nogc {
+    assert(keywords.length == N);
+    foreach (i, first; haystack) {
+        if (i > 0 && isAsciiAlnum(haystack[i - 1])) continue;
+        foreach (keywordIndex, needle; keywords) {
+            if (matched[keywordIndex] || needle.length == 0 ||
+                    i + needle.length > haystack.length ||
+                    !asciiFoldEq(first, needle[0])) continue;
+            bool equal = true;
+            foreach (j; 1 .. needle.length) if (!asciiFoldEq(haystack[i + j], needle[j])) {
+                equal = false;
+                break;
+            }
+            if (!equal) continue;
+            const followedByAlnum = i + needle.length < haystack.length &&
+                isAsciiAlnum(haystack[i + needle.length]);
+            if (!followedByAlnum) matched[keywordIndex] = true;
+        }
     }
-    return false;
 }
 
 // Issue #549: #538's word-boundary requirement above (correctly) also
 // rejects a legitimate compound class/id that concatenates a positive
 // keyword with no delimiter at all, e.g. `class="maintext"` no longer
 // credits `main` -- "main" is followed directly by the alphanumeric 't', so
-// `containsKeywordWord` rejects it as a mid-word occurrence exactly like it
+// the word-boundary matcher rejects it as a mid-word occurrence exactly like it
 // rejects "ad" inside "heading". Real corpus regression: the pinned
 // benchmark page `examples/pipeline-benchmark/corpus/www-spdfraktion-de.html`
 // has `<div class="maintext">` wrapping the real article body (including its
@@ -412,7 +421,7 @@ private bool containsKeywordWord(string haystack, string needle) pure nothrow @n
 // - the negative-keyword suffix guard rules out compounds this repo's own
 //   pinned corpus actually contains -- `mainMenu`, `mainNavBox`
 //   (`examples/pipeline-benchmark/corpus/`) -- where the camelCase suffix
-//   ("Menu", "NavBox") is itself chrome that `containsKeywordWord` already
+//   ("Menu", "NavBox") is itself chrome that the word-boundary matcher already
 //   excludes as its own separate token, but can't reach here because #538's
 //   boundary check also hides "menu"/"nav" as substrings mid-compound the
 //   same way it hides "ad" in "heading". Checking the suffix against
@@ -466,19 +475,33 @@ private double tagWeightFor(string name) pure nothrow @nogc {
 }
 
 private double keywordScoreFor(const ref HtmlNode node) pure {
-    double total = 0.0;
     auto classValue = attributeValue(node, "class");
     auto idValue = attributeValue(node, "id");
-    foreach (kw; positiveKeywords)
-        if ((classValue.length && (containsKeywordWord(classValue, kw) ||
-                containsKeywordPrefixOfLongerWord(classValue, kw))) ||
-            (idValue.length && (containsKeywordWord(idValue, kw) ||
-                containsKeywordPrefixOfLongerWord(idValue, kw))))
-            total += keywordWeightUnit;
-    foreach (kw; negativeKeywords)
-        if ((classValue.length && containsKeywordWord(classValue, kw)) ||
-            (idValue.length && containsKeywordWord(idValue, kw)))
-            total -= keywordWeightUnit;
+    // Most elements carry neither attribute. Avoid walking both fixed keyword
+    // tables for those nodes; the observable score is unconditionally zero.
+    if (classValue.length == 0 && idValue.length == 0) return 0.0;
+    enum positiveKeywordCount = 6;
+    enum negativeKeywordCount = 15;
+    static assert(positiveKeywords.length == positiveKeywordCount);
+    static assert(negativeKeywords.length == negativeKeywordCount);
+
+    bool[positiveKeywordCount] positiveMatched;
+    bool[negativeKeywordCount] negativeMatched;
+    markKeywordWords(classValue, positiveKeywords, positiveMatched);
+    markKeywordWords(idValue, positiveKeywords, positiveMatched);
+    markKeywordWords(classValue, negativeKeywords, negativeMatched);
+    markKeywordWords(idValue, negativeKeywords, negativeMatched);
+
+    double total = 0.0;
+    foreach (keywordIndex, kw; positiveKeywords) {
+        if (!positiveMatched[keywordIndex] &&
+                (containsKeywordPrefixOfLongerWord(classValue, kw) ||
+                 containsKeywordPrefixOfLongerWord(idValue, kw)))
+            positiveMatched[keywordIndex] = true;
+        if (positiveMatched[keywordIndex]) total += keywordWeightUnit;
+    }
+    foreach (keywordIndex; 0 .. negativeKeywordCount)
+        if (negativeMatched[keywordIndex]) total -= keywordWeightUnit;
     return total;
 }
 
@@ -2395,6 +2418,17 @@ unittest {
     auto articleBodyNode = elementWithClass("article-body");
     assert(keywordScoreFor(contentNode) > 0.0);
     assert(keywordScoreFor(articleBodyNode) > 0.0);
+
+    // The optimized boundary scan preserves the original per-distinct-keyword
+    // score: repeated occurrences and a duplicate class/id signal count once,
+    // while two different matching keywords still contribute twice.
+    auto repeated = elementWithClass("main-content main-content");
+    assert(keywordScoreFor(repeated) == 2 * keywordWeightUnit);
+    auto duplicatedAcrossAttributes = HtmlNode(HtmlNodeKind.element, size_t.max,
+        "div", null, [HtmlAttribute("class", "content"), HtmlAttribute("id", "content")]);
+    assert(keywordScoreFor(duplicatedAcrossAttributes) == keywordWeightUnit);
+    auto twoNegative = elementWithClass("ad-banner registration-banner");
+    assert(keywordScoreFor(twoNegative) == -2 * keywordWeightUnit);
 }
 
 // Issue #549: #538's word-boundary fix above also (necessarily) drops

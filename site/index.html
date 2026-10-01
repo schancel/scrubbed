@@ -23,7 +23,7 @@
         nav.jump li { margin-bottom: 0; }
         nav.jump a { display: block; padding: 0.35rem 0.65rem; border: 1px solid #444; color: #1a1a1a; text-decoration: none; font-family: monospace; font-size: 0.78rem; }
         nav.jump a:hover { border-color: #000; background: #f5f5f5; }
-        h2 { font-size: 0.72rem; letter-spacing: 2px; text-transform: uppercase; color: #666; margin: 2.75rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; font-family: monospace; }
+        h2 { font-size: 0.8rem; letter-spacing: 1.5px; text-transform: uppercase; color: #666; margin: 2.75rem 0 1rem; padding-bottom: 0.4rem; border-bottom: 1px solid #eee; font-family: monospace; }
         ul { padding-left: 1.25rem; }
         li { margin-bottom: 0.6rem; }
         p { margin-bottom: 1rem; }
@@ -71,19 +71,12 @@
         <p class="tagline">One native binary for turning raw web pages into clean training and evaluation data.</p>
         <nav class="jump" aria-label="Jump to section">
             <ul>
-                <li><a href="#why">The Why</a></li>
-                <li><a href="#problem">The problem</a></li>
-                <li><a href="#fit">Where this fits</a></li>
-                <li><a href="#see-it-work">See it work</a></li>
-                <li><a href="#pipeline">The pipeline</a></li>
-                <li><a href="#verified">Verified against</a></li>
-                <li><a href="#also-shipped">Also shipped</a></li>
-                <li><a href="#examples">Examples</a></li>
-                <li><a href="#status">Status</a></li>
-                <li><a href="#feedback">Feedback</a></li>
+                <li><a href="#why">Why</a></li>
+                <li><a href="#see-it-work">Demo</a></li>
+                <li><a href="#verified">Benchmarks</a></li>
                 <li><a href="#install">Install</a></li>
                 <li><a href="#usage">Usage</a></li>
-                <li><a href="#support">Support</a></li>
+                <li><a href="#status">Status</a></li>
             </ul>
         </nav>
         <div class="links header-links">
@@ -92,11 +85,8 @@
         </div>
     </header>
 
-    <h2 id="why">The Why</h2>
-    <p>Encoding damage, boilerplate, PII, and duplicate pages quietly degrade training data. scrubbed cleans that noise and flags near-duplicates before they reach a model.</p>
-
-    <h2 id="problem">The problem</h2>
-    <p>Corpus cleaning often means chaining several tools and repeatedly reading and writing the same documents. scrubbed combines encoding repair, main-content extraction, and PII scanning in one pipeline, with language ID and near-duplicate decisions available as additional stages.</p>
+    <h2 id="why">Why</h2>
+    <p>Encoding damage, boilerplate, personal information (PII), and duplicate pages quietly degrade training data. Cleaning them often means chaining several tools and repeatedly reading and writing the same documents. scrubbed combines encoding repair, main-content extraction, and PII scanning in one pipeline, with language ID and near-duplicate decisions available as additional stages.</p>
 
     <h2 id="fit">Where this fits in a training pipeline</h2>
     <p>scrubbed collects pages, cleans files to text, and transforms selected fields in existing JSONL streams.</p>
@@ -157,14 +147,14 @@ The survey team spent three weeks mapping the river delta's shifting sandbars, r
 scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Repairs encoding damage, extracts the article, captures metadata, scans for common PII, and writes an audit sidecar.</p>
 
-    <h2 id="verified">Verified against the tools it replaces</h2>
+    <h2 id="verified">Benchmarks and comparison checks</h2>
     <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">matched pipeline and extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
     <h3 class="comparison-heading">Overall matched pipeline</h3>
     <div class="stats">
         <div class="stat-card">
-            <span class="big">~37x</span>
-            <span class="label">scrubbed vs. warm ftfy → Trafilatura → langdetect → Presidio</span>
-            <p>CPU time over 400 files, with mojibake repair, extraction, language ID, and four-class PII on both sides. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">Methodology</a>.</p>
+            <span class="big">~37&times;</span>
+            <span class="label">Matched CPU time vs. warm ftfy → Trafilatura → langdetect → Presidio</span>
+            <p>On an Apple M4, scrubbed used 1.65 CPU-seconds and the warm Python pipeline used 61.12 over 400 files. This is a workload-specific benchmark, not a universal speed claim. <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark#steady-state-throughput-warm-process-corpus-scale" target="_blank" rel="noopener">Methodology</a>.</p>
         </div>
     </div>
 
@@ -192,13 +182,13 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         </div>
     </div>
 
-    <h2 id="also-shipped">Also shipped</h2>
+    <h2 id="also-shipped">Other capabilities</h2>
     <ul>
         <li>Main-content or full-page Markdown export, preserving headings, lists, links, and emphasis.</li>
         <li>PII report, mask, and redact modes for email, phone, card, and IPv4 data.</li>
-        <li>Exact-byte deduplication through the document-shard overlay API.</li>
+        <li>Exact-byte deduplication for document shards.</li>
         <li>Deterministic, model-free language identification.</li>
-        <li>Quality signals for repetitive or degenerate text.</li>
+        <li>Quality signals for repetitive or malformed text.</li>
         <li>HTML entity decoding, text normalization, and selective JSONL streaming.</li>
         <li>Parallel file processing, atomic output, and resumable runs.</li>
         <li>A local, multithreaded, resumable crawler.</li>
@@ -209,11 +199,8 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p class="note">No S3, Parquet, native-Windows, or distributed-execution examples are advertised because those are not shipped CLI capabilities.</p>
 
     <h2 id="status">Status</h2>
-    <p>Ready for local, single-machine corpus runs. Multi-machine runs under orchestrators such as DataTrove, Ray, Spark, Slurm, or Kubernetes have not yet been tested because the project does not have access to a representative cluster. Multi-terabyte operation is therefore not yet a proven claim.</p>
+    <p>Ready for local, single-machine corpus runs. Multi-machine runs under DataTrove, Ray, Spark, Slurm, or Kubernetes have not yet been tested on a representative cluster. Multi-terabyte operation is therefore not yet a proven claim.</p>
     <p><strong>Have real distributed infrastructure?</strong> We actively want operators to test scrubbed at scale. <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with your orchestrator, corpus size, hardware, throughput, and any failures.</p>
-
-    <h2 id="feedback">Feedback wanted</h2>
-    <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
     <h2 id="install">Install</h2>
     <noscript>
@@ -227,7 +214,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
           <button type="button" data-platform="macos" aria-pressed="true">macOS</button>
           <button type="button" data-platform="linux" aria-pressed="false">Linux</button>
       </div>
-      <pre id="install-command">brew install schancel/scrubbed/scrubbed</pre>
+      <pre id="install-command" aria-live="polite" aria-label="Installation command">brew install schancel/scrubbed/scrubbed</pre>
       <p id="install-note" class="note" aria-live="polite">Homebrew automatically adds the tap. Supports Apple Silicon with macOS 15 (Sequoia) or later.</p>
       <p id="release-status" class="note">Need an archive or want to build from source? See <a href="https://github.com/schancel/scrubbed/releases/tag/v1.0.0">the release downloads</a> and <a href="https://github.com/schancel/scrubbed#quick-start">quick start</a>.</p>
     </div>

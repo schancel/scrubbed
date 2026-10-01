@@ -38,6 +38,8 @@
         .stat-card .big { font-family: monospace; font-size: 1.7rem; font-weight: bold; display: block; }
         .stat-card .label { font-size: 0.8rem; color: #666; display: block; margin-top: 0.15rem; }
         .stat-card p { font-size: 0.85rem; color: #666; margin-top: 0.5rem; }
+        .comparison-heading { margin: 1.5rem 0 0.6rem; font-family: monospace; font-size: 0.9rem; }
+        .stage-comparisons .stat-card { flex-basis: 260px; }
         .pipeline-steps { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.4rem; margin: 1rem 0; }
         .pipeline-steps .step { flex: 1 1 130px; border: 1px solid #ddd; padding: 0.75rem 0.6rem; text-align: center; font-size: 0.85rem; }
         .pipeline-steps .step.here { border-color: #1a1a1a; border-width: 2px; background: #f7f7f7; font-weight: bold; }
@@ -48,6 +50,11 @@
         .demo-pair .demo-label { font-family: monospace; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 1px; color: #666; margin-bottom: 0.35rem; display: block; }
         .demo-pair pre { margin: 0; font-size: 0.78rem; white-space: pre-wrap; word-break: break-word; }
         .demo-pair .after pre { background: #0e2a17; }
+        .install-tabs { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; }
+        .install-tabs button { border: 1px solid #444; background: #fff; color: #1a1a1a; padding: 0.4rem 0.8rem; font: 0.8rem monospace; cursor: pointer; }
+        .install-tabs button:hover { background: #f5f5f5; }
+        .install-tabs button[aria-pressed="true"] { background: #1a1a1a; color: #fff; }
+        .install-tabs button:focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
         .usage-group { margin: 1.5rem 0; }
         .usage-group h3 { margin-bottom: 0.45rem; font-family: monospace; font-size: 0.8rem; }
     </style>
@@ -73,6 +80,7 @@
                 <li><a href="#examples">Examples</a></li>
                 <li><a href="#status">Status</a></li>
                 <li><a href="#feedback">Feedback</a></li>
+                <li><a href="#install">Install</a></li>
                 <li><a href="#usage">Usage</a></li>
                 <li><a href="#support">Support</a></li>
             </ul>
@@ -146,7 +154,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
 
     <h2 id="verified">Verified against the tools it replaces</h2>
     <p class="note">Methods: <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/ftfy_corpus.d" target="_blank" rel="noopener">ftfy correctness</a>, <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/external_comparator.d" target="_blank" rel="noopener">language and PII</a>, <a href="https://github.com/schancel/scrubbed/tree/main/examples/pipeline-benchmark" target="_blank" rel="noopener">matched pipeline and extraction</a>, and <a href="https://github.com/schancel/scrubbed/blob/main/benchmarks/mojibake_scale.d" target="_blank" rel="noopener">mojibake speed</a>.</p>
-    <h3>Overall matched pipeline</h3>
+    <h3 class="comparison-heading">Overall matched pipeline</h3>
     <div class="stats">
         <div class="stat-card">
             <span class="big">~37x</span>
@@ -155,8 +163,8 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         </div>
     </div>
 
-    <h3>Individual stages</h3>
-    <div class="stats">
+    <h3 class="comparison-heading">Individual stages</h3>
+    <div class="stats stage-comparisons">
         <div class="stat-card">
             <span class="big">39/39 + 48/48</span>
             <span class="label">fix-mojibake vs. ftfy</span>
@@ -196,13 +204,25 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p class="note">No S3, Parquet, native-Windows, or distributed-execution examples are advertised because those are not shipped CLI capabilities.</p>
 
     <h2 id="status">Status</h2>
-    <p>Ready for local, single-machine corpus runs. Multi-machine execution and proven multi-terabyte operation are not yet supported.</p>
+    <p>Ready for local, single-machine corpus runs. Multi-machine runs under orchestrators such as DataTrove, Ray, Spark, Slurm, or Kubernetes have not yet been tested because the project does not have access to a representative cluster. Multi-terabyte operation is therefore not yet a proven claim.</p>
+    <p><strong>Have real distributed infrastructure?</strong> We actively want operators to test scrubbed at scale. <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with your orchestrator, corpus size, hardware, throughput, and any failures.</p>
 
     <h2 id="feedback">Feedback wanted</h2>
     <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
+    <h2 id="install">Install</h2>
+    <p>Choose a platform. The installer detects the exact architecture, verifies the release checksum, and installs the binary plus shell completions.</p>
+    <div class="install-tabs" role="group" aria-label="Choose installation platform">
+        <button type="button" data-install="macos" aria-pressed="true">macOS</button>
+        <button type="button" data-install="linux" aria-pressed="false">Linux</button>
+        <button type="button" data-install="source" aria-pressed="false">Build from source</button>
+    </div>
+    <pre id="install-command">curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh</pre>
+    <p id="install-note" class="note" aria-live="polite">macOS on Apple Silicon. The installer selects the macos-arm64 release automatically.</p>
+    <p class="note"><strong>Before v1.0.0:</strong> release downloads are not live yet. Use “Build from source.” The installer itself has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
+
     <h2 id="usage">Usage</h2>
-    <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. Until the first tagged release, build from source with <a href="https://dlang.org/download.html" target="_blank" rel="noopener">DUB</a> and <a href="https://github.com/ldc-developers/ldc" target="_blank" rel="noopener">LDC</a>. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
+    <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
 
     <div class="usage-group">
         <h3>Build</h3>
@@ -244,7 +264,6 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <a href="https://github.com/sponsors/schancel" target="_blank" rel="noopener">GitHub Sponsors</a>
         <a href="https://paypal.me/intentionallyblank" target="_blank" rel="noopener">PayPal</a>
         <a href="https://www.patreon.com/givelotus" target="_blank" rel="noopener">Patreon</a>
-        <a href="https://shablag.substack.com" target="_blank" rel="noopener">Newsletter (free)</a>
     </div>
     <p class="note">Support is optional; the project remains fully open.</p>
 
@@ -252,5 +271,47 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <p><a href="https://github.com/schancel/scrubbed/blob/main/LICENSE" target="_blank" rel="noopener">MIT licensed</a> &middot; <a href="https://github.com/schancel/scrubbed" target="_blank" rel="noopener">Source</a> &middot; <a href="https://github.com/schancel/scrubbed/tree/main/benchmarks" target="_blank" rel="noopener">Verify the numbers yourself</a> &middot; <a href="https://github.com/schancel/scrubbed/issues" target="_blank" rel="noopener">Open issues</a> &middot; <a href="https://schancel.github.io" target="_blank" rel="noopener">#!blag</a></p>
     </footer>
 </main>
+<script>
+    (() => {
+        const choices = {
+            macos: {
+                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh",
+                note: "macOS on Apple Silicon. The installer selects the macos-arm64 release automatically."
+            },
+            linux: {
+                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh",
+                note: "Linux on x86_64 or aarch64. The installer selects the matching release automatically."
+            },
+            source: {
+                command: "git clone https://github.com/schancel/scrubbed.git\ncd scrubbed\ndub build --build=release --compiler=ldc2",
+                note: "Requires DUB and LDC. Native Windows is not supported; use a supported macOS or Linux environment."
+            }
+        };
+        const buttons = [...document.querySelectorAll("[data-install]")];
+        const command = document.getElementById("install-command");
+        const note = document.getElementById("install-note");
+
+        function selectInstall(key) {
+            const choice = choices[key];
+            if (!choice) return;
+            command.textContent = choice.command;
+            note.textContent = choice.note;
+            for (const button of buttons) {
+                button.setAttribute("aria-pressed", String(button.dataset.install === key));
+            }
+        }
+
+        for (const button of buttons) {
+            button.addEventListener("click", () => selectInstall(button.dataset.install));
+        }
+
+        const platform = String(
+            (navigator.userAgentData && navigator.userAgentData.platform) ||
+            navigator.platform || navigator.userAgent || ""
+        ).toLowerCase();
+        if (platform.includes("linux")) selectInstall("linux");
+        else if (!platform.includes("mac")) selectInstall("source");
+    })();
+</script>
 </body>
 </html>

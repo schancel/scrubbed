@@ -216,28 +216,39 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
     <h2 id="install">Install</h2>
-    <p id="install-summary">Choose a platform and installation method. The installer verifies the release checksum and includes shell completions.</p>
-    <p class="install-label">Platform</p>
-    <div class="install-tabs" role="group" aria-label="Choose installation platform">
-        <button type="button" data-platform="macos" aria-pressed="true">macOS</button>
-        <button type="button" data-platform="linux" aria-pressed="false">Linux</button>
+    <noscript>
+        <p>JavaScript is only used to switch installation commands. See the <a href="https://github.com/schancel/scrubbed#installing-a-prebuilt-binary">installation guide</a> or download a verified package from the <a href="https://github.com/schancel/scrubbed/releases/tag/v1.0.0">v1.0.0 release</a>.</p>
+        <style>.install-picker { display: none; }</style>
+    </noscript>
+    <div class="install-picker">
+      <p id="install-summary">Choose a platform and installation method. The installer verifies the release checksum and includes shell completions.</p>
+      <p class="install-label">Platform</p>
+      <div class="install-tabs" role="group" aria-label="Choose installation platform">
+          <button type="button" data-platform="macos" aria-pressed="true">macOS</button>
+          <button type="button" data-platform="linux" aria-pressed="false">Linux</button>
+      </div>
+      <p class="install-label">Method</p>
+      <div class="install-tabs" role="group" aria-label="Choose installation method">
+          <button type="button" data-method="installer" aria-pressed="true">Installer</button>
+          <button type="button" data-method="package" aria-pressed="false">Package manager</button>
+          <button type="button" data-method="archive" aria-pressed="false">Direct archive</button>
+          <button type="button" data-method="source" aria-pressed="false">Build from source</button>
+      </div>
+      <pre id="install-command">set -eu
+macos_major="$(sw_vers -productVersion | cut -d. -f1)"
+if [ "$macos_major" -lt 15 ]; then
+    echo "scrubbed requires macOS 15 (Sequoia) or later" &gt;&amp;2; exit 1
+fi
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT HUP INT TERM
+curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer"
+SCRUBBED_VERSION=1.0.0 sh "$installer"</pre>
+      <p id="install-note" class="note" aria-live="polite">macOS 15 (Sequoia) or later on Apple Silicon. The installer selects the macos-arm64 release automatically.</p>
+      <p id="release-status" class="note">Release downloads are live. The installer has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
     </div>
-    <p class="install-label">Method</p>
-    <div class="install-tabs" role="group" aria-label="Choose installation method">
-        <button type="button" data-method="installer" aria-pressed="true">Installer</button>
-        <button type="button" data-method="package" aria-pressed="false">Package manager</button>
-        <button type="button" data-method="archive" aria-pressed="false">Direct archive</button>
-        <button type="button" data-method="source" aria-pressed="false">Build from source</button>
-    </div>
-    <pre id="install-command">installer="$(mktemp)" &amp;&amp;
-curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer" &amp;&amp;
-SCRUBBED_VERSION=1.0.0 sh "$installer" &amp;&amp;
-rm -f "$installer"</pre>
-    <p id="install-note" class="note" aria-live="polite">macOS on Apple Silicon. The installer selects the macos-arm64 release automatically.</p>
-    <p id="release-status" class="note">Release downloads are live. The installer has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
 
     <h2 id="usage">Usage</h2>
-    <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
+    <p class="note"><strong>Supported:</strong> macOS 15+ on Apple Silicon and Linux with glibc 2.36+ on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
 
     <div class="usage-group">
         <h3>Build</h3>
@@ -291,37 +302,37 @@ rm -f "$installer"</pre>
         const choices = {
             macos: {
               installer: {
-                command: "installer=\"$(mktemp)\" &&\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\" &&\nSCRUBBED_VERSION=1.0.0 sh \"$installer\" &&\nrm -f \"$installer\"",
-                note: "macOS on Apple Silicon. The installer selects the macos-arm64 release automatically."
+                command: "set -eu\nmacos_major=\"$(sw_vers -productVersion | cut -d. -f1)\"\nif [ \"$macos_major\" -lt 15 ]; then\n    echo \"scrubbed requires macOS 15 (Sequoia) or later\" >&2; exit 1\nfi\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\"\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
+                note: "macOS 15 (Sequoia) or later on Apple Silicon. The installer selects the macos-arm64 release automatically."
               },
               package: {
                 command: "brew install schancel/scrubbed/scrubbed",
                 note: "Homebrew on Apple Silicon with macOS 15 (Sequoia) or later. The formula verifies the v1.0.0 release archive and installs shell completions."
               },
               archive: {
-                command: "workdir=\"$(mktemp -d)\" &&\nversion=1.0.0 &&\narchive=\"scrubbed-$version-macos-arm64.tar.gz\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\" &&\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | shasum -a 256 -c -) &&\ntar -xzf \"$workdir/$archive\" -C \"$workdir\" &&\nmkdir -p \"$HOME/.local/bin\" &&\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
-                note: "Downloads and verifies the macOS Apple Silicon archive, then installs the binary to ~/.local/bin. The archive also contains completions, licenses, and notices."
+                command: "set -eu\nmacos_major=\"$(sw_vers -productVersion | cut -d. -f1)\"\nif [ \"$macos_major\" -lt 15 ]; then\n    echo \"scrubbed requires macOS 15 (Sequoia) or later\" >&2; exit 1\nfi\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-macos-arm64.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | shasum -a 256 -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                note: "Downloads and verifies the macOS 15+ Apple Silicon archive, then installs the binary to ~/.local/bin. The archive also contains completions, licenses, and notices."
               },
               source: {
-                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\ndub build --build=release --compiler=ldc2",
+                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\nprintf '1.0.0\\n' > VERSION &&\ndub build --build=release --compiler=ldc2 &&\ntest \"$(./scrubbed --version)\" = \"scrubbed 1.0.0\"",
                 note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
               }
             },
             linux: {
               installer: {
-                command: "installer=\"$(mktemp)\" &&\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\" &&\nSCRUBBED_VERSION=1.0.0 sh \"$installer\" &&\nrm -f \"$installer\"",
-                note: "Linux on x86_64 or aarch64. The installer selects the matching release automatically."
+                command: "set -eu\nglibc=\"$(getconf GNU_LIBC_VERSION 2>/dev/null || true)\"\ncase \"$glibc\" in\n  \"glibc 2.\"*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ \"$minor\" -ge 36 ] || { echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1; } ;;\n  \"glibc \"[3-9]*) ;;\n  *) echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1 ;;\nesac\ninstaller=\"$(mktemp)\"\ntrap 'rm -f \"$installer\"' EXIT HUP INT TERM\ncurl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o \"$installer\"\nSCRUBBED_VERSION=1.0.0 sh \"$installer\"",
+                note: "Linux with glibc 2.36+ on x86_64 or aarch64. The installer checks compatibility before selecting the matching release."
               },
               package: {
-                command: "sudo apt-get update &&\nsudo apt-get install -y curl ca-certificates &&\narch=\"$(dpkg --print-architecture)\" &&\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac &&\nworkdir=\"$(mktemp -d)\" &&\npackage=\"scrubbed_1.0.0-1_$arch.deb\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\" &&\n(cd \"$workdir\" && grep \" $package$\" SHA256SUMS | sha256sum -c -) &&\nsudo apt-get install -y \"$workdir/$package\"",
+                command: "set -eu\nsudo apt-get update\nsudo apt-get install -y curl ca-certificates\narch=\"$(dpkg --print-architecture)\"\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\npackage=\"scrubbed_1.0.0-1_$arch.deb\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\n(cd \"$workdir\" && grep \" $package$\" SHA256SUMS | sha256sum -c -)\nsudo apt-get install -y \"$workdir/$package\"",
                 note: "Debian 12+ or Ubuntu 24.04+ on amd64/arm64. Verifies the published package checksum, then lets apt resolve runtime dependencies."
               },
               archive: {
-                command: "case \"$(uname -m)\" in\n  x86_64) target=linux-x86_64 ;;\n  aarch64|arm64) target=linux-aarch64 ;;\n  *) echo \"Unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\nesac &&\nworkdir=\"$(mktemp -d)\" &&\nversion=1.0.0 &&\narchive=\"scrubbed-$version-$target.tar.gz\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\" &&\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\" &&\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | sha256sum -c -) &&\ntar -xzf \"$workdir/$archive\" -C \"$workdir\" &&\nmkdir -p \"$HOME/.local/bin\" &&\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
-                note: "Detects x86_64 or aarch64, verifies the archive, then installs the binary to ~/.local/bin. The archive also contains completions, licenses, and notices."
+                command: "set -eu\nglibc=\"$(getconf GNU_LIBC_VERSION 2>/dev/null || true)\"\ncase \"$glibc\" in\n  \"glibc 2.\"*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ \"$minor\" -ge 36 ] || { echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1; } ;;\n  \"glibc \"[3-9]*) ;;\n  *) echo \"scrubbed requires glibc 2.36 or later\" >&2; exit 1 ;;\nesac\ncase \"$(uname -m)\" in\n  x86_64) target=linux-x86_64 ;;\n  aarch64|arm64) target=linux-aarch64 ;;\n  *) echo \"Unsupported architecture: $(uname -m)\" >&2; exit 1 ;;\nesac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\nversion=1.0.0\narchive=\"scrubbed-$version-$target.tar.gz\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/$archive\" -o \"$workdir/$archive\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v$version/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\n(cd \"$workdir\" && grep \" $archive$\" SHA256SUMS | sha256sum -c -)\ntar -xzf \"$workdir/$archive\" -C \"$workdir\"\n\"$workdir/scrubbed\" --version >/dev/null\nmkdir -p \"$HOME/.local/bin\"\ninstall -m 0755 \"$workdir/scrubbed\" \"$HOME/.local/bin/scrubbed\"",
+                note: "Detects x86_64 or aarch64, requires glibc 2.36+, verifies and runs the archive, then installs it to ~/.local/bin. The archive also contains completions, licenses, and notices."
               },
               source: {
-                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\ndub build --build=release --compiler=ldc2",
+                command: "git clone --branch v1.0.0 --depth 1 https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\nprintf '1.0.0\\n' > VERSION &&\ndub build --build=release --compiler=ldc2 &&\ntest \"$(./scrubbed --version)\" = \"scrubbed 1.0.0\"",
                 note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
               }
             }
@@ -334,6 +345,7 @@ rm -f "$installer"</pre>
         let selectedMethod = "installer";
 
         function selectInstall() {
+            if (!choices[selectedPlatform]) return;
             const choice = choices[selectedPlatform][selectedMethod];
             if (!choice) return;
             command.textContent = choice.command;
@@ -349,6 +361,8 @@ rm -f "$installer"</pre>
         for (const button of platformButtons) {
             button.addEventListener("click", () => {
                 selectedPlatform = button.dataset.platform;
+                if (!selectedMethod) selectedMethod = "installer";
+                for (const methodButton of methodButtons) methodButton.disabled = false;
                 selectInstall();
             });
         }
@@ -366,9 +380,23 @@ rm -f "$installer"</pre>
         const userAgent = String(navigator.userAgent || "").toLowerCase();
         const mobile = /android|iphone|ipad|ipod/.test(userAgent) ||
             (platform.includes("mac") && Number(navigator.maxTouchPoints || 0) > 1);
-        if (platform.includes("linux") && !mobile) selectedPlatform = "linux";
-        if (mobile || (!platform.includes("mac") && !platform.includes("linux"))) selectedMethod = "source";
-        selectInstall();
+        const supportedDesktop = !mobile && (platform.includes("mac") || platform.includes("linux"));
+        if (supportedDesktop) {
+            if (platform.includes("linux")) selectedPlatform = "linux";
+            selectInstall();
+        } else {
+            selectedPlatform = "";
+            selectedMethod = "";
+            for (const button of platformButtons) button.setAttribute("aria-pressed", "false");
+            for (const button of methodButtons) {
+                button.setAttribute("aria-pressed", "false");
+                button.disabled = true;
+            }
+            command.textContent = "No native build is available for this device. Choose macOS or Linux to copy a command for a supported machine.";
+            note.textContent = platform.includes("win")
+                ? "There is no native Windows build. Use WSL2, then choose Linux; WSL2 has not yet been verified on a Windows host."
+                : "Install on a supported macOS 15+ Apple Silicon or Linux x86_64/aarch64 machine.";
+        }
     })();
 </script>
 </body>

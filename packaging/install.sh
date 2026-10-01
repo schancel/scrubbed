@@ -1,10 +1,22 @@
 #!/bin/sh
 # scrubbed installer (issue #502, slice of #61).
 #
-#   installer="$(mktemp)" &&
-#   curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer" &&
-#   SCRUBBED_VERSION=1.0.0 sh "$installer" &&
-#   rm -f "$installer"
+#   set -eu
+#   installer="$(mktemp)"
+#   trap 'rm -f "$installer"' EXIT HUP INT TERM
+#   curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer"
+#   if [ "$(uname -s)" = Darwin ] && [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 15 ]; then
+#       echo "scrubbed requires macOS 15 (Sequoia) or later" >&2; exit 1
+#   fi
+#   if [ "$(uname -s)" = Linux ]; then
+#       glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+#       case "$glibc" in
+#           "glibc 2."*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ "$minor" -ge 36 ] || { echo "scrubbed requires glibc 2.36 or later" >&2; exit 1; } ;;
+#           "glibc "[3-9]*) ;;
+#           *) echo "scrubbed requires glibc 2.36 or later" >&2; exit 1 ;;
+#       esac
+#   fi
+#   SCRUBBED_VERSION=1.0.0 sh "$installer"
 #
 # Detects platform/arch, downloads the matching release tarball built by
 # .github/workflows/release.yml (issue #499), verifies its SHA-256 against
@@ -99,11 +111,38 @@ arch_name=$(uname -m)
 case "$os_name" in
     Darwin)
         case "$arch_name" in
-            arm64) target="macos-arm64" ;;
+            arm64)
+                need_cmd sw_vers
+                macos_version=$(sw_vers -productVersion)
+                macos_major=${macos_version%%.*}
+                case "$macos_major" in
+                    ''|*[!0-9]*) die "could not determine the macOS version: $macos_version" ;;
+                esac
+                if [ "$macos_major" -lt 15 ]; then
+                    die "macOS 15 (Sequoia) or later is required; found macOS $macos_version"
+                fi
+                target="macos-arm64"
+                ;;
             *) die "unsupported platform: macOS $arch_name (only macOS arm64 / Apple Silicon is supported; see issue #353)" ;;
         esac
         ;;
     Linux)
+        need_cmd getconf
+        glibc_report=$(getconf GNU_LIBC_VERSION 2>/dev/null || true)
+        case "$glibc_report" in
+            "glibc 2."*)
+                glibc_minor=${glibc_report#glibc 2.}
+                glibc_minor=${glibc_minor%%.*}
+                case "$glibc_minor" in
+                    ''|*[!0-9]*) die "could not determine the glibc version: $glibc_report" ;;
+                esac
+                if [ "$glibc_minor" -lt 36 ]; then
+                    die "glibc 2.36 or later is required; found $glibc_report"
+                fi
+                ;;
+            "glibc "[3-9]*) ;;
+            *) die "glibc 2.36 or later is required; found ${glibc_report:-an unknown C library}" ;;
+        esac
         case "$arch_name" in
             x86_64) target="linux-x86_64" ;;
             aarch64) target="linux-aarch64" ;;
@@ -192,6 +231,15 @@ mkdir -p "$extract_dir"
 tar -C "$extract_dir" -xzf "$archive_file"
 
 [ -f "$extract_dir/scrubbed" ] || die "extracted archive is missing the scrubbed binary (unexpected archive layout)"
+
+# Run the verified artifact before touching an existing installation. This
+# catches runtime-library or OS incompatibilities without overwriting a
+# previously working binary.
+packaged_version=$("$extract_dir/scrubbed" --version 2>/dev/null || true)
+if [ -z "$packaged_version" ]; then
+    die "downloaded binary did not run successfully on this host -- existing installation was not changed"
+fi
+info "verified runtime: $packaged_version"
 
 # --- 5. Choose install prefix ------------------------------------------------
 

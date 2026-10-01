@@ -77,13 +77,26 @@ x86_64/aarch64) plus a `SHA256SUMS` manifest automatically on every `v*`
 tag. To install the current release:
 
 ```sh
-installer="$(mktemp)" &&
-curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer" &&
-SCRUBBED_VERSION=1.0.0 sh "$installer" &&
-rm -f "$installer"
+set -eu
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT HUP INT TERM
+curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh -o "$installer"
+if [ "$(uname -s)" = Darwin ] && [ "$(sw_vers -productVersion | cut -d. -f1)" -lt 15 ]; then
+    echo "scrubbed requires macOS 15 (Sequoia) or later" >&2; exit 1
+fi
+if [ "$(uname -s)" = Linux ]; then
+    glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
+    case "$glibc" in
+        "glibc 2."*) minor=${glibc#glibc 2.}; minor=${minor%%.*}; [ "$minor" -ge 36 ] || { echo "scrubbed requires glibc 2.36 or later" >&2; exit 1; } ;;
+        "glibc "[3-9]*) ;;
+        *) echo "scrubbed requires glibc 2.36 or later" >&2; exit 1 ;;
+    esac
+fi
+SCRUBBED_VERSION=1.0.0 sh "$installer"
 ```
 
-This detects your platform (macOS arm64, Linux x86_64/aarch64), downloads
+This detects your platform (macOS 15+ arm64, Linux x86_64/aarch64 with
+glibc 2.36+), downloads
 the matching release tarball, verifies its SHA-256 against the release's
 published `SHA256SUMS`, and installs the binary plus bash/zsh/fish
 completions to `/usr/local` (falling back to `$HOME/.local` if that isn't

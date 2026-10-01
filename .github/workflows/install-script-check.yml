@@ -152,6 +152,12 @@ jobs:
           out=$(/tmp/install-latest/bin/scrubbed --version)
           echo "latest install --version: $out"
           [ -n "$out" ] || { echo "installed binary printed nothing for --version" >&2; exit 1; }
+          find /tmp/scrubbed-package/third_party -type f | sed 's#/tmp/scrubbed-package/##' | sort > /tmp/expected-notices
+          find /tmp/install-latest/share/licenses/scrubbed/third_party -type f | sed 's#/tmp/install-latest/share/licenses/scrubbed/##' | sort > /tmp/installed-notices
+          diff -u /tmp/expected-notices /tmp/installed-notices
+          while IFS= read -r notice; do
+              cmp "/tmp/scrubbed-package/$notice" "/tmp/install-latest/share/licenses/scrubbed/$notice"
+          done < /tmp/expected-notices
 
       - name: install.sh against a pinned SCRUBBED_VERSION
         run: |

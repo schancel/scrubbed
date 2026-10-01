@@ -7,7 +7,8 @@
 # Detects platform/arch, downloads the matching release tarball built by
 # .github/workflows/release.yml (issue #499), verifies its SHA-256 against
 # the release's published SHA256SUMS, and installs the binary + bash/zsh/
-# fish completions to a sensible location.
+# fish completions and the complete bundled license/notice closure to a
+# sensible location.
 #
 # POSIX sh only (no bashisms). Fails loudly (non-zero exit, message on
 # stderr) on any unsupported platform or checksum mismatch; never installs
@@ -277,14 +278,24 @@ verify_runtime() {
 }
 
 install_license_files() {
-    if [ -f "$extract_dir/LICENSE" ]; then
-        run mkdir -p "$share_dir/licenses/scrubbed"
-        run install -m 0644 "$extract_dir/LICENSE" "$share_dir/licenses/scrubbed/LICENSE"
-        if [ -f "$extract_dir/THIRD_PARTY_NOTICES.md" ]; then
-            run install -m 0644 "$extract_dir/THIRD_PARTY_NOTICES.md" \
-                "$share_dir/licenses/scrubbed/THIRD_PARTY_NOTICES.md"
-        fi
-    fi
+    license_dir="$share_dir/licenses/scrubbed"
+    [ -f "$extract_dir/LICENSE" ] || die "release archive is missing LICENSE"
+    [ -f "$extract_dir/THIRD_PARTY_NOTICES.md" ] || \
+        die "release archive is missing THIRD_PARTY_NOTICES.md"
+    [ -d "$extract_dir/third_party" ] || \
+        die "release archive is missing its third_party license/notice closure"
+
+    run mkdir -p "$license_dir"
+    run install -m 0644 "$extract_dir/LICENSE" "$license_dir/LICENSE"
+    run install -m 0644 "$extract_dir/THIRD_PARTY_NOTICES.md" \
+        "$license_dir/THIRD_PARTY_NOTICES.md"
+    # The release package checker derives this tree from the live
+    # THIRD_PARTY_NOTICES.md references and verifies it in both directions.
+    # Preserve that exact hierarchy so an installer-based installation has
+    # the same discoverable notices as the archive, Homebrew formula, and
+    # native packages.
+    run mkdir -p "$license_dir/third_party"
+    run cp -R "$extract_dir/third_party/." "$license_dir/third_party/"
 }
 
 info "installing to $prefix"

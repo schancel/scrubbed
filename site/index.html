@@ -176,9 +176,9 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             <p>Exact repair and clean-input agreement within scrubbed's Latin-1/Windows-1252 scope. A separate 5.9 MB fixture ran about 25x faster by whole-process wall time.</p>
         </div>
         <div class="stat-card">
-            <span class="big">0.894 / 0.761</span>
-            <span class="label">html-main-content vs. Trafilatura</span>
-            <p>Directional word-overlap precision / recall across the same 20 real pages; neither tool is treated as ground truth.</p>
+            <span class="big">89.4% / 76.1%</span>
+            <span class="label">Article-text overlap with Trafilatura</span>
+            <p>On average across 20 real pages, 89.4% of the words scrubbed kept also appeared in Trafilatura's output; scrubbed kept 76.1% of Trafilatura's words. This measures agreement, not accuracy&mdash;neither output is treated as the correct answer.</p>
         </div>
         <div class="stat-card">
             <span class="big">11/11</span>
@@ -323,7 +323,7 @@ SCRUBBED_VERSION=1.0.0 sh "$installer"</pre>
                 note: "Linux with glibc 2.36+ on x86_64 or aarch64. The installer verifies compatibility before selecting the matching release."
               },
               package: {
-                command: "set -eu\nsudo apt-get update\nsudo apt-get install -y curl ca-certificates\narch=\"$(dpkg --print-architecture)\"\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\npackage=\"scrubbed_1.0.0-1_$arch.deb\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$package\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $package\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | sha256sum -c -)\nsudo apt-get install -y \"$workdir/$package\"",
+                command: "set -eu\nif [ \"$(id -u)\" -eq 0 ]; then elevate=; elif command -v sudo >/dev/null 2>&1; then elevate=sudo; else echo \"Run as root or install sudo first\" >&2; exit 1; fi\n$elevate apt-get update\n$elevate apt-get install -y curl ca-certificates\narch=\"$(dpkg --print-architecture)\"\ncase \"$arch\" in amd64|arm64) ;; *) echo \"Unsupported architecture: $arch\" >&2; exit 1 ;; esac\nworkdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$workdir\"' EXIT HUP INT TERM\npackage=\"scrubbed_1.0.0-1_$arch.deb\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/$package\" -o \"$workdir/$package\"\ncurl -fsSL \"https://github.com/schancel/scrubbed/releases/download/v1.0.0/SHA256SUMS\" -o \"$workdir/SHA256SUMS\"\nchecksum=\"$(awk -v n=\"$package\" '$2 == n { print; exit }' \"$workdir/SHA256SUMS\")\"\n[ -n \"$checksum\" ] || { echo \"missing checksum for $package\" >&2; exit 1; }\n(cd \"$workdir\" && printf '%s\\n' \"$checksum\" | sha256sum -c -)\n$elevate apt-get install -y \"$workdir/$package\"",
                 note: "Debian 12+ or Ubuntu 24.04+ on amd64/arm64. Verifies the published package checksum, then lets apt resolve runtime dependencies."
               },
               archive: {

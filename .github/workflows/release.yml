@@ -4,7 +4,8 @@ name: release
 # tag pushes, builds macOS arm64, Linux x86_64, and Linux aarch64 release
 # binaries (Windows out of scope -- no POSIX port contract, matches
 # dub.json's own preBuildCommands platform gate), and publishes a GitHub
-# Release with .tar.gz archives, a SHA256SUMS manifest, the live
+# Release with .tar.gz archives, Debian packages, the installer, a
+# SHA256SUMS manifest, build metadata, signed provenance attestations, the live
 # third_party/** license/notice closure (experiments/package_core/check.d),
 # and bash/zsh/fish completions. The macOS leg also runs
 # experiments/metadata_route/cli_check.d against the built binary --
@@ -29,6 +30,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release-${{ github.ref_name }}
@@ -53,7 +56,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --draft "${prerelease_flag[@]}" \
             --title "$TAG" \
-            --notes "scrubbed $TAG -- macOS arm64, Linux x86_64, and Linux aarch64 release archives, SHA-256 checksums, bundled license notices, and bash/zsh/fish completions. Built by .github/workflows/release.yml."
+            --notes "scrubbed $TAG from source commit $GITHUB_SHA -- macOS arm64 and Linux x86_64/aarch64 archives, Debian packages, installer, SHA-256 checksums, bundled license notices, shell completions, and signed GitHub artifact attestations. Every asset is built and published by this tag-triggered workflow."
 
   build:
     name: build ${{ matrix.target }}
@@ -147,30 +150,132 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: gh release upload "$TAG" "$archive" --repo "${{ github.repository }}" --clobber
 
+  debian-packages:
+    name: build Debian package (${{ matrix.arch }})
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container: debian:12
+    timeout-minutes: 30
+    steps:
+      - name: Install checkout, build, and upload dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cmake curl gh git gzip \
+            libcurl4-openssl-dev xz-utils
+
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install pinned LDC
+        uses: dlang-community/setup-dlang@2979e3ea011f6a234cd3a47dcbeb60f451c9635f
+        with:
+          compiler: ldc-1.43.0
+
+      - name: Stamp release VERSION from tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          printf '%s\n' "$version" > VERSION
+          echo "version=$version" >> "$GITHUB_ENV"
+
+      - name: Build release binary and Debian package
+        run: |
+          dub build --compiler=ldc2 --build=release
+          packaging/debian/build.sh "$PWD" "$PWD/scrubbed" /tmp/debian-package
+          expected="/tmp/debian-package/scrubbed_${version}-1_${{ matrix.arch }}.deb"
+          test -f "$expected"
+          dpkg-deb --info "$expected"
+          dpkg-deb --contents "$expected"
+
+      - name: Upload Debian package to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" /tmp/debian-package/*.deb --repo "${{ github.repository }}" --clobber
+
+  installer:
+    name: publish versioned installer
+    needs: create-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Validate and stage installer
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          sh -n packaging/install.sh
+          cp packaging/install.sh "scrubbed-install-${version}.sh"
+          chmod 0755 "scrubbed-install-${version}.sh"
+          echo "installer=scrubbed-install-${version}.sh" >> "$GITHUB_ENV"
+
+      - name: Upload installer to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" "$installer" --repo "${{ github.repository }}" --clobber
+
   checksums:
-    name: publish SHA256SUMS
-    needs: build
+    name: publish checksums, build metadata, and attestations
+    needs: [build, debian-packages, installer]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - name: Download release archives and compute combined SHA256SUMS
+      - name: Download and verify the complete release asset set
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           mkdir -p /tmp/scrubbed-assets
-          gh release download "$TAG" --repo "${{ github.repository }}" \
-            --pattern 'scrubbed-*.tar.gz' --dir /tmp/scrubbed-assets
+          gh release download "$TAG" --repo "${{ github.repository }}" --dir /tmp/scrubbed-assets
           cd /tmp/scrubbed-assets
-          shopt -s nullglob
-          archives=(scrubbed-*.tar.gz)
-          if [[ ${#archives[@]} -eq 0 ]]; then
-            echo "no release archives found to checksum" >&2
+          version="${TAG#v}"
+          expected=(
+            "scrubbed-${version}-macos-arm64.tar.gz"
+            "scrubbed-${version}-linux-x86_64.tar.gz"
+            "scrubbed-${version}-linux-aarch64.tar.gz"
+            "scrubbed_${version}-1_amd64.deb"
+            "scrubbed_${version}-1_arm64.deb"
+            "scrubbed-install-${version}.sh"
+          )
+          for asset in "${expected[@]}"; do test -f "$asset"; done
+          actual_count=$(find . -maxdepth 1 -type f | wc -l)
+          [[ "$actual_count" -eq "${#expected[@]}" ]] || {
+            echo "expected ${#expected[@]} release assets before metadata, found $actual_count" >&2
+            find . -maxdepth 1 -type f -print >&2
             exit 1
-          fi
-          sha256sum "${archives[@]}" > SHA256SUMS
+          }
+          cat > BUILDINFO <<EOF
+          tag=$TAG
+          source_commit=$GITHUB_SHA
+          workflow=${{ github.workflow_ref }}
+          workflow_run=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          compiler=ldc-1.43.0
+          macos_runner=macos-15
+          linux_archive_runners=ubuntu-24.04,ubuntu-24.04-arm
+          debian_package_environment=debian:12
+          EOF
+          sha256sum "${expected[@]}" BUILDINFO > SHA256SUMS
           cat SHA256SUMS
-          gh release upload "$TAG" SHA256SUMS --repo "${{ github.repository }}" --clobber
+          gh release upload "$TAG" BUILDINFO SHA256SUMS --repo "${{ github.repository }}" --clobber
+
+      - name: Attest every published release file
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763
+        with:
+          subject-path: /tmp/scrubbed-assets/*
 
   publish:
     name: publish release

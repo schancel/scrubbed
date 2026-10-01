@@ -45,16 +45,15 @@ Maps `h1`–`h6`, `p`, `br`, `em`/`i`, `strong`/`b`, `ul`, `ol`, `li`,
 
 ## Tables
 
-Tables deliberately do **not** claim GFM table layout:
+With table rendering enabled (the default), rows use GFM-style pipe syntax.
+A first row containing `th` cells gets a delimiter row; later rows are padded
+to that header width. A table without a first-row header still uses pipe rows
+but does not invent a header or delimiter. Literal cell pipes are escaped.
 
-- Each `tr` becomes a plain `- ` row, with cells in source reading order
-  separated by ` | `; literal cell pipes are escaped.
-- Block whitespace inside a cell is flattened to spaces, keeping all cell
-  text on its row. Header and data cells use the same policy.
-- Rowspan/colspan are not interpreted. Parser-repaired malformed rows follow
-  the selected tree's order.
-
-This policy retains text without inventing a rectangular grid.
+Block whitespace inside a cell is flattened to spaces. Rowspan and colspan
+are not interpreted, and parser-repaired malformed rows retain tree order.
+With table rendering disabled, each row degrades to a plain `- ` line with
+cells separated by ` | `.
 
 ## Links and images
 
@@ -84,7 +83,8 @@ native static library is built by DUB, run:
 ```sh
 ldc2 -O -release -Isource -of=/tmp/html-markdown-check \
   experiments/html_markdown/check.d source/effects/html_markdown.d \
-  source/effects/html_tree.d source/effects/lexbor_ffi.d \
+  source/effects/html_tree.d source/effects/html_tree_walk.d \
+  source/effects/lexbor_ffi.d \
   source/text/decoding.d .dub/lexbor/liblexbor_static.a
 /tmp/html-markdown-check
 # If pandoc is installed, also prove the malicious inline-code golden

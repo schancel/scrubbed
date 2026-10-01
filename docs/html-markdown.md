@@ -46,9 +46,10 @@ Maps `h1`–`h6`, `p`, `br`, `em`/`i`, `strong`/`b`, `ul`, `ol`, `li`,
 ## Tables
 
 With table rendering enabled (the default), rows use GFM-style pipe syntax.
-A first row containing `th` cells gets a delimiter row; later rows are padded
-to that header width. A table without a first-row header still uses pipe rows
-but does not invent a header or delimiter. Literal cell pipes are escaped.
+A first row containing `th` cells gets a delimiter row. Every row, including
+the header, is padded to the widest row's column count, and the delimiter uses
+that width. A table without a first-row header still uses pipe rows but does
+not invent a header or delimiter. Literal cell pipes are escaped.
 
 Block whitespace inside a cell is flattened to spaces. Rowspan and colspan
 are not interpreted, and parser-repaired malformed rows retain tree order.

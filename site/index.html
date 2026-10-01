@@ -54,6 +54,7 @@
         .install-tabs button { border: 1px solid #444; background: #fff; color: #1a1a1a; padding: 0.4rem 0.8rem; font: 0.8rem monospace; cursor: pointer; }
         .install-tabs button:hover { background: #f5f5f5; }
         .install-tabs button[aria-pressed="true"] { background: #1a1a1a; color: #fff; }
+        .install-tabs button:disabled { cursor: not-allowed; opacity: 0.5; }
         .install-tabs button:focus-visible { outline: 2px solid #1a1a1a; outline-offset: 2px; }
         .usage-group { margin: 1.5rem 0; }
         .usage-group h3 { margin-bottom: 0.45rem; font-family: monospace; font-size: 0.8rem; }
@@ -211,15 +212,17 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
     <h2 id="install">Install</h2>
-    <p>Choose a platform. The installer detects the exact architecture, verifies the release checksum, and installs the binary plus shell completions.</p>
+    <p>Prebuilt installation will detect the exact architecture, verify the release checksum, and install the binary plus shell completions. Until v1.0.0 is published, build from source.</p>
     <div class="install-tabs" role="group" aria-label="Choose installation platform">
-        <button type="button" data-install="macos" aria-pressed="true">macOS</button>
-        <button type="button" data-install="linux" aria-pressed="false">Linux</button>
-        <button type="button" data-install="source" aria-pressed="false">Build from source</button>
+        <button type="button" data-install="macos" aria-pressed="false" disabled>macOS</button>
+        <button type="button" data-install="linux" aria-pressed="false" disabled>Linux</button>
+        <button type="button" data-install="source" aria-pressed="true">Build from source</button>
     </div>
-    <pre id="install-command">curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh</pre>
-    <p id="install-note" class="note" aria-live="polite">macOS on Apple Silicon. The installer selects the macos-arm64 release automatically.</p>
-    <p class="note"><strong>Before v1.0.0:</strong> release downloads are not live yet. Use “Build from source.” The installer itself has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
+    <pre id="install-command">git clone https://github.com/schancel/scrubbed.git
+cd scrubbed
+dub build --build=release --compiler=ldc2</pre>
+    <p id="install-note" class="note" aria-live="polite">macOS requires DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires DUB, LDC, build-essential, CMake, and libcurl development headers.</p>
+    <p class="note"><strong>Before v1.0.0:</strong> release downloads are not live yet, so the prebuilt options are disabled. The installer itself has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
 
     <h2 id="usage">Usage</h2>
     <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
@@ -284,12 +287,13 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             },
             source: {
                 command: "git clone https://github.com/schancel/scrubbed.git\ncd scrubbed\ndub build --build=release --compiler=ldc2",
-                note: "Requires DUB and LDC. Native Windows is not supported; use a supported macOS or Linux environment."
+                note: "macOS requires DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires DUB, LDC, build-essential, CMake, and libcurl development headers."
             }
         };
         const buttons = [...document.querySelectorAll("[data-install]")];
         const command = document.getElementById("install-command");
         const note = document.getElementById("install-note");
+        const releaseAvailable = false;
 
         function selectInstall(key) {
             const choice = choices[key];
@@ -305,12 +309,17 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
             button.addEventListener("click", () => selectInstall(button.dataset.install));
         }
 
-        const platform = String(
-            (navigator.userAgentData && navigator.userAgentData.platform) ||
-            navigator.platform || navigator.userAgent || ""
-        ).toLowerCase();
-        if (platform.includes("linux")) selectInstall("linux");
-        else if (!platform.includes("mac")) selectInstall("source");
+        if (releaseAvailable) {
+            const platform = String(
+                (navigator.userAgentData && navigator.userAgentData.platform) ||
+                navigator.platform || navigator.userAgent || ""
+            ).toLowerCase();
+            if (platform.includes("mac")) selectInstall("macos");
+            else if (platform.includes("linux")) selectInstall("linux");
+            else selectInstall("source");
+        } else {
+            selectInstall("source");
+        }
     })();
 </script>
 </body>

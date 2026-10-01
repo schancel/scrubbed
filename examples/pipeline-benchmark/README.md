@@ -82,7 +82,7 @@ venvs.
 ## What it does
 
 1. **Builds** the real, release-optimized `scrubbed` binary.
-2. **Times both whole pipelines**, interleaved A/B/A/B (scrubbed, python,
+2. **Times both task-matched pipelines**, interleaved A/B/A/B (scrubbed, python,
    scrubbed, python) over the full 20-page corpus, matching
    [`benchmarks/external_comparator.d`](../../benchmarks/external_comparator.d)'s
    own interleaving methodology (this avoids cold-cache/ordering bias

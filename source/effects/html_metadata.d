@@ -106,15 +106,9 @@ private string attribute(const ref HtmlNode node, string name) pure {
     return null;
 }
 
-/// Concatenates every text-node descendant of `nodeIndex` (any depth),
-/// walking each text node's ancestor chain -- the same ancestor-walk idiom
-/// this file's own head-membership check uses, and the same shape
-/// `effects.topical_tags_extract_stage`'s own `descendantText` helper
-/// already established as this codebase's precedent for pulling an
-/// element's full visible text out of the flat pre-order tree (used there
-/// for `rel="tag"` `<a>` text; used here for `rel="author"` `<a>` text and
-/// hCard/hAtom name text, both of which may be wrapped in a nested `<a>` or
-/// `<span>` rather than sitting as a direct child).
+/// Concatenates every text-node descendant of `nodeIndex` (any depth).
+/// `endOf` bounds the scan to the node's contiguous subtree in the flat
+/// pre-order tree, preserving document order without visiting later nodes.
 private string descendantText(const ref HtmlTree tree, size_t nodeIndex) pure {
     string result;
     const end = endOf(tree, nodeIndex);

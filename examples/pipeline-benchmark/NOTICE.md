@@ -7,9 +7,9 @@ using, redistributing, or basing any decision on this directory.
 ## What this is
 
 This corpus exists to give an external user a small, fixed, reproducible set
-of real web pages to run `scrubbed clean-web-document` against and compare
-with an equivalent Python tool chain (`ftfy` -> `trafilatura` -> `langdetect`
--> Presidio), documented in [`README.md`](README.md). It is one concrete,
+of real web pages to run through a task-matched `scrubbed run` composition
+and compare with a task-matched Python tool chain (`ftfy` -> `trafilatura`
+-> `langdetect` -> Presidio), documented in [`README.md`](README.md). It is one concrete,
 disclosed comparison over one small corpus, not a claim of a canonical or
 definitive "corpus cleaning benchmark" standard.
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # examples/pipeline-benchmark/run.sh
 #
-# Single runnable entry point for issue #315's whole-pipeline comparison:
-# a real release-built `scrubbed run` composition vs. an equivalent,
+# Single runnable entry point for issue #315's task-matched pipeline comparison:
+# a real release-built `scrubbed run` composition vs. a task-matched,
 # pinned Python chain (ftfy -> trafilatura -> langdetect -> Presidio, no
 # dedup step -- explicitly dropped from this slice) over the same small,
 # fixed, checked-in corpus at examples/pipeline-benchmark/corpus/.
@@ -121,7 +121,7 @@ if [[ "$presidio_scope" != "$expected_scope" ]]; then
   exit 1
 fi
 
-# ---- 5. Whole-pipeline chain definitions ----
+# ---- 5. Task-matched pipeline definitions ----
 
 # One full pass over the corpus with a scrubbed composition matched to the
 # Python side's four task families: text-transform(fix-mojibake) ->
@@ -182,7 +182,7 @@ run_scrubbed_pipeline() {
   fi
 }
 
-# One full pass over the corpus with the equivalent Python chain: ftfy ->
+# One full pass over the corpus with the task-matched Python chain: ftfy ->
 # trafilatura -> langdetect -> Presidio, no dedup step (explicitly out of
 # scope for this slice -- see the issue's owner decision). Intermediate
 # ftfy and trafilatura outputs are kept per file so the correctness section
@@ -254,8 +254,8 @@ tree_signature() {
 
 now_seconds() { python3 -c 'import time; print(f"{time.time():.6f}")'; }
 
-# ---- 6. Interleaved A/B/A/B whole-pipeline timing ----
-echo "run.sh: running interleaved A/B/A/B whole-pipeline timing (scrubbed, python, scrubbed, python)..." >&2
+# ---- 6. Interleaved A/B/A/B task-matched pipeline timing ----
+echo "run.sh: running interleaved A/B/A/B task-matched pipeline timing (scrubbed, python, scrubbed, python)..." >&2
 declare -a sample_tool sample_seconds sample_cpu_seconds
 scrubbed_dirs=()
 python_dirs=()
@@ -467,7 +467,7 @@ Corpus: $corpus_count pages, $corpus_bytes bytes (examples/pipeline-benchmark/co
   see manifest.json and NOTICE.md for provenance and the 6 originally
   pinned URLs that could not be fetched).
 
---- Whole-pipeline timing (A/B/A/B interleaved) ---
+--- Task-matched pipeline timing (A/B/A/B interleaved) ---
 scrubbed matched four-task pipeline samples: ${sample_seconds[0]}s, ${sample_seconds[2]}s (mean wall ${mean_scrubbed}s, mean cpu ${mean_scrubbed_cpu}s)
 python chain (ftfy->trafilatura->langdetect->presidio) samples: ${sample_seconds[1]}s, ${sample_seconds[3]}s (mean wall ${mean_python}s, mean cpu ${mean_python_cpu}s)
 Both tools reproduced byte-identical output across their own two samples.

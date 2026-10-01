@@ -212,7 +212,7 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <p>Using scrubbed in a real pipeline? <a href="https://github.com/schancel/scrubbed/issues/new" target="_blank" rel="noopener">Open an issue</a> with the formats, constraints, or integrations you need.</p>
 
     <h2 id="install">Install</h2>
-    <p>Prebuilt installation will detect the exact architecture, verify the release checksum, and install the binary plus shell completions. Until v1.0.0 is published, build from source.</p>
+    <p id="install-summary">Prebuilt installation will detect the exact architecture, verify the release checksum, and install the binary plus shell completions. Until v1.0.0 is published, build from source.</p>
     <div class="install-tabs" role="group" aria-label="Choose installation platform">
         <button type="button" data-install="macos" aria-pressed="false" disabled>macOS</button>
         <button type="button" data-install="linux" aria-pressed="false" disabled>Linux</button>
@@ -221,8 +221,8 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
     <pre id="install-command">git clone https://github.com/schancel/scrubbed.git
 cd scrubbed
 dub build --build=release --compiler=ldc2</pre>
-    <p id="install-note" class="note" aria-live="polite">macOS requires DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires DUB, LDC, build-essential, CMake, and libcurl development headers.</p>
-    <p class="note"><strong>Before v1.0.0:</strong> release downloads are not live yet, so the prebuilt options are disabled. The installer itself has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
+    <p id="install-note" class="note" aria-live="polite">macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers.</p>
+    <p id="release-status" class="note"><strong>Before v1.0.0:</strong> release downloads are not live yet, so the prebuilt options are disabled. The installer itself has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
 
     <h2 id="usage">Usage</h2>
     <p class="note"><strong>Supported:</strong> macOS on Apple Silicon and Linux on x86_64/aarch64. There is no native Windows build; WSL2 uses the Linux build but has not yet been verified on a Windows host. See the <a href="https://github.com/schancel/scrubbed/blob/main/docs/wsl2-evaluation.md" target="_blank" rel="noopener">WSL2 evaluation</a> and <a href="https://github.com/schancel/scrubbed/issues/379" target="_blank" rel="noopener">Linux adapter status</a> for details.</p>
@@ -287,12 +287,14 @@ dub build --build=release --compiler=ldc2</pre>
             },
             source: {
                 command: "git clone https://github.com/schancel/scrubbed.git\ncd scrubbed\ndub build --build=release --compiler=ldc2",
-                note: "macOS requires DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires DUB, LDC, build-essential, CMake, and libcurl development headers."
+                note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
             }
         };
         const buttons = [...document.querySelectorAll("[data-install]")];
         const command = document.getElementById("install-command");
         const note = document.getElementById("install-note");
+        const summary = document.getElementById("install-summary");
+        const releaseStatus = document.getElementById("release-status");
         const releaseAvailable = false;
 
         function selectInstall(key) {
@@ -306,10 +308,15 @@ dub build --build=release --compiler=ldc2</pre>
         }
 
         for (const button of buttons) {
+            if (button.dataset.install !== "source") {
+                button.disabled = !releaseAvailable;
+            }
             button.addEventListener("click", () => selectInstall(button.dataset.install));
         }
 
         if (releaseAvailable) {
+            summary.textContent = "Choose a platform. The installer detects the exact architecture, verifies the release checksum, and installs the binary plus shell completions.";
+            releaseStatus.textContent = "Release downloads are live. The installer has passed end-to-end macOS and Linux checks, including checksum rejection.";
             const platform = String(
                 (navigator.userAgentData && navigator.userAgentData.platform) ||
                 navigator.platform || navigator.userAgent || ""

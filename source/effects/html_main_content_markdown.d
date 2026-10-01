@@ -40,9 +40,9 @@
 /// with blank lines. That is deliberately the *same* escaping
 /// `renderNode`/`renderMarkdownFrom` apply to ordinary text nodes --
 /// reusing `clean()` (exported from `html_markdown.d` for this) rather than
-/// writing a second copy is what keeps a literal `.` (say) escaping
-/// identically to `\.` whichever path recovered it, instead of silently
-/// diverging. No heading/list/emphasis structure is synthesized: JSON-LD
+/// writing a second copy keeps punctuation escaping identical whichever path
+/// recovered it, instead of silently diverging. No heading/list/emphasis
+/// structure is synthesized: JSON-LD
 /// content has no DOM to derive that structure from, so the result is flat
 /// Markdown paragraphs only -- never a lossy re-guess at structure that was
 /// never there.
@@ -182,16 +182,15 @@ unittest {
     assert(combined.candidates == plain.candidates);
 
     // The key Slice 2 proof: real Markdown heading syntax, not Slice 1's
-    // plain text with a blank line (`plain.text` below). `renderNode`
-    // separately escapes literal `.` as `\.` (its ordinary Markdown-source
-    // escaping, unrelated to this slice, exercised here exactly as it would
-    // be for any other `renderMarkdown`/`renderMarkdownFrom` caller).
+    // plain text with a blank line (`plain.text` below). Punctuation follows
+    // the same rules as every other `renderMarkdown`/`renderMarkdownFrom`
+    // caller.
     assert(combined.markdown ==
         "# Field notes from the delta survey\n\n" ~
         "The survey team spent three weeks mapping the river delta's shifting " ~
         "sandbars, recording water depth every two hundred meters along six " ~
-        "transects\\. The main channel has migrated nearly forty meters east " ~
-        "since the last survey\\.\n",
+        "transects. The main channel has migrated nearly forty meters east " ~
+        "since the last survey.\n",
         "expected genuine Markdown heading syntax scoped to the selected subtree");
     assert(plain.text ==
         "Field notes from the delta survey\n\n" ~
@@ -267,7 +266,7 @@ unittest {
     // second hand-written escaper that could drift from it.
     assert(combined.markdown.length > 0,
         "recovered structured-data content must not be dropped on the floor");
-    assert(combined.markdown.canFind("Article body sentence\\."),
+    assert(combined.markdown.canFind("Article body sentence."),
         "same literal-`.`-escaping as ordinary rendered Markdown text");
     assert(!combined.markdown.canFind("<p>") && !combined.markdown.canFind("</p>"),
         "embedded HTML markup inside the JSON string must still be stripped");
@@ -294,10 +293,9 @@ unittest {
     ];
     auto twoStepResult = extractMainContentMarkdown(twoSteps);
     assert(twoStepResult.status == MainContentStatus.selectedStructuredData);
-    // The literal `.` after "now" is itself escaped (`clean()`'s ordinary
-    // Markdown-source escaping), same as every other `.` in this fixture.
-    assert(twoStepResult.markdown.canFind("First step body text here now\\."));
-    assert(twoStepResult.markdown.canFind("Second step body text here now\\."));
+    // The literal `.` after "now" remains ordinary prose punctuation.
+    assert(twoStepResult.markdown.canFind("First step body text here now."));
+    assert(twoStepResult.markdown.canFind("Second step body text here now."));
     assert(twoStepResult.markdown.canFind("\n\n"),
         "two recovered JSON-LD bodies must render as two separate paragraphs");
 

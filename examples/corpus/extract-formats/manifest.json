@@ -33,7 +33,7 @@
       "mediaType": "text/markdown; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "bad6c8e8155325c7049d97c6e4344a286523fc07343e46c63d157ee5b07ced2d",
+      "sha256": "e0a8bb49a45e9a97a07069c6b94e433536a6ad25dfe215b0d19c77826a46d145",
       "intendedPipeline": "extract --format markdown",
       "expectedOutcome": "The whole page rendered as Markdown -- nav chrome, the article, the comment section, and the footer all present, in document order; every structural element (heading/link/bold/italic/image/list/quote/table/code) round-trips as real Markdown syntax."
     },
@@ -42,7 +42,7 @@
       "mediaType": "text/markdown; charset=utf-8",
       "provenance": "Generated from the authored issue #504 input by the shipping scrubbed binary for this checked-in golden corpus.",
       "license": "MIT",
-      "sha256": "5e1a767ddec0a61c2d8351023e9b40d9c33ac0c6916ee82eee8f353cc23cdd49",
+      "sha256": "b058eef8cb2b63b8986bb6d933d2d800098eb5188a222b3cab0eca3d4becbb2f",
       "intendedPipeline": "extract --format main-content-markdown",
       "expectedOutcome": "Only the selected <article> subtree rendered as Markdown -- nav/header/footer chrome and the comment section (a sibling of the selected node, not part of its subtree) are both excluded; the same structural elements round-trip as in the whole-page form."
     },

@@ -145,6 +145,9 @@ jobs:
         run: |
           set -eu
           rm -rf /tmp/install-latest
+          mkdir -p /tmp/install-latest/share/licenses/scrubbed/third_party/obsolete
+          printf 'stale notice from an older release\n' \
+            > /tmp/install-latest/share/licenses/scrubbed/third_party/obsolete/LICENSE
           SCRUBBED_INSTALL_BASE_URL="http://127.0.0.1:8420" \
           SCRUBBED_INSTALL_PREFIX="/tmp/install-latest" \
           SCRUBBED_INSTALL_NO_SUDO=1 \

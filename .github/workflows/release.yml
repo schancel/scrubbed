@@ -192,7 +192,8 @@ jobs:
         run: |
           dub build --compiler=ldc2 --build=release
           packaging/debian/build.sh "$PWD" "$PWD/scrubbed" /tmp/debian-package
-          expected="/tmp/debian-package/scrubbed_${version}-1_${{ matrix.arch }}.deb"
+          debian_version=${version/-/\~}
+          expected="/tmp/debian-package/scrubbed_${debian_version}-1_${{ matrix.arch }}.deb"
           test -f "$expected"
           dpkg-deb --info "$expected"
           dpkg-deb --contents "$expected"
@@ -243,12 +244,13 @@ jobs:
           gh release download "$TAG" --repo "${{ github.repository }}" --dir /tmp/scrubbed-assets
           cd /tmp/scrubbed-assets
           version="${TAG#v}"
+          debian_version=${version/-/\~}
           expected=(
             "scrubbed-${version}-macos-arm64.tar.gz"
             "scrubbed-${version}-linux-x86_64.tar.gz"
             "scrubbed-${version}-linux-aarch64.tar.gz"
-            "scrubbed_${version}-1_amd64.deb"
-            "scrubbed_${version}-1_arm64.deb"
+            "scrubbed_${debian_version}-1_amd64.deb"
+            "scrubbed_${debian_version}-1_arm64.deb"
             "scrubbed-install-${version}.sh"
           )
           for asset in "${expected[@]}"; do test -f "$asset"; done

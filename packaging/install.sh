@@ -294,7 +294,9 @@ install_license_files() {
     # Preserve that exact hierarchy so an installer-based installation has
     # the same discoverable notices as the archive, Homebrew formula, and
     # native packages.
-    run mkdir -p "$license_dir/third_party"
+    # Replace instead of overlaying so an upgrade cannot retain a notice
+    # file that no longer belongs to the current release's verified closure.
+    run rm -rf "$license_dir/third_party"
     run cp -R "$extract_dir/third_party/." "$license_dir/third_party/"
 }
 

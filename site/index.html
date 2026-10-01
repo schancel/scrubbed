@@ -218,8 +218,8 @@ scrubbed clean-web-document --input pages/ --output clean/ --threads 4</pre>
         <button type="button" data-install="linux" aria-pressed="false" disabled>Linux</button>
         <button type="button" data-install="source" aria-pressed="true">Build from source</button>
     </div>
-    <pre id="install-command">git clone https://github.com/schancel/scrubbed.git
-cd scrubbed
+    <pre id="install-command">git clone https://github.com/schancel/scrubbed.git &amp;&amp;
+cd scrubbed &amp;&amp;
 dub build --build=release --compiler=ldc2</pre>
     <p id="install-note" class="note" aria-live="polite">macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers.</p>
     <p id="release-status" class="note"><strong>Before v1.0.0:</strong> release downloads are not live yet, so the prebuilt options are disabled. The installer itself has passed end-to-end macOS and Linux checks, including checksum rejection.</p>
@@ -278,15 +278,15 @@ dub build --build=release --compiler=ldc2</pre>
     (() => {
         const choices = {
             macos: {
-                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh",
+                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh | sh",
                 note: "macOS on Apple Silicon. The installer selects the macos-arm64 release automatically."
             },
             linux: {
-                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/main/packaging/install.sh | sh",
+                command: "curl -fsSL https://raw.githubusercontent.com/schancel/scrubbed/v1.0.0/packaging/install.sh | sh",
                 note: "Linux on x86_64 or aarch64. The installer selects the matching release automatically."
             },
             source: {
-                command: "git clone https://github.com/schancel/scrubbed.git\ncd scrubbed\ndub build --build=release --compiler=ldc2",
+                command: "git clone https://github.com/schancel/scrubbed.git &&\ncd scrubbed &&\ndub build --build=release --compiler=ldc2",
                 note: "macOS requires Git, DUB, LDC, Xcode Command Line Tools, CMake, and the system libcurl. Linux requires Git, DUB, LDC, build-essential, CMake, and libcurl development headers."
             }
         };
@@ -321,7 +321,11 @@ dub build --build=release --compiler=ldc2</pre>
                 (navigator.userAgentData && navigator.userAgentData.platform) ||
                 navigator.platform || navigator.userAgent || ""
             ).toLowerCase();
-            if (platform.includes("mac")) selectInstall("macos");
+            const userAgent = String(navigator.userAgent || "").toLowerCase();
+            const mobile = /android|iphone|ipad|ipod/.test(userAgent) ||
+                (platform.includes("mac") && Number(navigator.maxTouchPoints || 0) > 1);
+            if (mobile) selectInstall("source");
+            else if (platform.includes("mac")) selectInstall("macos");
             else if (platform.includes("linux")) selectInstall("linux");
             else selectInstall("source");
         } else {

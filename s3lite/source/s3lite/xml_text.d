@@ -123,6 +123,15 @@ unittest {
 }
 
 unittest {
+    // The last code point decodes; anything above it is not a character
+    // reference and is copied through as written.
+    static immutable source = "&#x10FFFF;|&#1114111;|&#x110000;|&#1114112;|&#xFFFFFFFFF;|&#99999999999;";
+    char[source.length] text = source;
+    assert(decodeEntitiesInPlace(text[]) ==
+        "\U0010FFFF|\U0010FFFF|&#x110000;|&#1114112;|&#xFFFFFFFFF;|&#99999999999;");
+}
+
+unittest {
     bool found;
     auto xml = "<A><Key>k1</Key><Keys>no</Keys></A><Key>k2</Key>";
     assert(elementText(xml, "Key", 0, xml.length, found) == "k1" && found);

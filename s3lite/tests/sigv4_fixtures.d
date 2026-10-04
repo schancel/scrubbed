@@ -13,11 +13,18 @@
 ///      Calculations for the Authorization Header: Transferring Payload in a
 ///      Single Chunk": a ranged GetObject and a ListObjects. Their
 ///      signatures are the ones that page prints.
-///   3. `s3-put-unsigned-payload`: a PutObject signed under the
-///      `UNSIGNED-PAYLOAD` policy, with the credentials, date and bucket of
-///      group 2. AWS publishes no header-signed vector for this policy, so
-///      the expected files were derived with a separate implementation
-///      (Python's `hashlib`/`hmac`) that reproduces both group-2 signatures.
+///      A third from the same page, `s3-put-object`, signs a body and two
+///      headers beyond the usual three (`Date`, `x-amz-storage-class`).
+///   3. Two vectors AWS does not publish, with the credentials, date and
+///      bucket of group 2. Their expected files were derived with a
+///      separate implementation (Python's `hashlib`/`hmac`), which
+///      reproduces all three group-2 signatures; they are not AWS's.
+///      `s3-put-unsigned-payload`: a PutObject under the
+///      `UNSIGNED-PAYLOAD` policy.
+///      `s3-put-extra-signed-headers`: a PutObject carrying nine signed
+///      headers -- content type, Content-MD5, storage class, a checksum
+///      and user metadata -- with mixed-case names and a value that needs
+///      trimming.
 ///
 /// The signer takes the payload hash as an input. For a case whose request
 /// carries `X-Amz-Content-Sha256`, that header's value is the hash, as it is
@@ -157,9 +164,12 @@ void main() {
         "get-header-key-duplicate", "get-header-value-order",
         "get-header-value-trim"])
         checkCase(fixturesRoot, name, suiteSigner);
-    foreach (name; ["s3-get-object-range", "s3-list-objects"])
+    foreach (name; ["s3-get-object-range", "s3-list-objects", "s3-put-object"])
         checkCase(fixturesRoot, name, s3DocsSigner);
-    checkCase(fixturesRoot, "s3-put-unsigned-payload", s3DocsSigner);
-    writeln("s3lite sigv4 verification: 8/8 AWS test-suite vectors, 2/2 S3 API-reference vectors "
-        ~ "and the unsigned-payload vector PASS (canonical request + string-to-sign + signature, byte-exact)");
+    writeln("  (independently derived, not published by AWS:)");
+    foreach (name; ["s3-put-unsigned-payload", "s3-put-extra-signed-headers"])
+        checkCase(fixturesRoot, name, s3DocsSigner);
+    writeln("s3lite sigv4 verification: 8/8 AWS test-suite vectors, 3/3 S3 API-reference vectors "
+        ~ "and 2/2 independently derived vectors (unsigned payload, extra signed headers) PASS "
+        ~ "(canonical request + string-to-sign + signature, byte-exact)");
 }

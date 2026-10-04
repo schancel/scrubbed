@@ -10,6 +10,7 @@
 ///       <Size>1234</Size>
 ///     </Contents>
 ///     ...
+///     <CommonPrefixes><Prefix>a/</Prefix></CommonPrefixes>
 ///     <NextContinuationToken>...</NextContinuationToken>
 ///   </ListBucketResult>
 ///
@@ -24,7 +25,7 @@
 /// nested).
 module s3lite.xml_list;
 
-import s3lite.fixed : indexOf, parseUnsigned, startsWith;
+import s3lite.fixed : indexOf, parseUnsigned, startsWith, trim;
 import s3lite.xml_text : decodeEntitiesInPlace, elementText;
 
 /// One listing entry. The slices point into the caller's entry buffer and
@@ -38,6 +39,11 @@ struct S3ObjectView {
 
 /// Receives each entry in listing order. Returning false stops the listing.
 alias ListEntryCallback = bool delegate(scope ref const S3ObjectView entry) @nogc nothrow;
+
+/// Receives each common prefix (the "directories" a delimiter groups keys
+/// into), in listing order. The slice is valid only during the call.
+/// Returning false stops the listing.
+alias ListPrefixCallback = bool delegate(scope const(char)[] prefix) @nogc nothrow;
 
 /// An entry buffer must hold the largest single `<Contents>` element (or
 /// continuation-token element) of a response. S3 keys are at most 1024
@@ -59,10 +65,12 @@ struct ListPageParser {
     private char[] tokenBuf;
     private size_t tokenLen;
 
-    bool sawRoot;        /// a `<ListBucketResult>` element was seen
+    bool sawRoot;        /// a `<ListBucketResult>` element was opened
+    bool sawRootEnd;     /// ... and closed: the body is complete
     bool isTruncated;
     bool tokenTooLarge;  /// the continuation token did not fit `tokenStorage`
     ulong entries;       /// entries delivered so far
+    ulong prefixes;      /// common prefixes delivered so far
 
 @nogc nothrow:
 
@@ -77,8 +85,10 @@ struct ListPageParser {
     /// The page's `NextContinuationToken`, "" if it had none.
     const(char)[] nextToken() const return pure { return tokenBuf[0 .. tokenLen]; }
 
-    /// Feeds the next piece of the response body.
-    ListFeed feed(scope const(ubyte)[] chunk, scope ListEntryCallback onEntry) {
+    /// Feeds the next piece of the response body. Either callback may be
+    /// null, in which case what it would receive is skipped.
+    ListFeed feed(scope const(ubyte)[] chunk, scope ListEntryCallback onEntry,
+            scope ListPrefixCallback onPrefix = null) {
         auto text = cast(const(char)[]) chunk;
         while (text.length) {
             if (fill == buf.length) return ListFeed.entryTooLarge;
@@ -89,7 +99,7 @@ struct ListPageParser {
             text = text[n .. $];
 
             bool stopped;
-            immutable consumed = scan(onEntry, stopped);
+            immutable consumed = scan(onEntry, onPrefix, stopped);
             if (stopped) return ListFeed.stopped;
             if (consumed) {
                 import core.stdc.string : memmove;
@@ -104,9 +114,10 @@ struct ListPageParser {
 
     /// Handles every complete element in the buffer; returns how many
     /// leading bytes are finished with.
-    private size_t scan(scope ListEntryCallback onEntry, out bool stopped) {
-        static immutable string[3] wanted = ["Contents", "IsTruncated", "NextContinuationToken"];
-        static immutable string[3] closers = ["</Contents>", "</IsTruncated>", "</NextContinuationToken>"];
+    private size_t scan(scope ListEntryCallback onEntry, scope ListPrefixCallback onPrefix, out bool stopped) {
+        static immutable string[4] wanted = ["Contents", "IsTruncated", "NextContinuationToken", "CommonPrefixes"];
+        static immutable string[4] closers = ["</Contents>", "</IsTruncated>", "</NextContinuationToken>",
+            "</CommonPrefixes>"];
 
         auto data = buf[0 .. fill];
         size_t pos = 0;
@@ -123,6 +134,8 @@ struct ListPageParser {
                 if (startsWith(name, "ListBucketResult") && (name.length == 16 || name[16] == ' ' ||
                         name[16] == '\t' || name[16] == '\r' || name[16] == '\n' || name[16] == '/'))
                     sawRoot = true;
+                else if (sawRoot && trim(name) == "/ListBucketResult")
+                    sawRootEnd = true;
                 pos = gt + 1;
                 continue;
             }
@@ -137,14 +150,25 @@ struct ListPageParser {
                     if (!deliver(content, onEntry)) { stopped = true; return pos; }
                     break;
                 case 1:
-                    isTruncated = content == "true";
+                    isTruncated = trim(content) == "true";
                     break;
                 case 2:
-                    auto token = decodeEntitiesInPlace(content);
+                    auto token = decodeEntitiesInPlace(trim(content));
                     if (token.length > tokenBuf.length) tokenTooLarge = true;
                     else {
                         tokenBuf[0 .. token.length] = token[];
                         tokenLen = token.length;
+                    }
+                    break;
+                case 3:
+                    bool found;
+                    auto prefix = elementText(content, "Prefix", 0, content.length, found);
+                    if (!found) break;
+                    prefixes++;
+                    // A prefix is key text: not trimmed, only decoded.
+                    if (onPrefix !is null && !onPrefix(decodeEntitiesInPlace(prefix))) {
+                        stopped = true;
+                        return pos;
                     }
                     break;
             }
@@ -161,11 +185,13 @@ struct ListPageParser {
         auto modified = elementText(content, "LastModified", 0, content.length, modifiedFound);
         if (!keyFound) return true; // not an object entry; skip it
 
+        // A key is taken exactly as sent (it may begin or end with blanks);
+        // the scalar fields are not sensitive to whitespace around them.
         S3ObjectView view;
         view.key = decodeEntitiesInPlace(key);
-        if (sizeFound && !parseUnsigned(sizeText, view.size)) view.size = 0;
-        if (etagFound) view.etag = decodeEntitiesInPlace(etag);
-        if (modifiedFound) view.lastModified = decodeEntitiesInPlace(modified);
+        if (sizeFound && !parseUnsigned(trim(sizeText), view.size)) view.size = 0;
+        if (etagFound) view.etag = decodeEntitiesInPlace(trim(etag));
+        if (modifiedFound) view.lastModified = decodeEntitiesInPlace(trim(modified));
         entries++;
         return onEntry is null ? true : onEntry(view);
     }
@@ -212,7 +238,7 @@ version(unittest) {
     auto parser = ListPageParser(entryBuffer[], token[]);
     Seen seen;
     assert(parser.feed(cast(const(ubyte)[]) twoEntries, &seen.take) == ListFeed.more);
-    assert(parser.sawRoot && parser.isTruncated && parser.nextToken == "token-1");
+    assert(parser.sawRoot && parser.sawRootEnd && parser.isTruncated && parser.nextToken == "token-1");
     assert(parser.entries == 2 && seen.keys[0 .. seen.keyLen] == "a.txt|b/c&d.txt|");
     assert(seen.sizes == 2058 && seen.lastEtag[0 .. seen.etagLen] == `"def456"`);
 }
@@ -227,8 +253,63 @@ version(unittest) {
     Seen seen;
     foreach (i; 0 .. twoEntries.length)
         assert(parser.feed(cast(const(ubyte)[]) twoEntries[i .. i + 1], &seen.take) == ListFeed.more);
-    assert(parser.sawRoot && parser.isTruncated && parser.nextToken == "token-1");
+    assert(parser.sawRoot && parser.sawRootEnd && parser.isTruncated && parser.nextToken == "token-1");
     assert(seen.keys[0 .. seen.keyLen] == "a.txt|b/c&d.txt|" && seen.sizes == 2058);
+}
+
+@nogc nothrow unittest {
+    // A body cut off before its closing root is visibly incomplete, however
+    // much of it parsed.
+    char[512] entryBuffer;
+    char[64] token;
+    auto parser = ListPageParser(entryBuffer[], token[]);
+    Seen seen;
+    auto cut = twoEntries[0 .. indexOf(twoEntries, "</ListBucketResult>")];
+    assert(parser.feed(cast(const(ubyte)[]) cut, &seen.take) == ListFeed.more);
+    assert(parser.sawRoot && !parser.sawRootEnd && parser.entries == 2);
+    assert(parser.feed(cast(const(ubyte)[]) "</ListBucketResult >\n", &seen.take) == ListFeed.more);
+    assert(parser.sawRootEnd);
+}
+
+@nogc nothrow unittest {
+    // Whitespace around scalar values does not change them; a key keeps its
+    // own. Common prefixes go to their own callback, decoded.
+    static struct Prefixes {
+        char[64] text = 0;
+        size_t len;
+        size_t stopAfter = size_t.max;
+        size_t count;
+        bool take(scope const(char)[] p) @nogc nothrow {
+            text[len .. len + p.length] = p[];
+            len += p.length;
+            text[len++] = '|';
+            return ++count < stopAfter;
+        }
+    }
+    static immutable page = "<ListBucketResult>\n  <IsTruncated>\n    true\n  </IsTruncated>\n" ~
+        "  <Contents><Key> a b </Key><Size>\n 42 </Size><ETag> &quot;e&quot;\n</ETag></Contents>\n" ~
+        "  <CommonPrefixes>\n    <Prefix>photos/2024&amp;25/</Prefix>\n  </CommonPrefixes>\n" ~
+        "  <CommonPrefixes><Prefix> spaced /</Prefix></CommonPrefixes>\n" ~
+        "  <NextContinuationToken>\n  tok \n</NextContinuationToken>\n</ListBucketResult>\n";
+    char[512] entryBuffer;
+    char[64] token;
+    auto parser = ListPageParser(entryBuffer[], token[]);
+    Seen seen;
+    Prefixes prefixes;
+    assert(parser.feed(cast(const(ubyte)[]) page, &seen.take, &prefixes.take) == ListFeed.more);
+    assert(parser.isTruncated && parser.nextToken == "tok" && parser.sawRootEnd);
+    assert(seen.keys[0 .. seen.keyLen] == " a b |" && seen.sizes == 42);
+    assert(seen.lastEtag[0 .. seen.etagLen] == `"e"`);
+    assert(parser.prefixes == 2 && prefixes.text[0 .. prefixes.len] == "photos/2024&25/| spaced /|");
+
+    // With no prefix callback they are counted and skipped; a prefix
+    // callback can stop the listing.
+    auto skipping = ListPageParser(entryBuffer[], token[]);
+    assert(skipping.feed(cast(const(ubyte)[]) page, null) == ListFeed.more && skipping.prefixes == 2);
+    auto stopping = ListPageParser(entryBuffer[], token[]);
+    Prefixes one;
+    one.stopAfter = 1;
+    assert(stopping.feed(cast(const(ubyte)[]) page, null, &one.take) == ListFeed.stopped && one.count == 1);
 }
 
 @nogc nothrow unittest {

@@ -39,7 +39,7 @@ struct QueryParam {
     const(char)[] value;
 }
 
-enum size_t maxSignedHeaders = 16;
+enum size_t maxSignedHeaders = 32;
 enum size_t maxQueryParams = 16;
 
 /// SHA-256 of the empty string: the `x-amz-content-sha256` value of a
@@ -263,6 +263,16 @@ struct SignedRequest {
     char[64] signatureHex;
 }
 
+/// Zeroes key material with stores the optimiser may not drop as dead.
+void wipe(scope ubyte[] bytes) @trusted {
+    static void volatileZero(ubyte* p, size_t n) @nogc nothrow {
+        import core.volatile : volatileStore;
+        foreach (i; 0 .. n) volatileStore(p + i, cast(ubyte) 0);
+    }
+    // Writing zeroes has no effect a caller can observe through `pure`.
+    (cast(void function(ubyte*, size_t) @nogc nothrow pure) &volatileZero)(bytes.ptr, bytes.length);
+}
+
 /// The four-step signing-key derivation:
 ///   kDate    = HMAC("AWS4" + secretKey, dateStamp)
 ///   kRegion  = HMAC(kDate, region)
@@ -281,6 +291,10 @@ SignFailure deriveSigningKey(ref Writer scratch, scope const(char)[] secretAcces
     auto kRegion = hmacSha256(kDate[], cast(const(ubyte)[]) region);
     auto kService = hmacSha256(kRegion[], cast(const(ubyte)[]) service);
     key = hmacSha256(kService[], cast(const(ubyte)[]) "aws4_request");
+    // The intermediate keys are as good as the secret for their scope.
+    wipe(kDate[]);
+    wipe(kRegion[]);
+    wipe(kService[]);
     return SignFailure.none;
 }
 
@@ -364,7 +378,7 @@ SignFailure signRequest(scope ref const SigningInput input, ref Writer w, out Si
         input.service, signingKey);
     if (keyStatus != SignFailure.none) return keyStatus;
     signed.signatureHex = hexOf(hmacSha256(signingKey[], cast(const(ubyte)[]) signed.stringToSign));
-    signingKey[] = 0;
+    wipe(signingKey[]);
 
     immutable authStart = w.mark;
     w.put("AWS4-HMAC-SHA256 Credential=");

@@ -1,0 +1,15 @@
+PUT
+/photos/2013/a%20b.jpg
+
+content-md5:DA7ZlRH1pbZ3bkrR3F5vrA==
+content-type:image/jpeg
+host:examplebucket.s3.amazonaws.com
+x-amz-checksum-crc32c:yZRlqg==
+x-amz-content-sha256:UNSIGNED-PAYLOAD
+x-amz-date:20130524T000000Z
+x-amz-meta-batch-id:607
+x-amz-meta-owner:alice example
+x-amz-storage-class:STANDARD_IA
+
+content-md5;content-type;host;x-amz-checksum-crc32c;x-amz-content-sha256;x-amz-date;x-amz-meta-batch-id;x-amz-meta-owner;x-amz-storage-class
+UNSIGNED-PAYLOAD

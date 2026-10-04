@@ -213,7 +213,9 @@ void main(string[] args) {
     writefln("  object grew by %s MiB (x%.0f); peak RSS grew by %.2f MiB (allowed: %s MiB)",
         (sizes[1] - sizes[0]) / MiB, sizes[1] / cast(double) sizes[0], growth / cast(double) MiB,
         allowedGrowthBytes / MiB);
-    check(sizes[1] > uint.max, "the large object should exceed 4 GiB to exercise 64-bit lengths");
+    // The default sizes must cross 4 GiB; sizes given on the command line
+    // are the caller's business.
+    check(args.length > 2 || sizes[1] > uint.max, "the default large object should exceed 4 GiB");
     check(growth <= allowedGrowthBytes, "peak memory grew with object size");
     writeln("s3lite large-object memory fixture: PASS (peak memory does not grow with object size)");
 }

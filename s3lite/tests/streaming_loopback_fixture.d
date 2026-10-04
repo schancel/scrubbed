@@ -1,0 +1,470 @@
+/// Loopback proof for the streaming core (`s3lite.core`, issue #607).
+///
+/// Everything the client does here happens inside `@nogc nothrow`
+/// functions: the compiler, not a comment, establishes that the core's
+/// request building, signing, transport and parsing paths neither allocate
+/// from the collector nor throw. The server side (`loopback_server`) is
+/// ordinary test scaffolding.
+///
+///   A. Upload from a range of many small chunks that is generated on the
+///      fly and never exists as one buffer. The server checks every byte
+///      and the declared `Content-Length`, under both payload-hash policies.
+///   B. Download into a sink, whole and with a byte range, through both the
+///      delegate form and the output-range form; an S3 error arrives as a
+///      typed status and never reaches the sink.
+///   C. A listing across three pages through the entry callback, with an
+///      entry buffer much smaller than a page and an explicit continuation.
+///   D. All of the above over one client: the server sees one connection.
+///   E. The convenience layer's range upload (`s3lite.client.putObject`)
+///      with a range that allocates, and with one that throws part-way.
+///
+/// No AWS account, credential, or network access beyond 127.0.0.1 is used.
+/// Run via: `dub run --config=streaming-loopback-fixture` (from this
+/// package's own directory).
+import convenience = s3lite.client;
+import loopback_server;
+import s3lite.core;
+import s3lite.curl_transport : CurlOptions, openCurlTransport;
+import s3lite.sigv4 : sha256Hex;
+import std.algorithm.searching : canFind, startsWith;
+import std.conv : to;
+import std.stdio : writeln;
+import std.string : indexOf;
+
+void check(bool condition, lazy string label) {
+    if (!condition) throw new Exception("FAIL: " ~ label);
+}
+
+// ---------------------------------------------------------------------
+// The object: a deterministic byte pattern, so neither side needs a copy.
+// ---------------------------------------------------------------------
+
+ubyte patternByte(ulong offset) @nogc nothrow pure {
+    return cast(ubyte)((offset * 31 + (offset >> 8) * 7) & 0xff);
+}
+
+enum size_t smallChunk = 37;
+enum ulong uploadChunks = 20_000;
+enum ulong uploadLength = smallChunk * uploadChunks; // 740,000 bytes in 20,000 pieces
+
+/// A forward range of `smallChunk`-byte chunks of the pattern. Each chunk
+/// is produced into the one small buffer the range points at; the object
+/// as a whole never exists in memory.
+struct PatternChunks {
+    ubyte[] buffer;
+    ulong offset;
+    ulong total;
+
+@nogc nothrow:
+    bool empty() const { return offset >= total; }
+
+    const(ubyte)[] front() {
+        immutable n = total - offset < buffer.length ? cast(size_t)(total - offset) : buffer.length;
+        foreach (i; 0 .. n) buffer[i] = patternByte(offset + i);
+        return buffer[0 .. n];
+    }
+
+    void popFront() {
+        offset += total - offset < buffer.length ? total - offset : buffer.length;
+    }
+
+    PatternChunks save() { return this; }
+}
+
+static assert(isChunkRange!PatternChunks);
+
+// ---------------------------------------------------------------------
+// Client side: every call into the core is inside @nogc nothrow.
+// ---------------------------------------------------------------------
+
+immutable fixedTime = AmzTime.fromUnix(1_440_938_160); // 20150830T123600Z
+
+S3Status openClient(ref S3Client client, scope const(char)[] origin, Credentials credentials,
+        char[] work) @nogc nothrow {
+    Transport transport;
+    auto opened = openCurlTransport(CurlOptions.init, transport);
+    if (!opened.ok) {
+        S3Status status;
+        status.kind = FailureKind.transportError;
+        status.transport = opened.failure;
+        return status;
+    }
+    S3Config config;
+    config.region = "us-east-1";
+    config.credentials = credentials;
+    config.dispatchOrigin = origin;
+    return client.open(config, transport, work);
+}
+
+PutResult uploadPattern(ref S3Client client, scope const(char)[] key, PayloadHash hash) @nogc nothrow {
+    ubyte[smallChunk] buffer = void;
+    auto chunks = PatternChunks(buffer[], 0, uploadLength);
+    return client.putObject("examplebucket", key, chunks, uploadLength, hash, fixedTime);
+}
+
+/// Checks a download against the pattern as it arrives; keeps nothing.
+struct PatternSink {
+    ulong base;      // object offset the first byte should have
+    ulong received;
+    ulong mismatches;
+    size_t calls;
+
+@nogc nothrow:
+    bool take(scope const(ubyte)[] chunk) {
+        put(chunk);
+        return true;
+    }
+
+    // Output-range form.
+    void put(scope const(ubyte)[] chunk) {
+        foreach (i, b; chunk)
+            if (b != patternByte(base + received + i)) mismatches++;
+        received += chunk.length;
+        calls++;
+    }
+}
+
+GetResult downloadViaDelegate(ref S3Client client, scope const(char)[] key, ByteRange range,
+        ref PatternSink sink) @nogc nothrow {
+    return client.getObject("examplebucket", key, range, &sink.take, fixedTime);
+}
+
+GetResult downloadViaOutputRange(ref S3Client client, scope const(char)[] key, ByteRange range,
+        ref PatternSink sink) @nogc nothrow {
+    return client.getObject("examplebucket", key, range, sink, fixedTime);
+}
+
+/// Folds listing entries into a few numbers and a bounded text, proving the
+/// callback sees every entry without anything being kept per entry.
+struct EntryFold {
+    ulong count;
+    ulong totalSize;
+    char[32] firstKey = 0;
+    size_t firstKeyLen;
+    char[32] lastKey = 0;
+    size_t lastKeyLen;
+    bool sawEscapedKey;
+
+    bool take(scope ref const S3ObjectView entry) @nogc nothrow {
+        if (count == 0) {
+            firstKeyLen = entry.key.length;
+            firstKey[0 .. firstKeyLen] = entry.key[];
+        }
+        lastKeyLen = entry.key.length;
+        lastKey[0 .. lastKeyLen] = entry.key[];
+        if (entry.key == "p/a&b <1>.bin") sawEscapedKey = true;
+        totalSize += entry.size;
+        count++;
+        return true;
+    }
+}
+
+struct ListOutcome {
+    S3Status status;
+    uint pages;
+    ulong entries;
+}
+
+/// Walks a whole listing: the continuation is a value the caller holds and
+/// passes back, and the loop is the caller's.
+ListOutcome listAll(ref S3Client client, ref EntryFold fold, char[] entryBuffer) @nogc nothrow {
+    ListOutcome outcome;
+    ListContinuation where;
+    ListOptions options;
+    options.prefix = "p/";
+    options.maxKeys = pageSize;
+    while (!where.done) {
+        auto page = client.listObjectsV2("examplebucket", options, where, entryBuffer, &fold.take, fixedTime);
+        outcome.status = page.status;
+        if (!page.ok) return outcome;
+        outcome.pages++;
+        outcome.entries += page.entries;
+    }
+    return outcome;
+}
+
+// ---------------------------------------------------------------------
+// Server side
+// ---------------------------------------------------------------------
+
+enum uint pageSize = 40;
+enum uint listedObjects = 100; // three pages: 40, 40, 20
+enum ulong downloadLength = 300_000;
+
+/// What the server observed, for the assertions in `main`.
+final class Observed {
+    string[] putHeads;       // "PUT <target>|<content-length>|<x-amz-content-sha256>|<authorization>"
+    ulong[] putBodyBytes;
+    ulong[] putMismatches;
+    string[] putSha256;
+    string[] ranges;
+    string[] listTargets;
+}
+
+string listPage(uint first, uint count, bool truncated, string nextToken) {
+    auto xml = `<?xml version="1.0" encoding="UTF-8"?>` ~
+        `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>examplebucket</Name>` ~
+        `<Prefix>p/</Prefix><IsTruncated>` ~ (truncated ? "true" : "false") ~ `</IsTruncated>`;
+    foreach (i; first .. first + count) {
+        // One key needs XML escaping, to exercise in-place decoding.
+        auto key = i == 41 ? "p/a&amp;b &lt;1&gt;.bin" : "p/obj-" ~ i.to!string ~ ".bin";
+        xml ~= `<Contents><Key>` ~ key ~ `</Key><LastModified>2024-01-02T03:04:05.000Z</LastModified>` ~
+            `<ETag>&quot;e` ~ i.to!string ~ `&quot;</ETag><Size>` ~ (i + 1).to!string ~
+            `</Size><StorageClass>STANDARD</StorageClass></Contents>`;
+    }
+    if (truncated) xml ~= `<NextContinuationToken>` ~ nextToken ~ `</NextContinuationToken>`;
+    return xml ~ `</ListBucketResult>`;
+}
+
+void handle(Observed seen, ref Request request, Connection conn) {
+    import std.digest.sha : SHA256, toHexString, LetterCase;
+
+    if (request.method == "PUT") {
+        ubyte[4096] buffer;
+        ulong offset = 0, mismatches = 0;
+        SHA256 hash;
+        hash.start();
+        size_t n;
+        while ((n = conn.readBody(buffer[])) != 0) {
+            foreach (i; 0 .. n) if (buffer[i] != patternByte(offset + i)) mismatches++;
+            hash.put(buffer[0 .. n]);
+            offset += n;
+        }
+        seen.putHeads ~= "PUT " ~ request.target ~ "|" ~ request.header("content-length") ~ "|" ~
+            request.header("x-amz-content-sha256") ~ "|" ~ request.header("authorization");
+        seen.putBodyBytes ~= offset;
+        seen.putMismatches ~= mismatches;
+        seen.putSha256 ~= hash.finish().toHexString!(LetterCase.lower).idup;
+        conn.respond(200, ["ETag": `"upload-etag"`], null);
+        return;
+    }
+
+    if (request.target.startsWith("/?")) {
+        seen.listTargets ~= request.target;
+        string body_;
+        if (request.target.canFind("continuation-token=page%3D3")) body_ = listPage(80, 20, false, null);
+        else if (request.target.canFind("continuation-token=page%3D2")) body_ = listPage(40, 40, true, "page=3");
+        else body_ = listPage(0, 40, true, "page=2");
+        conn.respond(200, ["Content-Type": "application/xml"], body_);
+        return;
+    }
+
+    if (request.target == "/missing.bin") {
+        conn.respond(404, ["Content-Type": "application/xml"],
+            `<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code>` ~
+            `<Message>The specified key does not exist.</Message><Key>missing.bin</Key></Error>`);
+        return;
+    }
+
+    // GET /pattern.bin, whole or ranged, streamed in small writes.
+    ulong first = 0, last = downloadLength - 1;
+    auto range = request.header("range");
+    seen.ranges ~= range;
+    int status = 200;
+    string[string] headers = ["ETag": `"pattern-etag"`, "Content-Type": "application/octet-stream"];
+    if (range.length) {
+        check(range.startsWith("bytes="), "unexpected Range: " ~ range);
+        auto dash = range.indexOf('-');
+        first = range[6 .. dash].to!ulong;
+        if (dash + 1 < range.length) last = range[dash + 1 .. $].to!ulong;
+        status = 206;
+        headers["Content-Range"] = "bytes " ~ first.to!string ~ "-" ~ last.to!string ~ "/" ~
+            downloadLength.to!string;
+    }
+    conn.sendHead(status, headers, last - first + 1);
+    ubyte[1500] buffer;
+    for (ulong at = first; at <= last;) {
+        immutable n = last - at + 1 < buffer.length ? cast(size_t)(last - at + 1) : buffer.length;
+        foreach (i; 0 .. n) buffer[i] = patternByte(at + i);
+        conn.send(buffer[0 .. n]);
+        at += n;
+    }
+}
+
+void main() {
+    writeln("s3lite streaming loopback fixture (issue #607)");
+
+    auto seen = new Observed;
+    auto server = new LoopbackServer((ref Request request, Connection conn) { handle(seen, request, conn); });
+    auto origin = server.origin;
+    auto credentials = Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY");
+
+    // The client's whole working memory: one work buffer and one entry buffer.
+    auto work = new char[recommendedWorkBytes];
+    auto entryBuffer = new char[512];
+
+    {
+        S3Client client;
+        auto opened = openClient(client, origin, credentials, work);
+        check(opened.ok, "client should open: " ~ opened.message[].idup);
+
+        // The reference digest, computed here only so the server-side hash
+        // has something to be compared against.
+        SHA256Reference reference;
+        auto expectedSha = reference.ofPattern(uploadLength);
+
+        writeln("A. upload from a range of ", uploadChunks, " chunks of ", smallChunk, " bytes...");
+        auto unsignedPut = uploadPattern(client, "up/unsigned.bin", PayloadHash.unsigned);
+        check(unsignedPut.ok, "unsigned-payload upload failed: " ~ unsignedPut.status.message[].idup);
+        check(unsignedPut.etag[] == `"upload-etag"`, "ETag not returned: " ~ unsignedPut.etag[].idup);
+        check(unsignedPut.bytesSent == uploadLength, "bytesSent should equal the declared length");
+
+        auto signedPut = uploadPattern(client, "up/signed.bin", PayloadHash.sha256Hex(expectedSha));
+        check(signedPut.ok, "supplied-SHA-256 upload failed: " ~ signedPut.status.message[].idup);
+
+        check(seen.putHeads.length == 2, "server should have seen two PUTs");
+        foreach (i; 0 .. 2) {
+            check(seen.putBodyBytes[i] == uploadLength,
+                "server received " ~ seen.putBodyBytes[i].to!string ~ " body bytes");
+            check(seen.putMismatches[i] == 0, "uploaded bytes differ from the pattern");
+            check(seen.putSha256[i] == expectedSha, "uploaded bytes hash differently");
+            check(seen.putHeads[i].canFind("|" ~ uploadLength.to!string ~ "|"),
+                "Content-Length should declare the total: " ~ seen.putHeads[i]);
+            check(seen.putHeads[i].canFind("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request"),
+                "PUT should be signed: " ~ seen.putHeads[i]);
+        }
+        check(seen.putHeads[0].startsWith("PUT /up/unsigned.bin|") && seen.putHeads[0].canFind("|UNSIGNED-PAYLOAD|"),
+            "unsigned policy should send UNSIGNED-PAYLOAD: " ~ seen.putHeads[0]);
+        check(seen.putHeads[1].canFind("|" ~ expectedSha ~ "|"),
+            "supplied policy should send the caller's digest: " ~ seen.putHeads[1]);
+        writeln("   PASS: ", uploadLength, " bytes arrived intact twice, Content-Length declared up front, ",
+            "UNSIGNED-PAYLOAD and caller-supplied SHA-256 policies both on the wire");
+
+        writeln("B. download into a sink...");
+        PatternSink whole;
+        auto got = downloadViaDelegate(client, "pattern.bin", ByteRange.whole, whole);
+        check(got.ok, "whole download failed: " ~ got.status.message[].idup);
+        check(whole.received == downloadLength && whole.mismatches == 0, "whole download content is wrong");
+        check(got.bytesDelivered == downloadLength && !got.partial, "whole download should be a 200");
+        check(got.hasTotalSize && got.totalSize == downloadLength, "total size should come from Content-Length");
+        check(got.etag[] == `"pattern-etag"` && got.contentType[] == "application/octet-stream",
+            "response headers not captured");
+        check(whole.calls > 1, "the body should arrive in more than one piece");
+
+        PatternSink ranged;
+        ranged.base = 123_456;
+        auto part = downloadViaOutputRange(client, "pattern.bin", ByteRange.bytes(123_456, 223_455), ranged);
+        check(part.ok, "ranged download failed: " ~ part.status.message[].idup);
+        check(ranged.received == 100_000 && ranged.mismatches == 0, "ranged download content is wrong");
+        check(part.partial && part.hasContentLength && part.contentLength == 100_000, "ranged download should be a 206");
+        check(part.hasTotalSize && part.totalSize == downloadLength, "total size should come from Content-Range");
+
+        PatternSink tail;
+        tail.base = downloadLength - 4096;
+        auto resumed = downloadViaDelegate(client, "pattern.bin", ByteRange.from(downloadLength - 4096), tail);
+        check(resumed.ok && tail.received == 4096 && tail.mismatches == 0, "open-ended range is wrong");
+        check(seen.ranges == ["", "bytes=123456-223455", "bytes=" ~ (downloadLength - 4096).to!string ~ "-"],
+            "Range headers on the wire: " ~ seen.ranges.to!string);
+
+        PatternSink untouched;
+        auto missing = downloadViaDelegate(client, "missing.bin", ByteRange.whole, untouched);
+        check(!missing.ok && missing.status.kind == FailureKind.notFound, "404 should be typed notFound");
+        check(missing.status.code[] == "NoSuchKey" && missing.status.httpStatus == 404, "S3 error code not parsed");
+        check(untouched.received == 0, "an error body must not reach the sink");
+        writeln("   PASS: whole object (", whole.calls, " sink calls), bytes=123456-223455 via an output range, ",
+            "an open-ended range, and a typed NoSuchKey that never touched the sink");
+
+        writeln("C. listing across pages through the callback...");
+        EntryFold fold;
+        auto listed = listAll(client, fold, entryBuffer);
+        check(listed.status.ok, "listing failed: " ~ listed.status.message[].idup);
+        check(listed.pages == 3 && listed.entries == listedObjects && fold.count == listedObjects,
+            "expected 100 entries over 3 pages, got " ~ fold.count.to!string ~ " over " ~ listed.pages.to!string);
+        check(fold.totalSize == listedObjects * (listedObjects + 1) / 2, "entry sizes not all delivered");
+        check(fold.firstKey[0 .. fold.firstKeyLen] == "p/obj-0.bin" && fold.lastKey[0 .. fold.lastKeyLen] == "p/obj-99.bin",
+            "entries out of order");
+        check(fold.sawEscapedKey, "an escaped key should be decoded for the callback");
+        check(seen.listTargets.length == 3, "expected three listing requests");
+        check(!seen.listTargets[0].canFind("continuation-token"), "first page must not send a token");
+        check(seen.listTargets[1].canFind("continuation-token=page%3D2") &&
+            seen.listTargets[2].canFind("continuation-token=page%3D3"), "tokens should drive pages 2 and 3");
+        check(seen.listTargets[0].canFind("max-keys=40") && seen.listTargets[0].canFind("prefix=p%2F"),
+            "listing options not on the wire: " ~ seen.listTargets[0]);
+        writeln("   PASS: ", fold.count, " entries over ", listed.pages, " pages through a ", entryBuffer.length,
+            "-byte entry buffer (pages are ~", listPage(0, 40, true, "page=2").length, " bytes)");
+    }
+
+    auto failures = server.stop();
+    check(failures.length == 0, "server-side failure: " ~ failures.to!string);
+
+    writeln("D. connection reuse...");
+    check(server.connectionsAccepted == 1,
+        "one client should use one connection, server accepted " ~ server.connectionsAccepted.to!string);
+    writeln("   PASS: every request above went over 1 TCP connection");
+
+    checkConvenienceRangeUpload();
+
+    writeln("s3lite streaming loopback fixture: PASS (all core calls made from @nogc nothrow functions)");
+}
+
+/// E. The convenience layer accepts ranges the core's `@nogc nothrow` form
+/// cannot: here one whose every chunk is a fresh allocation, and one that
+/// throws. Neither is gathered into a buffer first.
+void checkConvenienceRangeUpload() {
+    import s3lite.http : GetOptions;
+    import std.algorithm.iteration : map;
+    import std.range : iota;
+
+    writeln("E. convenience-layer upload from an allocating range, and from one that throws...");
+
+    static ubyte[] allocatedChunk(ulong index) {
+        auto chunk = new ubyte[smallChunk];
+        foreach (i, ref b; chunk) b = patternByte(index * smallChunk + i);
+        return chunk;
+    }
+
+    auto seen = new Observed;
+    auto server = new LoopbackServer((ref Request request, Connection conn) { handle(seen, request, conn); });
+    GetOptions options;
+    options.urlOverride = server.origin;
+    auto request = convenience.PutObjectRequest("examplebucket", "up/allocating.bin", "us-east-1",
+        Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY"), null, "s3", options);
+
+    enum ulong chunks = 500;
+    auto put = convenience.putObject(request, iota(chunks).map!allocatedChunk, chunks * smallChunk,
+        PayloadHash.unsigned);
+    check(put.ok, "allocating-range upload failed: " ~ put.error.message);
+    check(put.etag == `"upload-etag"`, "ETag not returned");
+    auto failures = server.stop();
+    check(failures.length == 0, "server-side failure: " ~ failures.to!string);
+    check(seen.putBodyBytes == [chunks * smallChunk] && seen.putMismatches == [0UL],
+        "allocating-range upload arrived wrong");
+
+    // A range that throws after 100 chunks: the upload stops, the result
+    // says why, and no exception crosses the transport.
+    auto broken = new LoopbackServer((ref Request request, Connection conn) { handle(seen, request, conn); });
+    options.urlOverride = broken.origin;
+    request.transport = options;
+    auto throwing = iota(chunks).map!((ulong i) {
+        if (i == 100) throw new Exception("disk read failed");
+        return allocatedChunk(i);
+    });
+    auto failed = convenience.putObject(request, throwing, chunks * smallChunk, PayloadHash.unsigned);
+    check(!failed.ok && failed.error.kind == FailureKind.aborted,
+        "a throwing range should abort the upload, got " ~ failed.error.kind.to!string);
+    check(failed.error.message == "body range threw: disk read failed", "unexpected message: " ~ failed.error.message);
+    // The server may or may not have seen part of the request before the
+    // connection dropped; what matters is that it never saw a whole one.
+    broken.stop();
+    check(seen.putHeads.length == 1, "an aborted upload must not complete");
+
+    writeln("   PASS: ", chunks, " freshly allocated chunks uploaded intact; a throwing range is a typed 'aborted'");
+}
+
+/// SHA-256 of the first `length` bytes of the pattern, computed in small
+/// pieces.
+struct SHA256Reference {
+    string ofPattern(ulong length) {
+        import std.digest.sha : SHA256, toHexString, LetterCase;
+        SHA256 hash;
+        hash.start();
+        ubyte[4096] buffer;
+        for (ulong at = 0; at < length;) {
+            immutable n = length - at < buffer.length ? cast(size_t)(length - at) : buffer.length;
+            foreach (i; 0 .. n) buffer[i] = patternByte(at + i);
+            hash.put(buffer[0 .. n]);
+            at += n;
+        }
+        return hash.finish().toHexString!(LetterCase.lower).idup;
+    }
+}

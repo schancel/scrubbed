@@ -6,6 +6,8 @@ loopback-fixture
 live-public-object
 put-list-loopback-fixture
 transfer-bulk-fixture
+streaming-loopback-fixture
+large-object-memory-fixture
 *.o
 *.obj
 .DS_Store

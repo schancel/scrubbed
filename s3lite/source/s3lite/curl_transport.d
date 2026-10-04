@@ -6,13 +6,20 @@
 /// exchange at a time and must not be shared between threads; give each
 /// thread its own.
 ///
+/// The transport sends the method the call names (GET, PUT, HEAD, DELETE),
+/// the path exactly as given (no "." or ".." collapsing), and refuses a
+/// URL or header that contains a control byte before libcurl sees it.
+///
 /// Memory: the request body is copied from the source's current chunk
 /// straight into libcurl's own upload buffer, and response bytes are handed
 /// to the sink straight out of libcurl's receive buffer. This module keeps
 /// no body buffer of its own. What it does use is fixed:
 ///
 ///   - one small C-heap block per transport (`CurlState`), made at open and
-///     freed at close;
+///     freed at close. It holds the state of the exchange in progress, and
+///     it is the only thing libcurl's callbacks are ever pointed at: no
+///     callback data refers to a stack frame, and every callback is
+///     unregistered again before `perform` returns, by whichever path;
 ///   - `maxLineBytes` of stack during `perform`, to NUL-terminate the URL
 ///     and each header line for libcurl;
 ///   - libcurl's internal allocations (its handle, its buffers, one list
@@ -46,19 +53,20 @@ struct CurlOptions {
     int stallTimeoutSecs = 60;
 }
 
-private struct CurlState {
-    CURL* easy;
-    curl_slist* resolveList;
-}
-
-/// State for one exchange, on `curlPerform`'s stack.
+/// State of the exchange in progress. `call` is null between exchanges,
+/// and every callback treats that as "nothing to do".
 private struct Exchange {
-    CURL* easy;
     const(HttpCall)* call;
     const(ubyte)[] chunk; // unread remainder of the body chunk last pulled
     bool bodyEnded;
     bool aborted;
     bool rewindFailed;
+}
+
+private struct CurlState {
+    CURL* easy;
+    curl_slist* resolveList;
+    Exchange exchange;
 }
 
 private shared int globalInitState; // 0: not started, 1: in progress, 2: done
@@ -93,7 +101,12 @@ private int responseStatus(CURL* easy) @nogc nothrow {
 }
 
 private extern(C) size_t readCallback(char* ptr, size_t size, size_t nmemb, void* userdata) @nogc nothrow {
-    auto x = cast(Exchange*) userdata;
+    auto x = &(cast(CurlState*) userdata).exchange;
+    if (x.call is null || !x.call.hasBody || x.call.pull is null) return 0;
+    // libcurl does not stop at a failed rewind: it would go on to send the
+    // rest of a body it could not restart, as if it were the whole of it.
+    // Nothing more is pulled from the source once that has happened.
+    if (x.rewindFailed) return CURL_READFUNC_ABORT;
     immutable want = size * nmemb;
     size_t filled = 0;
     while (filled < want && !x.bodyEnded) {
@@ -112,9 +125,13 @@ private extern(C) size_t readCallback(char* ptr, size_t size, size_t nmemb, void
 }
 
 private extern(C) int seekCallback(void* userdata, long offset, int origin) @nogc nothrow {
-    auto x = cast(Exchange*) userdata;
+    auto x = &(cast(CurlState*) userdata).exchange;
     // libcurl asks for this only to resend a body from its first byte.
-    if (offset == 0 && origin == 0 && x.call.rewind !is null && x.call.rewind()) {
+    if (offset != 0 || origin != 0) return CURL_SEEKFUNC_FAIL;
+    // With no body there is nothing to reposition.
+    if (x.call is null || !x.call.hasBody) return CURL_SEEKFUNC_OK;
+    if (x.call.rewind !is null && x.call.rewind()) {
+        // Whatever was left of the chunk in hand belongs to the old pass.
         x.chunk = null;
         x.bodyEnded = false;
         return CURL_SEEKFUNC_OK;
@@ -124,23 +141,25 @@ private extern(C) int seekCallback(void* userdata, long offset, int origin) @nog
 }
 
 private extern(C) size_t writeCallback(const(char)* ptr, size_t size, size_t nmemb, void* userdata) @nogc nothrow {
-    auto x = cast(Exchange*) userdata;
+    auto state = cast(CurlState*) userdata;
+    auto x = &state.exchange;
     immutable n = size * nmemb;
-    if (n == 0 || x.call.onBody is null) return n;
-    if (x.call.onBody(responseStatus(x.easy), cast(const(ubyte)[]) ptr[0 .. n])) return n;
+    if (n == 0 || x.call is null || x.call.onBody is null) return n;
+    if (x.call.onBody(responseStatus(state.easy), cast(const(ubyte)[]) ptr[0 .. n])) return n;
     x.aborted = true;
     return size_t.max; // any value other than `n` abandons the transfer
 }
 
 private extern(C) size_t headerCallback(const(char)* ptr, size_t size, size_t nmemb, void* userdata) @nogc nothrow {
-    auto x = cast(Exchange*) userdata;
+    auto state = cast(CurlState*) userdata;
+    auto x = &state.exchange;
     immutable n = size * nmemb;
-    if (x.call.onHeader is null) return n;
+    if (x.call is null || x.call.onHeader is null) return n;
     auto line = trim(ptr[0 .. n]);
     // Status lines and the blank separator carry no "name: value".
     immutable colon = indexOf(line, ':');
     if (colon > 0 && !(line.length >= 5 && line[0 .. 5] == "HTTP/"))
-        x.call.onHeader(responseStatus(x.easy), line[0 .. colon], trim(line[colon + 1 .. $]));
+        x.call.onHeader(responseStatus(state.easy), line[0 .. colon], trim(line[colon + 1 .. $]));
     return n;
 }
 
@@ -166,61 +185,111 @@ private const(char)[] curlErrorText(int code) @nogc nothrow {
     return text is null ? null : text[0 .. strlen(text)];
 }
 
+private TransportResult refuse(TransportFailure failure, const(char)[] why) @nogc nothrow pure {
+    return TransportResult(failure, 0, 0, why);
+}
+
+/// Registers the callbacks, all pointed at the heap state.
+private void attachCallbacks(CurlState* state) @nogc nothrow {
+    auto easy = state.easy;
+    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &writeCallback);
+    curl_easy_setopt(easy, CURLOPT_WRITEDATA, state);
+    curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &headerCallback);
+    curl_easy_setopt(easy, CURLOPT_HEADERDATA, state);
+    curl_easy_setopt(easy, CURLOPT_READFUNCTION, &readCallback);
+    curl_easy_setopt(easy, CURLOPT_READDATA, state);
+    curl_easy_setopt(easy, CURLOPT_SEEKFUNCTION, &seekCallback);
+    curl_easy_setopt(easy, CURLOPT_SEEKDATA, state);
+}
+
+/// Unregisters every callback and its data, the header list, and the
+/// exchange itself, so nothing registered for one call outlives it.
+private void detachCallbacks(CurlState* state) @nogc nothrow {
+    auto easy = state.easy;
+    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_WRITEDATA, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_HEADERDATA, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_READFUNCTION, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_READDATA, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_SEEKFUNCTION, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_SEEKDATA, cast(void*) null);
+    curl_easy_setopt(easy, CURLOPT_HTTPHEADER, cast(curl_slist*) null);
+    curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, cast(char*) null);
+    state.exchange = Exchange.init;
+}
+
 private TransportResult curlPerform(void* context, scope ref const HttpCall call) @nogc nothrow {
     auto state = cast(CurlState*) context;
     auto easy = state.easy;
     char[maxLineBytes + 1] line = void;
 
-    if (!terminated(line, call.url))
-        return TransportResult(TransportFailure.requestTooLarge, 0, 0, "URL exceeds the transport's line bound");
-    curl_easy_setopt(easy, CURLOPT_URL, line.ptr);
+    // Refuse what cannot be sent as described before libcurl sees any of it.
+    if (hasControlBytes(call.url) || indexOf(call.url, ' ') >= 0)
+        return refuse(TransportFailure.invalidCall, "URL contains a control byte or a space");
+    foreach (ref h; call.headers)
+        if (!isHeaderName(h.name) || hasControlBytes(h.value))
+            return refuse(TransportFailure.invalidCall, "header name or value contains a control byte");
+    if (call.hasBody && call.method != HttpMethod.put)
+        return refuse(TransportFailure.invalidCall, "only PUT carries a request body");
+    if (call.hasBody && call.pull is null)
+        return refuse(TransportFailure.invalidCall, "request has a body but no source");
+    if (call.hasBody && call.bodyLength > maxBodyLength)
+        return refuse(TransportFailure.invalidCall, "body length exceeds maxBodyLength");
 
+    if (!terminated(line, call.url))
+        return refuse(TransportFailure.requestTooLarge, "URL exceeds the transport's line bound");
+
+    // From here on the handle is being configured for this call; whatever
+    // the exit, it is left with no callback, no header list and no call.
     curl_slist* headerList;
     scope(exit) {
-        // The handle outlives this list; never leave it pointing at freed nodes.
-        curl_easy_setopt(easy, CURLOPT_HTTPHEADER, cast(curl_slist*) null);
+        detachCallbacks(state);
         if (headerList !is null) curl_slist_free_all(headerList);
     }
+
+    curl_easy_setopt(easy, CURLOPT_URL, line.ptr);
     foreach (ref h; call.headers) {
         if (h.name.length + 2 + h.value.length > maxLineBytes)
-            return TransportResult(TransportFailure.requestTooLarge, 0, 0,
-                "header line exceeds the transport's line bound");
+            return refuse(TransportFailure.requestTooLarge, "header line exceeds the transport's line bound");
         line[0 .. h.name.length] = h.name[];
         line[h.name.length .. h.name.length + 2] = ": ";
         line[h.name.length + 2 .. h.name.length + 2 + h.value.length] = h.value[];
         line[h.name.length + 2 + h.value.length] = '\0';
         auto grown = curl_slist_append(headerList, line.ptr);
-        if (grown is null)
-            return TransportResult(TransportFailure.other, 0, 0, "curl_slist_append failed");
+        if (grown is null) return refuse(TransportFailure.other, "curl_slist_append failed");
         headerList = grown;
     }
     curl_easy_setopt(easy, CURLOPT_HTTPHEADER, headerList);
 
-    auto exchange = Exchange(easy, &call);
-    curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, &writeCallback);
-    curl_easy_setopt(easy, CURLOPT_WRITEDATA, &exchange);
-    curl_easy_setopt(easy, CURLOPT_HEADERFUNCTION, &headerCallback);
-    curl_easy_setopt(easy, CURLOPT_HEADERDATA, &exchange);
+    state.exchange = Exchange(&call);
+    attachCallbacks(state);
 
-    if (call.hasBody) {
-        if (call.pull is null)
-            return TransportResult(TransportFailure.other, 0, 0, "request has a body but no source");
-        curl_easy_setopt(easy, CURLOPT_UPLOAD, 1L);
-        curl_easy_setopt(easy, CURLOPT_INFILESIZE_LARGE, cast(long) call.bodyLength);
-        curl_easy_setopt(easy, CURLOPT_READFUNCTION, &readCallback);
-        curl_easy_setopt(easy, CURLOPT_READDATA, &exchange);
-        curl_easy_setopt(easy, CURLOPT_SEEKFUNCTION, &seekCallback);
-        curl_easy_setopt(easy, CURLOPT_SEEKDATA, &exchange);
-    } else {
-        curl_easy_setopt(easy, CURLOPT_UPLOAD, 0L);
-        curl_easy_setopt(easy, CURLOPT_HTTPGET, 1L);
+    // The method is the call's, stated outright. Start from a plain GET so
+    // nothing of the previous exchange's verb survives.
+    curl_easy_setopt(easy, CURLOPT_UPLOAD, 0L);
+    curl_easy_setopt(easy, CURLOPT_NOBODY, 0L);
+    curl_easy_setopt(easy, CURLOPT_HTTPGET, 1L);
+    final switch (call.method) {
+        case HttpMethod.get:
+            break;
+        case HttpMethod.put:
+            curl_easy_setopt(easy, CURLOPT_UPLOAD, 1L);
+            curl_easy_setopt(easy, CURLOPT_INFILESIZE_LARGE, call.hasBody ? cast(long) call.bodyLength : 0L);
+            break;
+        case HttpMethod.head:
+            curl_easy_setopt(easy, CURLOPT_NOBODY, 1L);
+            break;
+        case HttpMethod.delete_:
+            curl_easy_setopt(easy, CURLOPT_CUSTOMREQUEST, "DELETE\0".ptr);
+            break;
     }
 
     immutable code = curl_easy_perform(easy);
     if (code != CURLE_OK) {
         auto failure = classifyCurlError(code);
-        if (exchange.rewindFailed) failure = TransportFailure.bodyNotRewindable;
-        else if (exchange.aborted) failure = TransportFailure.aborted;
+        if (state.exchange.rewindFailed) failure = TransportFailure.bodyNotRewindable;
+        else if (state.exchange.aborted) failure = TransportFailure.aborted;
         return TransportResult(failure, 0, code, curlErrorText(code));
     }
     return TransportResult(TransportFailure.none, responseStatus(easy), 0, null);
@@ -259,6 +328,10 @@ TransportResult openCurlTransport(scope const CurlOptions options, out Transport
     curl_easy_setopt(easy, CURLOPT_MAXREDIRS, 0L);
     curl_easy_setopt(easy, CURLOPT_NOPROGRESS, 1L);
     curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);
+    // Send the path exactly as given. Without this libcurl collapses "."
+    // and ".." segments, so the request would name a different object from
+    // the one that was signed.
+    curl_easy_setopt(easy, CURLOPT_PATH_AS_IS, 1L);
     curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, cast(long) options.connectTimeoutMs);
     curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, cast(long) options.totalTimeoutMs);
     if (options.stallTimeoutSecs > 0) {
@@ -314,4 +387,79 @@ unittest {
     HttpCall call;
     call.url = huge[];
     assert(t.perform(call).failure == TransportFailure.requestTooLarge);
+}
+
+unittest {
+    // Text that could split a request or header line never reaches libcurl,
+    // and a call that misdescribes itself is refused.
+    Transport t;
+    assert(openCurlTransport(CurlOptions.init, t).ok);
+    scope(exit) t.close();
+
+    HttpCall call;
+    call.url = "http://127.0.0.1:1/a\r\nX: 1";
+    assert(t.perform(call).failure == TransportFailure.invalidCall);
+    call.url = "http://127.0.0.1:1/a b";
+    assert(t.perform(call).failure == TransportFailure.invalidCall);
+
+    call.url = "http://127.0.0.1:1/";
+    foreach (bad; [HttpHeader("X-A", "v\r\nX-B: 1"), HttpHeader("X-A", "v\n"), HttpHeader("X-A", "v\0"),
+            HttpHeader("X\r\n-A", "v"), HttpHeader("X A", "v"), HttpHeader("X:A", "v"), HttpHeader("", "v")]) {
+        HttpHeader[1] headers = [bad];
+        call.headers = headers[];
+        assert(t.perform(call).failure == TransportFailure.invalidCall);
+    }
+    call.headers = null;
+
+    bool pull(ref const(ubyte)[] chunk) @nogc nothrow { chunk = null; return true; }
+    call.hasBody = true;
+    call.pull = &pull;
+    call.method = HttpMethod.get;
+    assert(t.perform(call).failure == TransportFailure.invalidCall); // body on a GET
+    call.method = HttpMethod.put;
+    call.bodyLength = cast(ulong) long.max + 1;
+    assert(t.perform(call).failure == TransportFailure.invalidCall);
+    call.bodyLength = 0;
+    call.pull = null;
+    assert(t.perform(call).failure == TransportFailure.invalidCall);
+}
+
+unittest {
+    // After an exchange -- here one that fails, with a body that cannot be
+    // rewound -- nothing of it remains on the handle's state, and a
+    // callback libcurl might still make (it keeps a pending rewind across
+    // requests) finds nothing to act on: no stale call, no dead pointer.
+    Transport t;
+    assert(openCurlTransport(CurlOptions.init, t).ok);
+    scope(exit) t.close();
+    auto state = cast(CurlState*) t.context;
+
+    static immutable ubyte[4] bytes = [1, 2, 3, 4];
+    int pulls;
+    bool pull(ref const(ubyte)[] chunk) @nogc nothrow { chunk = pulls++ == 0 ? bytes[] : null; return true; }
+    {
+        // The call lives in an inner scope: once it is gone, any pointer
+        // to it would dangle.
+        HttpCall call;
+        call.method = HttpMethod.put;
+        call.url = "http://127.0.0.1:1/unreachable";
+        call.hasBody = true;
+        call.bodyLength = bytes.length;
+        call.pull = &pull;
+        assert(t.perform(call).failure == TransportFailure.couldNotConnect);
+    }
+    assert(state.exchange == Exchange.init);
+
+    char[8] buffer;
+    assert(seekCallback(state, 0, 0) == CURL_SEEKFUNC_OK);
+    assert(readCallback(buffer.ptr, 1, buffer.length, state) == 0);
+    assert(writeCallback(buffer.ptr, 1, buffer.length, state) == buffer.length);
+    assert(headerCallback("X: y\r\n".ptr, 1, 6, state) == 6);
+    assert(state.exchange == Exchange.init && pulls == 0);
+
+    // The same holds after a call that is refused before it starts.
+    HttpCall bad;
+    bad.url = "http://127.0.0.1:1/a b";
+    assert(t.perform(bad).failure == TransportFailure.invalidCall);
+    assert(state.exchange == Exchange.init);
 }

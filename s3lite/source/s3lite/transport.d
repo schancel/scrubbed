@@ -33,11 +33,39 @@ enum TransportFailure {
     bodyNotRewindable,
     /// The URL or a header line exceeds the transport's fixed bounds.
     requestTooLarge,
+    /// The call cannot be sent as described: a control byte in the URL or
+    /// in a header, a body on a method that takes none, or a body length
+    /// the transport cannot declare.
+    invalidCall,
 }
 
+/// The verb of an exchange. A transport sends exactly this method; it does
+/// not infer one from whether there is a body. Only `put` carries a
+/// request body.
 enum HttpMethod : ubyte {
     get,
     put,
+    head,
+    delete_,
+}
+
+/// Largest request body length a call may declare.
+enum ulong maxBodyLength = long.max;
+
+/// True if `text` could end or split a header line or a request line: any
+/// control byte (CR, LF, NUL and the rest below 0x20) or DEL. Transports
+/// refuse such text with `TransportFailure.invalidCall`.
+bool hasControlBytes(scope const(char)[] text) @nogc nothrow pure {
+    foreach (c; text) if (c < 0x20 || c == 0x7f) return true;
+    return false;
+}
+
+/// True if `name` is a usable header name: non-empty, visible ASCII, no
+/// separator a header line gives meaning to.
+bool isHeaderName(scope const(char)[] name) @nogc nothrow pure {
+    if (name.length == 0) return false;
+    foreach (c; name) if (c <= 0x20 || c >= 0x7f || c == ':') return false;
+    return true;
 }
 
 /// One header, name and value exactly as sent or received.
@@ -71,8 +99,9 @@ struct HttpCall {
     const(char)[] url;
     const(HttpHeader)[] headers;
 
-    /// Set for methods that send a body. `bodyLength` is the exact number of
-    /// bytes `pull` will produce and is sent as `Content-Length`.
+    /// Set, with `method == put`, to send a body. `bodyLength` is the exact
+    /// number of bytes `pull` will produce (at most `maxBodyLength`) and is
+    /// sent as `Content-Length`. A `put` without it sends an empty body.
     bool hasBody;
     ulong bodyLength;
     BodyPull pull;

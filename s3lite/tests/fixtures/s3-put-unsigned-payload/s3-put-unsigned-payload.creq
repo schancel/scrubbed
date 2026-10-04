@@ -1,0 +1,9 @@
+PUT
+/test%24file.text
+
+host:examplebucket.s3.amazonaws.com
+x-amz-content-sha256:UNSIGNED-PAYLOAD
+x-amz-date:20130524T000000Z
+
+host;x-amz-content-sha256;x-amz-date
+UNSIGNED-PAYLOAD

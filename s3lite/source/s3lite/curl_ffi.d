@@ -5,14 +5,14 @@
 /// package does not import scrubbed's module or link against anything in
 /// scrubbed's own tree.
 ///
-/// Declares only the easy-handle entry points needed for a single
-/// synchronous HTTP(S) GET with custom request headers, response-header
-/// capture, and response-body capture. No multi-handle/async machinery --
-/// this package issues one request at a time (see the S02+ "two-level
-/// concurrency" non-goal note in `source/s3lite/client.d`).
+/// Declares only the easy-handle entry points `s3lite.curl_transport` needs:
+/// a blocking exchange with custom request headers, a pulled request body,
+/// and pushed response headers and body. No multi-handle/async machinery.
+/// Every entry point is `@nogc nothrow`: libcurl is C and neither throws nor
+/// touches the D collector.
 module s3lite.curl_ffi;
 
-extern(C) nothrow {
+extern(C) @nogc nothrow {
     struct CURL;
 
     /// curl_slist, include/curl/curl.h.
@@ -52,17 +52,25 @@ enum : int {
     CURLOPT_WRITEFUNCTION = 20_011,
     CURLOPT_READFUNCTION = 20_012,
     CURLOPT_HEADERDATA = 10_029,
+    CURLOPT_LOW_SPEED_LIMIT = 19,
+    CURLOPT_LOW_SPEED_TIME = 20,
     CURLOPT_NOPROGRESS = 43,
+    CURLOPT_NOBODY = 44,
     CURLOPT_UPLOAD = 46,
     CURLOPT_FOLLOWLOCATION = 52,
     CURLOPT_SSL_VERIFYPEER = 64,
     CURLOPT_CAINFO = 10_065,
     CURLOPT_MAXREDIRS = 68,
     CURLOPT_HEADERFUNCTION = 20_079,
+    CURLOPT_HTTPGET = 80,
     CURLOPT_SSL_VERIFYHOST = 81,
     CURLOPT_NOSIGNAL = 99,
     CURLOPT_TIMEOUT_MS = 155,
     CURLOPT_CONNECTTIMEOUT_MS = 156,
+    CURLOPT_CUSTOMREQUEST = 10_036,
+    CURLOPT_PATH_AS_IS = 234,
+    CURLOPT_SEEKDATA = 10_168,
+    CURLOPT_SEEKFUNCTION = 20_167,
     CURLOPT_RESOLVE = 10_203,
     CURLOPT_PROTOCOLS_STR = 10_318,
     CURLOPT_REDIR_PROTOCOLS_STR = 10_319,
@@ -70,7 +78,14 @@ enum : int {
 
     // CURLINFO values, include/curl/curl.h.
     CURLINFO_RESPONSE_CODE = 0x20_0002,
+
+    // Callback return values, include/curl/curl.h.
+    CURL_SEEKFUNC_OK = 0,
+    CURL_SEEKFUNC_FAIL = 1,
 }
+
+/// Returned by a read callback to abandon the transfer.
+enum size_t CURL_READFUNC_ABORT = 0x1000_0000;
 
 unittest {
     // ABI smoke test: the declared entry points link and the fixed

@@ -1,38 +1,59 @@
-/// Re-verifies the Phobos-HMAC-based `s3lite.sigv4` signer against the real
-/// AWS SigV4 test-suite fixtures, byte-exact, after porting the algorithm
-/// off scrubbed's `crypto.sha256`/`crypto.hmac_sha256` and onto
-/// `std.digest.hmac.HMAC!(std.digest.sha.SHA256)`.
+/// Verifies the collector-free `s3lite.sigv4` signer, byte-exact, against
+/// published SigV4 vectors: canonical request, string-to-sign and
+/// Authorization header.
 ///
-/// Evidence source (unchanged from scrubbed's own prior evaluation, see
-/// `experiments/sigv4_check/evaluate.d` in the parent repository): the
-/// AWS-published SigV4 test suite described at
-/// https://docs.aws.amazon.com/general/latest/gr/signature-v4-test-suite.html,
-/// obtained via https://github.com/saibotsivad/aws-sig-v4-test-suite
-/// (Apache-2.0; that repository's own README states "these are the test
-/// suite files found in the AWS documentation"). The `.req`/`.creq`/`.sts`/
-/// `.authz` fixture quadruples under `tests/fixtures/` are byte-for-byte
-/// copies of the same files already vetted in the parent repository's
-/// `experiments/sigv4_check/fixtures/`, copied here so this package is
-/// fully self-contained (no path back into the parent `scrubbed` checkout).
-/// Shared test credentials/config (accessKeyId=AKIDEXAMPLE, secretAccessKey,
-/// region=us-east-1, service=service) come from that same source's
-/// `index.json` `config` object.
+/// Three groups of vectors under `tests/fixtures/`, each a `.req`/`.creq`/
+/// `.sts`/`.authz` quadruple:
+///
+///   1. The AWS SigV4 test suite
+///      (https://docs.aws.amazon.com/general/latest/gr/signature-v4-test-suite.html,
+///      obtained via https://github.com/saibotsivad/aws-sig-v4-test-suite,
+///      Apache-2.0): eight cases signed for a service named "service".
+///   2. Two examples from the Amazon S3 API reference, "Signature
+///      Calculations for the Authorization Header: Transferring Payload in a
+///      Single Chunk": a ranged GetObject and a ListObjects. Their
+///      signatures are the ones that page prints.
+///      A third from the same page, `s3-put-object`, signs a body and two
+///      headers beyond the usual three (`Date`, `x-amz-storage-class`).
+///   3. Two vectors AWS does not publish, with the credentials, date and
+///      bucket of group 2. Their expected files were derived with a
+///      separate implementation (Python's `hashlib`/`hmac`), which
+///      reproduces all three group-2 signatures; they are not AWS's.
+///      `s3-put-unsigned-payload`: a PutObject under the
+///      `UNSIGNED-PAYLOAD` policy.
+///      `s3-put-extra-signed-headers`: a PutObject carrying nine signed
+///      headers -- content type, Content-MD5, storage class, a checksum
+///      and user metadata -- with mixed-case names and a value that needs
+///      trimming.
+///
+/// The signer takes the payload hash as an input. For a case whose request
+/// carries `X-Amz-Content-Sha256`, that header's value is the hash, as it is
+/// for S3; otherwise the hash is the SHA-256 of the request body.
 ///
 /// Run via: `dub run --config=sigv4-fixtures` (from this package's own
 /// directory).
-import s3lite.sigv4 : Header, SigningInput, signRequest;
+import s3lite.fixed : Writer;
+import s3lite.sigv4;
 import std.array : split;
 import std.file : readText;
-import std.path : buildPath, dirName;
+import std.path : buildPath;
 import std.stdio : writeln;
-import std.string : indexOf, startsWith;
+import std.string : indexOf;
+import std.uni : sicmp;
 
-enum accessKeyId = "AKIDEXAMPLE";
-enum secretAccessKey = "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY";
+/// Who signs, when, and for which service.
+struct Signer {
+    string accessKeyId;
+    string secretAccessKey;
+    string amzDate;
+    string service;
+}
+
+immutable suiteSigner = Signer("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+    "20150830T123600Z", "service");
+immutable s3DocsSigner = Signer("AKIAIOSFODNN7EXAMPLE", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "20130524T000000Z", "s3");
 enum region = "us-east-1";
-enum service = "service";
-enum amzDate = "20150830T123600Z";
-enum dateStamp = "20150830";
 
 void check(bool condition, string label) {
     if (!condition) throw new Exception(label);
@@ -86,7 +107,32 @@ ParsedRequest parseReq(string text) {
     return ParsedRequest(method, path, query, headers, cast(ubyte[]) bodyText);
 }
 
-void checkCase(string fixturesRoot, string name) {
+/// The signing itself: no collector, no exceptions, caller's buffer.
+SignFailure sign(scope ref const ParsedRequest parsed, scope ref const Signer signer,
+        scope const(char)[] payloadHash, ref Writer w, out SignedRequest signed) @nogc nothrow pure {
+    immutable uriStart = w.mark;
+    canonicalUriInto(w, parsed.path);
+    auto uri = w.since(uriStart);
+    immutable queryStart = w.mark;
+    auto queryStatus = canonicalQueryInto(w, parsed.query);
+    if (queryStatus != SignFailure.none) return queryStatus;
+
+    SigningInput input;
+    input.method = parsed.method;
+    input.canonicalUri = uri;
+    input.canonicalQuery = w.since(queryStart);
+    input.headers = parsed.headers;
+    input.payloadHash = payloadHash;
+    input.accessKeyId = signer.accessKeyId;
+    input.secretAccessKey = signer.secretAccessKey;
+    input.amzDate = signer.amzDate;
+    input.dateStamp = signer.amzDate[0 .. 8];
+    input.region = region;
+    input.service = signer.service;
+    return signRequest(input, w, signed);
+}
+
+void checkCase(string fixturesRoot, string name, Signer signer) {
     auto dir = buildPath(fixturesRoot, name);
     auto reqText = readText(buildPath(dir, name ~ ".req"));
     auto expectedCreq = readText(buildPath(dir, name ~ ".creq"));
@@ -94,28 +140,36 @@ void checkCase(string fixturesRoot, string name) {
     auto expectedAuthz = readText(buildPath(dir, name ~ ".authz"));
 
     auto parsed = parseReq(reqText);
-    auto input = SigningInput(parsed.method, parsed.path, parsed.query,
-        parsed.headers, parsed.body_, accessKeyId, secretAccessKey,
-        amzDate, dateStamp, region, service);
-    auto signed = signRequest(input);
+    string payloadHash = sha256Hex(parsed.body_).idup;
+    foreach (h; parsed.headers)
+        if (sicmp(h.name, "X-Amz-Content-Sha256") == 0) payloadHash = h.value.idup;
+
+    char[2048] work;
+    auto w = Writer(work[]);
+    SignedRequest signed;
+    check(sign(parsed, signer, payloadHash, w, signed) == SignFailure.none, name ~ ": signing failed");
 
     check(signed.canonicalRequest == expectedCreq, name ~ ": canonical request mismatch");
     check(signed.stringToSign == expectedSts, name ~ ": string-to-sign mismatch");
     check(signed.authorizationHeader == expectedAuthz, name ~ ": authorization header/signature mismatch");
-    writeln("  ", name, ": PASS (canonical request, string-to-sign, signature all match AWS test suite)");
+    writeln("  ", name, ": PASS (canonical request, string-to-sign, signature)");
 }
 
 void main() {
-    // __FILE_FULL_PATH__ would be more robust, but buildPath from the
-    // process cwd matches how `dub run` invokes this (cwd == package root).
+    // Relative to the process cwd, which is the package root under `dub run`.
     auto fixturesRoot = buildPath("tests", "fixtures");
-    writeln("s3lite SigV4 re-verification: Phobos-HMAC signer vs. AWS SigV4 test suite fixtures");
+    writeln("s3lite SigV4 verification: @nogc signer vs. published vectors");
     foreach (name; ["get-vanilla", "get-vanilla-query", "post-vanilla",
         "get-unreserved", "get-vanilla-query-order-key-case",
         "get-header-key-duplicate", "get-header-value-order",
         "get-header-value-trim"])
-        checkCase(fixturesRoot, name);
-    writeln("s3lite sigv4 re-verification: 8/8 AWS test-suite fixtures PASS "
-        ~ "(canonical request + string-to-sign + final signature, byte-exact, "
-        ~ "on std.digest.hmac.HMAC!SHA256)");
+        checkCase(fixturesRoot, name, suiteSigner);
+    foreach (name; ["s3-get-object-range", "s3-list-objects", "s3-put-object"])
+        checkCase(fixturesRoot, name, s3DocsSigner);
+    writeln("  (independently derived, not published by AWS:)");
+    foreach (name; ["s3-put-unsigned-payload", "s3-put-extra-signed-headers"])
+        checkCase(fixturesRoot, name, s3DocsSigner);
+    writeln("s3lite sigv4 verification: 8/8 AWS test-suite vectors, 3/3 S3 API-reference vectors "
+        ~ "and 2/2 independently derived vectors (unsigned payload, extra signed headers) PASS "
+        ~ "(canonical request + string-to-sign + signature, byte-exact)");
 }

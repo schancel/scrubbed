@@ -1,0 +1,10 @@
+PUT /photos/2013/a b.jpg HTTP/1.1
+Host:examplebucket.s3.amazonaws.com
+X-Amz-Date:20130524T000000Z
+X-Amz-Content-Sha256:UNSIGNED-PAYLOAD
+Content-Type:image/jpeg
+Content-MD5:DA7ZlRH1pbZ3bkrR3F5vrA==
+x-amz-storage-class:STANDARD_IA
+x-amz-checksum-crc32c:yZRlqg==
+x-amz-meta-Owner:  alice   example  
+X-Amz-Meta-Batch-Id:607

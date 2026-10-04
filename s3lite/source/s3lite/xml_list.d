@@ -1,4 +1,4 @@
-/// Minimal parser for S3's real `ListObjectsV2` response shape:
+/// Streaming parser for S3's `ListObjectsV2` response:
 ///
 ///   <?xml version="1.0" encoding="UTF-8"?>
 ///   <ListBucketResult>
@@ -10,169 +10,347 @@
 ///       <Size>1234</Size>
 ///     </Contents>
 ///     ...
+///     <CommonPrefixes><Prefix>a/</Prefix></CommonPrefixes>
 ///     <NextContinuationToken>...</NextContinuationToken>
 ///   </ListBucketResult>
 ///
-/// Deliberately not a general-purpose XML parser -- same rationale as
-/// `s3lite.xml_error`: S3's own `ListBucketResult` shape is small, flat (one
-/// level of repeated `<Contents>` elements, no nested `<Contents>` inside
-/// `<Contents>`), and well-known, so a targeted tag extractor keeps this
-/// package at zero dependencies instead of pulling in a real XML library.
+/// The body is fed in as it arrives, in pieces of any size. Each complete
+/// `<Contents>` element is handed to a callback as views into the caller's
+/// buffer and then discarded, so the memory needed is that of the largest
+/// single entry -- not of the page, and not of the listing. Nothing is
+/// allocated.
+///
+/// Not a general XML parser, for the same reason as `s3lite.xml_error`: the
+/// shape is flat and well known (repeated `<Contents>` at one level, never
+/// nested).
 module s3lite.xml_list;
 
-import std.conv : to;
-import std.string : indexOf;
+import s3lite.fixed : indexOf, parseUnsigned, startsWith, trim;
+import s3lite.xml_text : decodeEntitiesInPlace, elementText;
 
-/// One object entry from a `ListObjectsV2` page.
-struct S3Object {
-    string key;
-    size_t size;
-    string etag;
-    string lastModified;
+/// One listing entry. The slices point into the caller's entry buffer and
+/// are valid only until the callback returns; copy what must be kept.
+struct S3ObjectView {
+    const(char)[] key;
+    ulong size;
+    const(char)[] etag;         /// as S3 sends it, quotes included
+    const(char)[] lastModified; /// ISO 8601, as S3 sends it
 }
 
-struct ParsedListPage {
-    bool valid;              // true if this looked like a well-formed <ListBucketResult>
-    S3Object[] objects;
+/// Receives each entry in listing order. Returning false stops the listing.
+alias ListEntryCallback = bool delegate(scope ref const S3ObjectView entry) @nogc nothrow;
+
+/// Receives each common prefix (the "directories" a delimiter groups keys
+/// into), in listing order. The slice is valid only during the call.
+/// Returning false stops the listing.
+alias ListPrefixCallback = bool delegate(scope const(char)[] prefix) @nogc nothrow;
+
+/// An entry buffer must hold the largest single `<Contents>` element (or
+/// continuation-token element) of a response. S3 keys are at most 1024
+/// bytes, and a byte can take up to six when escaped, so 8 KiB covers the
+/// worst case; typical entries are a few hundred bytes.
+enum size_t recommendedListEntryBuffer = 8 * 1024;
+/// Smallest entry buffer `ListPageParser` accepts.
+enum size_t minListEntryBuffer = 256;
+
+enum ListFeed {
+    more,          /// chunk consumed; feed the next one
+    stopped,       /// the callback returned false
+    entryTooLarge, /// one element does not fit the entry buffer
+}
+
+struct ListPageParser {
+    private char[] buf;
+    private size_t fill;
+    private char[] tokenBuf;
+    private size_t tokenLen;
+
+    bool sawRoot;        /// a `<ListBucketResult>` element was opened
+    bool sawRootEnd;     /// ... and closed: the body is complete
     bool isTruncated;
-    string nextContinuationToken; // "" if isTruncated is false, or S3 omitted it
-}
+    bool tokenTooLarge;  /// the continuation token did not fit `tokenStorage`
+    ulong entries;       /// entries delivered so far
+    ulong prefixes;      /// common prefixes delivered so far
 
-private string decodeEntities(string s) pure {
-    import std.array : appender;
-    auto result = appender!string;
-    size_t i = 0;
-    while (i < s.length) {
-        if (s[i] == '&') {
-            if (i + 4 <= s.length && s[i .. i + 4] == "&lt;") { result ~= '<'; i += 4; continue; }
-            if (i + 4 <= s.length && s[i .. i + 4] == "&gt;") { result ~= '>'; i += 4; continue; }
-            if (i + 5 <= s.length && s[i .. i + 5] == "&amp;") { result ~= '&'; i += 5; continue; }
-            if (i + 6 <= s.length && s[i .. i + 6] == "&quot;") { result ~= '"'; i += 6; continue; }
-            if (i + 6 <= s.length && s[i .. i + 6] == "&apos;") { result ~= '\''; i += 6; continue; }
-        }
-        result ~= s[i];
-        i++;
+@nogc nothrow:
+
+    /// `entryBuffer` is working memory; `tokenStorage` receives the
+    /// decoded `NextContinuationToken`. Both are borrowed while the parser
+    /// is in use.
+    this(char[] entryBuffer, char[] tokenStorage) pure {
+        buf = entryBuffer;
+        tokenBuf = tokenStorage;
     }
-    return result.data;
-}
 
-/// Extracts the first `<tag>...</tag>` at or after `from` within `xml`,
-/// scoped to end no later than `limit` (so a top-level tag search never
-/// reaches into a later sibling's element by accident). Returns null (not
-/// found) via `found` rather than throwing -- callers decide what a missing
-/// optional tag means.
-private string extractTagIn(string xml, string tag, size_t from, size_t limit, out bool found) {
-    auto open = "<" ~ tag ~ ">";
-    auto close = "</" ~ tag ~ ">";
-    auto start = xml.indexOf(open, from);
-    if (start < 0 || cast(size_t) start >= limit) { found = false; return null; }
-    start += open.length;
-    auto end = xml.indexOf(close, start);
-    if (end < 0 || cast(size_t) end > limit) { found = false; return null; }
-    found = true;
-    return decodeEntities(xml[start .. end]);
-}
+    /// The page's `NextContinuationToken`, "" if it had none.
+    const(char)[] nextToken() const return pure { return tokenBuf[0 .. tokenLen]; }
 
-/// Parses one `ListObjectsV2` XML response body into its object entries plus
-/// pagination state. Returns `valid == false` (not an exception) if the body
-/// doesn't contain a recognizable `<ListBucketResult>` root -- callers treat
-/// that the same way `s3lite.xml_error`'s callers treat an unparseable error
-/// body: a typed `malformedResponse`, not a crash.
-ParsedListPage parseListObjectsV2(scope const(ubyte)[] body_) {
-    auto text = cast(string) body_.idup;
-    if (text.indexOf("<ListBucketResult") < 0)
-        return ParsedListPage(false);
+    /// Feeds the next piece of the response body. Either callback may be
+    /// null, in which case what it would receive is skipped.
+    ListFeed feed(scope const(ubyte)[] chunk, scope ListEntryCallback onEntry,
+            scope ListPrefixCallback onPrefix = null) {
+        auto text = cast(const(char)[]) chunk;
+        while (text.length) {
+            if (fill == buf.length) return ListFeed.entryTooLarge;
+            immutable room = buf.length - fill;
+            immutable n = text.length < room ? text.length : room;
+            buf[fill .. fill + n] = text[0 .. n];
+            fill += n;
+            text = text[n .. $];
 
-    bool found;
-    auto truncatedText = extractTagIn(text, "IsTruncated", 0, text.length, found);
-    bool isTruncated = found && truncatedText == "true";
-
-    string nextToken;
-    if (isTruncated)
-        nextToken = extractTagIn(text, "NextContinuationToken", 0, text.length, found);
-    if (nextToken is null) nextToken = "";
-
-    S3Object[] objects;
-    size_t pos = 0;
-    while (true) {
-        auto openTag = "<Contents>";
-        auto closeTag = "</Contents>";
-        auto start = text.indexOf(openTag, pos);
-        if (start < 0) break;
-        auto contentStart = start + openTag.length;
-        auto end = text.indexOf(closeTag, contentStart);
-        if (end < 0) break; // malformed trailing <Contents> with no close -- stop, keep what parsed so far
-
-        bool keyFound, sizeFound;
-        auto key = extractTagIn(text, "Key", contentStart, end, keyFound);
-        auto sizeText = extractTagIn(text, "Size", contentStart, end, sizeFound);
-        auto etag = extractTagIn(text, "ETag", contentStart, end, found);
-        auto lastModified = extractTagIn(text, "LastModified", contentStart, end, found);
-
-        if (keyFound) {
-            size_t size = 0;
-            if (sizeFound) {
-                try size = sizeText.to!size_t;
-                catch (Exception) size = 0;
+            bool stopped;
+            immutable consumed = scan(onEntry, onPrefix, stopped);
+            if (stopped) return ListFeed.stopped;
+            if (consumed) {
+                import core.stdc.string : memmove;
+                memmove(buf.ptr, buf.ptr + consumed, fill - consumed);
+                fill -= consumed;
             }
-            objects ~= S3Object(key, size, etag is null ? "" : etag,
-                lastModified is null ? "" : lastModified);
+            // Full with nothing consumable: one element is larger than the buffer.
+            if (fill == buf.length) return ListFeed.entryTooLarge;
         }
-
-        pos = end + closeTag.length;
+        return ListFeed.more;
     }
 
-    return ParsedListPage(true, objects, isTruncated, nextToken);
+    /// Handles every complete element in the buffer; returns how many
+    /// leading bytes are finished with.
+    private size_t scan(scope ListEntryCallback onEntry, scope ListPrefixCallback onPrefix, out bool stopped) {
+        static immutable string[4] wanted = ["Contents", "IsTruncated", "NextContinuationToken", "CommonPrefixes"];
+        static immutable string[4] closers = ["</Contents>", "</IsTruncated>", "</NextContinuationToken>",
+            "</CommonPrefixes>"];
+
+        auto data = buf[0 .. fill];
+        size_t pos = 0;
+        while (true) {
+            immutable lt = indexOf(data, '<', pos);
+            if (lt < 0) return fill;
+            immutable gt = indexOf(data, '>', lt + 1);
+            if (gt < 0) return lt; // tag not complete yet
+            auto name = data[lt + 1 .. gt];
+
+            int which = -1;
+            foreach (i, w; wanted) if (name == w) which = cast(int) i;
+            if (which < 0) {
+                if (startsWith(name, "ListBucketResult") && (name.length == 16 || name[16] == ' ' ||
+                        name[16] == '\t' || name[16] == '\r' || name[16] == '\n' || name[16] == '/'))
+                    sawRoot = true;
+                else if (sawRoot && trim(name) == "/ListBucketResult")
+                    sawRootEnd = true;
+                pos = gt + 1;
+                continue;
+            }
+
+            immutable close = indexOf(data, closers[which], gt + 1);
+            if (close < 0) return lt; // element not complete yet
+            auto content = data[gt + 1 .. close];
+            pos = close + closers[which].length;
+
+            final switch (which) {
+                case 0:
+                    if (!deliver(content, onEntry)) { stopped = true; return pos; }
+                    break;
+                case 1:
+                    isTruncated = trim(content) == "true";
+                    break;
+                case 2:
+                    auto token = decodeEntitiesInPlace(trim(content));
+                    if (token.length > tokenBuf.length) tokenTooLarge = true;
+                    else {
+                        tokenBuf[0 .. token.length] = token[];
+                        tokenLen = token.length;
+                    }
+                    break;
+                case 3:
+                    bool found;
+                    auto prefix = elementText(content, "Prefix", 0, content.length, found);
+                    if (!found) break;
+                    prefixes++;
+                    // A prefix is key text: not trimmed, only decoded.
+                    if (onPrefix !is null && !onPrefix(decodeEntitiesInPlace(prefix))) {
+                        stopped = true;
+                        return pos;
+                    }
+                    break;
+            }
+        }
+    }
+
+    private bool deliver(char[] content, scope ListEntryCallback onEntry) {
+        bool keyFound, sizeFound, etagFound, modifiedFound;
+        // Locate every field before decoding any: decoding rewrites bytes
+        // in place, and the fields do not overlap.
+        auto key = elementText(content, "Key", 0, content.length, keyFound);
+        auto sizeText = elementText(content, "Size", 0, content.length, sizeFound);
+        auto etag = elementText(content, "ETag", 0, content.length, etagFound);
+        auto modified = elementText(content, "LastModified", 0, content.length, modifiedFound);
+        if (!keyFound) return true; // not an object entry; skip it
+
+        // A key is taken exactly as sent (it may begin or end with blanks);
+        // the scalar fields are not sensitive to whitespace around them.
+        S3ObjectView view;
+        view.key = decodeEntitiesInPlace(key);
+        if (sizeFound && !parseUnsigned(trim(sizeText), view.size)) view.size = 0;
+        if (etagFound) view.etag = decodeEntitiesInPlace(trim(etag));
+        if (modifiedFound) view.lastModified = decodeEntitiesInPlace(trim(modified));
+        entries++;
+        return onEntry is null ? true : onEntry(view);
+    }
 }
 
-unittest {
-    auto xml = cast(const(ubyte)[]) (
+version(unittest) {
+    private struct Seen {
+        char[256] keys = 0;
+        size_t keyLen;
+        ulong sizes;
+        char[64] lastEtag = 0;
+        size_t etagLen;
+        size_t stopAfter = size_t.max;
+        size_t count;
+
+        bool take(scope ref const S3ObjectView e) @nogc nothrow {
+            keys[keyLen .. keyLen + e.key.length] = e.key[];
+            keyLen += e.key.length;
+            keys[keyLen++] = '|';
+            sizes += e.size;
+            lastEtag[0 .. e.etag.length] = e.etag[];
+            etagLen = e.etag.length;
+            return ++count < stopAfter;
+        }
+    }
+
+    private immutable twoEntries =
         `<?xml version="1.0" encoding="UTF-8"?>` ~
         `<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">` ~
-        `<Name>examplebucket</Name><Prefix></Prefix><KeyCount>2</KeyCount>` ~
+        `<Name>examplebucket</Name><Prefix></Prefix>` ~
+        `<NextContinuationToken>token-1</NextContinuationToken><KeyCount>2</KeyCount>` ~
         `<MaxKeys>2</MaxKeys><IsTruncated>true</IsTruncated>` ~
         `<Contents><Key>a.txt</Key><LastModified>2024-01-02T03:04:05.000Z</LastModified>` ~
         `<ETag>&quot;abc123&quot;</ETag><Size>10</Size><StorageClass>STANDARD</StorageClass></Contents>` ~
-        `<Contents><Key>b/c.txt</Key><LastModified>2024-01-03T00:00:00.000Z</LastModified>` ~
+        `<Contents><Key>b/c&amp;d.txt</Key><LastModified>2024-01-03T00:00:00.000Z</LastModified>` ~
         `<ETag>&quot;def456&quot;</ETag><Size>2048</Size><StorageClass>STANDARD</StorageClass></Contents>` ~
-        `<NextContinuationToken>token-1</NextContinuationToken>` ~
-        `</ListBucketResult>`);
-    auto parsed = parseListObjectsV2(xml);
-    assert(parsed.valid);
-    assert(parsed.objects.length == 2);
-    assert(parsed.objects[0].key == "a.txt");
-    assert(parsed.objects[0].size == 10);
-    assert(parsed.objects[0].etag == `"abc123"`);
-    assert(parsed.objects[1].key == "b/c.txt");
-    assert(parsed.objects[1].size == 2048);
-    assert(parsed.isTruncated);
-    assert(parsed.nextContinuationToken == "token-1");
+        `</ListBucketResult>`;
 }
 
-unittest {
-    // Final page: IsTruncated=false, no NextContinuationToken at all.
-    auto xml = cast(const(ubyte)[]) (
-        `<ListBucketResult><IsTruncated>false</IsTruncated>` ~
-        `<Contents><Key>only.txt</Key><ETag>"z"</ETag><Size>1</Size></Contents>` ~
-        `</ListBucketResult>`);
-    auto parsed = parseListObjectsV2(xml);
-    assert(parsed.valid);
-    assert(!parsed.isTruncated);
-    assert(parsed.nextContinuationToken == "");
-    assert(parsed.objects.length == 1 && parsed.objects[0].key == "only.txt");
+@nogc nothrow unittest {
+    // Whole body in one piece.
+    char[512] entryBuffer;
+    char[64] token;
+    auto parser = ListPageParser(entryBuffer[], token[]);
+    Seen seen;
+    assert(parser.feed(cast(const(ubyte)[]) twoEntries, &seen.take) == ListFeed.more);
+    assert(parser.sawRoot && parser.sawRootEnd && parser.isTruncated && parser.nextToken == "token-1");
+    assert(parser.entries == 2 && seen.keys[0 .. seen.keyLen] == "a.txt|b/c&d.txt|");
+    assert(seen.sizes == 2058 && seen.lastEtag[0 .. seen.etagLen] == `"def456"`);
 }
 
-unittest {
-    // Empty bucket/prefix: valid root, zero <Contents> entries.
-    auto xml = cast(const(ubyte)[]) (
-        `<ListBucketResult><IsTruncated>false</IsTruncated><KeyCount>0</KeyCount></ListBucketResult>`);
-    auto parsed = parseListObjectsV2(xml);
-    assert(parsed.valid);
-    assert(parsed.objects.length == 0);
-    assert(!parsed.isTruncated);
+@nogc nothrow unittest {
+    // The same body one byte at a time, through a buffer far smaller than
+    // the body: every tag and element straddles a feed boundary.
+    char[minListEntryBuffer] entryBuffer;
+    char[64] token;
+    assert(twoEntries.length > entryBuffer.length);
+    auto parser = ListPageParser(entryBuffer[], token[]);
+    Seen seen;
+    foreach (i; 0 .. twoEntries.length)
+        assert(parser.feed(cast(const(ubyte)[]) twoEntries[i .. i + 1], &seen.take) == ListFeed.more);
+    assert(parser.sawRoot && parser.sawRootEnd && parser.isTruncated && parser.nextToken == "token-1");
+    assert(seen.keys[0 .. seen.keyLen] == "a.txt|b/c&d.txt|" && seen.sizes == 2058);
 }
 
-unittest {
-    auto parsed = parseListObjectsV2(cast(const(ubyte)[]) "not xml at all");
-    assert(!parsed.valid);
+@nogc nothrow unittest {
+    // A body cut off before its closing root is visibly incomplete, however
+    // much of it parsed.
+    char[512] entryBuffer;
+    char[64] token;
+    auto parser = ListPageParser(entryBuffer[], token[]);
+    Seen seen;
+    auto cut = twoEntries[0 .. indexOf(twoEntries, "</ListBucketResult>")];
+    assert(parser.feed(cast(const(ubyte)[]) cut, &seen.take) == ListFeed.more);
+    assert(parser.sawRoot && !parser.sawRootEnd && parser.entries == 2);
+    assert(parser.feed(cast(const(ubyte)[]) "</ListBucketResult >\n", &seen.take) == ListFeed.more);
+    assert(parser.sawRootEnd);
+}
+
+@nogc nothrow unittest {
+    // Whitespace around scalar values does not change them; a key keeps its
+    // own. Common prefixes go to their own callback, decoded.
+    static struct Prefixes {
+        char[64] text = 0;
+        size_t len;
+        size_t stopAfter = size_t.max;
+        size_t count;
+        bool take(scope const(char)[] p) @nogc nothrow {
+            text[len .. len + p.length] = p[];
+            len += p.length;
+            text[len++] = '|';
+            return ++count < stopAfter;
+        }
+    }
+    static immutable page = "<ListBucketResult>\n  <IsTruncated>\n    true\n  </IsTruncated>\n" ~
+        "  <Contents><Key> a b </Key><Size>\n 42 </Size><ETag> &quot;e&quot;\n</ETag></Contents>\n" ~
+        "  <CommonPrefixes>\n    <Prefix>photos/2024&amp;25/</Prefix>\n  </CommonPrefixes>\n" ~
+        "  <CommonPrefixes><Prefix> spaced /</Prefix></CommonPrefixes>\n" ~
+        "  <NextContinuationToken>\n  tok \n</NextContinuationToken>\n</ListBucketResult>\n";
+    char[512] entryBuffer;
+    char[64] token;
+    auto parser = ListPageParser(entryBuffer[], token[]);
+    Seen seen;
+    Prefixes prefixes;
+    assert(parser.feed(cast(const(ubyte)[]) page, &seen.take, &prefixes.take) == ListFeed.more);
+    assert(parser.isTruncated && parser.nextToken == "tok" && parser.sawRootEnd);
+    assert(seen.keys[0 .. seen.keyLen] == " a b |" && seen.sizes == 42);
+    assert(seen.lastEtag[0 .. seen.etagLen] == `"e"`);
+    assert(parser.prefixes == 2 && prefixes.text[0 .. prefixes.len] == "photos/2024&25/| spaced /|");
+
+    // With no prefix callback they are counted and skipped; a prefix
+    // callback can stop the listing.
+    auto skipping = ListPageParser(entryBuffer[], token[]);
+    assert(skipping.feed(cast(const(ubyte)[]) page, null) == ListFeed.more && skipping.prefixes == 2);
+    auto stopping = ListPageParser(entryBuffer[], token[]);
+    Prefixes one;
+    one.stopAfter = 1;
+    assert(stopping.feed(cast(const(ubyte)[]) page, null, &one.take) == ListFeed.stopped && one.count == 1);
+}
+
+@nogc nothrow unittest {
+    // Final page, empty page, and a body that is not a listing at all.
+    char[512] entryBuffer;
+    char[64] token;
+    Seen seen;
+    auto last = ListPageParser(entryBuffer[], token[]);
+    last.feed(cast(const(ubyte)[]) (`<ListBucketResult><IsTruncated>false</IsTruncated>` ~
+        `<Contents><Key>only.txt</Key><ETag>"z"</ETag><Size>1</Size></Contents></ListBucketResult>`),
+        &seen.take);
+    assert(last.sawRoot && !last.isTruncated && last.nextToken == "" && last.entries == 1);
+
+    auto empty = ListPageParser(entryBuffer[], token[]);
+    empty.feed(cast(const(ubyte)[])
+        `<ListBucketResult><IsTruncated>false</IsTruncated><KeyCount>0</KeyCount></ListBucketResult>`, null);
+    assert(empty.sawRoot && empty.entries == 0);
+
+    auto junk = ListPageParser(entryBuffer[], token[]);
+    assert(junk.feed(cast(const(ubyte)[]) "not xml at all", null) == ListFeed.more && !junk.sawRoot);
+}
+
+@nogc nothrow unittest {
+    // The callback can stop the listing; an entry that cannot fit is an
+    // error rather than a silent skip; so is a token that cannot fit.
+    char[512] entryBuffer;
+    char[64] token;
+    Seen seen;
+    seen.stopAfter = 1;
+    auto parser = ListPageParser(entryBuffer[], token[]);
+    assert(parser.feed(cast(const(ubyte)[]) twoEntries, &seen.take) == ListFeed.stopped);
+    assert(seen.count == 1);
+
+    char[minListEntryBuffer] small;
+    auto tight = ListPageParser(small[], token[]);
+    static immutable char[300] longKey = 'k';
+    assert(tight.feed(cast(const(ubyte)[]) "<ListBucketResult><Contents><Key>", null) == ListFeed.more);
+    assert(tight.feed(cast(const(ubyte)[]) longKey[], null) == ListFeed.entryTooLarge);
+
+    char[4] tinyToken;
+    auto noRoom = ListPageParser(entryBuffer[], tinyToken[]);
+    noRoom.feed(cast(const(ubyte)[]) "<NextContinuationToken>too-long</NextContinuationToken>", null);
+    assert(noRoom.tokenTooLarge && noRoom.nextToken == "");
 }

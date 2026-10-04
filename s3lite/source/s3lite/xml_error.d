@@ -1,84 +1,63 @@
-/// Minimal parser for S3's real REST error response shape:
+/// Parser for S3's REST error response:
 ///
 ///   <?xml version="1.0" encoding="UTF-8"?>
 ///   <Error><Code>NoSuchKey</Code><Message>...</Message>...</Error>
 ///
-/// Deliberately not a general-purpose XML parser (and not a dependency on
-/// one, keeping this package at zero dependencies) -- S3's own error body is
-/// a small, flat, well-known tag set, so a targeted tag extractor is enough
-/// to distinguish real error codes and is easy to verify against real S3
-/// responses (see tests/live_public_object.d).
+/// Not a general XML parser: S3's error body is a small, flat, well-known
+/// tag set, so a targeted extractor is enough and keeps the package free of
+/// dependencies. The result carries its text inline, so parsing allocates
+/// nothing and the result outlives the body it was read from.
 module s3lite.xml_error;
 
+import s3lite.fixed : InlineText, indexOf;
+import s3lite.xml_text : decodeEntitiesTo, elementText;
+
+/// Longest `<Code>` and `<Message>` kept; longer text is cut and flagged
+/// (`InlineText.truncated`).
+enum size_t maxErrorCodeBytes = 64;
+/// ditto
+enum size_t maxErrorMessageBytes = 256;
+
 struct ParsedS3Error {
-    bool valid;   // true if this looked like a well-formed <Error>...</Error> body
-    string code;    // e.g. "NoSuchKey", "AccessDenied", "NoSuchBucket"
-    string message;
+    bool valid; /// true if the body held an `<Error>` element with a `<Code>`
+    InlineText!maxErrorCodeBytes code;       /// e.g. "NoSuchKey", "AccessDenied"
+    InlineText!maxErrorMessageBytes message; /// "" if S3 sent none
 }
 
-private string decodeEntities(string s) pure {
-    import std.array : appender;
-    auto result = appender!string;
-    size_t i = 0;
-    while (i < s.length) {
-        if (s[i] == '&') {
-            if (i + 4 <= s.length && s[i .. i + 4] == "&lt;") { result ~= '<'; i += 4; continue; }
-            if (i + 4 <= s.length && s[i .. i + 4] == "&gt;") { result ~= '>'; i += 4; continue; }
-            if (i + 5 <= s.length && s[i .. i + 5] == "&amp;") { result ~= '&'; i += 5; continue; }
-            if (i + 6 <= s.length && s[i .. i + 6] == "&quot;") { result ~= '"'; i += 6; continue; }
-            if (i + 6 <= s.length && s[i .. i + 6] == "&apos;") { result ~= '\''; i += 6; continue; }
-        }
-        result ~= s[i];
-        i++;
-    }
-    return result.data;
+/// Parses an S3 error body. `valid == false` means the body is not a
+/// recognisable `<Error>`; callers treat that as a malformed response.
+ParsedS3Error parseS3Error(scope const(ubyte)[] body_) @nogc nothrow pure {
+    auto text = cast(const(char)[]) body_;
+    ParsedS3Error parsed;
+    if (indexOf(text, "<Error>") < 0 && indexOf(text, "<Error ") < 0) return parsed;
+    bool found;
+    auto code = elementText(text, "Code", 0, text.length, found);
+    if (!found) return parsed;
+    decodeEntitiesTo(code, parsed.code);
+    auto message = elementText(text, "Message", 0, text.length, found);
+    if (found) decodeEntitiesTo(message, parsed.message);
+    parsed.valid = true;
+    return parsed;
 }
 
-private string extractTag(string xml, string tag) pure {
-    import std.string : indexOf;
-    auto open = "<" ~ tag ~ ">";
-    auto close = "</" ~ tag ~ ">";
-    auto start = xml.indexOf(open);
-    if (start < 0) return null;
-    start += open.length;
-    auto end = xml.indexOf(close, start);
-    if (end < 0) return null;
-    return decodeEntities(xml[start .. end]);
-}
-
-/// Parses an S3 error-response body. Returns `valid == false` (not an
-/// exception) if the body doesn't contain a recognizable `<Error>` element
-/// with both `<Code>` and `<Message>` -- callers treat that as
-/// `malformedResponse`, not a crash.
-ParsedS3Error parseS3Error(scope const(ubyte)[] body_) pure {
-    auto text = cast(string) body_.idup;
-    import std.string : indexOf;
-    if (text.indexOf("<Error>") < 0 && text.indexOf("<Error ") < 0)
-        return ParsedS3Error(false, null, null);
-    auto code = extractTag(text, "Code");
-    auto message = extractTag(text, "Message");
-    if (code is null) return ParsedS3Error(false, null, null);
-    return ParsedS3Error(true, code, message is null ? "" : message);
-}
-
-unittest {
-    auto xml = cast(const(ubyte)[]) (`<?xml version="1.0" encoding="UTF-8"?>` ~
+@nogc nothrow pure unittest {
+    static immutable xml = `<?xml version="1.0" encoding="UTF-8"?>` ~
         `<Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message>` ~
-        `<Key>csv.gz/does-not-exist.csv.gz</Key><RequestId>ABC</RequestId></Error>`);
-    auto parsed = parseS3Error(xml);
+        `<Key>csv.gz/does-not-exist.csv.gz</Key><RequestId>ABC</RequestId></Error>`;
+    auto parsed = parseS3Error(cast(const(ubyte)[]) xml);
     assert(parsed.valid);
-    assert(parsed.code == "NoSuchKey");
-    assert(parsed.message == "The specified key does not exist.");
+    assert(parsed.code[] == "NoSuchKey");
+    assert(parsed.message[] == "The specified key does not exist.");
 }
 
 unittest {
-    auto parsed = parseS3Error(cast(const(ubyte)[]) "not xml at all");
-    assert(!parsed.valid);
+    assert(!parseS3Error(cast(const(ubyte)[]) "not xml at all").valid);
+    assert(!parseS3Error(cast(const(ubyte)[]) "<Error><Message>no code</Message></Error>").valid);
 }
 
 unittest {
-    auto xml = cast(const(ubyte)[]) ("<Error><Code>NoSuchBucket</Code>" ~
-        "<Message>The specified bucket does not exist</Message></Error>");
-    auto parsed = parseS3Error(xml);
-    assert(parsed.valid && parsed.code == "NoSuchBucket");
+    auto parsed = parseS3Error(cast(const(ubyte)[]) ("<Error><Code>NoSuchBucket</Code>" ~
+        "<Message>The bucket &quot;b&amp;c&quot; does not exist</Message></Error>"));
+    assert(parsed.valid && parsed.code[] == "NoSuchBucket");
+    assert(parsed.message[] == `The bucket "b&c" does not exist`);
 }

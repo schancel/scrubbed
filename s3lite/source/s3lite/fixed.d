@@ -95,6 +95,9 @@ struct InlineText(size_t N) {
         if (length_ == N) { truncated = true; return; }
         data_[length_++] = c;
     }
+
+    /// Output-range spelling of `append`.
+    alias put = append;
 }
 
 char toLowerAscii(char c) {

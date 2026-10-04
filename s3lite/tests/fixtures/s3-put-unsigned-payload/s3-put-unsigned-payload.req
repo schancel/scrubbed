@@ -1,0 +1,4 @@
+PUT /test$file.text HTTP/1.1
+Host:examplebucket.s3.amazonaws.com
+X-Amz-Content-Sha256:UNSIGNED-PAYLOAD
+X-Amz-Date:20130524T000000Z

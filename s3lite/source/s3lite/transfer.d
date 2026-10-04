@@ -1,59 +1,55 @@
-/// Worker-pool bulk S3 pull/push, built entirely on `s3lite.client`'s
-/// single-object primitives (`getObject`, `putObject`, `listObjectsV2`).
+/// Worker-pool bulk S3 pull/push: concurrency and retry policy layered on
+/// the single-shot operations of `s3lite.core`.
 ///
-/// This module depends on `s3lite.client`; the reverse is never true --
-/// `s3lite.client` does not import anything from here (see its own module
-/// doc comment), so a consumer who only wants `GetObject`/`PutObject`/
-/// `ListObjectsV2` and does `import s3lite.client;` never drags in the
-/// worker-pool machinery below. Only a caller who explicitly wants bulk
-/// transfer does `import s3lite.transfer;`.
+/// This module depends on the core and on `s3lite.client`'s request and
+/// result types; the reverse is never true. A consumer who only wants
+/// `GetObject`/`PutObject`/`ListObjectsV2` never drags in the worker-pool
+/// machinery below.
 ///
-/// Architecture (issue #367, matching s5cmd's real published design,
-/// verified against its own docs/source rather than assumed):
+/// It is part of the convenience layer: outcomes are delivered as whole
+/// buffers (`DownloadOutcome.body_`, `UploadItem.body_`) and bookkeeping
+/// uses the collector. Its transfer loops, though, use the core's streaming
+/// forms, so the only object-sized memory is the one buffer the caller
+/// receives or supplies:
+///
+///   - a chunked download writes each ranged response straight into its
+///     slice of the object's buffer, as it arrives;
+///   - a whole-object download fills one buffer sized from the listing;
+///   - an upload is pulled from the caller's bytes by the transport.
+///
+/// Each object (and each chunk) works through one `S3Client`, so its retry
+/// attempts reuse a connection.
+///
+/// Architecture (issue #367, matching s5cmd's published design):
 ///
 ///   - A global, object-level worker pool (`TransferConfig.objectWorkers`,
 ///     default 256, s5cmd's own default) bounds how many objects transfer
-///     concurrently. Built on scrubbed's own `std.parallelism.TaskPool`
-///     pattern, already used in `source/effects/crawl_orchestrator.d`
-///     (`new TaskPool(workers - 1)`) -- reused here rather than inventing a
-///     new concurrency primitive.
+///     concurrently, on `std.parallelism.TaskPool`.
 ///   - A separate, bounded per-file concurrency (`TransferConfig
 ///     .perFileChunkConcurrency`, default 5, s5cmd's own default) bounds how
 ///     many byte-range chunks of *one* large object download concurrently,
-///     via a second, per-object `TaskPool` sized to that bound. This applies
-///     to `downloadBulk` today, for objects above `chunkThresholdBytes`: a
-///     ranged `GetObject`-equivalent GET per chunk, built directly on
-///     `s3lite.client.buildGetRequest` plus an appended `Range` header --
-///     `s3lite.client` itself gains no new ranged-GET primitive, since the
-///     signature it already produces covers a request `s3lite.transfer` is
-///     free to add ordinary (unsigned) headers to before dispatch. `pushBulk`
-///     does not yet chunk a single object's upload -- this package has no
-///     multipart-upload primitive (`CreateMultipartUpload`/`UploadPart`/
-///     `CompleteMultipartUpload`), which is out of issue #367's explicit
-///     `s3lite.client` scope (`PutObject`/`ListObjectsV2` only). The
-///     `perFileChunkConcurrency` knob still exists on `TransferConfig` for
-///     the two-level architecture's sake and is honestly documented as
-///     inert for uploads until multipart upload lands.
-///   - `downloadBulk`'s object list is fed by `s3lite.client.listObjectsV2`'s
-///     own streaming pagination: each object is dispatched to the
-///     object-level pool as its page arrives, rather than collecting the
-///     entire bucket listing into memory before the first download starts.
+///     via a second, per-object `TaskPool`. This applies to `downloadBulk`,
+///     for objects above `chunkThresholdBytes`: one ranged `getObject` per
+///     chunk. `uploadBulk` does not chunk a single object's upload -- the
+///     package has no multipart upload yet -- so `perFileChunkConcurrency`
+///     is inert for uploads.
+///   - `downloadBulk`'s object list is fed by `s3lite.client.listObjectsV2`
+///     page by page: each object is dispatched to the pool as its page
+///     arrives, rather than after the whole listing.
 ///   - Bounded exponential-backoff retry (`TransferConfig.maxAttempts`,
 ///     default 10; `baseDelayMs`/`maxDelayMs`, default budget matching
-///     s5cmd's own ~1-minute total) wraps every whole-object transfer and
-///     every chunk fetch. Only `FailureKind.transportError` and
-///     `FailureKind.malformedResponse` are treated as retryable --
-///     `notFound`/`forbidden`/`other` are deterministic failures a retry
-///     cannot fix.
+///     s5cmd's ~1 minute) wraps every whole-object transfer and every chunk
+///     fetch. Only `FailureKind.transportError` and
+///     `FailureKind.malformedResponse` are retried; `notFound`, `forbidden`
+///     and the rest are failures a retry cannot fix. An upload is retryable
+///     because its body is in memory and can be read again.
 module s3lite.transfer;
 
 import s3lite.client;
-import s3lite.http : httpGet, RequestHeader, GetOptions;
+import s3lite.core : ByteRange, PayloadHash, S3Client, SliceBody;
+import s3lite.http : GetOptions, assumeNoGC;
 import std.algorithm.comparison : min;
-import std.datetime.systime : Clock;
-import std.datetime.timezone : UTC;
 import std.exception : enforce;
-import std.format : format;
 import std.parallelism : task, TaskPool;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
@@ -147,35 +143,46 @@ struct DownloadBulkResult {
 
 private struct ChunkResult {
     bool ok;
-    ubyte[] data;
     bool retryable;
     S3Error error;
 }
 
-private ChunkResult fetchRange(GetObjectRequest baseReq, size_t start, size_t end) {
-    auto now = Clock.currTime(UTC());
-    auto built = buildGetRequest(baseReq, now);
-    auto rangeHeaders = built.headers ~ RequestHeader("Range", format("bytes=%d-%d", start, end));
-    auto result = httpGet(built.url, rangeHeaders, baseReq.transport);
-    if (!result.ok)
-        return ChunkResult(false, [], true, S3Error(FailureKind.transportError, "", result.failureDetail, 0));
-    auto resp = result.response;
-    if (resp.status == 206 || resp.status == 200)
-        return ChunkResult(true, resp.body_, false, S3Error.init);
-    // Any other status for a ranged GET is treated as a retryable,
-    // coarsely-classified failure -- s3lite.client's richer S3 XML error
-    // classification is reserved for its own whole-object primitives, not
-    // duplicated here for an internal chunk-fetch detail.
-    return ChunkResult(false, [], true,
-        S3Error(FailureKind.malformedResponse, "", "unexpected chunk response status", resp.status));
+/// Receives a ranged response directly into its place in the object's
+/// buffer. More bytes than the range asked for stop the download.
+private struct SliceSink {
+    ubyte[] target;
+    size_t filled;
+
+    bool put(scope const(ubyte)[] chunk) @nogc nothrow {
+        if (chunk.length > target.length - filled) return false;
+        target[filled .. filled + chunk.length] = chunk[];
+        filled += chunk.length;
+        return true;
+    }
+}
+
+/// One attempt at bytes `start .. start + target.length` of `key`, written
+/// into `target` as they arrive.
+private ChunkResult fetchRange(ref S3Client client, string bucket, string key, size_t start, ubyte[] target) {
+    auto sink = SliceSink(target);
+    auto got = client.getObject(bucket, key, ByteRange.bytes(start, start + target.length - 1), &sink.put);
+    if (got.ok && sink.filled == target.length) return ChunkResult(true, false, S3Error.init);
+    if (got.ok)
+        return ChunkResult(false, true,
+            S3Error(FailureKind.malformedResponse, "", "chunk response shorter than its range", got.status.httpStatus));
+    if (got.status.kind == FailureKind.aborted)
+        return ChunkResult(false, true,
+            S3Error(FailureKind.malformedResponse, "", "chunk response longer than its range", got.status.httpStatus));
+    return ChunkResult(false, isRetryableKind(got.status.kind), toS3Error(got.status));
 }
 
 /// Downloads one large object as `ceil(size / chunkSizeBytes)` byte-range
 /// GETs, up to `cfg.perFileChunkConcurrency` of them in flight at once via a
-/// per-object `TaskPool`, assembling them into one contiguous buffer (each
-/// chunk owns a disjoint byte range, so no synchronization is needed on the
-/// buffer itself -- only on the shared failure/attempt bookkeeping).
-private DownloadOutcome downloadObjectChunked(GetObjectRequest baseReq, S3Object obj, TransferConfig cfg) {
+/// per-object `TaskPool`. Each chunk streams into its own disjoint slice of
+/// one buffer, so no synchronization is needed on the buffer itself -- only
+/// on the shared failure/attempt bookkeeping -- and no per-chunk copy of the
+/// data is ever made.
+private DownloadOutcome downloadObjectChunked(ListObjectsV2Request listReq, S3Object obj, TransferConfig cfg) {
     immutable size = obj.size;
     immutable chunkSize = cfg.chunkSizeBytes;
     immutable numChunks = (size + chunkSize - 1) / chunkSize;
@@ -187,18 +194,20 @@ private DownloadOutcome downloadObjectChunked(GetObjectRequest baseReq, S3Object
 
     void doChunk(size_t idx) {
         immutable start = idx * chunkSize;
-        immutable end = min(start + chunkSize, size) - 1;
+        immutable end = min(start + chunkSize, size);
         size_t attempts = 0;
-        auto result = withRetry!ChunkResult(cfg,
-            () { attempts++; return fetchRange(baseReq, start, end); },
+        ChunkResult result;
+        S3Client client;
+        auto opened = openClient(client, listReq.region, listReq.credentials, listReq.service, listReq.transport);
+        if (!opened.ok) result = ChunkResult(false, false, toS3Error(opened));
+        else result = withRetry!ChunkResult(cfg,
+            () { attempts++; return fetchRange(client, listReq.bucket, obj.key, start, buffer[start .. end]); },
             (ChunkResult r) => !r.ok,
             (ChunkResult r) => r.retryable);
         mutex.lock();
         scope(exit) mutex.unlock();
         totalAttempts += attempts;
-        if (result.ok) {
-            buffer[start .. end + 1] = result.data[];
-        } else {
+        if (!result.ok) {
             if (!anyFailed) firstError = result.error;
             anyFailed = true;
         }
@@ -218,17 +227,32 @@ private DownloadOutcome downloadObjectChunked(GetObjectRequest baseReq, S3Object
 }
 
 private DownloadOutcome downloadOneObject(ListObjectsV2Request listReq, S3Object obj, TransferConfig cfg) {
-    auto baseReq = GetObjectRequest(listReq.bucket, obj.key, listReq.region,
-        listReq.credentials, listReq.service, listReq.transport);
     if (obj.size > cfg.chunkThresholdBytes && cfg.perFileChunkConcurrency > 0)
-        return downloadObjectChunked(baseReq, obj, cfg);
+        return downloadObjectChunked(listReq, obj, cfg);
 
+    S3Client client;
+    auto opened = openClient(client, listReq.region, listReq.credentials, listReq.service, listReq.transport);
+    if (!opened.ok) return DownloadOutcome(obj.key, false, [], toS3Error(opened), 0);
+
+    // One buffer, sized from the listing and filled as the body arrives. It
+    // still grows if the object turns out larger than it was listed.
+    ubyte[] body_;
+    body_.reserve(obj.size);
+    auto sink = assumeNoGC((scope const(ubyte)[] chunk) nothrow { body_ ~= chunk; return true; });
+
+    static struct Attempt { bool ok; S3Error error; bool retryable; }
     size_t attempts = 0;
-    auto result = withRetry!GetObjectResult(cfg,
-        () { attempts++; return getObject(baseReq); },
-        (GetObjectResult r) => !r.ok,
-        (GetObjectResult r) => isRetryableKind(r.error.kind));
-    return DownloadOutcome(obj.key, result.ok, result.body_, result.error, attempts);
+    auto result = withRetry!Attempt(cfg,
+        () {
+            attempts++;
+            body_.length = 0;
+            body_.assumeSafeAppend();
+            auto got = client.getObject(listReq.bucket, obj.key, ByteRange.whole, sink);
+            return got.ok ? Attempt(true) : Attempt(false, toS3Error(got.status), isRetryableKind(got.status.kind));
+        },
+        (Attempt r) => !r.ok,
+        (Attempt r) => r.retryable);
+    return DownloadOutcome(obj.key, result.ok, result.ok ? body_ : null, result.error, attempts);
 }
 
 /// Bulk-downloads every object `listReq` (a `ListObjectsV2Request`) matches,
@@ -314,13 +338,26 @@ UploadBulkResult uploadBulk(string bucket, string region, Credentials credential
     auto pool = new TaskPool(objectPoolSize(cfg));
 
     void handleItem(UploadItem item) {
-        auto req = PutObjectRequest(bucket, item.key, region, credentials, item.body_, service, transport);
-        size_t attempts = 0;
-        auto result = withRetry!PutObjectResult(cfg,
-            () { attempts++; return putObject(req); },
-            (PutObjectResult r) => !r.ok,
-            (PutObjectResult r) => isRetryableKind(r.error.kind));
-        auto outcome = UploadOutcome(item.key, result.ok, result.etag, result.error, attempts);
+        UploadOutcome outcome;
+        S3Client client;
+        auto opened = openClient(client, region, credentials, service, transport);
+        if (!opened.ok) outcome = UploadOutcome(item.key, false, "", toS3Error(opened), 0);
+        else {
+            // Hashed once; every attempt re-reads the same bytes.
+            immutable hash = PayloadHash.ofBytes(item.body_);
+            size_t attempts = 0;
+            auto result = withRetry!PutObjectResult(cfg,
+                () {
+                    attempts++;
+                    auto body_ = SliceBody(item.body_);
+                    auto put = client.putObject(bucket, item.key, body_.source, hash);
+                    return put.ok ? PutObjectResult(true, put.etag[].idup, S3Error.init)
+                        : PutObjectResult(false, "", toS3Error(put.status));
+                },
+                (PutObjectResult r) => !r.ok,
+                (PutObjectResult r) => isRetryableKind(r.error.kind));
+            outcome = UploadOutcome(item.key, result.ok, result.etag, result.error, attempts);
+        }
         mutex.lock();
         if (outcome.ok) succeeded++;
         else { failed++; failedKeys ~= outcome.key; }

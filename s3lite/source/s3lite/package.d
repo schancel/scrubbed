@@ -16,11 +16,12 @@
 /// `s3lite.http` (one-call HTTP) are imported by name when wanted.
 module s3lite;
 
-public import s3lite.core : AmzTime, BodyPull, BodyRewind, BodySink, BodySource, ByteRange, Credentials,
-    FailureKind, GetResult, ListContinuation, ListEntryCallback, ListOptions, ListPageResult,
-    PayloadHash, PutResult, S3Client, S3Config, S3ObjectView, S3Status, SliceBody, Transport,
-    TransportFailure, isChunkRange, maxContinuationToken, minListEntryBuffer, minWorkBytes,
-    recommendedListEntryBuffer, recommendedWorkBytes;
+public import s3lite.core : AmzTime, BodyPull, BodyRewind, BodySink, BodySource, ByteRange,
+    ChecksumAlgorithm, Credentials, FailureKind, GetObjectOptions, GetResult, ListContinuation,
+    ListEntryCallback, ListOptions, ListPageResult, ListPrefixCallback, MetadataPair, PayloadHash,
+    PutObjectOptions, PutResult, S3Client, S3Config, S3ObjectView, S3Status, SliceBody, Transport,
+    TransportFailure, isChunkRange, maxConsecutiveEmptyChunks, maxContinuationToken, maxUserMetadata,
+    minListEntryBuffer, minWorkBytes, recommendedListEntryBuffer, recommendedWorkBytes;
 public import s3lite.curl_transport : CurlOptions, openCurlTransport;
 public import s3lite.client : GetObjectRequest, GetObjectResult, S3Error, getObject,
     buildGetRequest, routeFor;

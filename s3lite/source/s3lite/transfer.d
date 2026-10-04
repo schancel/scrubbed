@@ -46,7 +46,7 @@
 module s3lite.transfer;
 
 import s3lite.client;
-import s3lite.core : ByteRange, PayloadHash, S3Client, SliceBody;
+import s3lite.core : ByteRange, GetObjectOptions, PayloadHash, S3Client, SliceBody;
 import s3lite.http : GetOptions, assumeNoGC;
 import std.algorithm.comparison : min;
 import std.exception : enforce;
@@ -165,7 +165,11 @@ private struct SliceSink {
 /// into `target` as they arrive.
 private ChunkResult fetchRange(ref S3Client client, string bucket, string key, size_t start, ubyte[] target) {
     auto sink = SliceSink(target);
-    auto got = client.getObject(bucket, key, ByteRange.bytes(start, start + target.length - 1), &sink.put);
+    // The core accepts only a 206 here: a server that ignores the range is
+    // a typed `rangeIgnored`, and nothing of that answer reaches `target`.
+    GetObjectOptions options;
+    options.range = ByteRange.bytes(start, start + target.length - 1);
+    auto got = client.getObject(bucket, key, &sink.put, options);
     if (got.ok && sink.filled == target.length) return ChunkResult(true, false, S3Error.init);
     if (got.ok)
         return ChunkResult(false, true,
@@ -247,7 +251,7 @@ private DownloadOutcome downloadOneObject(ListObjectsV2Request listReq, S3Object
             attempts++;
             body_.length = 0;
             body_.assumeSafeAppend();
-            auto got = client.getObject(listReq.bucket, obj.key, ByteRange.whole, sink);
+            auto got = client.getObject(listReq.bucket, obj.key, sink);
             return got.ok ? Attempt(true) : Attempt(false, toS3Error(got.status), isRetryableKind(got.status.kind));
         },
         (Attempt r) => !r.ok,

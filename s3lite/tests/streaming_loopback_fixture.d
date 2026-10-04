@@ -9,11 +9,16 @@
 ///   A. Upload from a range of many small chunks that is generated on the
 ///      fly and never exists as one buffer. The server checks every byte
 ///      and the declared `Content-Length`, under both payload-hash policies.
+///      An upload with options puts content type, storage class, a
+///      checksum and user metadata on the wire, all signed; its signature
+///      is compared with one derived by a separate implementation.
 ///   B. Download into a sink, whole and with a byte range, through both the
 ///      delegate form and the output-range form; an S3 error arrives as a
 ///      typed status and never reaches the sink.
 ///   C. A listing across three pages through the entry callback, with an
-///      entry buffer much smaller than a page and an explicit continuation.
+///      entry buffer much smaller than a page and an explicit continuation;
+///      and a delimited listing whose common prefixes arrive through their
+///      own callback.
 ///   D. All of the above over one client: the server sees one connection.
 ///   E. The convenience layer's range upload (`s3lite.client.putObject`)
 ///      with a range that allocates, and with one that throws part-way.
@@ -83,12 +88,7 @@ S3Status openClient(ref S3Client client, scope const(char)[] origin, Credentials
         char[] work) @nogc nothrow {
     Transport transport;
     auto opened = openCurlTransport(CurlOptions.init, transport);
-    if (!opened.ok) {
-        S3Status status;
-        status.kind = FailureKind.transportError;
-        status.transport = opened.failure;
-        return status;
-    }
+    if (!opened.ok) return S3Status(FailureKind.transportError, 0, opened.failure);
     S3Config config;
     config.region = "us-east-1";
     config.credentials = credentials;
@@ -96,10 +96,11 @@ S3Status openClient(ref S3Client client, scope const(char)[] origin, Credentials
     return client.open(config, transport, work);
 }
 
-PutResult uploadPattern(ref S3Client client, scope const(char)[] key, PayloadHash hash) @nogc nothrow {
+PutResult uploadPattern(ref S3Client client, scope const(char)[] key, PayloadHash hash,
+        PutObjectOptions options = PutObjectOptions.init) @nogc nothrow {
     ubyte[smallChunk] buffer = void;
     auto chunks = PatternChunks(buffer[], 0, uploadLength);
-    return client.putObject("examplebucket", key, chunks, uploadLength, hash, fixedTime);
+    return client.putObject("examplebucket", key, chunks, uploadLength, hash, options, fixedTime);
 }
 
 /// Checks a download against the pattern as it arrives; keeps nothing.
@@ -126,12 +127,12 @@ struct PatternSink {
 
 GetResult downloadViaDelegate(ref S3Client client, scope const(char)[] key, ByteRange range,
         ref PatternSink sink) @nogc nothrow {
-    return client.getObject("examplebucket", key, range, &sink.take, fixedTime);
+    return client.getObject("examplebucket", key, &sink.take, GetObjectOptions(range), fixedTime);
 }
 
 GetResult downloadViaOutputRange(ref S3Client client, scope const(char)[] key, ByteRange range,
         ref PatternSink sink) @nogc nothrow {
-    return client.getObject("examplebucket", key, range, sink, fixedTime);
+    return client.getObject("examplebucket", key, sink, GetObjectOptions(range), fixedTime);
 }
 
 /// Folds listing entries into a few numbers and a bounded text, proving the
@@ -174,13 +175,38 @@ ListOutcome listAll(ref S3Client client, ref EntryFold fold, char[] entryBuffer)
     options.prefix = "p/";
     options.maxKeys = pageSize;
     while (!where.done) {
-        auto page = client.listObjectsV2("examplebucket", options, where, entryBuffer, &fold.take, fixedTime);
+        auto page = client.listObjectsV2("examplebucket", options, where, entryBuffer, &fold.take, null, fixedTime);
         outcome.status = page.status;
         if (!page.ok) return outcome;
         outcome.pages++;
         outcome.entries += page.entries;
     }
     return outcome;
+}
+
+/// Collects common prefixes into a bounded text.
+struct PrefixFold {
+    char[96] text = 0;
+    size_t len;
+    ulong count;
+
+    bool take(scope const(char)[] prefix) @nogc nothrow {
+        text[len .. len + prefix.length] = prefix[];
+        len += prefix.length;
+        text[len++] = '|';
+        count++;
+        return true;
+    }
+}
+
+ListPageResult listDelimited(ref S3Client client, ref EntryFold entries, ref PrefixFold prefixes,
+        char[] entryBuffer) @nogc nothrow {
+    ListContinuation where;
+    ListOptions options;
+    options.prefix = "p/";
+    options.delimiter = "/";
+    return client.listObjectsV2("examplebucket", options, where, entryBuffer, &entries.take, &prefixes.take,
+        fixedTime);
 }
 
 // ---------------------------------------------------------------------
@@ -197,6 +223,7 @@ final class Observed {
     ulong[] putBodyBytes;
     ulong[] putMismatches;
     string[] putSha256;
+    string[string] optionsPutHeaders; // the request headers of PUT /up/options.bin
     string[] ranges;
     string[] listTargets;
 }
@@ -235,6 +262,7 @@ void handle(Observed seen, ref Request request, Connection conn) {
         seen.putBodyBytes ~= offset;
         seen.putMismatches ~= mismatches;
         seen.putSha256 ~= hash.finish().toHexString!(LetterCase.lower).idup;
+        if (request.target == "/up/options.bin") seen.optionsPutHeaders = request.headers.dup;
         conn.respond(200, ["ETag": `"upload-etag"`], null);
         return;
     }
@@ -242,7 +270,14 @@ void handle(Observed seen, ref Request request, Connection conn) {
     if (request.target.startsWith("/?")) {
         seen.listTargets ~= request.target;
         string body_;
-        if (request.target.canFind("continuation-token=page%3D3")) body_ = listPage(80, 20, false, null);
+        if (request.target.canFind("delimiter=%2F"))
+            body_ = `<?xml version="1.0" encoding="UTF-8"?><ListBucketResult><Prefix>p/</Prefix>` ~
+                `<Delimiter>/</Delimiter><IsTruncated>false</IsTruncated>` ~
+                `<Contents><Key>p/top.bin</Key><ETag>&quot;t&quot;</ETag><Size>9</Size></Contents>` ~
+                `<CommonPrefixes><Prefix>p/2023/</Prefix></CommonPrefixes>` ~
+                `<CommonPrefixes><Prefix>p/a&amp;b/</Prefix></CommonPrefixes>` ~
+                `<CommonPrefixes><Prefix>p/2024/</Prefix></CommonPrefixes></ListBucketResult>`;
+        else if (request.target.canFind("continuation-token=page%3D3")) body_ = listPage(80, 20, false, null);
         else if (request.target.canFind("continuation-token=page%3D2")) body_ = listPage(40, 40, true, "page=3");
         else body_ = listPage(0, 40, true, "page=2");
         conn.respond(200, ["Content-Type": "application/xml"], body_);
@@ -330,14 +365,45 @@ void main() {
         writeln("   PASS: ", uploadLength, " bytes arrived intact twice, Content-Length declared up front, ",
             "UNSIGNED-PAYLOAD and caller-supplied SHA-256 policies both on the wire");
 
+        // Upload options: each becomes a header, and each header is signed.
+        static immutable MetadataPair[2] metadata = [MetadataPair("Owner", "streaming fixture"),
+            MetadataPair("batch-id", "607")];
+        PutObjectOptions putOptions;
+        putOptions.contentType = "text/plain; charset=utf-8";
+        putOptions.storageClass = "STANDARD_IA";
+        putOptions.checksumAlgorithm = ChecksumAlgorithm.crc32c;
+        putOptions.checksumValue = "yZRlqg==";
+        putOptions.metadata = metadata[];
+        auto optionsPut = uploadPattern(client, "up/options.bin", PayloadHash.unsigned, putOptions);
+        check(optionsPut.ok, "upload with options failed: " ~ optionsPut.status.message[].idup);
+        auto sentHeaders = seen.optionsPutHeaders;
+        check(sentHeaders.get("content-type", "") == "text/plain; charset=utf-8" &&
+            sentHeaders.get("x-amz-storage-class", "") == "STANDARD_IA" &&
+            sentHeaders.get("x-amz-checksum-crc32c", "") == "yZRlqg==" &&
+            sentHeaders.get("x-amz-meta-owner", "") == "streaming fixture" &&
+            sentHeaders.get("x-amz-meta-batch-id", "") == "607",
+            "upload options not on the wire: " ~ sentHeaders.to!string);
+        // Expected value derived with a separate implementation (Python's
+        // hashlib/hmac) from this request's method, path, headers, fixed
+        // time and example credentials -- not produced by this package.
+        check(sentHeaders.get("authorization", "") ==
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, " ~
+            "SignedHeaders=content-type;host;x-amz-checksum-crc32c;x-amz-content-sha256;x-amz-date;" ~
+            "x-amz-meta-batch-id;x-amz-meta-owner;x-amz-storage-class, " ~
+            "Signature=8b391e9243ee516dd5209a997debce86ccc91dd4dbad4a4c6d4cb567e0ad15d8",
+            "signature over the option headers differs from the independent one: " ~
+            sentHeaders.get("authorization", ""));
+        writeln("   PASS: content type, storage class, checksum and metadata sent and signed; ",
+            "signature matches an independently derived one");
+
         // A zero-length object: declared, sent and received as such.
         ubyte[smallChunk] unused = void;
         auto nothing = PatternChunks(unused[], 0, 0);
         auto emptyPut = client.putObject("examplebucket", "up/empty.bin", nothing, 0,
-            PayloadHash.unsigned, fixedTime);
+            PayloadHash.unsigned, PutObjectOptions.init, fixedTime);
         check(emptyPut.ok && emptyPut.bytesSent == 0, "empty upload failed");
-        check(seen.putHeads.length == 3 && seen.putHeads[2].startsWith("PUT /up/empty.bin|0|") &&
-            seen.putBodyBytes[2] == 0, "empty upload should declare and send zero bytes");
+        check(seen.putHeads.length == 4 && seen.putHeads[3].startsWith("PUT /up/empty.bin|0|") &&
+            seen.putBodyBytes[3] == 0, "empty upload should declare and send zero bytes");
 
         writeln("B. download into a sink...");
         PatternSink whole;
@@ -389,8 +455,18 @@ void main() {
             seen.listTargets[2].canFind("continuation-token=page%3D3"), "tokens should drive pages 2 and 3");
         check(seen.listTargets[0].canFind("max-keys=40") && seen.listTargets[0].canFind("prefix=p%2F"),
             "listing options not on the wire: " ~ seen.listTargets[0]);
+
+        EntryFold topLevel;
+        PrefixFold prefixes;
+        auto delimited = listDelimited(client, topLevel, prefixes, entryBuffer);
+        check(delimited.ok, "delimited listing failed: " ~ delimited.status.message[].idup);
+        check(delimited.entries == 1 && topLevel.count == 1 && topLevel.lastKey[0 .. topLevel.lastKeyLen] == "p/top.bin",
+            "delimited listing should deliver its one object");
+        check(delimited.prefixes == 3 && prefixes.text[0 .. prefixes.len] == "p/2023/|p/a&b/|p/2024/|",
+            "common prefixes not delivered in order: " ~ prefixes.text[0 .. prefixes.len].idup);
         writeln("   PASS: ", fold.count, " entries over ", listed.pages, " pages through a ", entryBuffer.length,
-            "-byte entry buffer (pages are ~", listPage(0, 40, true, "page=2").length, " bytes)");
+            "-byte entry buffer (pages are ~", listPage(0, 40, true, "page=2").length, " bytes); ",
+            delimited.prefixes, " common prefixes through their own callback");
     }
 
     auto failures = server.stop();

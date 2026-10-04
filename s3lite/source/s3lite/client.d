@@ -14,9 +14,10 @@
 module s3lite.client;
 
 import core_ = s3lite.core;
-import s3lite.core : AmzTime, ByteRange, ListContinuation, ListOptions, PayloadHash, PreparedRequest,
-    RequestSpec, S3Client, S3Config, S3ObjectView, S3Status, SliceBody, isChunkRange,
-    prepareRequest, recommendedListEntryBuffer, recommendedWorkBytes;
+import s3lite.core : AmzTime, ByteRange, GetObjectOptions, ListContinuation, ListOptions, PayloadHash,
+    PreparedRequest, PutObjectOptions, RequestSpec, S3Client, S3Config, S3ObjectView, S3Status,
+    SliceBody, isChunkRange, maxConsecutiveEmptyChunks, prepareRequest, recommendedListEntryBuffer,
+    recommendedWorkBytes;
 import s3lite.curl_transport : openCurlTransport;
 import s3lite.http : GetOptions, RequestHeader, assumeNoGC, curlOptionsOf;
 import s3lite.sigv4 : QueryParam, emptyPayloadSha256Hex;
@@ -116,6 +117,7 @@ private BuiltRequest build(S3Config config, RequestSpec spec) {
     built.url = prepared.url.idup;
     built.host = prepared.host.idup;
     foreach (h; prepared.headers) built.headers ~= RequestHeader(h.name.idup, h.value.idup);
+    work[] = '\0'; // the copies above are all that is kept
     return built;
 }
 
@@ -137,9 +139,9 @@ GetObjectResult getObject(GetObjectRequest req, SysTime now = Clock.currTime(UTC
     if (!opened.ok) return GetObjectResult(false, [], "", 0, "", toS3Error(opened));
 
     ubyte[] body_;
-    auto got = client.getObject(req.bucket, req.key, ByteRange.whole,
+    auto got = client.getObject(req.bucket, req.key,
         assumeNoGC((scope const(ubyte)[] chunk) nothrow { body_ ~= chunk; return true; }),
-        amzTimeOf(now));
+        GetObjectOptions.init, amzTimeOf(now));
     if (!got.ok) return GetObjectResult(false, [], "", 0, "", toS3Error(got.status));
     return GetObjectResult(true, body_, got.etag[].idup, body_.length, got.contentType[].idup, S3Error.init);
 }
@@ -182,7 +184,7 @@ PutObjectResult putObject(PutObjectRequest req, SysTime now = Clock.currTime(UTC
 
     auto body_ = SliceBody(req.body_);
     auto put = client.putObject(req.bucket, req.key, body_.source, PayloadHash.ofBytes(req.body_),
-        amzTimeOf(now));
+        PutObjectOptions.init, amzTimeOf(now));
     if (!put.ok) return PutObjectResult(false, "", toS3Error(put.status));
     return PutObjectResult(true, put.etag[].idup, S3Error.init);
 }
@@ -192,9 +194,10 @@ PutObjectResult putObject(PutObjectRequest req, SysTime now = Clock.currTime(UTC
 /// (`File.byChunk`, for one), which the `@nogc nothrow` core form does not
 /// accept. `req.body_` is ignored. The range is walked as the connection
 /// accepts data and is never gathered into one buffer. An exception thrown
-/// by the range stops the upload and is reported in the result.
+/// by the range stops the upload and is reported in the result. `options`
+/// carries content type, metadata, storage class and checksums.
 PutObjectResult putObject(R)(PutObjectRequest req, R chunks, ulong length, PayloadHash hash,
-        SysTime now = Clock.currTime(UTC()))
+        PutObjectOptions options = PutObjectOptions.init, SysTime now = Clock.currTime(UTC()))
 if (isChunkRange!R) {
     import std.range.primitives : empty, front, popFront;
 
@@ -204,15 +207,20 @@ if (isChunkRange!R) {
 
     string thrown;
     bool handedOut = false;
+    bool stalled = false;
     bool pull(ref const(ubyte)[] chunk) nothrow {
         try {
-            while (true) {
+            // Empty elements are skipped, but not without limit: see
+            // `maxConsecutiveEmptyChunks`.
+            foreach (attempt; 0 .. maxConsecutiveEmptyChunks + 1) {
                 if (handedOut) { chunks.popFront(); handedOut = false; }
                 if (chunks.empty) { chunk = null; return true; }
                 chunk = chunks.front;
                 handedOut = true;
                 if (chunk.length) return true;
             }
+            stalled = true;
+            return false;
         } catch (Exception e) {
             thrown = e.msg;
             return false;
@@ -220,10 +228,14 @@ if (isChunkRange!R) {
     }
 
     auto put = client.putObject(req.bucket, req.key, core_.BodySource(length, assumeNoGC(&pull), null),
-        hash, amzTimeOf(now));
+        hash, options, amzTimeOf(now));
     if (!put.ok) {
         auto error = toS3Error(put.status);
         if (thrown !is null) error.message = "body range threw: " ~ thrown;
+        else if (stalled) {
+            error.kind = FailureKind.bodyLengthMismatch;
+            error.message = "body range yielded too many empty chunks in a row";
+        }
         return PutObjectResult(false, "", error);
     }
     return PutObjectResult(true, put.etag[].idup, S3Error.init);
@@ -250,6 +262,8 @@ struct ListObjectsV2Page {
     bool isTruncated;
     string nextContinuationToken;
     S3Error error;
+    /// The prefixes `delimiter` grouped keys under; empty without one.
+    string[] commonPrefixes;
 }
 
 /// Result of draining a full (possibly multi-page) listing via
@@ -280,14 +294,17 @@ BuiltRequest buildListRequest(ListObjectsV2Request req, string continuationToken
 private ListObjectsV2Page fetchPage(ref S3Client client, ListObjectsV2Request req,
         ref ListContinuation where, char[] entryBuffer, SysTime now) {
     S3Object[] objects;
+    string[] prefixes;
     auto options = ListOptions(req.prefix, req.delimiter, cast(uint) req.maxKeysPerPage);
     auto page = client.listObjectsV2(req.bucket, options, where, entryBuffer,
         assumeNoGC((scope ref const S3ObjectView e) nothrow {
             objects ~= S3Object(e.key.idup, cast(size_t) e.size, e.etag.idup, e.lastModified.idup);
             return true;
-        }), amzTimeOf(now));
+        }),
+        assumeNoGC((scope const(char)[] prefix) nothrow { prefixes ~= prefix.idup; return true; }),
+        amzTimeOf(now));
     if (!page.ok) return ListObjectsV2Page(false, [], false, "", toS3Error(page.status));
-    return ListObjectsV2Page(true, objects, page.isTruncated, where.token.idup, S3Error.init);
+    return ListObjectsV2Page(true, objects, page.isTruncated, where.token.idup, S3Error.init, prefixes);
 }
 
 /// Fetches one `ListObjectsV2` page and returns its entries as an array.

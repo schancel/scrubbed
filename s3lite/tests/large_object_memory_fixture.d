@@ -112,19 +112,14 @@ RoundTrip roundTrip(ref S3Client client, ulong size, ubyte[] chunkBuffer) @nogc 
     auto chunks = PatternChunks(chunkBuffer, 0, size);
     result.put = client.putObject("examplebucket", "big/object.bin", chunks, size, PayloadHash.unsigned);
     if (!result.put.ok) return result;
-    result.get = client.getObject("examplebucket", "big/object.bin", ByteRange.whole, &result.sink.take);
+    result.get = client.getObject("examplebucket", "big/object.bin", &result.sink.take);
     return result;
 }
 
 S3Status openClient(ref S3Client client, scope const(char)[] origin, char[] work) @nogc nothrow {
     Transport transport;
     auto opened = openCurlTransport(CurlOptions.init, transport);
-    if (!opened.ok) {
-        S3Status status;
-        status.kind = FailureKind.transportError;
-        status.transport = opened.failure;
-        return status;
-    }
+    if (!opened.ok) return S3Status(FailureKind.transportError, 0, opened.failure);
     S3Config config;
     config.region = "us-east-1";
     config.credentials = Credentials("AKIDEXAMPLE", "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY");

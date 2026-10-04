@@ -1152,6 +1152,30 @@ version(unittest) {
 }
 
 @nogc nothrow unittest {
+    // An empty object, and a whole in-memory body through SliceBody and
+    // through std.range.only.
+    import std.range : only;
+    static immutable ubyte[5] bytes = [10, 20, 30, 40, 50];
+    char[minWorkBytes] work;
+    FakeTransport fake;
+    S3Client client;
+    assert(client.open(S3Config("us-east-1"), fake.handle, work[]).ok);
+
+    const(ubyte[])[] nothing;
+    auto empty = client.putObject("bucket", "empty", nothing, 0, PayloadHash.ofBytes(null), testTime);
+    assert(empty.ok && empty.bytesSent == 0 && fake.declaredLength == 0 && fake.sentLen == 0);
+
+    auto slab = SliceBody(bytes[]);
+    fake.rewindOnce = true;
+    assert(client.putObject("bucket", "slab", slab.source, PayloadHash.ofBytes(bytes[]), testTime).ok);
+    assert(fake.sent[0 .. fake.sentLen] == bytes[]);
+
+    const(ubyte)[] view = bytes[];
+    assert(client.putObject("bucket", "only", only(view), 5, PayloadHash.unsigned, testTime).ok);
+    assert(fake.sent[0 .. fake.sentLen] == bytes[]);
+}
+
+@nogc nothrow unittest {
     // An input-only range is consumed and cannot be resent.
     static immutable ubyte[][2] pieces = [[9, 8], [7]];
     static immutable ubyte[3] whole = [9, 8, 7];

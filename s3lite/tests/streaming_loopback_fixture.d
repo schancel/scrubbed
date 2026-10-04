@@ -330,6 +330,15 @@ void main() {
         writeln("   PASS: ", uploadLength, " bytes arrived intact twice, Content-Length declared up front, ",
             "UNSIGNED-PAYLOAD and caller-supplied SHA-256 policies both on the wire");
 
+        // A zero-length object: declared, sent and received as such.
+        ubyte[smallChunk] unused = void;
+        auto nothing = PatternChunks(unused[], 0, 0);
+        auto emptyPut = client.putObject("examplebucket", "up/empty.bin", nothing, 0,
+            PayloadHash.unsigned, fixedTime);
+        check(emptyPut.ok && emptyPut.bytesSent == 0, "empty upload failed");
+        check(seen.putHeads.length == 3 && seen.putHeads[2].startsWith("PUT /up/empty.bin|0|") &&
+            seen.putBodyBytes[2] == 0, "empty upload should declare and send zero bytes");
+
         writeln("B. download into a sink...");
         PatternSink whole;
         auto got = downloadViaDelegate(client, "pattern.bin", ByteRange.whole, whole);

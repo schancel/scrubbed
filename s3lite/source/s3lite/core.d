@@ -34,7 +34,8 @@
 /// the one-call, whole-buffer convenience forms.
 module s3lite.core;
 
-import s3lite.fixed : InlineText, Writer, equalIgnoreCase, indexOf, parseUnsigned, startsWith, toLowerAscii;
+import s3lite.fixed : InlineText, Writer, equalIgnoreCase, indexOf, parseUnsigned, startsWith, toLowerAscii,
+    trim;
 import s3lite.sigv4;
 import s3lite.transport;
 import s3lite.xml_error : parseS3Error;
@@ -491,6 +492,10 @@ private bool buildRequest(scope ref const S3Config config, scope ref const Reque
     foreach (ref h; spec.extraHeaders) {
         if (!isHeaderName(h.name) || hasControlBytes(h.value))
             return refuse(FailureKind.invalidRequest, "extra header name or value is not sendable");
+        // A header with nothing in it is signed but not sent (an HTTP
+        // client drops the line), and the signature would then not match.
+        if (trim(h.value).length == 0)
+            return refuse(FailureKind.invalidRequest, "a header value is empty or blank");
         static immutable string[5] reservedNames = ["Host", "X-Amz-Date", "X-Amz-Content-Sha256", "Range",
             "Authorization"];
         foreach (reserved; reservedNames)
@@ -1233,9 +1238,10 @@ version(unittest) {
     PreparedRequest p;
     S3Status status;
 
-    static immutable HttpHeader[6] bad = [HttpHeader("X-A", "v\r\nX-B: 1"), HttpHeader("X\nA", "v"),
+    static immutable HttpHeader[9] bad = [HttpHeader("X-A", "v\r\nX-B: 1"), HttpHeader("X\nA", "v"),
         HttpHeader("", "v"), HttpHeader("host", "evil"), HttpHeader("AUTHORIZATION", "x"),
-        HttpHeader("x-amz-date", "19700101T000000Z")];
+        HttpHeader("x-amz-date", "19700101T000000Z"), HttpHeader("X-A", ""), HttpHeader("X-A", " "),
+        HttpHeader("X-A", " \t ")];
     foreach (i; 0 .. bad.length) {
         spec.extraHeaders = bad[i .. i + 1];
         assert(!prepareRequest(config, spec, work[], p, status) && status.kind == FailureKind.invalidRequest);
@@ -1705,6 +1711,28 @@ version(unittest) {
     static immutable MetadataPair[maxUserMetadata + 1] tooMany = MetadataPair("k", "v");
     bad.metadata = tooMany[];
     assert(refused(bad));
+    // A value that is empty once blanks are trimmed would be signed and
+    // then not sent, for any of the optional headers.
+    static immutable MetadataPair[1] emptyValue = [MetadataPair("k", "")];
+    static immutable MetadataPair[1] blankValue = [MetadataPair("k", " \t")];
+    bad = PutObjectOptions.init;
+    bad.metadata = emptyValue[];
+    assert(refused(bad));
+    bad.metadata = blankValue[];
+    assert(refused(bad));
+    bad = PutObjectOptions.init;
+    bad.contentType = " ";
+    assert(refused(bad));
+    bad = PutObjectOptions.init;
+    bad.storageClass = "  ";
+    assert(refused(bad));
+    bad = PutObjectOptions.init;
+    bad.contentMd5 = "\t";
+    assert(refused(bad));
+    bad = PutObjectOptions.init;
+    bad.checksumAlgorithm = ChecksumAlgorithm.crc32c;
+    bad.checksumValue = " ";
+    assert(refused(bad));
     bad = PutObjectOptions.init;
     bad.checksumAlgorithm = ChecksumAlgorithm.sha256; // no value
     assert(refused(bad));
@@ -1817,6 +1845,16 @@ version(unittest) {
     injected.ifMatch = "x\r\nX-Injected: 1";
     assert(client.getObject("bucket", "key", &part.take, injected, testTime).status.kind
         == FailureKind.invalidRequest);
+    immutable sentBefore = fake.performs;
+    GetObjectOptions blank;
+    blank.ifMatch = " ";
+    assert(client.getObject("bucket", "key", &part.take, blank, testTime).status.kind
+        == FailureKind.invalidRequest);
+    blank = GetObjectOptions.init;
+    blank.ifNoneMatch = "\t ";
+    assert(client.getObject("bucket", "key", &part.take, blank, testTime).status.kind
+        == FailureKind.invalidRequest);
+    assert(fake.performs == sentBefore);
 }
 
 @nogc nothrow unittest {

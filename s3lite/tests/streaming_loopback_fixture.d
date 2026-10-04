@@ -135,6 +135,14 @@ GetResult downloadViaOutputRange(ref S3Client client, scope const(char)[] key, B
     return client.getObject("examplebucket", key, sink, GetObjectOptions(range), fixedTime);
 }
 
+GetResult downloadWithEveryOption(ref S3Client client, ref PatternSink sink) @nogc nothrow {
+    GetObjectOptions options;
+    options.range = ByteRange.bytes(10, 19);
+    options.ifMatch = `"pattern-etag"`;
+    options.ifNoneMatch = `"some-other-etag"`;
+    return client.getObject("examplebucket", "pattern.bin", &sink.take, options, fixedTime);
+}
+
 /// Folds listing entries into a few numbers and a bounded text, proving the
 /// callback sees every entry without anything being kept per entry.
 struct EntryFold {
@@ -224,6 +232,7 @@ final class Observed {
     ulong[] putMismatches;
     string[] putSha256;
     string[string] optionsPutHeaders; // the request headers of PUT /up/options.bin
+    string[string] lastGetHeaders;    // ... and of the latest GET /pattern.bin
     string[] ranges;
     string[] listTargets;
 }
@@ -295,6 +304,7 @@ void handle(Observed seen, ref Request request, Connection conn) {
     ulong first = 0, last = downloadLength - 1;
     auto range = request.header("range");
     seen.ranges ~= range;
+    if (request.target == "/pattern.bin") seen.lastGetHeaders = request.headers.dup;
     int status = 200;
     string[string] headers = ["ETag": `"pattern-etag"`, "Content-Type": "application/octet-stream"];
     if (range.length) {
@@ -314,6 +324,20 @@ void handle(Observed seen, ref Request request, Connection conn) {
         conn.send(buffer[0 .. n]);
         at += n;
     }
+}
+
+/// Checks that every header named in a request's `SignedHeaders` arrived
+/// with a value, and returns how many there are.
+size_t signedHeadersAllSent(string[string] headers) {
+    import std.array : split;
+    auto authorization = headers.get("authorization", "");
+    auto start = authorization.indexOf("SignedHeaders=");
+    check(start >= 0, "request is not signed: " ~ authorization);
+    auto list = authorization[start + "SignedHeaders=".length .. $];
+    auto names = list[0 .. list.indexOf(',')].split(";");
+    foreach (name; names)
+        check(headers.get(name, "").length > 0, "header '" ~ name ~ "' is signed but was not sent");
+    return names.length;
 }
 
 void main() {
@@ -371,6 +395,7 @@ void main() {
         PutObjectOptions putOptions;
         putOptions.contentType = "text/plain; charset=utf-8";
         putOptions.storageClass = "STANDARD_IA";
+        putOptions.contentMd5 = "DA7ZlRH1pbZ3bkrR3F5vrA=="; // the server does not verify it
         putOptions.checksumAlgorithm = ChecksumAlgorithm.crc32c;
         putOptions.checksumValue = "yZRlqg==";
         putOptions.metadata = metadata[];
@@ -378,6 +403,7 @@ void main() {
         check(optionsPut.ok, "upload with options failed: " ~ optionsPut.status.message[].idup);
         auto sentHeaders = seen.optionsPutHeaders;
         check(sentHeaders.get("content-type", "") == "text/plain; charset=utf-8" &&
+            sentHeaders.get("content-md5", "") == "DA7ZlRH1pbZ3bkrR3F5vrA==" &&
             sentHeaders.get("x-amz-storage-class", "") == "STANDARD_IA" &&
             sentHeaders.get("x-amz-checksum-crc32c", "") == "yZRlqg==" &&
             sentHeaders.get("x-amz-meta-owner", "") == "streaming fixture" &&
@@ -388,12 +414,15 @@ void main() {
         // time and example credentials -- not produced by this package.
         check(sentHeaders.get("authorization", "") ==
             "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/s3/aws4_request, " ~
-            "SignedHeaders=content-type;host;x-amz-checksum-crc32c;x-amz-content-sha256;x-amz-date;" ~
-            "x-amz-meta-batch-id;x-amz-meta-owner;x-amz-storage-class, " ~
-            "Signature=8b391e9243ee516dd5209a997debce86ccc91dd4dbad4a4c6d4cb567e0ad15d8",
+            "SignedHeaders=content-md5;content-type;host;x-amz-checksum-crc32c;x-amz-content-sha256;" ~
+            "x-amz-date;x-amz-meta-batch-id;x-amz-meta-owner;x-amz-storage-class, " ~
+            "Signature=fae91e21f8ed879e1cfe57eeabb5617382e9b34006a815ef2aafc54db326d3ac",
             "signature over the option headers differs from the independent one: " ~
             sentHeaders.get("authorization", ""));
-        writeln("   PASS: content type, storage class, checksum and metadata sent and signed; ",
+        // Every option is set on that upload: each header the signature
+        // names must be on the wire, or the server could not verify it.
+        check(signedHeadersAllSent(sentHeaders) == 9, "the upload should sign nine headers");
+        writeln("   PASS: with every upload option set, all nine signed headers are on the wire; ",
             "signature matches an independently derived one");
 
         // A zero-length object: declared, sent and received as such.
@@ -428,6 +457,18 @@ void main() {
         tail.base = downloadLength - 4096;
         auto resumed = downloadViaDelegate(client, "pattern.bin", ByteRange.from(downloadLength - 4096), tail);
         check(resumed.ok && tail.received == 4096 && tail.mismatches == 0, "open-ended range is wrong");
+
+        // Every download option at once: range and both conditions.
+        PatternSink conditional;
+        conditional.base = 10;
+        auto conditionalGet = downloadWithEveryOption(client, conditional);
+        check(conditionalGet.ok && conditional.received == 10 && conditional.mismatches == 0,
+            "download with every option failed: " ~ conditionalGet.status.message[].idup);
+        check(seen.lastGetHeaders.get("if-match", "") == `"pattern-etag"` &&
+            seen.lastGetHeaders.get("if-none-match", "") == `"some-other-etag"` &&
+            seen.lastGetHeaders.get("range", "") == "bytes=10-19", "download options not on the wire");
+        check(signedHeadersAllSent(seen.lastGetHeaders) == 6, "the download should sign six headers");
+        seen.ranges = seen.ranges[0 .. $ - 1]; // not one of the three range cases checked below
         check(seen.ranges == ["", "bytes=123456-223455", "bytes=" ~ (downloadLength - 4096).to!string ~ "-"],
             "Range headers on the wire: " ~ seen.ranges.to!string);
 

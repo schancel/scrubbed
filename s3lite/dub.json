@@ -46,6 +46,13 @@
 			"sourceFiles": ["tests/loopback_server.d"]
 		},
 		{
+			"name": "transport-loopback-fixture",
+			"targetType": "executable",
+			"targetName": "transport-loopback-fixture",
+			"mainSourceFile": "tests/transport_loopback_fixture.d",
+			"sourceFiles": ["tests/loopback_server.d"]
+		},
+		{
 			"name": "large-object-memory-fixture",
 			"targetType": "executable",
 			"targetName": "large-object-memory-fixture",

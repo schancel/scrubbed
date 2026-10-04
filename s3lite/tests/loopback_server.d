@@ -6,7 +6,9 @@
 /// connection open across requests (so connection reuse can be observed),
 /// answers `Expect: 100-continue`, and gives the handler the request body
 /// as a stream -- a handler can check a multi-gigabyte upload without the
-/// server ever holding it.
+/// server ever holding it. A handler can also drop or reset the connection
+/// in the middle of a request, which is how the fixtures make a reused
+/// connection fail under the client.
 module loopback_server;
 
 import core.atomic : atomicLoad, atomicOp, atomicStore;
@@ -26,13 +28,51 @@ struct Request {
     string header(string name) { auto p = name in headers; return p ? *p : null; }
 }
 
+/// Thrown by `Connection.drop`; unwinds the handler and closes the socket
+/// without being recorded as a failure.
+final class ConnectionDropped : Exception {
+    this() { super("connection dropped on purpose"); }
+}
+
 /// One accepted connection, as a handler sees it.
 final class Connection {
+    /// 1 for the first connection the server accepted, 2 for the next, ...
+    int id;
     private Socket peer;
     private ubyte[] buffered;   // bytes received beyond the request head
     private ulong bodyRemaining;
 
-    private this(Socket peer) { this.peer = peer; }
+    private this(Socket peer, int id) { this.peer = peer; this.id = id; }
+
+    /// Closes the connection now, whatever is still unread or unsent.
+    void drop() { throw new ConnectionDropped; }
+
+    /// Ends the connection after a response the handler has already sent,
+    /// without first reading the rest of the request: closes the sending
+    /// side, then discards what the client still sends until it lets go.
+    /// This is a server that answers an upload early and hangs up.
+    void closeAfterResponse() {
+        peer.shutdown(SocketShutdown.SEND);
+        ubyte[16 * 1024] discard;
+        while (peer.receive(discard[]) > 0) {}
+        throw new ConnectionDropped;
+    }
+
+    /// Fails the connection under a client that is in the middle of
+    /// sending: stops reading for a moment, so the client's send stalls
+    /// with most of its body still to go, then resets the connection
+    /// without having answered a byte.
+    void reset() {
+        import core.time : msecs;
+        import std.socket : Linger;
+        Thread.sleep(300.msecs);
+        Linger linger;
+        linger.on = 1;
+        linger.time = 0;
+        peer.setOption(SocketOptionLevel.SOCKET, SocketOption.LINGER, linger);
+        peer.close(); // with zero linger: a reset, not an orderly close
+        throw new ConnectionDropped;
+    }
 
     /// Reads up to `into.length` bytes of the current request's body.
     /// Returns 0 once the body is complete.
@@ -79,6 +119,7 @@ final class Connection {
     private static string reason(int status) {
         switch (status) {
             case 200: return "OK";
+            case 204: return "No Content";
             case 206: return "Partial Content";
             case 403: return "Forbidden";
             case 404: return "Not Found";
@@ -91,6 +132,11 @@ alias Handler = void delegate(ref Request request, Connection connection);
 
 final class LoopbackServer {
     ushort port;
+    /// Whether `Expect: 100-continue` is answered. When it is not, the
+    /// client sends its body after its own short wait, having received
+    /// nothing at all -- the state in which a client may still decide a
+    /// reused connection was dead and start over.
+    bool answerExpect = true;
     private TcpSocket listener;
     private Thread acceptThread;
     private Thread[] connectionThreads;
@@ -109,6 +155,9 @@ final class LoopbackServer {
         port = (cast(InternetAddress) listener.localAddress()).port;
         listener.listen(16);
         acceptThread = new Thread(&acceptLoop);
+        // Daemon threads: a fixture that fails must exit, not wait on a
+        // blocked accept().
+        acceptThread.isDaemon = true;
         acceptThread.start();
     }
 
@@ -146,18 +195,19 @@ final class LoopbackServer {
             try peer = listener.accept();
             catch (Exception e) { if (!atomicLoad(stopping)) fail("accept: " ~ e.msg); return; }
             if (atomicLoad(stopping)) { peer.close(); return; }
-            atomicOp!"+="(accepted_, 1);
-            connectionThreads ~= serve(peer);
+            connectionThreads ~= serve(peer, atomicOp!"+="(accepted_, 1));
         }
     }
 
     // A function of its own so each thread closes over its own `peer`.
-    private Thread serve(Socket peer) {
+    private Thread serve(Socket peer, int id) {
         auto t = new Thread({
-            scope(exit) { peer.shutdown(SocketShutdown.BOTH); peer.close(); }
-            try serveConnection(new Connection(peer));
+            scope(exit) if (peer.isAlive) { peer.shutdown(SocketShutdown.BOTH); peer.close(); }
+            try serveConnection(new Connection(peer, id));
+            catch (ConnectionDropped) {}
             catch (Exception e) fail(e.msg);
         });
+        t.isDaemon = true;
         t.start();
         return t;
     }
@@ -180,7 +230,7 @@ final class LoopbackServer {
 
             auto request = parseHead(cast(string) head[0 .. end].idup);
             conn.bodyRemaining = request.contentLength;
-            if (request.header("expect").toLower == "100-continue")
+            if (answerExpect && request.header("expect").toLower == "100-continue")
                 conn.send("HTTP/1.1 100 Continue\r\n\r\n");
 
             handler(request, conn);

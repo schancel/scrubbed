@@ -58,6 +58,7 @@ struct CurlOptions {
 private struct Exchange {
     const(HttpCall)* call;
     const(ubyte)[] chunk; // unread remainder of the body chunk last pulled
+    bool pulled;          // the source has been pulled from since its start
     bool bodyEnded;
     bool aborted;
     bool rewindFailed;
@@ -112,6 +113,7 @@ private extern(C) size_t readCallback(char* ptr, size_t size, size_t nmemb, void
     while (filled < want && !x.bodyEnded) {
         if (x.chunk.length == 0) {
             const(ubyte)[] next;
+            x.pulled = true;
             if (!x.call.pull(next)) { x.aborted = true; return CURL_READFUNC_ABORT; }
             if (next.length == 0) { x.bodyEnded = true; break; }
             x.chunk = next;
@@ -130,10 +132,17 @@ private extern(C) int seekCallback(void* userdata, long offset, int origin) @nog
     if (offset != 0 || origin != 0) return CURL_SEEKFUNC_FAIL;
     // With no body there is nothing to reposition.
     if (x.call is null || !x.call.hasBody) return CURL_SEEKFUNC_OK;
+    // A source nobody has pulled from is at its start already. This is not
+    // a formality: libcurl remembers a rewind it could not do and asks for
+    // it again at the start of the *next* transfer on the handle, whose
+    // body is a different one and has done nothing to deserve it.
+    if (!x.pulled) return CURL_SEEKFUNC_OK;
     if (x.call.rewind !is null && x.call.rewind()) {
         // Whatever was left of the chunk in hand belongs to the old pass.
         x.chunk = null;
         x.bodyEnded = false;
+        x.pulled = false;
+        x.rewindFailed = false;
         return CURL_SEEKFUNC_OK;
     }
     x.rewindFailed = true;
@@ -462,4 +471,62 @@ unittest {
     bad.url = "http://127.0.0.1:1/a b";
     assert(t.perform(bad).failure == TransportFailure.invalidCall);
     assert(state.exchange == Exchange.init);
+}
+
+unittest {
+    // A seek to the start of an exchange whose source has not been pulled
+    // from succeeds without touching the source, rewindable or not: it is
+    // libcurl settling a rewind left over from an earlier transfer. Once
+    // the source has been pulled from, the seek is a real rewind.
+    Transport t;
+    assert(openCurlTransport(CurlOptions.init, t).ok);
+    scope(exit) t.close();
+    auto state = cast(CurlState*) t.context;
+
+    static immutable ubyte[4] bytes = [1, 2, 3, 4];
+    int pulls, rewinds;
+    bool pull(ref const(ubyte)[] chunk) @nogc nothrow { chunk = pulls++ == 0 ? bytes[] : null; return true; }
+    bool rewind() @nogc nothrow { rewinds++; pulls = 0; return true; }
+
+    HttpCall call;
+    call.method = HttpMethod.put;
+    call.hasBody = true;
+    call.bodyLength = bytes.length;
+    call.pull = &pull;
+    char[8] buffer;
+
+    // Single-pass body, fresh exchange.
+    state.exchange = Exchange(&call);
+    assert(seekCallback(state, 0, 0) == CURL_SEEKFUNC_OK);
+    assert(!state.exchange.rewindFailed && pulls == 0);
+    assert(readCallback(buffer.ptr, 1, 2, state) == 2); // the body then goes out as usual
+    // ... and after that the same seek is a rewind this body cannot do.
+    assert(seekCallback(state, 0, 0) == CURL_SEEKFUNC_FAIL && state.exchange.rewindFailed);
+    assert(readCallback(buffer.ptr, 1, 2, state) == CURL_READFUNC_ABORT);
+
+    // Rewindable body, fresh exchange: no needless rewind.
+    pulls = 0;
+    call.rewind = &rewind;
+    state.exchange = Exchange(&call);
+    assert(seekCallback(state, 0, 0) == CURL_SEEKFUNC_OK && rewinds == 0);
+    assert(readCallback(buffer.ptr, 1, 2, state) == 2);
+    assert(seekCallback(state, 0, 0) == CURL_SEEKFUNC_OK && rewinds == 1);
+    assert(state.exchange.chunk.length == 0 && !state.exchange.pulled);
+    // Straight after a rewind the source is at its start again.
+    assert(seekCallback(state, 0, 0) == CURL_SEEKFUNC_OK && rewinds == 1);
+    assert(readCallback(buffer.ptr, 1, buffer.length, state) == 4 && buffer[0 .. 4] == cast(const(char)[]) bytes[]);
+
+    // A call with no body has nothing to rewind, whatever state says: its
+    // rewind delegate, if it carries one, is never called.
+    HttpCall bodiless;
+    bodiless.method = HttpMethod.get;
+    bodiless.rewind = &rewind;
+    state.exchange = Exchange(&bodiless);
+    state.exchange.pulled = true;
+    assert(seekCallback(state, 0, 0) == CURL_SEEKFUNC_OK && rewinds == 1);
+    state.exchange = Exchange(&call);
+
+    // Anything but "to the start" is not something this transport does.
+    assert(seekCallback(state, 1, 0) == CURL_SEEKFUNC_FAIL);
+    state.exchange = Exchange.init;
 }

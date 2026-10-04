@@ -13,6 +13,11 @@
 ///      also proves the partly-sent chunk in hand was discarded.
 ///      A third sequence has the server refuse the upload part-way (an
 ///      early 403 and a closed connection) and then uses the client again.
+///      A fourth follows the failed single-pass upload with more uploads
+///      instead of a download. libcurl carries the rewind it could not do
+///      into the next transfer and asks for it before sending anything;
+///      the uploads that follow, each with a fresh body, must go out
+///      untouched, and a rewindable one must not be rewound for nothing.
 ///   B. Keys with "." and ".." segments reach the server byte for byte as
 ///      they were signed, not collapsed.
 ///   C. The transport sends the call's method: HEAD and DELETE.
@@ -111,8 +116,9 @@ GetResult download(ref S3Client client, scope const(char)[] key, ref Sink sink) 
     return client.getObject("examplebucket", key, &sink.take, GetObjectOptions.init, fixedTime);
 }
 
-PutResult upload(ref S3Client client, ref PatternBody body_) @nogc nothrow {
-    return client.putObject("examplebucket", "up/object.bin", body_.source, PayloadHash.unsigned,
+PutResult upload(ref S3Client client, ref PatternBody body_,
+        scope const(char)[] key = "up/object.bin") @nogc nothrow {
+    return client.putObject("examplebucket", key, body_.source, PayloadHash.unsigned,
         PutObjectOptions.init, fixedTime);
 }
 
@@ -182,6 +188,8 @@ final class Observed {
     string[] requests;      // "<connection id> <METHOD> <target>"
     int putsToDrop;
     int putsToRefuseEarly;
+    int putsToCloseMidBody;
+    string[] putTargets;    // target of each PUT read to completion
     ulong[] putBytes;       // body bytes of each PUT read to completion
     ulong[] putMismatches;
 }
@@ -198,6 +206,13 @@ void handle(Observed seen, ref Request request, Connection conn) {
             size_t taken = 0;
             while (taken < 300_000) taken += conn.readBody(buffer[]);
             conn.reset();
+        }
+        if (seen.putsToCloseMidBody > 0) {
+            seen.putsToCloseMidBody--;
+            // Read the head and part of the body, then just close.
+            size_t taken = 0;
+            while (taken < 100_000) taken += conn.readBody(buffer[]);
+            conn.drop();
         }
         if (seen.putsToRefuseEarly > 0) {
             seen.putsToRefuseEarly--;
@@ -217,6 +232,7 @@ void handle(Observed seen, ref Request request, Connection conn) {
         }
         seen.putBytes ~= offset;
         seen.putMismatches ~= bad;
+        seen.putTargets ~= request.target;
         conn.respond(200, ["ETag": `"put-etag"`], null);
     } else if (request.method == "HEAD") {
         // Declares a length and, as HEAD requires, sends no body.
@@ -364,6 +380,67 @@ void checkEarlyRefusal() {
     writeln("   PASS: typed AccessDenied with the upload stopped part-way; GET and list on the same client then succeed");
 }
 
+/// A4. Uploads after an upload whose connection failed under it.
+/// `rewindableFollowUps` selects the kind of body the later uploads use.
+/// `resetStalled` selects how the first upload's connection fails: reset
+/// while the client's send is stalled, or closed outright part-way through
+/// the body. Which of the two leaves libcurl with a rewind pending depends
+/// on the libcurl build, so both are run.
+void checkUploadsAfterFailedUpload(bool rewindableFollowUps, bool resetStalled) {
+    writeln("A4. connection ", resetStalled ? "reset" : "closed", " mid-upload, then four ",
+        rewindableFollowUps ? "rewindable" : "single-pass", " uploads...");
+
+    auto seen = new Observed;
+    auto server = new LoopbackServer((ref Request request, Connection conn) { handle(seen, request, conn); });
+    server.answerExpect = false;
+    auto work = new char[recommendedWorkBytes];
+    auto chunkBuffer = new ubyte[chunkBytes];
+    // Below libcurl's threshold for `Expect: 100-continue`, which this
+    // server leaves unanswered and which would cost a second per upload.
+    enum ulong followUpLength = 900_077;
+    immutable keys = ["up/next-1.bin", "up/next-2.bin", "up/next-3.bin", "up/next-4.bin"];
+    {
+        S3Client client;
+        check(openClient(client, server.origin, work).ok, "client should open");
+        Sink warm;
+        check(download(client, "warm.bin", warm).ok, "warming download failed");
+
+        if (resetStalled) seen.putsToDrop = 1;
+        else seen.putsToCloseMidBody = 1;
+        auto doomed = PatternBody(chunkBuffer, uploadLength, false);
+        auto failed = upload(client, doomed);
+        check(!failed.ok && failed.status.kind == FailureKind.transportError,
+            "the upload whose connection was closed should fail at the transport, got " ~
+            failed.status.kind.to!string);
+        check(seen.putBytes.length == 0, "the closed upload must not have completed");
+
+        // Whatever libcurl still holds from that upload -- a pending rewind
+        // among it -- concerns that body, not these.
+        foreach (i, key; keys) {
+            auto body_ = PatternBody(chunkBuffer, followUpLength, rewindableFollowUps);
+            auto put = upload(client, body_, key);
+            check(put.ok, "upload " ~ (i + 1).to!string ~ " after the failed one was not sent: " ~
+                put.status.kind.to!string ~ "/" ~ put.status.transport.to!string ~ " (" ~
+                put.status.message[].idup ~ "), " ~ put.bytesSent.to!string ~ " bytes pulled");
+            check(put.bytesSent == followUpLength, "upload " ~ (i + 1).to!string ~ " was cut short");
+            check(body_.rewinds == 0, "a fresh body was rewound " ~ body_.rewinds.to!string ~
+                " time(s) on upload " ~ (i + 1).to!string);
+        }
+    }
+    auto failures = server.stop();
+    foreach (failure; failures)
+        check(failure == "client closed the connection mid-body", "server-side failure: " ~ failure);
+    check(seen.putTargets == ["/up/next-1.bin", "/up/next-2.bin", "/up/next-3.bin", "/up/next-4.bin"],
+        "each follow-up upload should have arrived once: " ~ seen.putTargets.to!string);
+    check(seen.putBytes == [followUpLength, followUpLength, followUpLength, followUpLength] &&
+        seen.putMismatches == [0UL, 0UL, 0UL, 0UL],
+        "follow-up uploads should arrive whole and intact: " ~ seen.putBytes.to!string ~ " bytes, " ~
+        seen.putMismatches.to!string ~ " mismatches");
+
+    writeln("   PASS: the first upload fails; four fresh ", rewindableFollowUps ? "rewindable" : "single-pass",
+        " uploads on the same client each arrive intact, none rewound");
+}
+
 /// B. The request target is the signed path, byte for byte.
 void checkPathSentAsSigned() {
     writeln("B. keys with '.' and '..' segments are sent as signed...");
@@ -458,6 +535,10 @@ void main() {
     checkDroppedReusedConnection(false);
     checkDroppedReusedConnection(true);
     checkEarlyRefusal();
+    foreach (resetStalled; [true, false]) {
+        checkUploadsAfterFailedUpload(false, resetStalled);
+        checkUploadsAfterFailedUpload(true, resetStalled);
+    }
     checkPathSentAsSigned();
     checkMethods();
     checkSinkAbort();
